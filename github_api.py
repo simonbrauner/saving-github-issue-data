@@ -10,5 +10,5 @@ def get_github():
         raise ValueError("GITHUB_TOKEN is not set")
 
     auth = Auth.Token(token)
-    g = Github(auth=auth)
+    g = Github(auth=auth, retry=None)
     return g
