@@ -38,6 +38,7 @@ def process_issue(issue):
     data["number"] = issue.number
     data["type"] = "pull_request" if issue.pull_request else "issue"
     data["title"] = issue.title
+    data["user"] = issue.user.login
     data["body"] = issue.body
     data["comments"] = process_comments(issue)
 
@@ -49,6 +50,7 @@ def process_comments(issue):
     for comment in issue.get_comments():
         data = {}
 
+        data["user"] = comment.user.login
         data["body"] = comment.body
 
         comments.append(data)
