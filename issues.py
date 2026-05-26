@@ -39,8 +39,21 @@ def process_issue(issue):
     data["type"] = "pull_request" if issue.pull_request else "issue"
     data["title"] = issue.title
     data["body"] = issue.body
+    data["comments"] = process_comments(issue)
 
     return data
+
+def process_comments(issue):
+    comments = []
+
+    for comment in issue.get_comments():
+        data = {}
+
+        data["body"] = comment.body
+
+        comments.append(data)
+
+    return comments
 
 def get_latest_timestamp(timestamp_file):
     try:
