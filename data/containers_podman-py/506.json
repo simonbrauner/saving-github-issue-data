@@ -1,0 +1,49 @@
+{
+    "number": 506,
+    "type": "issue",
+    "title": "[BUG] empty stdout/stderr for `exec_run` on macOS",
+    "user": "aparcar",
+    "body": "Hi, I'm running Podman Machine on a MacBook and everything works fine except the `exec_run`, the output is always empty. Below an example which works on Linux machines:\n\n```python\n>>> import podman\n>>> client = podman.PodmanClient()\n>>> client.images.list()\n[<Image: 'docker.io/library/alpine:latest'>]\n>>> client.version()\n{'Platform': {'Name': 'linux/arm64/fedora-41'}, 'Components': [{'Name': 'Podman Engine', 'Version': '5.4.0-dev-234c41c80', 'Details': {'APIVersion': '5.4.0-dev-234c41c80', 'Arch': 'arm64', 'BuildTime': '2025-01-22T00:00:00Z', 'Experimental': 'false', 'GitCommit': '', 'GoVersion': 'go1.23.4', 'KernelVersion': '6.12.7-200.fc41.aarch64', 'MinAPIVersion': '4.0.0', 'Os': 'linux'}}, {'Name': 'Conmon', 'Version': 'conmon version 2.1.12, commit: ', 'Details': {'Package': 'conmon-2.1.12-3.fc41.aarch64'}}, {'Name': 'OCI Runtime (crun)', 'Version': 'crun version UNKNOWN\\ncommit: b143d9ea7cfea9de44222d7fcfb7f55c21ba8060\\nrundir: /run/user/501/crun\\nspec: 1.0.0\\n+SYSTEMD +SELINUX +APPARMOR +CAP +SECCOMP +EBPF +CRIU +LIBKRUN +WASM:wasmedge +YAJL', 'Details': {'Package': 'crun-1.19.1-1.20250121161049663014.main.23.ga2d140d.fc41.aarch64'}}], 'Version': '5.4.0-dev-234c41c80', 'ApiVersion': '1.41', 'MinAPIVersion': '1.24', 'GitCommit': '', 'GoVersion': 'go1.23.4', 'Os': 'linux', 'Arch': 'arm64', 'KernelVersion': '6.12.7-200.fc41.aarch64', 'BuildTime': '2025-01-22T00:00:00Z'}\n>>> container = client.containers.create(\"alpine\", command=[\"sleep\", \"1000\"])\n>>> container.start()\n>>> ret, out = container.exec_run(\"echo 42\", demux=True)\n>>> ret\n0\n>>> out\n(b'', b'')\n```\n\nAny ideas?",
+    "comments": [
+        {
+            "user": "aparcar",
+            "body": "Generally stdout works when using the example below:\n\n```python\n>>> client.containers.run(\"alpine\", [\"echo\", \"42\"])\nb'42\\n'\n```"
+        },
+        {
+            "user": "inknos",
+            "body": "hey @aparcar , thanks for the report. I can try to investigate it on Windows (since podman is provided via machine), but I don't have a mac, so it will take more time if it's mac only. I'll follow up if I can get it on Windows or I'll ask for more info :)\n\n@Edward5hen do you have a mac?"
+        },
+        {
+            "user": "aparcar",
+            "body": "Turns out this is an issue when using SSH as connection. I tried using the UNIX socket and it works as expected..."
+        },
+        {
+            "user": "aekasitt",
+            "body": "Adding more logs from my machine for review.\n```txt\nHardware: Apple M1 Pro\nmacOS: Sequoia 15.3.2\nPython: 3.11.9\nArchitecture: arch64\n```\n\n### Environment script `env.py`\n\n```python\n#!/usr/bin/env python3\n\nfrom dataclasses import dataclass\nfrom json import loads\nfrom subprocess import CalledProcessError, run\nfrom typing import List\n\n@dataclass\nclass Connection:\n  default: bool\n  host: str\n  identity: str\nHOST: str\nIDENTITY: str\n\ntry:\n  output: str = (\n    \"[\"\n    + \",\".join(\n      run(\n        [\n          \"podman\",\n          \"system\",\n          \"connection\",\n          \"list\",\n          \"--format\",\n          '{\"host\": \"{{.URI}}\", \"identity\": \"{{.Identity}}\", \"default\": {{.Default}}}',\n        ],\n        capture_output=True,\n        check=True,\n      )\n      .stdout.decode(\"utf-8\")\n      .rstrip()\n      .split(\"\\n\")\n    )\n    + \"]\"\n  )\n  connections: List[Connection] = [Connection(**connection) for connection in loads(output)]\n  default_connection: Connection = next(filter(lambda connection: connection.default, connections))\n  HOST = default_connection.host\n  IDENTITY = default_connection.identity\nexcept CalledProcessError:\n  HOST = \"\"\n  IDENTITY = \"\"\n```\n\n### Runtime\n\n```sh\n$ python -i env.py\n>>> import podman\n>>> client = podman.PodmanClient(base_url=HOST, identity=IDENTITY)\n>>> client.images.list()\n[<Image: 'docker.io/library/alpine:latest'>]\n>>> container = client.containers.create(\"alpine\", command=[\"sleep\", \"1000\"])\n>>> container.start()\n>>> ret, out = container.exec_run(\"echo 42\", demux=True)\n>>> ret\n0\n>>> out\n(None, None)\n```"
+        },
+        {
+            "user": "aekasitt",
+            "body": "More context, running latest code from branch `main` as of date\n\n```sh\n>>> ret, out = container.exec_run(\"echo 42\")\n>>> ret\n0\n>>> out\nb''\n```"
+        },
+        {
+            "user": "aekasitt",
+            "body": "MOAR CONTEXT: Spam until it works.\n\n```sh\n$ python -i env.py\n... steps from op...\n>>> container.exec_run(\"echo 42\", tty=True)\n(0, b'')\n>>> container.exec_run(\"echo 42\", tty=True)\n(0, b'')\n>>> container.exec_run(\"echo 42\", tty=True)\n(0, b'')\n>>> container.exec_run(\"echo 42\", tty=True)\n(0, b'')\n>>> container.exec_run(\"echo 42\", tty=True)\n(0, b'')\n>>> container.exec_run(\"echo 42\", tty=True)\n(0, b'')\n>>> container.exec_run(\"echo 42\", tty=True)\n(0, b'')\n>>> container.exec_run(\"echo 42\", tty=True)\n(0, b'')\n>>> container.exec_run(\"echo 42\", tty=True)\n(0, b'')\n>>> container.exec_run(\"echo 42\", tty=True)\n(0, b'')\n>>> container.exec_run(\"echo 42\", tty=True)\n(0, b'')\n>>> container.exec_run(\"echo 42\", tty=True)\n(0, b'')\n>>> container.exec_run(\"echo 42\", tty=True)\n(0, b'')\n>>> container.exec_run(\"echo 42\", tty=True)\n(0, b'')\n>>> container.exec_run(\"echo 42\", tty=True)\n(0, b'')\n>>> container.exec_run(\"echo 42\", tty=True)\n(0, b'')\n>>> container.exec_run(\"echo 42\", tty=True)\n(0, b'')\n>>> container.exec_run(\"echo 42\", tty=True)\n(0, b'')\n>>> container.exec_run(\"echo 42\", tty=True)\n(0, b'')\n>>> container.exec_run(\"echo 42\", tty=True)\n(0, b'')\n>>> container.exec_run(\"echo 42\", tty=True)\n(0, b'')\n>>> container.exec_run(\"echo 42\", tty=True)\n(0, b'')\n>>> container.exec_run(\"echo 42\", tty=True)\n(0, b'')\n>>> container.exec_run(\"echo 42\", tty=True)\n(0, b'')\n>>> container.exec_run(\"echo 42\", tty=True)\n(0, b'42\\r\\n')\n```"
+        },
+        {
+            "user": "aekasitt",
+            "body": "Without `tty` flag:\n\n```sh\n$ python -i env.py\n... steps from op...\n>>> container.exec_run(\"echo 42\")\n(0, b'')\n>>> container.exec_run(\"echo 42\")\n(0, b'')\n>>> container.exec_run(\"echo 42\")\n(0, b'')\n>>> container.exec_run(\"echo 42\")\n(0, b'')\n>>> container.exec_run(\"echo 42\")\n(0, b'')\n>>> container.exec_run(\"echo 42\")\n(0, b'')\n>>> container.exec_run(\"echo 42\")\n(0, b'')\n>>> container.exec_run(\"echo 42\")\n(0, b'')\n>>> container.exec_run(\"echo 42\")\n(0, b'')\n>>> container.exec_run(\"echo 42\")\n(0, b'')\n>>> container.exec_run(\"echo 42\")\n(0, b'')\n>>> container.exec_run(\"echo 42\")\n(0, b'')\n>>> container.exec_run(\"echo 42\")\n(0, b'')\n>>> container.exec_run(\"echo 42\")\n(0, b'')\n>>> container.exec_run(\"echo 42\")\n(0, b'')\n>>> container.exec_run(\"echo 42\")\n(0, b'\\x01\\x00\\x00\\x00\\x00\\x00\\x00\\x0342\\n')\n```"
+        },
+        {
+            "user": "choems",
+            "body": "I'm using Debian linux, and I met the same problem."
+        },
+        {
+            "user": "choems",
+            "body": "> I'm using Debian linux, and I met the same problem.\n\nI finally fixed this by manually create ssh tunnel instead of using the one automatically created."
+        },
+        {
+            "user": "maxammann",
+            "body": "just so you are aware I put up a PR with a fix. Its quite convoluted tbh but I think that fix should be minimal"
+        }
+    ]
+}

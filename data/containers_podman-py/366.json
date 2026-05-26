@@ -1,0 +1,57 @@
+{
+    "number": 366,
+    "type": "pull_request",
+    "title": "Fix the 'max_pool_size' parameter passing for Adapters",
+    "user": "milanbalazs",
+    "body": "The `max_pool_size` was typed `max_pools_size`  in the `APIClient` class and it caused issue.\r\n\r\n**Test code:**\r\n\r\n```python\r\nimport podman\r\nimport requests\r\nclient = podman.from_env()\r\n```\r\n\r\n**Output:**\r\n\r\n```text\r\n>>> python3 test.py\r\n\r\nTraceback (most recent call last):\r\n  File \"/local/user/podman_test/tools/test.py\", line 11, in <module>\r\n    client = podman.from_env()\r\n  File \"/local/user/podman_test/venv/lib/python3.9/site-packages/podman/client.py\", line 131, in from_env\r\n    return PodmanClient(\r\n  File \"/local/user/podman_test/venv/lib/python3.9/site-packages/podman/client.py\", line 77, in __init__\r\n    self.api = APIClient(**api_kwargs)\r\n  File \"/local/user/podman_test/venv/lib/python3.9/site-packages/podman/api/client.py\", line 136, in __init__\r\n    self.mount(\"http://\", HTTPAdapter(**adapter_kwargs))\r\nTypeError: __init__() got an unexpected keyword argument 'max_pool_size'\r\n```\r\n\r\n\r\nIf I set the `max_pool_size` parameter in the `from_env` method (`client = podman.from_env(max_pool_size=requests.adapters.DEFAULT_POOLSIZE)`), the output is (the same):\r\n\r\n\r\n```text\r\nTraceback (most recent call last):\r\n  File \"/local/user/podman_test/tools/test.py\", line 12, in <module>\r\n    client = podman.from_env(max_pool_size=requests.adapters.DEFAULT_POOLSIZE)\r\n  File \"/local/user/podman_test/venv/lib/python3.9/site-packages/podman/client.py\", line 131, in from_env\r\n    return PodmanClient(\r\n  File \"/local/user/podman_test/venv/lib/python3.9/site-packages/podman/client.py\", line 77, in __init__\r\n    self.api = APIClient(**api_kwargs)\r\n  File \"/local/user/podman_test/venv/lib/python3.9/site-packages/podman/api/client.py\", line 136, in __init__\r\n    self.mount(\"http://\", HTTPAdapter(**adapter_kwargs))\r\nTypeError: __init__() got an unexpected keyword argument 'max_pool_size'\r\n```\r\n\r\nIf I use `max_pools_size` instead of `max_pool_size`, the output is:\r\n\r\n```text\r\nTraceback (most recent call last):\r\n  File \"/local/user/podman_test/test.py\", line 12, in <module>\r\n    client = podman.from_env(max_pools_size=requests.adapters.DEFAULT_POOLSIZE)\r\nTypeError: from_env() got an unexpected keyword argument 'max_pools_size'\r\n```\r\n\r\nBased on the above analysis, it's clearly visible the parameter passing is not correct...\r\n\r\nFurthermore the implementation and the docstring are not matched (pool -> pools):\r\n\r\n![implementation and docstring confusion](https://github.com/containers/podman-py/assets/62033726/a5250081-b51f-45ab-879d-dd414ea06026)\r\n\r\nI have check the complete source code and I haven't found reference for `max_pools_size` parameter so I think my change is compatible with the source code.\r\n\r\n**Note:**\r\n- If a user uses the `APIClient` directly and the `max_pools_size` parameter is passed, then that implementation won't be working after my change because the parameter is renamed. But it can be made for backward compatible is it's preferred.\r\n\r\n**The tested system:**\r\n- Python 3.9.17\r\n- RHEL 8.7 OS\r\n- podman 4.8.2\r\n",
+    "comments": [
+        {
+            "user": "milanbalazs",
+            "body": "In my opinion, further improvement would be nice in the Adapter creation section. The `UDSAdapter` and `SSHAdapter` classes can handle the additional warts, like:\r\n\r\n```python\r\nclass UDSAdapter(HTTPAdapter):\r\n    \"\"\"Specialization of requests transport adapter for UNIX domain sockets.\"\"\"\r\n\r\n    def __init__(\r\n        self,\r\n        uds: str,\r\n        pool_connections=DEFAULT_POOLSIZE,\r\n        pool_maxsize=DEFAULT_POOLSIZE,\r\n        max_retries=DEFAULT_RETRIES,\r\n        pool_block=DEFAULT_POOLBLOCK,\r\n        **kwargs,  # <-- It can handle the \"unexpected\" kwargs\r\n    ):\r\n```\r\n\r\nBut the `HTTPAdapter` doesn't handle, it means only the defined keyword parameters can be passed to this class:\r\n\r\n```python\r\n    def __init__(\r\n        self,\r\n        pool_connections=DEFAULT_POOLSIZE,\r\n        pool_maxsize=DEFAULT_POOLSIZE,\r\n        max_retries=DEFAULT_RETRIES,\r\n        pool_block=DEFAULT_POOLBLOCK,\r\n    ):  # There is no \"**kwargs\", so it can handle only the defined keyword parameters.\r\n```\r\n\r\nIn the current implementations in the `APIClient` class, the passed arguments are passed towards to the Adapters. It means the `max_pool_size` or `num_pools` and the `HTTPAdapter` could say `TypeError: HTTPAdapter.__init__() got an unexpected keyword argument 'max_pool_size'`. That part could be improved to create a much precise kwargs dict for Adapters.\r\n\r\nThe mainly problematic part.\r\n\r\n```python\r\n\r\n        adapter_kwargs = kwargs.copy()\r\n        if num_pools is not None:\r\n            adapter_kwargs[\"pool_connections\"] = num_pools\r\n        if max_pool_size is not None:\r\n            adapter_kwargs[\"pool_maxsize\"] = max_pool_size\r\n        if timeout is not None:\r\n            adapter_kwargs[\"timeout\"] = timeout\r\n\r\n        if self.base_url.scheme == \"http+unix\":\r\n            self.mount(\"http://\", UDSAdapter(self.base_url.geturl(), **adapter_kwargs))\r\n            self.mount(\"https://\", UDSAdapter(self.base_url.geturl(), **adapter_kwargs))\r\n\r\n        elif self.base_url.scheme == \"http+ssh\":\r\n            self.mount(\"http://\", SSHAdapter(self.base_url.geturl(), **adapter_kwargs))\r\n            self.mount(\"https://\", SSHAdapter(self.base_url.geturl(), **adapter_kwargs))\r\n\r\n        elif self.base_url.scheme == \"http\":\r\n            self.mount(\"http://\", HTTPAdapter(**adapter_kwargs))\r\n            self.mount(\"https://\", HTTPAdapter(**adapter_kwargs))\r\n        else:\r\n            assert False, \"APIClient.supported_schemes changed without adding a branch here.\"\r\n```\r\n\r\nI can implement it in another PR (Or extending this one), if you want."
+        },
+        {
+            "user": "jwhonce",
+            "body": "@milanbalazs `max_pool_size` should have been the parameter name. I agree with the addition of kwargs to `HTTPAdapter`."
+        },
+        {
+            "user": "umohnani8",
+            "body": "Thanks for the PR @milanbalazs! Can you please make this backward compatible so we don't break any users."
+        },
+        {
+            "user": "milanbalazs",
+            "body": "I have just added a new commit which contains the backward compatible solution (And providing `DeprecationWarning`). Furthermore, I have fixed the parameter passing for `HTTPAdapter` class.\r\n\r\nMy minimal test about the parameter usage:\r\n\r\n```text\r\n>>> import podman\r\n\r\n>>> podman.client.APIClient(base_url=\"tcp://asdfadf\", max_pool_size=8)\r\n<podman.api.client.APIClient object at 0x102a80d90>\r\n\r\n>>> podman.client.APIClient(base_url=\"tcp://asdfadf\", max_pools_size=8)\r\n/Users/user/podman-py/podman/api/client.py:135: DeprecationWarning: 'max_pools_size' parameter is deprecated! Please use 'max_pool_size' parameter.\r\n  warnings.warn(\"'max_pools_size' parameter is deprecated! \"\r\n<podman.api.client.APIClient object at 0x102e02890>\r\n\r\n>>> podman.client.APIClient(base_url=\"tcp://asdfadf\", max_pools_size=8, max_pool_size=9)\r\n/Users/user/podman-py/podman/api/client.py:135: DeprecationWarning: 'max_pools_size' parameter is deprecated! Please use 'max_pool_size' parameter.\r\n  warnings.warn(\"'max_pools_size' parameter is deprecated! \"\r\nTraceback (most recent call last):\r\n  File \"<stdin>\", line 1, in <module>\r\n  File \"/Users/user/podman-py/podman/api/client.py\", line 138, in __init__\r\n    raise ValueError(\"Both of 'max_pools_size' and 'max_pool_size' parameters are set. \"\r\nValueError: Both of 'max_pools_size' and 'max_pool_size' parameters are set. Please use only the 'max_pool_size', 'max_pools_size' is deprecated!\r\n```"
+        },
+        {
+            "user": "umohnani8",
+            "body": "Thank you!\r\n/approve\r\nLGTM"
+        },
+        {
+            "user": "openshift-ci[bot]",
+            "body": "[APPROVALNOTIFIER] This PR is **APPROVED**\n\nThis pull-request has been approved by: *<a href=\"https://github.com/containers/podman-py/pull/366#\" title=\"Author self-approved\">milanbalazs</a>*, *<a href=\"https://github.com/containers/podman-py/pull/366#issuecomment-1898452202\" title=\"Approved\">umohnani8</a>*\n\nThe full list of commands accepted by this bot can be found [here](https://go.k8s.io/bot-commands?repo=containers%2Fpodman-py).\n\nThe pull request process is described [here](https://git.k8s.io/community/contributors/guide/owners.md#the-code-review-process)\n\n<details >\nNeeds approval from an approver in each of these files:\n\n- ~~[OWNERS](https://github.com/containers/podman-py/blob/main/OWNERS)~~ [umohnani8]\n\nApprovers can indicate their approval by writing `/approve` in a comment\nApprovers can cancel approval by writing `/approve cancel` in a comment\n</details>\n<!-- META={\"approvers\":[]} -->"
+        },
+        {
+            "user": "umohnani8",
+            "body": "@milanbalazs I think validate is failing because the subject of the commit message is too long, it should be less than 72 characters. Can you please fix that and push."
+        },
+        {
+            "user": "milanbalazs",
+            "body": "Thanks! I have just made shorter the problematic commit massage. "
+        },
+        {
+            "user": "umohnani8",
+            "body": "@rhatdan @jwhonce PTAL"
+        },
+        {
+            "user": "rhatdan",
+            "body": "/lgtm\r\nThanks @milanbalazs "
+        },
+        {
+            "user": "milanbalazs",
+            "body": "Thanks to merge my PR!\r\n\r\nWhen do you plan to create a new release which contains my fix (PyPi package)?"
+        },
+        {
+            "user": "umohnani8",
+            "body": "@milanbalazs I created a new 4.9 release with your changes included in it. "
+        }
+    ]
+}
