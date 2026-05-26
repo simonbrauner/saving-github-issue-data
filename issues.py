@@ -1,3 +1,4 @@
+from argparse import ArgumentParser
 from datetime import datetime
 from json import dump
 from pathlib import Path
@@ -68,5 +69,12 @@ def update_latest_timestamp(timestamp_file, timestamp):
     with open(timestamp_file, "w") as f:
         f.write(timestamp.isoformat())
 
+def parse_arguments():
+    parser = ArgumentParser(description="Save issue data from GitHub locally")
+    parser.add_argument("organization", help="The organization name")
+    parser.add_argument("repository", help="The repository name")
+    return parser.parse_args()
+
 if __name__ == "__main__":
-    main("containers", "podman")
+    arguments = parse_arguments()
+    main(arguments.organization, arguments.repository)
