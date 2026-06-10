@@ -45,7 +45,7 @@ def process_issue(organization_name, repository_name, issue):
     data["type"] = "pull_request" if issue.pull_request else "issue"
     data["title"] = issue.title
     data["user"] = issue.user.login
-    data["body"] = issue.body
+    data["body"] = normalize_text(issue.body)
 
     data["comments"] = process_comments(issue)
 
@@ -58,11 +58,17 @@ def process_comments(issue):
         data = {}
 
         data["user"] = comment.user.login
-        data["body"] = comment.body
+        data["body"] = normalize_text(comment.body)
 
         comments.append(data)
 
     return comments
+
+def normalize_text(text):
+    if text is None:
+        return ""
+
+    return text.replace("\r", "")
 
 def get_latest_timestamp(timestamp_file):
     try:
