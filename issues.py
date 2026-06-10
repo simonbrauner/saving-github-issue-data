@@ -9,38 +9,44 @@ from github_api import get_github
 
 g = get_github()
 
-DATA_DIR = "data"
-TIMESTAMP_FILE = f"timestamp.txt"
+DATA_DIR = "data/issues"
+TIMESTAMP_DIR = "data/timestamps"
+TIMESTAMP_FILE_SUFFIX = "_timestamp.txt"
 
 def main(organization_name, repository_name):
     repo = g.get_repo(f"{organization_name}/{repository_name}")
-    repo_data_dir = f"{DATA_DIR}/{organization_name}_{repository_name}"
-    Path(repo_data_dir).mkdir(parents=True, exist_ok=True)
+    repo_prefix = f"{organization_name}_{repository_name}"
+    Path(DATA_DIR).mkdir(parents=True, exist_ok=True)
+    Path(TIMESTAMP_DIR).mkdir(parents=True, exist_ok=True)
 
-    timestamp_file = f"{repo_data_dir}/{TIMESTAMP_FILE}"
+    timestamp_file = f"{TIMESTAMP_DIR}/{repo_prefix}{TIMESTAMP_FILE_SUFFIX}"
     latest_timestamp = get_latest_timestamp(timestamp_file)
 
     try:
         issues = repo.get_issues(state="all", sort="updated", direction="asc", since=latest_timestamp)
         for issue in issues:
-            issue_data = process_issue(issue)
+            issue_data = process_issue(organization_name, repository_name, issue)
 
-            with open(f"{repo_data_dir}/{issue.number}.json", "w") as f:
+            with open(f"{DATA_DIR}/{repo_prefix}_{issue.number}.json", "w") as f:
                 dump(issue_data, f, indent=4, ensure_ascii=False)
 
             update_latest_timestamp(timestamp_file, issue.updated_at)
     except GithubException as e:
         print(e)
 
-def process_issue(issue):
+def process_issue(organization_name, repository_name, issue):
     print(f"{issue.number}\t{issue.updated_at}\t{issue.title}")
 
     data = {}
+    data["organization"] = organization_name
+    data["repository"] = repository_name
+
     data["number"] = issue.number
     data["type"] = "pull_request" if issue.pull_request else "issue"
     data["title"] = issue.title
     data["user"] = issue.user.login
     data["body"] = issue.body
+
     data["comments"] = process_comments(issue)
 
     return data

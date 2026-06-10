@@ -1,0 +1,31 @@
+{
+    "organization": "containers",
+    "repository": "podman-py",
+    "number": 201,
+    "type": "issue",
+    "title": "podman run not working",
+    "user": "KaiBroeker",
+    "body": "Hello,\r\n\r\nI use the lib version 4.2.0, Python 3.10.4, podman 3.4.4.\r\n\r\nIf I try to use client.containers.run I get the following error:\r\n```\r\n>>> import podman\r\n>>> \r\n>>> client = podman.PodmanClient()\r\n>>> \r\n>>> client.images.pull(\"docker.io/library/ubuntu:20.04\")\r\n<Image: 'docker.io/library/ubuntu:20.04'>\r\n>>> \r\n>>> image = client.images.pull(\"docker.io/library/ubuntu:20.04\")\r\n>>> \r\n>>> client.containers.run(image, [\"ls\", \"/\"])\r\nTraceback (most recent call last):\r\n  File \"<stdin>\", line 1, in <module>\r\n  File \"/home/kai/.local/lib/python3.10/site-packages/podman/domain/containers_run.py\", line 80, in run\r\n    exit_status = container.wait()[\"StatusCode\"]\r\nTypeError: 'int' object is not subscriptable\r\n>>> \r\n```\r\n\r\nAre I'm doing something wrong or is there a bug?\r\n\r\nThanks for the help\r\nKai",
+    "comments": [
+        {
+            "user": "ericpershey",
+            "body": "Same thing with lib version 4.2.0, Python 3.9.7, podman 4.2.0.  I tried debugging this for a few hours and found that container.wait() is returning from requests and is valid json, which is a single integer.  That line attempts to then treat it as a dictionary and pull the key StatusCode out, which fails in a TypeError.  I was never able to get past this either.\r\n```\r\n>>> import json; json.loads(json.dumps(0))\r\n0\r\n```\r\n\r\n```\r\n>>>podman --version\r\npodman version 4.2.0\r\n\r\n>>>python -c \"import podman; print(podman.__version__)\"\r\n4.2.0\r\n\r\nimport podman\r\nuri = \"http://127.0.0.1:8090\"\r\nclient = podman.PodmanClient(base_url=uri)\r\nclient.images.pull(\"docker.io/library/ubuntu:20.04\")\r\nimage = client.images.pull(\"docker.io/library/ubuntu:20.04\")\r\nclient.containers.run(image, [\"ls\", \"/\"])        \r\n\r\n>>>python\r\nPython 3.9.7 (default, Sep 16 2021, 13:09:58)\r\n[GCC 7.5.0] :: Anaconda, Inc. on linux\r\nType \"help\", \"copyright\", \"credits\" or \"license\" for more information.\r\n>>> import podman\r\n>>> uri = \"http://127.0.0.1:8090\"\r\n>>> client = podman.PodmanClient(base_url=uri)\r\n>>> client.images.pull(\"docker.io/library/ubuntu:20.04\")\r\n<Image: 'docker.io/library/ubuntu:20.04'>\r\n>>> image = client.images.pull(\"docker.io/library/ubuntu:20.04\")\r\n>>> client.containers.run(image, [\"ls\", \"/\"])\r\nTraceback (most recent call last):\r\n  File \"<stdin>\", line 1, in <module>\r\n  File \"****/lib/python3.9/site-packages/podman/domain/containers_run.py\", line 80, in run\r\n    exit_status = container.wait()[\"StatusCode\"]\r\nTypeError: 'int' object is not subscriptable\r\n>>>\r\n        \r\n"
+        },
+        {
+            "user": "rhatdan",
+            "body": "@cdoern @mwhahaha PTAL"
+        },
+        {
+            "user": "cdoern",
+            "body": "this is not new for 4.2 or the previous version, unless something changes with the container wait method in podman. I will look at this. "
+        },
+        {
+            "user": "ericpershey",
+            "body": "It seems the wait on libpod returns a single integer rather than json with StatusCode.  This may be all because I am using http://127.0.0.1:8090.\r\nhttps://docs.podman.io/en/latest/_static/api.html#tag/containers/operation/ContainerWaitLibpod\r\nvs\r\nhttps://docs.docker.com/engine/api/v1.40/#tag/Container/operation/ContainerWait\r\n\r\nExample:\r\n>curl -X POST http://localhost:8090/v4.2.0/libpod/containers/220b34da1552337c7bcb31a422f51407ce3bdb0748884d6f5f5c5f84e4f5efe5/wait\r\n0\r\n\r\n>curl -X POST http://localhost:8090/v1.41/containers/220b34da1552337c7bcb31a422f51407ce3bdb0748884d6f5f5c5f84e4f5efe5/wait\r\n{\"StatusCode\":0,\"Error\":null}\r\n\r\nInside api/client.py you can see the compatible_prefix, but if you specify that in the kwargs, it blows up if you use HTTPAdapter, because it doesn't allow the compatible_version kwarg.  It then uses self.path_prefix and that's where it gets libpod from.  I thought that might be a way to get this to work, but it did not.\r\n```\r\n       self.path_prefix = f\"/v{self.version}/libpod/\"\r\n        self.compatible_version = kwargs.get(\"compatible_version\", api.COMPATIBLE_VERSION)\r\n        self.compatible_prefix = f\"/v{self.compatible_version}/\"\r\n```\r\n\r\nBelow are some of the requests coming from podman-py.\r\n```\r\n127.0.0.1 - - [08/Sep/2022:17:02:16 -0500] \"POST /v4.2.0/libpod/containers/3605caa5d93fe09515c5add54ee284df75e362e9286e2999f3863f1338ce9081/start HTTP/1.1\" 204 0 \"\" \"PodmanPy/4.2.0 (API v4.2.0; Compatible v1.40)\"\r\n127.0.0.1 - - [08/Sep/2022:17:02:16 -0500] \"POST /v4.2.0/libpod/containers/3605caa5d93fe09515c5add54ee284df75e362e9286e2999f3863f1338ce9081/wait?condition=running&condition=exited HTTP/1.1\" 200 2 \"\" \"PodmanPy/4.2.0 (API v4.2.0; Compatible v1.40)\"\r\n127.0.0.1 - - [08/Sep/2022:17:02:16 -0500] \"GET /v4.2.0/libpod/containers/3605caa5d93fe09515c5add54ee284df75e362e9286e2999f3863f1338ce9081/json HTTP/1.1\" 200 4826 \"\" \"PodmanPy/4.2.0 (API v4.2.0; Compatible v1.40)\"\r\n127.0.0.1 - - [08/Sep/2022:17:02:16 -0500] \"GET /v4.2.0/libpod/containers/3605caa5d93fe09515c5add54ee284df75e362e9286e2999f3863f1338ce9081/logs?follow=True&stderr=False&stdout=True HTTP/1.1\" 200 21 \"\" \"PodmanPy/4.2.0 (API v4.2.0; Compatible v1.40)\"\r\n127.0.0.1 - - [08/Sep/2022:17:02:16 -0500] \"POST /v4.2.0/libpod/containers/3605caa5d93fe09515c5add54ee284df75e362e9286e2999f3863f1338ce9081/wait HTTP/1.1\" 200 2 \"\" \"PodmanPy/4.2.0 (API v4.2.0; Compatible v1.40)\"\r\n```"
+        },
+        {
+            "user": "jonathanunderwood",
+            "body": "This remains broken on master as of today."
+        }
+    ]
+}

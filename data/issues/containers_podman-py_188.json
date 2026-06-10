@@ -1,0 +1,83 @@
+{
+    "organization": "containers",
+    "repository": "podman-py",
+    "number": 188,
+    "type": "issue",
+    "title": "Unix-Sockets connection not working",
+    "user": "awildturtok",
+    "body": "Using podman-py we cannot connect to a local unix-socket. Irrespective of how we communicate the protocol, it will always end up as http.\r\n\r\nThe following does not work, it will end up making an http-request to `http://%2frun%2fpodman.sock/v4.0.0/libpod/version` instead of the unix-socket.\r\n\r\n```python\r\ndef podman_py():\r\n    from podman import PodmanClient\r\n\r\n    uri = \"unix:///run/podman.sock\"\r\n\r\n    with PodmanClient(base_url=uri) as client:\r\n        version = client.version()  # fails\r\n        print(\"Release: \", version[\"Version\"])\r\n        print(\"Compatible API: \", version[\"ApiVersion\"])\r\n        print(\"Podman API: \", version[\"Components\"][0][\"Details\"][\"APIVersion\"], \"\\n\")\r\n```\r\n\r\nFor comparison, the following, manual connection to the socket works:\r\n\r\n```python\r\ndef podman_requests_unixsocket():\r\n    import requests_unixsocket\r\n\r\n    url = \"http+unix://%2frun%2fpodman.sock/v4.0.0/libpod/version\"\r\n\r\n    with requests_unixsocket.Session() as session:\r\n        response = session.get(url)\r\n        response.raise_for_status()\r\n        version = json.loads(response.text)\r\n        print(\"Release: \", version[\"Version\"])\r\n        print(\"Compatible API: \", version[\"ApiVersion\"])\r\n        print(\"Podman API: \", version[\"Components\"][0][\"Details\"][\"APIVersion\"], \"\\n\")\r\n```\r\n\r\nMy suspicion is that we are doing something wrong, or that something is lost in translation when hard-coding the protocol to `http` and then mapping to UDSAdapter down the line.\r\n\r\n---\r\n\r\nWe made some manual changes to podman-py that seem to do the trick (although they look wrong to me):\r\n\r\n[podman/api/uds.py#108:](https://github.com/containers/podman-py/blob/main/podman/api/uds.py#L108=)\r\n\r\n```python\r\n    # Map supported schemes to Pool Classes\r\n    _pool_classes_by_scheme = {\r\n        \"http\": UDSConnectionPool,\r\n        \"http+unix\": UDSConnectionPool,\r\n        \"http+ssh\": UDSConnectionPool,\r\n    }\r\n\r\n    # Map supported schemes to Pool Key index generator\r\n    _key_fn_by_scheme = {\r\n        \"http\": functools.partial(_key_normalizer, _PoolKey),\r\n        \"http+unix\": functools.partial(_key_normalizer, _PoolKey),\r\n        \"http+ssh\": functools.partial(_key_normalizer, _PoolKey),\r\n    }\r\n```\r\n\r\n[podman/api/client.py#126](https://github.com/containers/podman-py/blob/main/podman/api/client.py#L126=)\r\n\r\n```python\r\n        if self.base_url.scheme == \"http+unix\":\r\n            self.mount(\"http+unix://\", UDSAdapter(self.base_url.geturl(), **adapter_kwargs))\r\n```\r\n\r\n[podman/api/client.py#396](https://github.com/containers/podman-py/blob/main/podman/api/client.py#L393=)\r\n\r\n```python\r\n        uri = urllib.parse.ParseResult(\r\n            \"http+unix\",\r\n            self.base_url.netloc,\r\n            urllib.parse.urljoin(path_prefix, path),\r\n            self.base_url.params,\r\n            self.base_url.query,\r\n            self.base_url.fragment,\r\n        )\r\n```\r\n\r\n\r\nWe are using version 4.0.0",
+    "comments": [
+        {
+            "user": "msisj",
+            "body": "Hey,\r\n\r\nI think you are passing wrong url.\r\nIn podman socket socket is located under `/run/podman/podman.sock` by default. \r\nYou are probably used to docker where socket was located under `/run/docker.sock`\r\n\r\n```\r\nPython 3.6.8 (default, Jan 14 2022, 11:04:20)\r\n[GCC 8.5.0 20210514 (Red Hat 8.5.0-7)] on linux\r\nType \"help\", \"copyright\", \"credits\" or \"license\" for more information.\r\n>>> def podman_py(uri):\r\n...     from podman import PodmanClient\r\n...     with PodmanClient(base_url=uri) as client:\r\n...         version = client.version()  # fails\r\n...         print(\"Release: \", version[\"Version\"])\r\n...         print(\"Compatible API: \", version[\"ApiVersion\"])\r\n...         print(\"Podman API: \", version[\"Components\"][0][\"Details\"][\"APIVersion\"], \"\\n\")\r\n...\r\n>>> for uri in [\"unix:///run/podman.sock\", \"unix:///run/podman/podman.sock\"]:\r\n...     try:\r\n...         print(podman_py(uri=uri))\r\n...     except:\r\n...         print(f'uri {uri} failed')\r\n...\r\nuri unix:///run/podman.sock failed\r\nRelease:  4.0.2\r\nCompatible API:  1.40\r\nPodman API:  4.0.2\r\n```"
+        },
+        {
+            "user": "awildturtok",
+            "body": "@msisj the socket is mounted there by us. And as I demonstrate in the lower snippet, acessing the socket does work, just not with podman-py."
+        },
+        {
+            "user": "lmilbaum",
+            "body": "I am hitting some similar issues. The module was working with the following uri - `f\"unix:///run/user/{os.getuid()}/podman/podman.sock` until I run the following command:\r\n`sudo usermod --add-subuids 100000-165535 --add-subgids 100000-165535 $USER && podman system migrate`. \r\nThe usermod command was used to solve an image build failure. "
+        },
+        {
+            "user": "rhatdan",
+            "body": "If you run podman natively does it work?"
+        },
+        {
+            "user": "lmilbaum",
+            "body": "> If you run podman natively does it work?\r\n\r\nNop. It stopped working as well. Is there a way to restore the settings before the usermod command?"
+        },
+        {
+            "user": "lmilbaum",
+            "body": "@rhatdan I was able to revert the change such that podman cli returned working. The api is not. Hitting the error `requests.exceptions.ConnectionError: ('Connection aborted.', APIError(\"Unable to make connection to UDS '/run/user/114164/podman/podman.sock'\"))`"
+        },
+        {
+            "user": "rhatdan",
+            "body": "@cdoern PTAL"
+        },
+        {
+            "user": "cdoern",
+            "body": "@awildturtok can you please paste the output you get when this fails? also, please run `systemctl start podman` to ensure the socket it listening and that the system service is using this socket.\r\n\r\nThis most likely is not on our end, as I just fresh installed podman-py 4.2 and ran the test code, and it succeeded. I would assume the custom mounting of the socket is not right."
+        },
+        {
+            "user": "ryukinix",
+            "body": "Just a question here... I was trying to embed this is a container to deal with image registry checking part... But it's really necessary to have the socket available to do this part? I am not following right the stuff being said about Portman. Is it was not said that podman was daemonless? It the socket is not for the API Daemon, it's for what?"
+        },
+        {
+            "user": "rhatdan",
+            "body": "podman runs well without any daemon or service.  If you want to talk to the remote API via podman-py, docker-py, docker-compose ... Then we need to have a service listening for incoming connections. This is also provided via a Podman systemd socket activated service.  Which will handle connections and shuts down within 10 seconds of the last connection.  If you want to call this a daemon, then fine."
+        },
+        {
+            "user": "ryukinix",
+            "body": "My main intent it's to create a mechanism to getting a registry image so I can validate if the image exists with the respective tag... \n\nThat is a embedded application deployed in a k8s without access to a docker daemon, so I thought about using podman, but I had problems about the socket.\n\nI receive for instance: gcr.io/namespace/image:latest\n\nI want to check if that exists or not. "
+        },
+        {
+            "user": "rhatdan",
+            "body": "So you want to pull the image into the container, or are you looking to see if k8s has pulled the image?"
+        },
+        {
+            "user": "ryukinix",
+            "body": "Neither of that, I only want to validate if the given remote repository\nimage exists, not necessarily I need to pull and download it...\n\nI could just use http... But checking directly via http get can be\ncumbersome if there is multiple possible docker registries (potential\nplaces to check: on-premisse registries, gcr.io etc)\n\nSo the whole OCI container engineer is not necessary for this application.\n\nCordialmente,\nManoel Vilela.\n\nEm sex., 28 de abr. de 2023 11:23, Daniel J Walsh ***@***.***>\nescreveu:\n\n> So you want to pull the image into the container, or are you looking to\n> see if k8s has pulled the image?\n>\n> —\n> Reply to this email directly, view it on GitHub\n> <https://github.com/containers/podman-py/issues/188#issuecomment-1527648403>,\n> or unsubscribe\n> <https://github.com/notifications/unsubscribe-auth/AB2J57RVERM3TDY5VIHQU2TXDPHEJANCNFSM54HFK54A>\n> .\n> You are receiving this because you commented.Message ID:\n> ***@***.***>\n>\n"
+        },
+        {
+            "user": "rhatdan",
+            "body": "Why not use `skopeo inspect`"
+        },
+        {
+            "user": "ryukinix",
+            "body": "Thank you for sharing skopeo, that's the type of utility I was looking for.\nUnfortunately it's written in Go and make integration a little bit worse in\nthe kind of application will be embedded with it.\n\nIt would be nice if skopeo provided a python client library wrapper for\nthis.\n\nSorry for bothering podman-py with this.\n\ncc @luizmanke\n\nCordialmente,\nManoel Vilela.\n\nEm sáb., 29 de abr. de 2023 07:46, Daniel J Walsh ***@***.***>\nescreveu:\n\n> Why not use skopeo inspect\n>\n> —\n> Reply to this email directly, view it on GitHub\n> <https://github.com/containers/podman-py/issues/188#issuecomment-1528755936>,\n> or unsubscribe\n> <https://github.com/notifications/unsubscribe-auth/AB2J57TRUJRRG3QRQIZU5XTXDTWQNANCNFSM54HFK54A>\n> .\n> You are receiving this because you commented.Message ID:\n> ***@***.***>\n>\n"
+        },
+        {
+            "user": "mkst",
+            "body": "I'm doing something very similar @ryukinix, my extra pain point is that I'm doing it from within a docker container. Anyhow you need to start the podman service:\r\n\r\n```sh\r\n# this will run until killed\r\npodman system service --time=0 unix:///tmp/podman.sock &\r\n```\r\nthen within your python code\r\n```py\r\nimport podman\r\n\r\nuri=\"unix:///tmp/podman.sock\"\r\nclient = podman.PodmanClient(base_url=uri)\r\n\r\ndocker_image = \"registry.hub.docker.com/library/busybox:latest\"\r\n\r\nmanifest = client.manifests.get(docker_image)\r\nif manifest is None:\r\n  print(\"image does not exist in registry\")\r\nelse:\r\n  print(\"ok!\")\r\n```\r\n\r\nNote that I'm having issues with the subuids/subguids, but to check this image, you should be ok without anything set."
+        },
+        {
+            "user": "jwhonce",
+            "body": "Please open a new RFE issue if there is still a request for podman-py changes."
+        },
+        {
+            "user": "ryukinix",
+            "body": "That was implemented?\r\n\r\nEm qua., 24 de jul. de 2024 18:31, Jhon Honce ***@***.***>\r\nescreveu:\r\n\r\n> Please open a new RFE issue if there is still a request for podman-py\r\n> changes.\r\n>\r\n> —\r\n> Reply to this email directly, view it on GitHub\r\n> <https://github.com/containers/podman-py/issues/188#issuecomment-2248934689>,\r\n> or unsubscribe\r\n> <https://github.com/notifications/unsubscribe-auth/AB2J57VUYX67PU4GAMINJDLZOAMJ7AVCNFSM6AAAAABLNJK4R2VHI2DSMVQWIX3LMV43OSLTON2WKQ3PNVWWK3TUHMZDENBYHEZTINRYHE>\r\n> .\r\n> You are receiving this because you were mentioned.Message ID:\r\n> ***@***.***>\r\n>\r\n"
+        }
+    ]
+}

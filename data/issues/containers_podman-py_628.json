@@ -1,0 +1,47 @@
+{
+    "organization": "containers",
+    "repository": "podman-py",
+    "number": 628,
+    "type": "issue",
+    "title": "[RFE] login with client inside a container when host socket is mounted",
+    "user": "lnlrbr",
+    "body": "Hi all,\nI'm trying to build images with podman-py but can't use base images from a private registry, despite pulling them work after login.\nNote: this is done inside a container started with \"--userns=keep-id\" and -v \"/run/user/XXX/podman/podman.sock:/run/podman/podman.sock:z\"\n\n```python\nimport podman\nclient = podman.PodmanClient(base_url=\"/run/podman/podman.sock\")\nclient.login(registry='my_private_reg', username=..., password=...)\nclient.images.pull('my_private_reg/docker/python:3.14')  # Works as expected\n# Dockerfile contains \"FROM my_private_reg/docker/python:3.12\"\nclient.images.build(dockerfile='Dockerfile', ...)  # Fails\n```\nError message:\n```\npodman.errors.exceptions.BuildError: creating build container: initializing source docker://my_private_reg/docker/python:3.12: reading manifest 3.12 in my_private_reg/docker/python: unauthorized: The client does not have permission for manifest: Download request for repo:path 'docker-cache:python/3.12/list.manifest.json' is forbidden for user: 'anonymous'.\n```\n",
+    "comments": [
+        {
+            "user": "inknos",
+            "body": "hey, thanks for the report\n\nMy first guess is that it's not about being in a container but it has to do with `build` and `pull`. I'll take a look"
+        },
+        {
+            "user": "inknos",
+            "body": "I tried with a private registry and couldn't reproduce. just making sure, did you set `--security-opt label=disable` as per [the docs](https://docs.podman.io/en/latest/markdown/podman-system-service.1.html#access-the-unix-socket-from-inside-a-container)?"
+        },
+        {
+            "user": "lnlrbr",
+            "body": "Hi, sorry for the delay. You cannot reproduce the error because you are probably already registered on your system. Please remove any Podman (and Docker) auth file such as `${XDG_RUNTIME_DIR}/containers/auth.json` and `$HOME/.docker/config.json` before proceeding with the test. The error occurs with or without `--security-opt label=disable`"
+        },
+        {
+            "user": "inknos",
+            "body": "I think I was able to reproduce something similar with the few commands in the first comment.\nNow, I believe it's not a bug but rather a missing feature.\n\nHere are the results of my investigation.\n\n---\n\nPreparation:\n\n1. create a container to use for the reproducer\n```\nFROM python:trixie\n\nRUN pip install podman\n```\n\n`podman build . --tag podman-py:trixie`\n\n2. push a private image on a registry (I have `docker.io/inknos/inknos-test-private:tagname`)\n\n3. create a Containerfile in a test directory that will use FROM private image:\n\n```\nmkdir test\ncat > test/Containerfile << EOF\nFROM docker.io/inknos/inknos-test-private:tagname\nRUN echo \"hello world\"\nEOF\n```\n\n4. Before every step, remove dangling images with `podman image prune -a` and remove logins with `rm $XDG_RUNTIME_DIR/containers/auth.json`\n\n5. Run the container with `podman run --rm -it --security-opt label=disable -v /run/user/1000/podman/podman.sock:/run/podman/podman.sock:z -v $PWD:/test:Z podman-py:trixie`. Run these commands to check the sock connection\n\n```python\nfrom podman import PodmanClient                                 \nclient = PodmanClient(base_url=\"unix:///run/podman/podman.sock\")\nclient.images.list()                                            \n```\n\nNote: if `--security-opt label=disable` is not set, step 5 fails on Fedora.\n\n---\n\nReproduce:\n\n**Case 1**: login inside the container, no login on host, pull | build\n\n```\n>>> client.images.pull(\"docker.io/inknos/inknos-test-private:tagname\")\n...\n    raise APIError(cause, response=self._response, explanation=message)\npodman.errors.exceptions.APIError: 403 Client Error: Forbidden ({\"message\":\"denied: requested access to the resource is denied\"}\n)\n\n>>> client.images.build(dockerfile=\"/test/Containerfile\", path=\"/test\")\n...\npodman.errors.exceptions.BuildError: creating build container: unable to copy from source docker://inknos/inknos-test-private:tagname: initializing source docker://inknos/inknos-test-private:tagname: reading manifest tagname in docker.io/inknos/inknos-test-private: requested access to the resource is denied\n```\n\nImage not pulled, image not built, as expected\n\n**Case 2**: login inside the container, no login on host, pull | build\n\n```\n>>> client.login(registry=\"docker.io\", username=\"inknos\", password=\"xxx\")\n{'IdentityToken': '', 'Status': 'Login Succeeded'}\n```\n\n```\n>>> client.images.pull(\"docker.io/inknos/inknos-test-private:tagname\")\n...\n    raise APIError(cause, response=self._response, explanation=message)\npodman.errors.exceptions.APIError: 403 Client Error: Forbidden ({\"message\":\"denied: requested access to the resource is denied\"}\n\n>>> client.images.build(dockerfile=\"/test/Containerfile\", path=\"/test\")\n...\n    raise BuildError(result[\"error\"], report_stream)\npodman.errors.exceptions.BuildError: creating build container: unable to copy from source docker://inknos/inknos-test-private:tagname: initializing source docker://inknos/inknos-test-private:tagname: reading manifest tagname in docker.io/inknos/inknos-test-private: requested access to the resource is denied\n```\n\nImage not pulled, image not built. Token is fetched from socket connection\n\n**Case 3**: no login inside the container, login on host, pull | build\n\n```\n$ podman login docker.io\nUsername: inknos\nPassword: \nLogin Succeeded!\n```\n\n```\n>>> client.images.pull(\"docker.io/inknos/inknos-test-private:tagname\")\n<Image: 'docker.io/inknos/inknos-test-private:tagname'>\n>>> client.images.build(dockerfile=\"/test/Containerfile\", path=\"/test\")\n(<Image: ''>, <itertools._tee object at 0x7f16864cc740>)\n```\n\nNote: local image removed after every step, credentials removed and refreshed after every step.\n\nImage pulled, image built. Token is fetched from host\n\n---\n\nThe behavior is consistent with pull and build. To be able to login from inside the container while connected to host socket is probably not a bug, I'd say is a feature request.\n\nPlease tell me if I missed something from your example, or provide more details :)"
+        },
+        {
+            "user": "lnlrbr",
+            "body": "After removing any dangling image before the pull, I also have the same result :-p\nNow, is there a way with a feature request to be able to only login via PodmanPy without having to do a 'podman login' on the host? It's a problem on CI with Jenkins..."
+        },
+        {
+            "user": "inknos",
+            "body": "I think it's a very reasonable feature, although I don't know the details of how the token travels through the socket, so I'll need to investigate it"
+        },
+        {
+            "user": "inknos",
+            "body": "@lnlrbr do you think the title fits? I think the result wanted is more clear now"
+        },
+        {
+            "user": "lnlrbr",
+            "body": "Ok for the updated title.\nBTW, what is the point of doing a `client.login` ?\n"
+        },
+        {
+            "user": "tollsimy",
+            "body": "It seems there is no libpod API to authenticate and store persistent credentials as the Podman CLI does.\n\nSolutions include:\n1. wrap podman cli login command around `podman.domain.systemSystemManager.login()`\n2. directly read and write to `auth.json` following Podman CLI specs\n\n@inknos what do you think?"
+        }
+    ]
+}
