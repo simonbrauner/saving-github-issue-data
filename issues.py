@@ -42,8 +42,10 @@ def process_issue(organization_name, repository_name, issue):
     data["repository"] = repository_name
 
     data["number"] = issue.number
-    data["type"] = "pull_request" if issue.pull_request else "issue"
     data["title"] = issue.title
+    data["type"] = "pull_request" if issue.pull_request else "issue"
+    data["state"] = issue.state
+    data["labels"] = [label.name for label in issue.labels]
     data["user"] = issue.user.login
     data["body"] = normalize_text(issue.body)
 
