@@ -24,7 +24,7 @@ def main(organization_name, repository_name):
 
     try:
         issues = repo.get_issues(state="all", sort="updated", direction="asc", since=latest_timestamp)
-        for issue in issues:
+        for issue in filter(lambda issue: not issue.pull_request, issues):
             issue_data = process_issue(organization_name, repository_name, issue)
 
             with open(f"{DATA_DIR}/{repo_prefix}_{issue.number}.json", "w") as f:
@@ -43,7 +43,6 @@ def process_issue(organization_name, repository_name, issue):
 
     data["number"] = issue.number
     data["title"] = issue.title
-    data["type"] = "pull_request" if issue.pull_request else "issue"
     data["state"] = issue.state
     data["labels"] = [label.name for label in issue.labels]
     data["user"] = issue.user.login
