@@ -1,0 +1,120 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 24147,
+    "title": "pasta: UDP/IPv4 large transfer, tap: mismatch",
+    "state": "closed",
+    "labels": [
+        "flakes",
+        "pasta",
+        "locked - please file new issue/PR"
+    ],
+    "user": "edsantiago",
+    "body": "So far debian-only, in parallel system tests\n```\nnot ok 379 |505| UDP/IPv4 large transfer, tap in 2576ms\n...\n$ podman logs --follow c-socat-t379-i0yzkalc\nf7f2c12c2da26c7fe3701753a8a3167b  -\n#/vvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv\n#|     FAIL: Mismatch between data sent and received\n#| expected: = 16650cce72835ebf29698339858b4296  -\n#|   actual:   f7f2c12c2da26c7fe3701753a8a3167b  -\n#\\^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n```\n\n* debian-13 : sys podman debian-13 rootless host sqlite\n  * PR #23275\n    * [10-02 12:37](https://api.cirrus-ci.com/v1/artifact/task/5697441880604672/html/sys-podman-debian-13-rootless-host-sqlite.log.html#t--00379p) in [sys] |505| UDP/IPv4 large transfer, tap\n    * [10-01 17:23](https://api.cirrus-ci.com/v1/artifact/task/5176892674801664/html/sys-podman-debian-13-rootless-host-sqlite.log.html#t--00375p) in [sys] |505| UDP/IPv4 large transfer, tap\n\n| x | x | x | x | x | x |\n| ---: | ---: | ---: | ---: | ---: | ---: |\n| sys(2) | podman(2) | debian-13(2) | rootless(2) | host(2) | sqlite(2) |\n",
+    "comments": [
+        {
+            "user": "sbrivio-rh",
+            "body": "...only in parallel tests, and it happened only twice in a while, correct?"
+        },
+        {
+            "user": "edsantiago",
+            "body": "Once in my own parallel testing on my f40 laptop, in the `small transfer, tap` test. Most of the easily-reproduced parallel flakes have been addressed, which unfortunately leaves us with the more challenging ones."
+        },
+        {
+            "user": "edsantiago",
+            "body": "I instrumented the test, and got a hit (flake) on [my first try](https://api.cirrus-ci.com/v1/artifact/task/5545556326481920/html/sys-podman-fedora-40-rootless-host-sqlite.log.html#t--00380p):\n\n```\n# #|     FAIL: Mismatch between data sent and received\n         # #| expected: = size=53248 hash=61514771ee5e67d618f0fe13e97bfa08 - head= df 08 a1 d0 ca c4 87 0e tail= e8 f2 d3 0f 74 0e 1e 13\n         # #|   actual:   size=49152 hash=23a9a6b6368ffb95ecdc9116944fc53b - head= df 08 a1 d0 ca c4 87 0e tail= 86 21 ae d8 31 48 ec 3a\n```\n`53248 - 49152 = 4096` and it looks like it's missing from the end (not surprising)"
+        },
+        {
+            "user": "sbrivio-rh",
+            "body": "Thanks a lot, that's really helpful. 4096 bytes makes it look like it's not actually an issue in pasta itself, rather a race in the tests (that's the size of a page, not a packet or any buffer we use). I'll have another look at the test and try to make this more likely to happen somehow and hopefully reproduce it..."
+        },
+        {
+            "user": "sbrivio-rh",
+            "body": "I'm able to reproduce this easily (by simply running that test in a loop). I'm still clueless as to what's going on."
+        },
+        {
+            "user": "sbrivio-rh",
+            "body": "With commit https://github.com/edsantiago/libpod/commit/a659d9fa067a9ac3f84ceda9da5869c725bf4db9 and packet captures:\n\n* successful test: https://passt.top/static/podman24147_good.pcap\n* failing test: https://passt.top/static/podman24147_good.pcap and\n```\n   [19:51:22.959789450] size=1040384 hash=7fded94f95042fdbb9027b9d32ea715c - head= 62 cf fa 91 8e cb b3 15 tail= 90 40 43 0a af 83 d6 f1\n   #/vvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv\n   #|     FAIL: Mismatch between data sent and received\n   #| expected: = size=1048576 hash=30cb39a1743c7cfd386320f1a378ccea - head= 62 cf fa 91 8e cb b3 15 tail= 90 40 43 0a af 83 d6 f1\n   #|   actual:   size=1040384 hash=7fded94f95042fdbb9027b9d32ea715c - head= 62 cf fa 91 8e cb b3 15 tail= 90 40 43 0a af 83 d6 f1\n   #\\^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n```\n\nin my case, 8192 bytes are missing from somewhere in the middle of the file. From the capture, it looks like the kernel drops frame #4 (second UDP data packet pasta is sending, range 8192-16384): there's an ICMP port unreachable message referring to that data (`d3 2c f7 11`...) in frame #9.\n\nCuriously, in this case, we also see an ARP request for 88.198.0.161 (default gateway in the container) and pasta replying to it (frames 6 and 7). Overview using tshark(1) output:\n\n```\n    1   0.000000 fe80::ccc9:bfff:fe5b:b4cb → ff02::2      ICMPv6 70 Router Solicitation from ce:c9:bf:5b:b4:cb\n    2   0.005934 fe80::ccc9:bfff:fe5b:b4cb → ff02::16     ICMPv6 90 Multicast Listener Report Message v2\n```\n\nExpected.\n\n```\n    3   0.139513  169.254.1.2 → 88.198.0.164 UDP 8234 43171 → 5189 Len=8192\n    4   0.139560  169.254.1.2 → 88.198.0.164 UDP 8234 43171 → 5189 Len=8192\n    5   0.139576  169.254.1.2 → 88.198.0.164 UDP 8234 43171 → 5189 Len=8192\n```\n\nStart of transfer.\n\n\n```\n    6   0.139587 ce:c9:bf:5b:b4:cb → Broadcast    ARP 42 Who has 88.198.0.161? Tell 88.198.0.164\n    7   0.139601 9a:55:9a:55:9a:55 → ce:c9:bf:5b:b4:cb ARP 42 88.198.0.161 is at 9a:55:9a:55:9a:55\n```\n\nARP request and reply for default gateway, only visible in the bad case.\n\n```\n    8   0.139611  169.254.1.2 → 88.198.0.164 UDP 8234 43171 → 5189 Len=8192\n```\n\nTransfer continues.\n\n```\n    9   0.139620 88.198.0.164 → 169.254.1.2  ICMP 590 Destination unreachable (Port unreachable)\n```\n\nCompletely unexpected: this refers to frame #4.\n\n```\n   10   0.139634  169.254.1.2 → 88.198.0.164 UDP 8234 43171 → 5189 Len=8192\n   11   0.139652  169.254.1.2 → 88.198.0.164 UDP 8234 43171 → 5189 Len=8192\n   12   0.139667  169.254.1.2 → 88.198.0.164 UDP 8234 43171 → 5189 Len=8192\n[...]\n```\n\nTransfer goes on.\n\nThis starts looking like a kernel issue to me: if we send UDP message shortly after we set up the namespace, one message (and not the first one!) gets a port unreachable message (this happens after we check that the port is bound via procfs).\n\nBy the way, this looks similar to a failure I've noticed with a pending series (not merged yet): https://archives.passt.top/passt-dev/20241009224433.7fc28fc7@elisabeth/. That's from passt's tests (no Podman): on a spliced connection (loopback path, not tap) we get a \"host unreachable\" error from the kernel for the tap (local, non-loopback) address.\n\nI'll add some prints to the kernel and try to figure out what's going on there. This doesn't appear to be a race in the tests (data in the middle of a transfer is missing) and it doesn't look like an issue in pasta (we're sending all the packets we need to send, the kernel drops one, without any apparent reason).\n\n\n"
+        },
+        {
+            "user": "edsantiago",
+            "body": "I can't tell if that's a really really fun issue to debug, or a really really horrible one, or both. Whatever the case, thank you for looking into it."
+        },
+        {
+            "user": "sbrivio-rh",
+            "body": "So, I was trying to find out why the kernel can't match the bound port with a UDP socket (which is the reason why that ICMP message is generated, and the corresponding datagram dropped)... and, since yesterday, I can't reproduce this anymore. Same kernel, same exact build of Podman and pasta, same machine and terminal (I still had the same open), even.\n\nEarlier it would happen once out of ~10 times. Since yesterday it's completely gone, and today it didn't fail once in a loop of 1000 runs. I'm completely puzzled. Now I'm trying to increase/decrease memory pressure on that machine.\n\nSo, well, I don't really have an update yet. It's just turning out to be much subtler than I thought. I don't think it depends on the timing of the test, by the way."
+        },
+        {
+            "user": "dgibson",
+            "body": "I've managed to reproduce this (or at least something which looks very much like it), but it took quite a long time (finding and fixing #24342 along the way)."
+        },
+        {
+            "user": "dgibson",
+            "body": "I think I now have an improved reproducer, though it's certainly not instant.  I can get it reasonably quickly if I simultaneously run the podman pasta tests in a loop, and run this script:\n\n```\n#! /bin/sh\n\nset -ex\n\nBASE=\"$(dirname $0)/..\"\nPASTA=$BASE/pasta\nPORT=23967\n\nLEN=$(($(cat /proc/sys/net/core/wmem_default) / 4))\n\nIN=$BASE/test/udp.bin\nOUT=$BASE/test/out.bin\n\ndd if=/dev/urandom bs=1 count=$LEN of=$IN\n\nwhile :; do\n        $PASTA --config-net -u $PORT -- socat -u UDP4-LISTEN:$PORT,null-eof OPEN:$OUT,create,trunc &\n        sleep 1\n        socat -u OPEN:$IN UDP4:localhost:$PORT,shut-null\n        wait\n        cmp $IN $OUT\ndone\n```"
+        },
+        {
+            "user": "dgibson",
+            "body": "Realized, of course that the script above shows something up for a \"spliced\" connection rather than a tap one.  I have also reproduced with a \"tap\" connection (replacing `localhost` with the host's global address), although it did seem to take longer.\n\nI suspect this problem affects both \"splice\" and \"tap\" flows.  That's unusual, but makes some sense based on the packet capture that @sbrivio-rh obtained (and I have similar ones).  It looks like something on the container/namespace side is causing an ICMP to be generated for one of the packets , and that could happen whether the packet is travelling over the tuntap link or over the namespace's loopback interface."
+        },
+        {
+            "user": "dgibson",
+            "body": "I concur with @sbrivio-rh that this looks like a kernel bug.  There only seems to be one place that sends a port unreachable ICMP, which is if can't find a socket.  I've confirmed with systemtap that we are indeed hitting that path.  So for some reason the kernel momentarily can't local the listening socket, which is quite odd.\n"
+        },
+        {
+            "user": "dgibson",
+            "body": "@sbrivio-rh and I had speculated that this might have something to do with migration of processes and/or sockets between CPUs, so I tried a couple of tests based on that theory:\n\n- If I `taskset` the pasta command line (both pasta and the socat server) to a single CPU I wasn't able to reproduce.   This isn't conclusive, since the fault is intermittent.\n- I *was* able to reproduce with only the socat `taskset` to a single cpu\n- I *was* able to reproduce with pasta and socat each `taskset` to different single cpus.\n\nNot really sure what that means, yet, but maybe it's a clue."
+        },
+        {
+            "user": "dgibson",
+            "body": "There are two paths to the `no_sk` label in `__udp4_lib_rcv()` which we seem to be reaching.\n\n1.  Simply falling through after failing to find a socket from `__udp4_lib_rcv()`\n2. From a `goto` after getting an error from `inet_steal_sock()`\n\nAs far as I could tell from systemtap, we're coming through path (1) - I only checked on one occasion, though, so I don't know for certain if that's true all the time.\n"
+        },
+        {
+            "user": "dgibson",
+            "body": "@sbrivio-rh further systemtap investigation has shown something I suspect is pretty useful, though I can't immediately interpret it.\n\nAFAICT there are two different success paths through `__udb4_lib_rcv()`.  The first is if we get a socket from `inet_steal_sock()`.  The second is if that returns no socket, and we instead look one up via `__udp4_lib_lookup_skb()`.\n\nFrom systemtap traces, each failure case seems to go:\n\n1. Several successful lookups via `__udp4_lib_lookup_skb()`\n2. A failed lookup via `__udp4_lib_lookup_skb()`, leading to the ICMP port unreachable\n3. Successful lookups via `inet_steal_sock()` for the remaining packets\n\nI don't really know what the `inet_steal_sock()` mechanism is about, but it kinda looks like there's a race in the transition from one lookup mechanism to the other which causes the socket to be unfindable.\n"
+        },
+        {
+            "user": "sbrivio-rh",
+            "body": "> I don't really know what the `inet_steal_sock()` mechanism is about\n\nThe basic idea, introduced by kernel commit [23542618deb7](https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/commit/?id=23542618deb77cfed312842fe8c41ed19fb16470) (\"inet: Don't lookup the socket if there's a socket attached to the skb\"), is that if a socket is attached to a skb, we can avoid an actual socket lookup, and just grab (\"steal\") a reference to it.\n\n> but it kinda looks like there's a race in the transition from one lookup mechanism to the other which causes the socket to be unfindable\n\nThat logic was slightly modified by kernel commit [9c02bec95954](https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/commit/?id=9c02bec95954252c3c01bfbb3f7560e0b95ca955) (\"bpf, net: Support SO_REUSEPORT sockets with bpf_sk_assign\") last year. I couldn't spot any obvious issue with it, but let me try to reproduce this with and without that commit."
+        },
+        {
+            "user": "sbrivio-rh",
+            "body": "> let me try to reproduce this with and without that commit.\n\nI can reproduce the issue with the Podman test after and also _before_ (not a revert) that commit, even though before that commit, this is  more likely to happen:\n\n```\n+ :\n+ sleep 1\n+ ./pasta --config-net -u 23967 -- socat -u UDP4-LISTEN:23967,null-eof OPEN:./test/out.bin,create,trunc\n+ socat -u OPEN:./test/udp.bin UDP4:localhost:23967,shut-null\n+ wait\n+ cmp ./test/udp.bin ./test/out.bin\n./test/udp.bin ./test/out.bin differ: char 32769, line 102\n```\n\nand I never observed this with a recent net.git kernel instead.\n"
+        },
+        {
+            "user": "sbrivio-rh",
+            "body": "Context: `Documentation/RCU/rculist_nulls.rst`, commit da82af04352b (\"doc: Update and wordsmith rculist_nulls.rst\"), commit 47d63d7a391 (\"Docs/RCU/rculist_nulls: Fix text about atomic_set_release()\"), and this [discussion](https://lore.kernel.org/rcu/46440869-644a-4982-b790-b71b43976c66@paulmck-laptop/).\n\nBack to UDP: memory barriers were dropped by commit 88ab1932eac7 (\"udp: Use hlist_nulls in UDP RCU code\") because of the switch to the \"hlist_nulls\" implementation, in 2008. Then, 8 years later, the switch was reverted by commit ca065d0cf80f (\"udp: no longer use SLAB_DESTROY_BY_RCU\"), but the barriers were not added back. Especially relevant here: the one in udb_lib_get_port(). Sure, it's faster, but we might miss sockets on lookup.\n\nI'm trying to add again barriers that appeared to make sense and see if this is fixed...\n"
+        },
+        {
+            "user": "sbrivio-rh",
+            "body": "> I'm trying to add again barriers that appeared to make sense and see if this is fixed...\n\nNot so easy, I tried a bunch of things:\n\n<details>\n\n```\ndiff --git a/net/ipv4/udp.c b/net/ipv4/udp.c\nindex 8accbf4cb295..4f9c585aec1f 100644\n--- a/net/ipv4/udp.c\n+++ b/net/ipv4/udp.c\n@@ -327,6 +327,7 @@ int udp_lib_get_port(struct sock *sk, unsigned short snum,\n                        goto fail_unlock;\n                }\n \n+               smp_wmb();\n                sock_set_flag(sk, SOCK_RCU_FREE);\n \n                sk_add_node_rcu(sk, &hslot->head);\n@@ -434,6 +435,10 @@ static struct sock *udp4_lib_lookup2(const struct net *net,\n \n        result = NULL;\n        badness = 0;\n+\n+       rcu_read_lock();\n+\n+       smp_rmb();\n        udp_portaddr_for_each_entry_rcu(sk, &hslot2->head) {\n                need_rescore = false;\n rescore:\n@@ -458,8 +463,10 @@ static struct sock *udp4_lib_lookup2(const struct net *net,\n                        }\n \n                        /* Fall back to scoring if group has connections */\n-                       if (!reuseport_has_conns(sk))\n+                       if (!reuseport_has_conns(sk)) {\n+                               rcu_read_unlock();\n                                return result;\n+                       }\n \n                        /* Reuseport logic returned an error, keep original score. */\n                        if (IS_ERR(result))\n@@ -475,6 +482,9 @@ static struct sock *udp4_lib_lookup2(const struct net *net,\n                        goto rescore;\n                }\n        }\n+\n+       rcu_read_unlock();\n+\n        return result;\n }\n \n```\n</details>\n\nbut no luck so far. I didn't try reintroducing an equivalent of hlist_for_each_entry_rcu_safenext() as removed by commit 88ab1932eac7. I guess the problem is more subtle than I expected at this point."
+        },
+        {
+            "user": "dgibson",
+            "body": "> I guess the problem is more subtle than I expected at this point.\n\nYouch, it really is.  Should we be trying to bring in some kernel networking experts at this point?"
+        },
+        {
+            "user": "sbrivio-rh",
+            "body": "> > I guess the problem is more subtle than I expected at this point.\n> \n> Youch, it really is. Should we be trying to bring in some kernel networking experts at this point?\n\nI was kind of maybe supposed to be one. :) But yes, I think it would be fair to ask the author of the changes around this stuff, at least. We should just come up with a more contained reproducer, possibly without Podman and bats."
+        },
+        {
+            "user": "sbrivio-rh",
+            "body": "Just adding these prints makes the shell script reproducer fail by itself reliably on the first loop (without need for bats and Podman in parallel). Unless I `taskset -c1` it, of course: in that case, it never fails.\n\n<details>\n\n```\ndiff --git a/net/ipv4/udp.c b/net/ipv4/udp.c\nindex 8accbf4cb295..9ddf42e35335 100644\n--- a/net/ipv4/udp.c\n+++ b/net/ipv4/udp.c\n@@ -429,12 +429,14 @@ static struct sock *udp4_lib_lookup2(const struct net *net,\n                                     struct sk_buff *skb)\n {\n        struct sock *sk, *result;\n-       int score, badness;\n+       int score, badness, count = 0, ne = 0;\n        bool need_rescore;\n \n        result = NULL;\n        badness = 0;\n+\n        udp_portaddr_for_each_entry_rcu(sk, &hslot2->head) {\n+               count++;\n                need_rescore = false;\n rescore:\n                score = compute_score(need_rescore ? result : sk, net, saddr,\n@@ -450,6 +452,8 @@ static struct sock *udp4_lib_lookup2(const struct net *net,\n                                continue;\n                        }\n \n+                       ne = 1;\n+\n                        result = inet_lookup_reuseport(net, sk, skb, sizeof(struct udphdr),\n                                                       saddr, sport, daddr, hnum, udp_ehashfn);\n                        if (!result) {\n@@ -475,6 +479,12 @@ static struct sock *udp4_lib_lookup2(const struct net *net,\n                        goto rescore;\n                }\n        }\n+\n+       if (!result) {\n+               pr_err(\"%s:%i, score: %i, badness: %i, entries: %i, ne: %i\",\n+                       __func__, __LINE__, score, badness, count, ne);\n+       }\n+\n        return result;\n }\n \n@@ -2422,8 +2432,10 @@ int __udp4_lib_rcv(struct sk_buff *skb, struct udp_table *udptable,\n \n        sk = inet_steal_sock(net, skb, sizeof(struct udphdr), saddr, uh->source, daddr, uh->dest,\n                             &refcounted, udp_ehashfn);\n-       if (IS_ERR(sk))\n+       if (IS_ERR(sk)) {\n+               pr_err(\"%s:%i, steal error\", __func__, __LINE__);\n                goto no_sk;\n+       }\n \n        if (sk) {\n                struct dst_entry *dst = skb_dst(skb);\n@@ -2435,6 +2447,7 @@ int __udp4_lib_rcv(struct sk_buff *skb, struct udp_table *udptable,\n                ret = udp_unicast_rcv_skb(sk, skb, uh);\n                if (refcounted)\n                        sock_put(sk);\n+               pr_err(\"%s:%i, steal found\", __func__, __LINE__);\n                return ret;\n        }\n \n@@ -2445,6 +2458,9 @@ int __udp4_lib_rcv(struct sk_buff *skb, struct udp_table *udptable,\n        sk = __udp4_lib_lookup_skb(skb, uh->source, uh->dest, udptable);\n        if (sk)\n                return udp_unicast_rcv_skb(sk, skb, uh);\n+\n+       pr_err(\"%s:%i lib_lookup_skb error\", __func__, __LINE__);\n+\n no_sk:\n        if (!xfrm4_policy_check(NULL, XFRM_POLICY_IN, skb))\n                goto drop;\n@@ -2463,6 +2479,7 @@ int __udp4_lib_rcv(struct sk_buff *skb, struct udp_table *udptable,\n         * don't wanna listen.  Ignore it.\n         */\n        sk_skb_reason_drop(sk, skb, drop_reason);\n+       pr_err(\"=== %s:%i drop\", __func__, __LINE__);\n        return 0;\n \n short_packet:\n```\n</details>\n"
+        },
+        {
+            "user": "sbrivio-rh",
+            "body": "Based on further investigation, the issue seems to be the same as what was fixed 14 years ago by commit 719f835853a9 (\"udp: add rehash on connect()\").\n\nThe packet drop happens when we start looking up a socket, and its connect() call completes in the meantime: udp_lib_rehash() is called before __udp4_lib_lookup() but didn't complete yet, or just after. The local address changes, but the hash wasn't updated, yet, and the socket can't be found.\n\nThat is, the fix is not complete, because it leaves a window of opportunity for the socket to be missed.\n\nWe can probably split the rehash operation into two atomic operations, the first one adding a new entry in the secondary hash table, before we assign the new `inet->inet_rcv_saddr` in `ip4_datagram_connect()`, and the second one removing the old entry, after that address is assigned and any possible lookup has completed. Insertions and removals are protected by RCU, so locking is mostly sorted. As to the assignment itself, its ordering, and its visibility across CPUs, I still need to reach some conclusions."
+        },
+        {
+            "user": "sbrivio-rh",
+            "body": "RFC fix at https://lore.kernel.org/netdev/20241114215414.3357873-3-sbrivio@redhat.com/"
+        },
+        {
+            "user": "sbrivio-rh",
+            "body": "Final version of the fix applied to net-next: https://git.kernel.org/pub/scm/linux/kernel/git/netdev/net-next.git/commit/?id=a502ea6fa94b. It should land in kernel version 6.14."
+        },
+        {
+            "user": "Luap99",
+            "body": "This is fixed in the latest CI images, I have not seen this again since the kernel update. Many thanks to @sbrivio-rh "
+        }
+    ]
+}

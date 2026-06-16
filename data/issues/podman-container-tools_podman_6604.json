@@ -1,0 +1,113 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 6604,
+    "title": "podman in systemd: improve logging",
+    "state": "closed",
+    "labels": [
+        "kind/feature",
+        "stale-issue",
+        "In Progress",
+        "locked - please file new issue/PR"
+    ],
+    "user": "vrothberg",
+    "body": "We need to find a way to easier integrate the container/pod logs into the systemd service and journalctl. At the moment, we run containers with `--detached` such that stderr and stdout don't show up in the service logs and can only be examined via `podman logs`.\n\nI guess we need a combination of `--log-driver=journald` and `--log-opt tag=...` with the later maybe being set to `%n` (i.e., the unit/service name).\n\nCc: @mheon @rhatdan @goochjj  @storrgie  @lucab",
+    "comments": [
+        {
+            "user": "lucab",
+            "body": "Not sure if directly useful for podman, but journald has capabilities for distinguishing/isolating logs from (containerized) services:\n * [Unit identifier](https://www.freedesktop.org/software/systemd/man/systemd.journal-fields.html#_SYSTEMD_CGROUP=)\n * [Machine ID](https://www.freedesktop.org/software/systemd/man/systemd.journal-fields.html#_MACHINE_ID=)\n * [Namespaces](https://www.freedesktop.org/software/systemd/man/systemd-journald.service.html#Journal%20Namespaces)\n\nThe first has some [known races](https://github.com/systemd/systemd/issues/2913) on exit. The third is a recent feature. The second can be used in conjunction with `machinectl` (see an example on the defunct [rkt docs](https://coreos.com/rkt/docs/latest/commands.html#logging))."
+        },
+        {
+            "user": "goochjj",
+            "body": "conmon with --log-driver=journald adds CONTAINER_ID, CONTAINER_NAME and CONTAINER_ID_FULL to every log coming from conmon and from the container's stderr and stdout... (and container_tag if specified)  Note the CONTAINER_NAME wasn't logged until a merge 27 days ago in #6291 and a related pull in conmon.\n\nThe unit identifier should also be logged consistently now that the default is cgroups no-conmon - Journald will get the correct unit context from the cgroup of the process.\n\n\n\n"
+        },
+        {
+            "user": "goochjj",
+            "body": "conmon internals log via syslog() when --syslog is passed, which ends up on /dev/log, which gets logged to systemd under the correct unit, with any LogExtraFields in the unit file, but without CONTAINER_xxx metadata.  (Because only the logs send to the journald socket have the additional CONTAINER_xxx fields)\n\nSo with log-driver journald\n  stderr + stdout -> journald socket, with CONTAINER_xxx metadata\n  internal logs -> syslog socket (when --syslog, which podman sets), without any CONTAINER_xxx metadata\n\nI'm currently using an OCI hook to write CONTAINER_ID and CONTAINER_ID_FULL into /run/systemd/units/log-extra-fields:unitname, which adds those fields to the internal logs received via /dev/log.  I'm also launching a busybox syslogd instance, that binds to /dev/log inside my container and forwards to the host's /dev/log, which also leverages the log extra fields, so everything gets logged right.\n\nExcept the journald driver, which nows receives every field twice, so I get CONTAINER_NAME [ \"name\", \"name\" ], but it still seems to work for filtering purposes.\n\nConmon could leverage writing directly to journald in utils.h so the conmon internal logs have more control, instead of writing to /dev/log they'd now write to the journald socket.\n\n\n"
+        },
+        {
+            "user": "andrewdunndev",
+            "body": "It'd be extremely nice to have verbose logging about the overall state of all subsystems related to operating the container (podman/conmon/slirp4netns/etc.) in the standard systemd journal. then the container logs itself being done via a tagging mechanism would be fine.\n\nUnifying the logs would __maybe__ be better for usability. It's not clear (until @goochjj starting posting) that I could find the logging via `journalctl CONTAINER_NAME=<name>`"
+        },
+        {
+            "user": "goochjj",
+            "body": "Any process spawned by podman would likely log via syslog, and be logged under the systemd unit that spawned podman.\n\nI don't think I agree with your assertion - I'm not sure I agree that utility processes (i.e. podman, conmon, slirp4netns) should identify themselves with the container - they're outside the container.  It feels to me like there should be a difference between \"inside the container\" logs and \"outside the container\" logs. (Which, based on how conmon is right now, is maintained - conmon logs go to syslog and are attached to the unit, but not the container ID and name, while stderr/stdout from the container ARE tagged properly)\n\nI don't quite know how to accommodate that - by leveraging LogExtraFields I'm attaching that metadata to anything subordinate to the unit.\n\n"
+        },
+        {
+            "user": "andrewdunndev",
+            "body": "> I don't think I agree with your assertion - I'm not sure I agree that utility processes (i.e. podman, conmon, slirp4netns) should identify themselves with the container - they're outside the container. It feels to me like there should be a difference between \"inside the container\" logs and \"outside the container\" logs. (Which, based on how conmon is right now, is maintained - conmon logs go to syslog and are attached to the unit, but not the container ID and name, while stderr/stdout from the container ARE tagged properly)\n\nI agree with you, consistency and transparency of how one has awareness of those two logging streams would really help.\n"
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@vrothberg @goochjj Any progress on this?"
+        },
+        {
+            "user": "goochjj",
+            "body": "We probably need to better flesh out exactly what desired state is before this will be actionable\n"
+        },
+        {
+            "user": "vrothberg",
+            "body": "I concur. Let's put it on our roadmap. I won't find time this week to think this through."
+        },
+        {
+            "user": "vrothberg",
+            "body": "> I concur. Let's put it on our roadmap. I won't find time this week to think this through.\n\nI created a card to our internal pipeline to make sure we can tackle it in the future and discuss upstream here what we want and need."
+        },
+        {
+            "user": "polendri",
+            "body": "In case the perspective of an ignorant end user is at all helpful here: my expectation when I fired up containers via systemd (generated via `podman generate systemd`) was to see roughly the same output in `journalctl` as what `podman logs` shows. Other logs (e.g. `slirp4netns`) feels like an implementation detail that I wouldn't want to see unless opting in via config or something."
+        },
+        {
+            "user": "yangm97",
+            "body": "It seems like generating units for containers created with `--log-driver=journald` (or changing the `ExecStart` line to include said flag) is already enough to get `journalctl` and `systemctl` to display the container logs associated with that unit. I haven't tested with pod units though.\n\nAssuming pod units are as good, looks like we only need to add this flag to the unit template in order to close this issue?\n"
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "RLovelett",
+            "body": "In case the perspective of an ignorant end user is at all helpful here: I tried @yangm97's suggestion and that gives me more or less what I was looking for."
+        },
+        {
+            "user": "acastong",
+            "body": "Since the `play kube` command does not have a `--log-driver` option, this remains a problem for containers created through this command.  A `--log-driver` option to `play kube` would allow @yangm97's suggestion to work for pods too."
+        },
+        {
+            "user": "rhatdan",
+            "body": "Sounds good, would someone from the community want to open a PR to add this feature?"
+        },
+        {
+            "user": "andylibrian",
+            "body": "If no one is working on this already, let me take it\n\n/assign"
+        },
+        {
+            "user": "rhatdan",
+            "body": "@andylibrian You got it, thanks."
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "andylibrian",
+            "body": "I think this is completed now:\n\n- [x] Generating systemd units for containers created with `--log-driver=journald` works as expected, logging to journald\n- [x] `--log-driver` arg has been added to `play kube`"
+        },
+        {
+            "user": "rhatdan",
+            "body": "Ok I will close. "
+        },
+        {
+            "user": "maclean",
+            "body": "With the default --log-driver option to podman run, every keystroke is logged to systemd\n\nThis even applies to things like pinentry keystrokes.  Running pinentry-curses by hand In a Ubuntu Bionic image,  on a Fedora 35 host, the passphrase is logged:\n\npinentry-curses\nGETPIN\ntest\nctrl-D\n\nThe following is logged, as seen with journalctl -f:\nJan 09 11:42:55 gmlat conmon[314188]: pinentry-curses  > /dev/null\nJan 09 11:42:57 gmlat conmon[314188]: \nJan 09 11:43:00 gmlat conmon[314188]: G\nJan 09 11:43:00 gmlat conmon[314188]: E\nJan 09 11:43:00 gmlat conmon[314188]: T\nJan 09 11:43:01 gmlat conmon[314188]: P\nJan 09 11:43:01 gmlat conmon[314188]: I\nJan 09 11:43:01 gmlat conmon[314188]: N\nJan 09 11:43:02 gmlat conmon[314188]: \nJan 09 11:43:03 gmlat conmon[314188]: t\nJan 09 11:43:04 gmlat conmon[314188]: e\nJan 09 11:43:04 gmlat conmon[314188]: s\nJan 09 11:43:04 gmlat conmon[314188]: t\nJan 09 11:43:05 gmlat conmon[314188]: \nJan 09 11:43:07 gmlat conmon[314188]: [24B blob data]\n\nIf I sign something in the container with gpg2, and pinentry is run to fetch the passphrase, the following is logged:\nJan 09 11:46:21 gmlat conmon[314188]: [4B blob data]\nJan 09 11:46:21 gmlat conmon[314188]: [4B blob data]\nJan 09 11:46:21 gmlat conmon[314188]: [4B blob data]\nJan 09 11:46:21 gmlat conmon[314188]: [4B blob data]\n\nJust 4 byte blobs are reported and not the actual keystrokes, but I would guess that this is a side effect of the logger combining  output and not the result of security.\n\nSetting --log-driver=none to podman run turns off the logging.  \n\nFor users that are not aware that keystrokes are logged, this is a security vulnerability.\n\n\n\n"
+        },
+        {
+            "user": "travier",
+            "body": "@maclean Please open a new issue to help us track it."
+        }
+    ]
+}

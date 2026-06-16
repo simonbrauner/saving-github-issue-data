@@ -1,0 +1,26 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 4314,
+    "title": "Spurious (race?): Error removing container: container does not exist in database: no such container",
+    "state": "closed",
+    "labels": [
+        "locked - please file new issue/PR"
+    ],
+    "user": "edsantiago",
+    "body": "This is a longstanding bug that I only just today found a semi-reproducer for. It fails inconsistently but should not go more than 20 iterations without at least failing once:\n```\n# while :;do echo >| /tmp/foo.log; (podman run --rm --attach=stdout --name foo alpine sh -c \"trap 'echo Finishing;exit' SIGTERM;echo READY;while :;do sleep 1;done\" >>/tmp/foo.log &); while test -n \"$(grep -L READY /tmp/foo.log)\";do sleep 0.1;done;podman stop --time=10 foo;cat /tmp/foo.log;sleep 2;done\n```\n(That's the copy-paste one. Here's the same thing, better annotated):\n```\n# while :;do\n    ! Run a container that will exit on SIGTERM. Container says READY when started.\n    ! The --rm is important\n    echo >| /tmp/foo.log                        ! truncate log file\n    (podman run --rm --attach=stdout --name foo alpine sh -c \"trap 'echo Finishing;exit' SIGTERM;echo READY;while :;do sleep 1;done\" >>/tmp/foo.log &)\n\n    ! wait for container to be ready (string \"READY\" appears in log file)\n    while test -n \"$(grep -L READY /tmp/foo.log)\";do sleep 0.1;done\n\n    ! signal the container; this will succeed, and terminate within a second or so\n    podman stop --time=10 foo\n    ! Show the container log. This isn't really interesting, it'll just be READY and Finishing\n    cat /tmp/foo.log\n\n    ! Wait for container cleanup (otherwise the loop fails when rerunning with --name foo)\n    sleep 2\ndone\n```\nYou will see a long series of READY/Finishing/CID, then once in a while:\n```\nREADY\nFinishing\nERRO[0002] Error removing container e1a27c7c1e093350aa63e14c42b8d320f3b5c1d75278af7d9e1dad56e93c1438: container e1a27c7c1e093350aa63e14c42b8d320f3b5c1d75278af7d9e1dad56e93c1438 does not exist in database: no such container\n738b09de1851100aae4facc5a512f2abb1fa45ab4caf8b81d00c1d2e6a922eeb\n```\nAlthough the message is tagged with ERRO, it does not seem to affect anything. The subsequent `podman run --name foo` works perfectly fine, indicating that the named container is cleaned up. \n\npodman-1.6.2-2.fc30 but I've been seeing this sporadically for many months.",
+    "comments": [
+        {
+            "user": "mheon",
+            "body": "This is a race between the cleanup process and main process, which both attempt to remove the container (I think - 80% sure). The main process is interactive and in the foreground, and I'm pretty sure as such it's getting more attention from the scheduler, so it always seems to win, and the cleanup process fails silently in the background. The & may be throwing a wrench into this equation and allowing the cleanup process to get in and remove it first.\n\nOverall, this isn't a fatal condition. We're trying to remove the container, but it's already gone, because we do the removal in two places. Might want to squash this down to a WARN or INFO log."
+        },
+        {
+            "user": "edsantiago",
+            "body": ">Overall, this isn't a fatal condition\n\nAgreed, and although I didn't explicitly say \"low priority\" in my report I believe this is such. There's no actual harm anywhere, no stuck state, just a message that may (very) infrequently confuse someone. "
+        },
+        {
+            "user": "rhatdan",
+            "body": "Yes I think dropping the removal of a non existing container to Warn, makes sense."
+        }
+    ]
+}

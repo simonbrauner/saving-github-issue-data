@@ -1,0 +1,71 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 14819,
+    "title": "TestEnvVarValue fails on several architectures",
+    "state": "closed",
+    "labels": [
+        "kind/bug",
+        "locked - please file new issue/PR"
+    ],
+    "user": "siretart",
+    "body": "/kind bug\n**Description**\n\nI've updated the Debian package to version 4.1, and while the package builds and seeimgly  works fine on amd64 and arm64, any other architectures fail while running the testsuite. I've seen two kind of failures:\n\nOn:\n - i386 (32bit intel)\n - armel\n - armhf\n - mipsel\n\nThe test TestEnvVarValue fails with this output:\n\n```\n=== RUN   TestEnvVarValue/ResourceFieldRefNoLimitMemory\n-246611968 8343322624\n    play_test.go:787: \n        \tError Trace:\tplay_test.go:787\n        \tError:      \tNot equal: \n        \t            \texpected: (*string)(0xa3f73ec)\n        \t            \tactual  : (*string)(0xa3491c8)\n        \t            \t\n        \t            \tDiff:\n        \tTest:       \tTestEnvVarValue/ResourceFieldRefNoLimitMemory\n=== RUN   TestEnvVarValue/ResourceFieldRefNoRequestMemory\n-246611968 8343322624\n    play_test.go:787: \n        \tError Trace:\tplay_test.go:787\n        \tError:      \tNot equal: \n        \t            \texpected: (*string)(0xa3f752c)\n        \t            \tactual  : (*string)(0xa349260)\n        \t            \t\n        \t            \tDiff:\n        \tTest:       \tTestEnvVarValue/ResourceFieldRefNoRequestMemory\n=== RUN   TestEnvVarValue/ResourceFieldRefNoLimitCPU\n4 4\n=== RUN   TestEnvVarValue/ResourceFieldRefNoRequestCPU\n4 4\n--- FAIL: TestEnvVarValue (0.01s)\n```\n\nI note that these are all 32bit architectures, and the test fails while comparing a pointer.\n\n\n\nThere is a different failure signature on:\n\n- s390x\n- mips64el\n- ppc64el\n\n```\n=== RUN   TestMonitorTwoDirGood/bad-primary-new-addition\ntime=\"2022-07-03T23:35:24Z\" level=error msg=\"Failed loading hooks for /tmp/hooks-test-primary-1983903746/0a.json: parsing hook \\\"/tmp/hooks-test-primary-1983903746/0a.json\\\": unrecognized hook version: \\\"-1\\\"\"\ntime=\"2022-07-03T23:35:24Z\" level=error msg=\"Failed loading hooks for /tmp/hooks-test-primary-1983903746/0a.json: parsing hook \\\"/tmp/hooks-test-primary-1983903746/0a.json\\\": unrecognized hook version: \\\"-1\\\"\"\nexpected:  <nil>\nactual:  &{[{/bin/sh [] [] 0xc00001a458}] [] [] [] [] []}\n```\n\n(at least that's what I think fails).\n\nI note that all these architectures are 64bit.\n",
+    "comments": [
+        {
+            "user": "siretart",
+            "body": "All build logs can be seen from https://buildd.debian.org/status/package.php?p=libpod&suite=experimental which currently looks like this (click on \"Build-Attempted\" in the status column):\n\n![image](https://user-images.githubusercontent.com/1878436/177148820-ba0a41c9-d9d7-46c8-b02a-345eb43f3d8f.png)\n"
+        },
+        {
+            "user": "siretart",
+            "body": "Also, this has been reported as https://bugs.debian.org/cgi-bin/bugreport.cgi?bug=1014309"
+        },
+        {
+            "user": "Luap99",
+            "body": "I don't think the TestEnvVarValue test is correct. It should not compare pointers there, I don't understand how this even works on x86_64."
+        },
+        {
+            "user": "siretart",
+            "body": "I tend to concur:\n\nhttps://github.com/containers/podman/blob/edcbcfdd065fb0c0f352f79a6c083efedd7a287f/pkg/specgen/generate/kube/play_test.go#L778-L790\n\nindicates that `result` in line 787 is actually a pointer that needs to be dereferenced instead of comparing to the pointer of the reference value. How can this possibly match?"
+        },
+        {
+            "user": "Luap99",
+            "body": "From https://pkg.go.dev/github.com/stretchr/testify/assert#Equal\n> Pointer variable equality is determined based on the equality of the referenced values (as opposed to the memory addresses). Function equality cannot be determined and will always fail. \n\nSo the test already compares by value even if pass pointers, therefore the test works.\nFrom your test output we can see both values printed `-246611968 8343322624`\n\nThe test case converts directly the int64 memtotal value from ReadMemInfo() info to an string. The actual code seems to cast it to and int: https://github.com/containers/podman/blob/main/pkg/specgen/generate/kube/kube.go#L813\nThat would explain why it fails on 32 bit systems only.\n\n@siretart Can you test it again with this diff applied?\n```diff\n$ git diff\ndiff --git a/pkg/specgen/generate/kube/kube.go b/pkg/specgen/generate/kube/kube.go\nindex 689c740f0..39e15f950 100644\n--- a/pkg/specgen/generate/kube/kube.go\n+++ b/pkg/specgen/generate/kube/kube.go\n@@ -810,8 +810,8 @@ func envVarValueResourceFieldRef(env v1.EnvVar, opts *CtrSpecGenOptions) (*strin\n        }\n \n        // k8s rounds up the result to the nearest integer\n-       intValue := int(math.Ceil(value.AsApproximateFloat64() / divisor.AsApproximateFloat64()))\n-       stringValue := strconv.Itoa(intValue)\n+       intValue := int64(math.Ceil(value.AsApproximateFloat64() / divisor.AsApproximateFloat64()))\n+       stringValue := strconv.FormatInt(intValue, 10)\n \n        return &stringValue, nil\n }\n```"
+        },
+        {
+            "user": "siretart",
+            "body": "I can (probably) upload a new package with that patch applied later today.\n\nI guess the failure in TestMonitorTwoDirGood is unrelated? -- would you prefer a separate issue for that?"
+        },
+        {
+            "user": "Luap99",
+            "body": "Yes a new issue for the other failure would be good, I haven't looked at that one."
+        },
+        {
+            "user": "siretart",
+            "body": "@Luap99 yes, I can confirm that your patch makes the test pass on `i386`,  but now it is failing on the TestMonitorTwoDirGood issue:\n\n```\n=== RUN   TestMonitorTwoDirGood                                                                                                                                                               \n=== RUN   TestMonitorTwoDirGood/good-fallback-addition                                                                                                                                        \n=== RUN   TestMonitorTwoDirGood/good-primary-override                                                                                                                                         \n=== RUN   TestMonitorTwoDirGood/good-fallback-removal                                                                                                                                         \n=== RUN   TestMonitorTwoDirGood/good-fallback-restore                                                                                                                                         \n=== RUN   TestMonitorTwoDirGood/bad-primary-new-addition                                                                                                                                      \ntime=\"2022-07-04T15:04:04Z\" level=error msg=\"Failed loading hooks for /tmp/hooks-test-primary-2603618593/0a.json: parsing hook \\\"/tmp/hooks-test-primary-2603618593/0a.json\\\": unrecognized ho\nok version: \\\"-1\\\"\"                                                                                                                                                                           \ntime=\"2022-07-04T15:04:04Z\" level=error msg=\"Failed loading hooks for /tmp/hooks-test-primary-2603618593/0a.json: parsing hook \\\"/tmp/hooks-test-primary-2603618593/0a.json\\\": unrecognized ho\nok version: \\\"-1\\\"\"                                                                                                                                                                           \nexpected:  <nil>                                                                                                                                                                              \nactual:  &{[{/bin/sh [] [] 0x963a2b8}] [] [] [] [] []}                                                                                                                                        \n\n```"
+        },
+        {
+            "user": "Luap99",
+            "body": "> @Luap99 yes, I can confirm that your patch makes the test pass on `i386`, but now it is failing on the TestMonitorTwoDirGood issue:\n> \n> ```\n> === RUN   TestMonitorTwoDirGood                                                                                                                                                               \n> === RUN   TestMonitorTwoDirGood/good-fallback-addition                                                                                                                                        \n> === RUN   TestMonitorTwoDirGood/good-primary-override                                                                                                                                         \n> === RUN   TestMonitorTwoDirGood/good-fallback-removal                                                                                                                                         \n> === RUN   TestMonitorTwoDirGood/good-fallback-restore                                                                                                                                         \n> === RUN   TestMonitorTwoDirGood/bad-primary-new-addition                                                                                                                                      \n> time=\"2022-07-04T15:04:04Z\" level=error msg=\"Failed loading hooks for /tmp/hooks-test-primary-2603618593/0a.json: parsing hook \\\"/tmp/hooks-test-primary-2603618593/0a.json\\\": unrecognized ho\n> ok version: \\\"-1\\\"\"                                                                                                                                                                           \n> time=\"2022-07-04T15:04:04Z\" level=error msg=\"Failed loading hooks for /tmp/hooks-test-primary-2603618593/0a.json: parsing hook \\\"/tmp/hooks-test-primary-2603618593/0a.json\\\": unrecognized ho\n> ok version: \\\"-1\\\"\"                                                                                                                                                                           \n> expected:  <nil>                                                                                                                                                                              \n> actual:  &{[{/bin/sh [] [] 0x963a2b8}] [] [] [] [] []}                                                                                                                                        \n> ```\n\nIsn't this the same failure you mentioned above already?\n"
+        },
+        {
+            "user": "Luap99",
+            "body": "I took a look at the full log and I do not see any errors with the TestMonitorTwoDirGood tests. All are passing. The output are just logs that are expected.\n\nIf you scroll further you find this:\n```\nFAIL\tgithub.com/containers/podman/pkg/machine [build failed]\nFAIL\tgithub.com/containers/podman/pkg/machine/qemu [build failed]\n```"
+        },
+        {
+            "user": "siretart",
+            "body": "Indeed, it is.\n\nThanks, the log is quite long, and I was mistakenly looking for `FAIL:`, whereas I really should have looked for `build failed`. It is, however, quite surprising that the test is producing output about mismatching values, without the test is  actually failing. \n\nFurther down in the log, I see this:\n\n```\n# github.com/containers/podman/pkg/machine [github.com/containers/podman/pkg/machine.test]\nsrc/github.com/containers/podman/pkg/machine/config_test.go:25:8: undefined: RemoteConnectionType\n# github.com/containers/podman/pkg/machine/qemu [github.com/containers/podman/pkg/machine/qemu.test]\nsrc/github.com/containers/podman/pkg/machine/qemu/config_test.go:41:18: undefined: machine.VMFile\nsrc/github.com/containers/podman/pkg/machine/qemu/config_test.go:83:15: undefined: machine.VMFile\nsrc/github.com/containers/podman/pkg/machine/qemu/config_test.go:94:20: undefined: machine.VMFile\nsrc/github.com/containers/podman/pkg/machine/qemu/config_test.go:106:22: undefined: machine.VMFile\nsrc/github.com/containers/podman/pkg/machine/qemu/config_test.go:124:22: undefined: machine.VMFile\nsrc/github.com/containers/podman/pkg/machine/qemu/config_test.go:131:24: undefined: machine.NewMachineFile\nsrc/github.com/containers/podman/pkg/machine/qemu/machine_test.go:10:12: undefined: MachineVM\n```\n\nIt seems that this test was written to only compile on `amd64` and `arm64`, maybe qemu support wasn't written for other platforms? -- given that `pkg/machine` code is not used in the Debian package, I'm inclined to just skip that test.\n\nThanks for helping me navigate reading the log!"
+        },
+        {
+            "user": "Luap99",
+            "body": "You can just skip the pkg/machine test for now. AFAIK the code should be used but only for amd64 and arm64 builds.\nYou could just check if the `podman machine` command is available.\n\nI will open a PR to fix the missing build tags on the tests."
+        },
+        {
+            "user": "Luap99",
+            "body": "@siretart I think #14823 should fix all your issues, you can use this patch: https://patch-diff.githubusercontent.com/raw/containers/podman/pull/14823.patch\n"
+        },
+        {
+            "user": "siretart",
+            "body": "Awesome, I've uploaded your patch as version `4.1.1+ds1-2`, let's see how it goes at https://buildd.debian.org/status/package.php?p=libpod&suite=experimental this time. ~It seems that at least i386, armhf and ppc64el~ all builds have already succeeded!\n\nThank you!"
+        }
+    ]
+}

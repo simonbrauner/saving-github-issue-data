@@ -1,0 +1,143 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 16245,
+    "title": "Questions regarding volume lifetimes vs on-disk storage",
+    "state": "closed",
+    "labels": [
+        "stale-issue",
+        "locked - please file new issue/PR"
+    ],
+    "user": "alexlarsson",
+    "body": "So, this is not necessarily an issue, but something that came up in work/discussions around transient container storage and may be problematic. At least it requires some though.\n\nI've been looking at making /var/lib/container/storage a tmpfs for transient containers in the automotive usecase. This is nice, because we always create containers from scratch, and run them with `--rm --read-only` so there is no real state anyway. This way there is no risk of any leftover garbled state after a boot, and there are some important performance advantages.\n\nHowever, we still might want to persist volumes in some way, because that is the way to persist data in this approach. The idea I had was to just change `volumes_path` to point outside of `/var/lib/containers/storage`, which would persist the volume data. However, the container metadata is stored in the bolt db, so that gets lost over a reboot. \n\nI tried to just re-create the container on boot, and that works great, as it picks up the existing directory for the volume (because it has the same name). However @vrothberg is a bit worried about this picking up of an existing directory because this may lose some important metadata about the volume (like driver, etc?). So, the question is, should the volume create really succeed if there was already an existing backing store for it, or should it fail? And if should fail, is there some other way we can achieve our goal, like maybe we could put the volume bold db in the volume_path rather than in the storage directory?\n",
+    "comments": [
+        {
+            "user": "vrothberg",
+            "body": "@baude @rhatdan @mheon PTAL"
+        },
+        {
+            "user": "mheon",
+            "body": "Volume driver shouldn't matter here; nor should volume options. Driver means that the mountpoint of the volume is not managed by Podman, but by the driver; `volume_path` won't matter because an external program is managing the volume. If non-default options are chosen, Podman will use `mount` to mount over the volume's directory, in which case it not being empty doesn't matter, we're mounting our own content over it. In brief, any critical volume config is already overriding the storage, so I see no reason we need to change the current behavior.\n\nThat said, there is also no solid reason to *keep* the current behavior. Using existing directories isn't documented anywhere, and it's more of an accident of how we wrote things than anything else. If you see another reason why this breaks things, I have no objection to changing this. `podman volume import` and `podman volume export` should cover any use-cases that manually modifying the volume's backing directory would (albeit in a somewhat slower and less convenient fashion)."
+        },
+        {
+            "user": "alexlarsson",
+            "body": "I don't, I actually prefer this behaviour, in that it allows me to reinitialize the transient volume (with the same options) and get the previously written content back. Works great with the \"transient storage\" model. Although there is a slight fear here about relying on undocumented behaviour."
+        },
+        {
+            "user": "vrothberg",
+            "body": "Yes, I am mostly afraid of relying on undocumented behavior and a probably unintended use case.\n\nMetadata (e.g., labels) is stored in libpod's DB which will be nuked in the described use case.  There is \"works\" and \"works as intended\" and I think we should be on the latter side.\n\nIf the volume data would be stored in `--volumepath`, we wouldn't run into this issue.  Not sure about the impacts though."
+        },
+        {
+            "user": "alexlarsson",
+            "body": "Here is the WIP code to use this:\n  https://gitlab.com/CentOS/automotive/sample-images/-/merge_requests/160\nWith this containers-transient-store rpm:\n  https://gitlab.com/CentOS/automotive/rpms/containers-transient-store\nThat just adds a tmpfs .mount unit on top of /var/lib/containers/storage"
+        },
+        {
+            "user": "alexlarsson",
+            "body": "Ok, so what about this approach:\n\nWe add a new run option `--transient`, that marks a container as transient.  For any containers that are marked transient, we store the corresponding `overlay-containers`, `containers-layers` in runroot instead of root. In addition we add a separate bolt db in runroot (i.e. /run/containers/storage/libpod/bolt_state.db) where we store transient containers.\n\nFor volumes and images we keep everything in the regular root as before, so these persist.\n\nThen libpod will need to merge the two bolt databases when e.g. listing or looking up running processes.\n\nThis would give us faster start times for transient containers (no syncs when writing the bolt db, or the layers.json/containers.json files), as well as zero chances of transient containers causing weird db issues on any kind of unclean shutdown.\n"
+        },
+        {
+            "user": "alexlarsson",
+            "body": "Maybe this can even use the \"volatile\" key that we already have, although one main difference is that with this the actual upper overlayfs layers would be on the tmpfs. \n\nMaybe we can split that too, and have the layers.json/containers.json in runroot, but the backing overlayfs storage on the regular root though?"
+        },
+        {
+            "user": "vrothberg",
+            "body": "@containers/podman-maintainers WDYT?"
+        },
+        {
+            "user": "Luap99",
+            "body": "> Then libpod will need to merge the two bolt databases when e.g. listing or looking up running processes.\n\nI think this makes performance worse, having to check two databases will take more time. Sounds also like a horror to maintain how can we guarantee a consistent state when have two databases?\n\n---\nGetting back to your original question: Could you just use regular bind mounts -v /path:/path instead of named volumes? In this case there is no volume metadata."
+        },
+        {
+            "user": "vrothberg",
+            "body": "IMO the volumes database belongs on `--volumepath`.  Otherwise, the flag does not seem to be all too useful.  At the very least, we should document the current behavior and state that changing `--volumepath` can lead to issues.\n\n> I think this makes performance worse, having to check two databases will take more time. \n\nThat really depends on the implementation.  It would only slow down if Podman would currently read all data at once but I am pretty sure we're doing subsequent reads.  Caching and locking may play a role but this can be optimized in clever ways.\n\n> Sounds also like a horror to maintain how can we guarantee a consistent state when have two databases?\n\nLocking will make sure that the tools function properly but we are defenseless against forcefully removing data. Is there a real difference to other cases such as secrets, images, containers, layers, etc?  "
+        },
+        {
+            "user": "alexlarsson",
+            "body": "> I think this makes performance worse, having to check two databases will take more time. \n\nIn actual measurements I've not really seen loading from the db as any noticeable cost. Whereas the writes (that this could avoid) are extremely costly. This is particularly true since the added database would be on tmpfs anyway.\n\n> Sounds also like a horror to maintain how can we guarantee a consistent state when have two databases?\n\nThere won't really be any conflicts. One db will contain all the \"volatile\" containers, and the other the rest. We always know at creation time where to save a container.\n\n> Getting back to your original question: Could you just use regular bind mounts -v /path:/path instead of named volumes? In this case there is no volume metadata.\n\nCould I? Yes, that would be a workaround to the problem. However, I'm trying to create a product here, not a workaround. And named volumes is an important part of the container ecosystem. For instance, if you want to use this from `podman play kube`, then that uses PersistentVolumeClaims which impliy named volumes. Not being able to use them is problematic and limits the usefullness of volatile containers.\n\n"
+        },
+        {
+            "user": "Luap99",
+            "body": "\n\n\n\n> IMO the volumes database belongs on `--volumepath`. Otherwise, the flag does not seem to be all too useful. At the very least, we should document the current behavior and state that changing `--volumepath` can lead to issues.\n> \n> > I think this makes performance worse, having to check two databases will take more time.\n> \n> That really depends on the implementation. It would only slow down if Podman would currently read all data at once but I am pretty sure we're doing subsequent reads. Caching and locking may play a role but this can be optimized in clever ways.\n\n\nSorry I was referring to `In addition we add a separate bolt db in runroot (i.e. /run/containers/storage/libpod/bolt_state.db) where we store transient containers.`\n\nI agree that it would make sense to have the volume data stored inside --volumepath.\n\n---\n> > Sounds also like a horror to maintain how can we guarantee a consistent state when have two databases?\n> \n> There won't really be any conflicts. One db will contain all the \"volatile\" containers, and the other the rest. We always know at creation time where to save a container.\n\nSure we know where to store it but it still needs to check that there are not containers with the given name or ID, we cannot have any collisions. If you do things like podman start/stop/inspect/rm/etc... we now always need to lookup in both dbs.\n\n\n\n---\n\n> > I think this makes performance worse, having to check two databases will take more time.\n> \n> In actual measurements I've not really seen loading from the db as any noticeable cost. Whereas the writes (that this could avoid) are extremely costly. This is particularly true since the added database would be on tmpfs anyway.\n\n\nIf writes are the problem than we should move the container state to a tmpfs db. This is really the only part with many writes during all podman operations."
+        },
+        {
+            "user": "alexlarsson",
+            "body": "> If writes are the problem than we should move the container state to a tmpfs db. This is really the only part with many writes during all podman operations.\n\nThat would lose the container state on a reboot though? That will not work for non `podman run --rm` containers.\n"
+        },
+        {
+            "user": "Luap99",
+            "body": "AFAIK most the container state should be temporary anyway, it is already cleared on boot (first podman command) here: https://github.com/containers/podman/blob/9062dede656933646079e4eabeecf3b8fc77ca63/libpod/container_internal.go#L631\n\nLooks like some fields are not reset so they might have to stay but we could investigate this further to see what is really needed if it is a performance issue. This would help every work flow and not just one.\n"
+        },
+        {
+            "user": "alexlarsson",
+            "body": "Some container state is temporary, like obviously the part stored in runroot. But you definately can podman create foo, reboot, and still have a container named foo."
+        },
+        {
+            "user": "Luap99",
+            "body": "That is not in the container state, that is part of the container config, check the [ContainerState ](https://github.com/containers/podman/blob/717a8dfb477d20e6a88157fa0716efa998d46e04/libpod/container.go#L132)struct in libpod."
+        },
+        {
+            "user": "alexlarsson",
+            "body": "Ok, I was not that specific with my reference to \"state\", I just meant state in general.\n\nBut, to be more precise, on my machine during a \"podman run\" these are the boltdb write ops I see:\nBoltState.addContainer - 11.58 msec\nBoltState.SaveContainer - 3.85 msec (saved before fully setup)\nBoltState.SaveContainer - 3.27 msec (fully setup)\nBoltState.SaveContainer - 3.12 msec (started)\nBoltState.SaveContainer - 2.85 mesc (exited)\n\nThat is 25 msec, and a large part of the overhead.\nIn addition, I see:\n\nAtomicWriteFile storage/overlay-layers/layers.json  - 13.76 msec\nAtomicWriteFile storage/overlay-layers/layers.json - 8.89 msec\nAtomicWriteFile storage/overlay-containers/containers.json 5.57 msec\nAtomicWriteFile storage/overlay-layers/layers.json 8.27 msec\n\nWhich is another 36 msec.\n\nThe exact time of this depends on how large the files are, but generally the actual cost is not from the writes, but the fsyncs. These are the operations I hope to avoid in my case, where none of these writes need to be persisted across boot, yet almost half the time to start a container is spent ensuring on-disk robustness. I want `--rm` containers to be transient (as they are not meant to survive a reboot anyway) to avoid this.\n\nIts possible that we could get some of this by moving the state to a tmpfs database, but as long as \"podman run\" writes something that could potentially need to survive a reboot I don't think that can fully avoid this."
+        },
+        {
+            "user": "giuseppe",
+            "body": "> IMO the volumes database belongs on `--volumepath`. Otherwise, the flag does not seem to be all too useful. At the very least, we should document the current behavior and state that changing `--volumepath` can lead to issues.\n> \n> >\n\nI agree, I think this is what we should do and move away the volume data from the main bolt db.  We that in place we have the freedom of moving the volume data to persistent storage and the rest is under the graphroot"
+        },
+        {
+            "user": "mheon",
+            "body": "I missed a lot here, so catching up:\n\n`--volumepath` is *not* a regular-use flag. It's intended to be used similar to flags like `--runroot` and `--tmpdir` - set it once, the first time you start up Podman, and it's cached in the DB forever after. We cannot separate the voume DB from the container DB without consistency issues, either - what happens if a container references a volume that isn't in the volume DB? It's a lot easier to be consistent when everything is in one DB.\n\nWhat is the perceived benefit of splitting the data out? Is this just around not losing volume data when the main db (on tmpfs) gets cleared? I don't really see that as much of a problem. Is there something I'm missing here?"
+        },
+        {
+            "user": "mheon",
+            "body": "I suppose we could also consider a volume driver (not the plugin kind, something like the image driver I implemented recently) that would source a volume from a given path. A recreate on reboot would still be required, but we could easily persist metadata alongside the volume (store a text file alongside the volume directory with relevant metadata). Something like:\n\n`podman volume create --driver external --opt path=/my/persistent/directory persistentVol`\n\nThis would be a hell of a lot easier to code up than a completely separate volume database."
+        },
+        {
+            "user": "alexlarsson",
+            "body": "Ok, so it seems we are relying on using a single bolt db to get transactional behaviour. For example that you can't remove a volume that is being used, or that when deleting a container that it is removed from the volumes it uses. That implies that we can't really split up the bolt database, and the only realistic alternative is to have a completely transient bolt-db (i.e. on tmpfs). For example, we could use a storage.conf option to store the bolt db in runroot instead. And in this case we would have to re-create all volumes as needed (using podman volume create, or implicitly) and rely on this picking up the old volume content. This sounds fine to me.\n\nFor the containers.json and layers.json files though, we don't have the same issues. In fact we already support multiple stores, for example layerstore & ro-layerstore. I can easily see extending this with a volatile-layerstore. We would know from the container config already where a container should be stored allowing us to update the right json file.\n\nSo, what I propose is:\n* Add global option to put bolt-db on runroot. \n* Declare that \"podman create named-volume\" will pick up pre-existing volume data in that path (as it already does, just make it documented)\n* Add a new volatile-container-store on runroot and put data about `--rm' (i.e. c.config.Volatile) in it\n* Add a new volatile-layer-store on runroot and put data about the container layers for volatile containers in it.\n\nOptionally we could store a json file in e.g. /var/lib/containers/storage/volumes/myvolume/ next to the _data directory which can be used to pre-populate the bolt db on boot if its stored on runroot.\n"
+        },
+        {
+            "user": "rhatdan",
+            "body": "Where is the layer store stored for a --rm container in your stategy?  If it is on a tmpfs then I could run out of space rather quickly unless the container is --read-only?"
+        },
+        {
+            "user": "rhatdan",
+            "body": "It might be worth scheduling a meeting to fully discuss this."
+        },
+        {
+            "user": "alexlarsson",
+            "body": "I think the layer store could be persistent, but perhaps not mixed with the persistent ones. So, maybe `/var/lib/containers/storage/overlay-containers/` and `/var/lib/containers/storage/overlay-containers-volatile`, where the later is cleaned on boot."
+        },
+        {
+            "user": "alexlarsson",
+            "body": "Basically you would have something like:\n\nPersistent containers (like now):\n* /var/lib/containers/storage/overlay-containers/containers.json - list of all persistent containers\n* /var/lib/containers/storage/overlay-containers/$ID/ - persistent data \n* /run/containers/storage/overlay-containers/$ID/ - transient data\n\nVolatile containers:\n* /run/containers/storage/overlay-containers-volatile/containers.json - list of all volatile containers\n* /var/lib/containers/storage/overlay-containers-volatile/$ID/ - persistent data \n* /run/containers/storage/overlay-containers-volatile/$ID/ - transient data\n\nWhere we clean out /var/lib/containers/storage/overlay-containers-volatile/ on boot.\n\nActually, the above isn't quite right, as overlay-containers only contains userdata, what I really mean is that the persistant part would be the overlay upper directory, but I still think you understand what I mean.\n"
+        },
+        {
+            "user": "alexlarsson",
+            "body": "> It might be worth scheduling a meeting to fully discuss this.\n\nWe have the auto meeting later today."
+        },
+        {
+            "user": "alexlarsson",
+            "body": "I guess just clearing out the directory at boot is not really compatible with a bolt-db that persists, so the we would also have to remove all volatile containers from the db at boot."
+        },
+        {
+            "user": "alexlarsson",
+            "body": "So, from the discussion in the meeting today, I think the proposal can be simplified a bit:\n\nAdd a new global storage.conf option, that makes all containers transient. In this mode we store the whole bolt db as well as containers.json and the container-related layers in layers.json in runroot (i.e. on tmpfs). We then mention in the volume create docs that it will pick up pre-existing volume directories if they exist at creation time."
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@alexlarsson Are we all set on this now?"
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "alexlarsson",
+            "body": "This should be ok now"
+        }
+    ]
+}

@@ -1,0 +1,127 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 3114,
+    "title": "Ginkgo timed out waiting for all parallel nodes to report back!",
+    "state": "closed",
+    "labels": [
+        "kind/bug",
+        "locked - please file new issue/PR"
+    ],
+    "user": "cevich",
+    "body": "/kind bug\n\n**Description**\n\nVarious Cirrus-CI tasks fail with this text after about 20-minutes of runtime:\n\n```\n[+1346s] \t -------------------------------------------------------------------\n[+1346s] \t|                                                                   |\n[+1346s] \t|  Ginkgo timed out waiting for all parallel nodes to report back!  |\n[+1346s] \t|                                                                   |\n[+1346s] \t -------------------------------------------------------------------\n```\n\nHowever, the ginkgo timeout should be set @ 90-minutes.  Emergence of this behavior seems to coincide with wide-spread flakes we're currently seeing following PR #3072 7b54ebb48fecb4205304586a57a3e6b9b96befa0\n\n**Steps to reproduce the issue:**\n\n1. Unknown, seems to happen randomly\n\n**Describe the results you received:**\n\nSee description\n\n**Describe the results you expected:**\n\nAll CI tasks should pass\n\n**Additional information you deem important (e.g. issue happens only occasionally):**\n\nPoking around on google, this error can happen due to bad signal handling between ginkgo and the test subject.  Many issues were filed against ginkgo and other projects eluding to the difficulty of debugging this situation.  Found some concluding with an already merged ginkgo fix, mentioning the use of `-debug` option.",
+    "comments": [
+        {
+            "user": "mheon",
+            "body": "This has to be ginkgo itself. Possibly a separate timeout for parallel testing we missed?"
+        },
+        {
+            "user": "cevich",
+            "body": "From #3083\n> Another timeout flake. It seems like it's consistently 30 minutes - but we're setting 90. This seems like it might be an infra thing?\n\n@mheon I don't think this is related to infrastructure, though I would not rule that out yet.  All the ginkgo-related issues I trolled with this error message, revolved around a test running in a ginkgo node missing/mishandling a signal from ginkgo (STOP I believe).  There were also TONS of complaints and proposed fixes to ginkgo since people found this incredibly difficult to debug.\n\nThough since #3083 happened _after_ your fix to the 'pod rm' / cgroups flake, that means we can probably rule rule \"correlation != causation\".  In other words, this new timeout thing is something different/unrelated.\n\nI would like to try two things:\n\n1. Remove `-nodes 3` and run tests repeatedly to see if any flake\n2. Add `-debug` (with `-nodes 3`) repeatedly, to see if if timeout-flakes, and then gives us more detail of what's happening."
+        },
+        {
+            "user": "cevich",
+            "body": "> This has to be ginkgo itself. Possibly a separate timeout for parallel testing we missed?\n\nCould be, but from my trolling the error, its seems likely a ginkgo thread (node) that's \"hanging\" because a test is hanging."
+        },
+        {
+            "user": "cevich",
+            "body": "TEST PR: #3115"
+        },
+        {
+            "user": "mheon",
+            "body": "@cevich I think we're hitting some sort of internal Ginkgo PR (inconsistently). What's strange is that it seems like 30 minutes of *overall* time on the VM, then it stops, consistently - not 30 minutes in the Ginkgo integration tests"
+        },
+        {
+            "user": "mheon",
+            "body": "Internal Ginkgo Timeout. I need more coffee."
+        },
+        {
+            "user": "cevich",
+            "body": "A/B testing in 3115 finished with interesting results:\n\n* When `-nodes3` is removed (executes all test in serial) the same test failed every time:  `podman run notify_socket`\n* One of the runs with `-debug` enabled + `-nodes 3` also seems to have flaked on this test.\n* The other two runs with `-debug` enabled passed fine.\n\nSo the instrumented testing results seem useful and mirror the randomness we see in the wild.  Digging into the `-debug` enabled test run of `podman run notify_socket` to see if it looks like the failure output from the serial runs..."
+        },
+        {
+            "user": "cevich",
+            "body": "...common error across all failures seems to be:\n\n```\nRunning: /var/tmp/go/src/github.com/containers/libpod/bin/podman --root /tmp/podman_test334660585/crio --runroot /tmp/podman_test334660585/crio-run --runtime /usr/bin/runc --conmon /usr/libexec/podman/conmon --cni-config-dir /etc/cni/net.d --cgroup-manager cgroupfs --tmpdir /tmp/podman_test334660585 --storage-driver vfs stop -a --timeout 0\n[+2337s] Error: timed out waiting for the condition\n```\n\nIs that correct, it should use `--timeout 0`, or a typo?"
+        },
+        {
+            "user": "mheon",
+            "body": "The `--timeout 0` for `podman stop` indicates that it shouldn't bother with `SIGINT`; just go straight to `SIGKILL` immediately."
+        },
+        {
+            "user": "mheon",
+            "body": "It's timing out waiting for the exit file to be created, I think. Your error is almost certainly coming out of `waitForExitFileAndSync()` in `container_internal.go`."
+        },
+        {
+            "user": "cevich",
+            "body": "It's curious how this test could hang then, SIGKILL is not trapable.  Looking at the tracebacks from ginkgo, I see no difference between the `-debug` (paralel) and the `-nodes 1` (serial) failure cases.  But somehow, when running under `-nodes 3` this test _sometimes_ becomes unresponsive to ginkgo trying to signal it."
+        },
+        {
+            "user": "cevich",
+            "body": "``[cevich@cevich libpod]$ diff -Naur A B``\n\n```diff\n--- A\t2019-05-13 14:03:34.467347559 -0400\n+++ B\t2019-05-13 14:03:32.359384378 -0400\n@@ -1,33 +1,31 @@\n Podman run \n   podman run notify_socket\n   /var/tmp/go/src/github.com/containers/libpod/test/e2e/run_test.go:275\n-\n [BeforeEach] Podman run\n   /var/tmp/go/src/github.com/containers/libpod/test/e2e/run_test.go:27\n Restoring docker.io/library/alpine:latest...\n-Running: /var/tmp/go/src/github.com/containers/libpod/bin/podman --root /tmp/podman_test527522307/crio --runroot /tmp/podman_test527522307/crio-run --runtime /usr/bin/runc --conmon /usr/libexec/podman/conmon --cni-config-dir /etc/cni/net.d --cgroup-manager cgroupfs --tmpdir /tmp/podman_test527522307 --storage-driver vfs load -q -i /tmp/alpine-latest.tar\n+Running: /var/tmp/go/src/github.com/containers/libpod/bin/podman --root /tmp/podman_test674115587/crio --runroot /tmp/podman_test674115587/crio-run --runtime /usr/bin/runc --conmon /usr/libexec/podman/conmon --cni-config-dir /etc/cni/net.d --cgroup-manager cgroupfs --tmpdir /tmp/podman_test674115587 --storage-driver vfs load -q -i /tmp/alpine-latest.tar\n Loaded image(s): docker.io/library/alpine:latest\n Restoring docker.io/library/busybox:latest...\n-Running: /var/tmp/go/src/github.com/containers/libpod/bin/podman --root /tmp/podman_test527522307/crio --runroot /tmp/podman_test527522307/crio-run --runtime /usr/bin/runc --conmon /usr/libexec/podman/conmon --cni-config-dir /etc/cni/net.d --cgroup-manager cgroupfs --tmpdir /tmp/podman_test527522307 --storage-driver vfs load -q -i /tmp/busybox-latest.tar\n+Running: /var/tmp/go/src/github.com/containers/libpod/bin/podman --root /tmp/podman_test674115587/crio --runroot /tmp/podman_test674115587/crio-run --runtime /usr/bin/runc --conmon /usr/libexec/podman/conmon --cni-config-dir /etc/cni/net.d --cgroup-manager cgroupfs --tmpdir /tmp/podman_test674115587 --storage-driver vfs load -q -i /tmp/busybox-latest.tar\n Loaded image(s): docker.io/library/busybox:latest\n [It] podman run notify_socket\n   /var/tmp/go/src/github.com/containers/libpod/test/e2e/run_test.go:275\n-Running: /var/tmp/go/src/github.com/containers/libpod/bin/podman --root /tmp/podman_test527522307/crio --runroot /tmp/podman_test527522307/crio-run --runtime /usr/bin/runc --conmon /usr/libexec/podman/conmon --cni-config-dir /etc/cni/net.d --cgroup-manager cgroupfs --tmpdir /tmp/podman_test527522307 --storage-driver vfs run docker.io/library/alpine:latest printenv NOTIFY_SOCKET\n+Running: /var/tmp/go/src/github.com/containers/libpod/bin/podman --root /tmp/podman_test674115587/crio --runroot /tmp/podman_test674115587/crio-run --runtime /usr/bin/runc --conmon /usr/libexec/podman/conmon --cni-config-dir /etc/cni/net.d --cgroup-manager cgroupfs --tmpdir /tmp/podman_test674115587 --storage-driver vfs run docker.io/library/alpine:latest printenv NOTIFY_SOCKET\n /run/notify/notify.sock\n [AfterEach] Podman run\n   /var/tmp/go/src/github.com/containers/libpod/test/e2e/run_test.go:37\n-Running: /var/tmp/go/src/github.com/containers/libpod/bin/podman --root /tmp/podman_test527522307/crio --runroot /tmp/podman_test527522307/crio-run --runtime /usr/bin/runc --conmon /usr/libexec/podman/conmon --cni-config-dir /etc/cni/net.d --cgroup-manager cgroupfs --tmpdir /tmp/podman_test527522307 --storage-driver vfs stop -a --timeout 0\n+Running: /var/tmp/go/src/github.com/containers/libpod/bin/podman --root /tmp/podman_test674115587/crio --runroot /tmp/podman_test674115587/crio-run --runtime /usr/bin/runc --conmon /usr/libexec/podman/conmon --cni-config-dir /etc/cni/net.d --cgroup-manager cgroupfs --tmpdir /tmp/podman_test674115587 --storage-driver vfs stop -a --timeout 0\n Error: timed out waiting for the condition\n-Running: /var/tmp/go/src/github.com/containers/libpod/bin/podman --root /tmp/podman_test527522307/crio --runroot /tmp/podman_test527522307/crio-run --runtime /usr/bin/runc --conmon /usr/libexec/podman/conmon --cni-config-dir /etc/cni/net.d --cgroup-manager cgroupfs --tmpdir /tmp/podman_test527522307 --storage-driver vfs pod stop -a -t 0\n+Running: /var/tmp/go/src/github.com/containers/libpod/bin/podman --root /tmp/podman_test674115587/crio --runroot /tmp/podman_test674115587/crio-run --runtime /usr/bin/runc --conmon /usr/libexec/podman/conmon --cni-config-dir /etc/cni/net.d --cgroup-manager cgroupfs --tmpdir /tmp/podman_test674115587 --storage-driver vfs pod stop -a -t 0\n output: \n-Running: /var/tmp/go/src/github.com/containers/libpod/bin/podman --root /tmp/podman_test527522307/crio --runroot /tmp/podman_test527522307/crio-run --runtime /usr/bin/runc --conmon /usr/libexec/podman/conmon --cni-config-dir /etc/cni/net.d --cgroup-manager cgroupfs --tmpdir /tmp/podman_test527522307 --storage-driver vfs pod rm -fa\n+Running: /var/tmp/go/src/github.com/containers/libpod/bin/podman --root /tmp/podman_test674115587/crio --runroot /tmp/podman_test674115587/crio-run --runtime /usr/bin/runc --conmon /usr/libexec/podman/conmon --cni-config-dir /etc/cni/net.d --cgroup-manager cgroupfs --tmpdir /tmp/podman_test674115587 --storage-driver vfs pod rm -fa\n output: \n-Running: /var/tmp/go/src/github.com/containers/libpod/bin/podman --root /tmp/podman_test527522307/crio --runroot /tmp/podman_test527522307/crio-run --runtime /usr/bin/runc --conmon /usr/libexec/podman/conmon --cni-config-dir /etc/cni/net.d --cgroup-manager cgroupfs --tmpdir /tmp/podman_test527522307 --storage-driver vfs rm -fa\n-time=\"2019-05-13T13:07:28-04:00\" level=error msg=\"cleanup storage: failed to cleanup container 77a25a509b084ad456b4fff852566ffbd5884c93ebe005316402f0f68c7bbff8 storage: error unmounting container 77a25a509b084ad456b4fff852566ffbd5884c93ebe005316402f0f68c7bbff8 root filesystem: layer is not mounted\" \n-Error: error cleaning up container 77a25a509b084ad456b4fff852566ffbd5884c93ebe005316402f0f68c7bbff8: error unmounting container 77a25a509b084ad456b4fff852566ffbd5884c93ebe005316402f0f68c7bbff8 storage: error unmounting container 77a25a509b084ad456b4fff852566ffbd5884c93ebe005316402f0f68c7bbff8 root filesystem: layer is not mounted\n-\n+Running: /var/tmp/go/src/github.com/containers/libpod/bin/podman --root /tmp/podman_test674115587/crio --runroot /tmp/podman_test674115587/crio-run --runtime /usr/bin/runc --conmon /usr/libexec/podman/conmon --cni-config-dir /etc/cni/net.d --cgroup-manager cgroupfs --tmpdir /tmp/podman_test674115587 --storage-driver vfs rm -fa\n+time=\"2019-05-13T13:21:46-04:00\" level=error msg=\"cleanup storage: failed to cleanup container 0302b76fca15c64ae63f08888176b526e565e51e542048d337bd954253191fd6 storage: error unmounting container 0302b76fca15c64ae63f08888176b526e565e51e542048d337bd954253191fd6 root filesystem: layer is not mounted\" \n+Error: error cleaning up container 0302b76fca15c64ae63f08888176b526e565e51e542048d337bd954253191fd6: error unmounting container 0302b76fca15c64ae63f08888176b526e565e51e542048d337bd954253191fd6 storage: error unmounting container 0302b76fca15c64ae63f08888176b526e565e51e542048d337bd954253191fd6 root filesystem: layer is not mounted\n \n-â€¢ Failure [96.579 seconds]\n+â€¢ Failure [96.313 seconds]\n Podman run\n /var/tmp/go/src/github.com/containers/libpod/test/e2e/run_test.go:20\n   podman run notify_socket [It]\n@@ -40,15 +38,15 @@\n \n   Full Stack Trace\n   \t/var/tmp/go/src/github.com/containers/libpod/vendor/github.com/onsi/gomega/internal/asyncassertion/async_assertion.go:49 +0x81\n-  github.com/containers/libpod/vendor/github.com/onsi/gomega/gexec.(*Session).Wait(0xc000933020, 0xc000c61118, 0x1, 0x1, 0x1)\n+  github.com/containers/libpod/vendor/github.com/onsi/gomega/gexec.(*Session).Wait(0xc001e65290, 0xc00103b118, 0x1, 0x1, 0x1)\n   \t/var/tmp/go/src/github.com/containers/libpod/vendor/github.com/onsi/gomega/gexec/session.go:142 +0xc8\n-  github.com/containers/libpod/test/utils.(*PodmanSession).WaitWithDefaultTimeout(0xc000853590)\n+  github.com/containers/libpod/test/utils.(*PodmanSession).WaitWithDefaultTimeout(0xc002180f28)\n   \t/var/tmp/go/src/github.com/containers/libpod/test/utils/utils.go:317 +0x89\n   github.com/containers/libpod/test/e2e.glob..func70.23()\n   \t/var/tmp/go/src/github.com/containers/libpod/test/e2e/run_test.go:295 +0x406\n-  github.com/containers/libpod/vendor/github.com/onsi/ginkgo/internal/leafnodes.(*runner).runSync(0xc000de31a0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, ...)\n+  github.com/containers/libpod/vendor/github.com/onsi/ginkgo/internal/leafnodes.(*runner).runSync(0xc001057380, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, ...)\n   \t/var/tmp/go/src/github.com/containers/libpod/test/e2e/common_test.go:87 +0xe0\n-  testing.tRunner(0xc000120a00, 0x13739b8)\n+  testing.tRunner(0xc000268500, 0x13739b8)\n   \t/usr/lib/golang/src/testing/testing.go:827 +0xbf\n   created by testing.(*T).Run\n   \t/usr/lib/golang/src/testing/testing.go:878 +0x35c\n```"
+        },
+        {
+            "user": "cevich",
+            "body": "ya...only thing that changes appears to be memory addresses and names/locations we would expect to differ.  All the line numbers and other significant details remain identical between serial and parallel failures."
+        },
+        {
+            "user": "mheon",
+            "body": "I think we are seeing the container die, but we're not finding the exit file containing details about how the container exited (with what code, when). Conmon could be dying prematurely, potentially? Or the file is created in a place we don't know to look?"
+        },
+        {
+            "user": "cevich",
+            "body": "Hmmm, I don't know about most of this stuff, but what sticks out to me is:  The test uses a number of `defer` statements to cleanup a socket and it's file handle.  However, the failure trace happens during 'AfterEach`.  Since this happens randomly, perhaps the file-handle defer and socket close defer are racing eachother, or (if possible) racing AfterEach()?"
+        },
+        {
+            "user": "cevich",
+            "body": "Experimenting with fixing the cleanup order of the socket, fd, and env var..."
+        },
+        {
+            "user": "cevich",
+            "body": "@mheon assuming my experiment will fail, and you're right:  How can I verify ``we're not finding the exit file containing details``?  Would running an `ls -la` during `AfterEach` suffice?  What directory should it list?"
+        },
+        {
+            "user": "mheon",
+            "body": "Exit files are going to be in libpod's temporary directory (`--tmpdir`), in a subdirectory called `exit`, with their name being the full ID of the container in question"
+        },
+        {
+            "user": "cevich",
+            "body": "mmmm, dang.  That sounds like it would be difficult to find from AfterEach :disappointed: \n\nMaybe I could temporarily move the `AfterEach` code into this specific test, where it could have ready access to those details.  Then it would be a simple matter of spamming the test until it fails with proof (or not) of a missing(?) exit file."
+        },
+        {
+            "user": "cevich",
+            "body": "@mheon okay, well my experiment did fail on all 10 attempts, we still get:\n\n```\n[+1774s] â€¢ Failure [96.356 seconds]\n[+1774s] Podman run\n[+1774s] /var/tmp/go/src/github.com/containers/libpod/test/e2e/run_test.go:20\n[+1774s]   podman run notify_socket [It]\n[+1774s]   /var/tmp/go/src/github.com/containers/libpod/test/e2e/run_test.go:275\n[+1774s] \n[+1774s]   Timed out after 90.000s.\n[+1774s]   Expected process to exit.  It did not.\n[+1774s] \n[+1774s]   /var/tmp/go/src/github.com/containers/libpod/test/utils/utils.go:317\n```\n\nWhere `test/utils/utils.go:317` is the first line of code in the function:\n\n```golang\n// WaitWithDefaultTimeout waits for process finished with defaultWaitTimeout\nfunc (s *PodmanSession) WaitWithDefaultTimeout() {\n    s.Wait(defaultWaitTimeout)\n    os.Stdout.Sync()\n    os.Stderr.Sync()\n    fmt.Println(\"output:\", s.OutputToString())\n}\n```"
+        },
+        {
+            "user": "cevich",
+            "body": "Removed my experimental fix, and re-worked testing PR to only run this single test x10 with 10x flake attempts each.  This should make it fail fast, and often.  Then I'll see about this exit-file business..."
+        },
+        {
+            "user": "cevich",
+            "body": "@mheon playing around in 1.2.0, while a container is running I see no matching file in `/var/run/libpod/exits/$CID`.  After the container exits, but before I remove it, I see:\n``/var/run/libpod/exits/ad53df0c...f64b3-old``.\n\nSo in the case of this test, after the normal test code runs, I should NOT find a ``--tmpdir`` file called ``${CID}.old`` (presumably, because the container has not stopped)?"
+        },
+        {
+            "user": "cevich",
+            "body": "(--force pushed: removed 10x flake-attempts, taking too long to fail 90-seconds each)"
+        },
+        {
+            "user": "mheon",
+            "body": "OK, `-old` makes some sense - when we read the file in, we rename it (I forget exactly where) so we won't have conflicts if we restart the container"
+        },
+        {
+            "user": "cevich",
+            "body": "Interesting, so there's actually a double-failure happening here.  The first (test-fail) @baude thinks is a multi-thread collision on the socket name.  The test then goes into AfterEach and that's where we get the hang and timeout.  This seems to be masking the original failure, so I'm not sure what that is.  Trying Brent's socket name fix..."
+        },
+        {
+            "user": "cevich",
+            "body": "@baude with your patch there is no change:  The `printenv NOTIFY_SOCKET` still outputs  ``/run/notify/notify.sock``, but then we hang in `session.WaitWithDefaultTimeout()`.  So `AfterEach` takes over, and fails again.   I double-checked a prior run, to make sure, it's the same behavior :disappointed: \n\n@mheon I'm assuming there's some \"magic\" involved with passing NOTIFY_SOCKET from the host to the container.  Could that be setting up the 'podman run' somehow such that it races when exiting?"
+        },
+        {
+            "user": "cevich",
+            "body": "This should be fixed by #3127"
+        },
+        {
+            "user": "cevich",
+            "body": "Sadly reopening this, seems not all the gremlins have been shaken loose :disappointed: "
+        }
+    ]
+}

@@ -1,0 +1,51 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 12376,
+    "title": "clarification request regarding the necessity and persistence of enable-linger in rootless mode",
+    "state": "closed",
+    "labels": [
+        "stale-issue",
+        "locked - please file new issue/PR"
+    ],
+    "user": "godmar",
+    "body": "The [troubleshooting guide](https://github.com/containers/podman/blob/main/troubleshooting.md) has 2 entries:\n\n[17. rootless containers exit once the user sessions exits](https://github.com/containers/podman/blob/main/troubleshooting.md#symptom-14) and [21. A rootless container running in detached mode is closed at logout](https://github.com/containers/podman/blob/main/troubleshooting.md#21-a-rootless-container-running-in-detached-mode-is-closed-at-logout).\n\n- do these issues address an identical problem?  If so, could they be consolidated into one?\n- would it be possible to add more details, such as:\n   - when does `loginctl enable-linger` require root privileges (or, in general, what capability does it require)\n   - how does a user tell if this applies to them?\n   - where is the information whether a user lingers stored, and how long does it persist?  Is it per session, or is it stored in a configuration file?  If so, is it in the user's home directory or elsewhere? (On my system, which has user's home directories on NFS, it appears that I need to repeat this setting every time I start a detached container - is this expected?). Is there a way to make this setting persistent for an unprivileged user?\n\nI note that at the time of this writing, there are [85 closed issues that mention enable-linger](https://github.com/containers/podman/issues?q=is%3Aissue+enable-linger) so this may be a frequent problem.\n\nThank you.  ",
+    "comments": [
+        {
+            "user": "rhatdan",
+            "body": "Are you interested in opening a PR fo this?\nIt looks like enable-linger requires the user to be in the `wheel` group or to provide the root password, I don't think there is a capability involved, since this is a communication with systemd.\nYou can see what users are enabled to linger by listing /var/lib/systemd/linger directory\n$ ls /var/lib/systemd/linger\ndwalsh\n\nPretty much without setting the linger, systemd will kill all processes created by users when the log out. Whether those processes are created normally or as a container.\nEnable-linger usually comes up more when users are attempting to create user system services to run containers at boot time, in which case they need to enable it.\n\n1. Where is the information whether a user lingers stored?\n            /var/lib/systemd/linger\n2. How long does it persist? \n            Until the file is removed by the user or an administrator.\n3. Is it per session, or is it stored in a configuration file? \n            I believe it is for all user sessions.\n4. If so, is it in the user's home directory or elsewhere? \n            See #1\n5. (On my system, which has user's home directories on NFS, it appears that I need to repeat this setting every time I start a detached container - is this expected?). \n             No\n6. Is there a way to make this setting persistent for an unprivileged user?\n             I would think just creating the file.  I don't believe anything other the a user or admin remove the setting."
+        },
+        {
+            "user": "mheon",
+            "body": "I would concur with Dan that what you're experiencing (needing to frequently reenable lingering) sounds like a bug (almost certainly with Systemd, not Podman, we don't touch that directly)."
+        },
+        {
+            "user": "godmar",
+            "body": "> Are you interested in opening a PR fo this?\n\nThank you for the reply, at this point I feel like I don't know enough about podman to do this. Perhaps for now continuing this discussion here may help other readers.\n\n> It looks like enable-linger requires the user to be in the wheel group or to provide the root password, I don't think there is a capability involved, since this is a communication with systemd.\n\nOn my machine (CentOS 8 Stream with podman-3.4.1-dev), I found out that I can change my own linger setting without requiring any additional privileges such as being in `wheel`, only trying to change another user's linger setting appears to prompt for a root password. That's good.\n\n> You can see what users are enabled to linger by listing /var/lib/systemd/linger directory\n> $ ls /var/lib/systemd/linger\n> dwalsh\n\nIndeed. I also was mistaken that the setting isn't remembered. It is, it's just that it's in a local file system and not shared across machines as it would be if it were remembered in the user's network-mounted home directory.\n\n> \n> Pretty much without setting the linger, systemd will kill all processes created by users when the log out. Whether those processes are created normally or as a container.\n\nIs this really true?  On our machines, `loginctl show-user` shows `KillUserProcesses=no` which according to [logind.conf](https://www.freedesktop.org/software/systemd/man/logind.conf.html) means that 'the scope is \"abandoned\", see systemd.scope(5), and processes are not killed'\n\n> Enable-linger usually comes up more when users are attempting to create user system services to run containers at boot time, in which case they need to enable it.\n\nThis is confusing. Based on my recollection, user system services used to not work on at least earlier versions of CentOS (before stream) - I recall trying to use them some years ago and having to abandon that.\n\nIt appears that the linger setting is necessary for any detached container to survive a logout. Continuing to quote from the manpage:\n\n_In addition to session processes, user process may run under the user manager unit user@.service. Depending on the linger settings, this may allow users to run processes independent of their login sessions. See the description of enable-linger in loginctl(1)._\n\nIt appears that `enable-linger` and `KillUserProcesses` are separate settings.  `KillUserProcesses` may be set to no, so users are ordinarily accustomed to their processes not being killed on logout, yet podman still requires `enable-linger`, presumably because its containers are run under `user@.service`.\n\nThe failure mode here, btw, feels uncomfortable - before I discovered this FAQ after browsing the github issues, podman had become unusable, notably, upon `podman ps` the infamous `unknown FS magic` popped up and I could recover only via `podman rm --force <containerid>` as described in other issues.\n"
+        },
+        {
+            "user": "rhatdan",
+            "body": "I am by no means an expert on this.  I think one of the reasons Podman wants linger is that it uses XDG_RUNTIME_DIR and wants this to be set when running in a systemd user service at boot.\n\nI am not as concerned with when a user logs out, as for the system services."
+        },
+        {
+            "user": "mheon",
+            "body": "In addition to requiring a valid `XDG_RUNTIME_DIR` for rootless users (systemd will tear down `/run/user/$UID` on logout by default), as Dan mentioned, we also require an active DBus socket for the user on CGroupsv2 systems, which requires an active user session."
+        },
+        {
+            "user": "godmar",
+            "body": "As a related aside, on one of the machines where I am testing, the use of podman to run a rootless detached container has somehow led to the killing of the 'User Manager' systemd unit for my account. This means that `XDG_RUNTIME_DIR` is no longer set when I log in. It's a machine where I don't have root so I can't examine the logs; I'm working with the system administrator to try to find out what could have caused the failure of this systemd user unit. But it basically means that users could get into a situation that requires recovery actions to be taken by a sysadmin, just for using podman.\n"
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "godmar",
+            "body": "To follow up on the conversation with my sysadmin. They claimed that some \"cleanup\" script (whose content they weren't willing to disclose) led to the stopping of my user unit and that they were able to restart it. They then proceeded to disable that \"cleanup\" script.\n\nAfter that, I've used podman on the same cluster for a group of over 200 students successfully. Each student built a container and started it in detached mode (all rootless). That is, enabling lingering allowed detached containers to persist even after the users logged off.  The associated user units stayed active.\n\nSo the lesson here is that podman probably works as advertised, but that there may be subtle interactions with assumptions system administrators make, or things they believe they need to do to maintain their machines but which inadvertently interact with podman in some way.  Sorry I wasn't able to find out more."
+        },
+        {
+            "user": "rhatdan",
+            "body": "Thanks @godmar Great information, and I am happy Podman worked correctly."
+        }
+    ]
+}

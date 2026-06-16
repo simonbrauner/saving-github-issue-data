@@ -1,0 +1,81 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 17598,
+    "title": "new pasta flake: timeout",
+    "state": "closed",
+    "labels": [
+        "flakes",
+        "rootless",
+        "pasta",
+        "locked - please file new issue/PR"
+    ],
+    "user": "edsantiago",
+    "body": "Seen twice today, on different PRs:\n```\n$ podman run --net=pasta -p [10.128.0.63]:5561:5561/tcp quay.io/libpod/testimage:20221018 sh -c for port in $(seq 5561 5561); do                              socat -u TCP4-LISTEN:${port},bind=[10.128.0.63] STDOUT &                          done; wait\ntimeout: sending signal TERM to command ‘/var/tmp/go/src/github.com/containers/podman/bin/podman’\ntimeout: sending signal KILL to command ‘/var/tmp/go/src/github.com/containers/podman/bin/podman’\n[ rc=137 (** EXPECTED 0 **) ]\n```\nIn [one case](https://api.cirrus-ci.com/v1/artifact/task/5677484889341952/html/sys-remote-fedora-37-rootless-host.log.html#t--00489), only one subtest failed. In [the other](https://api.cirrus-ci.com/v1/task/6329278573314048/logs/main.log), subsequent tests also failed, and the entire test run timed out.\n\n",
+    "comments": [
+        {
+            "user": "edsantiago",
+            "body": "And [yet another one](https://api.cirrus-ci.com/v1/task/6386543657484288/logs/main.log), the repeated-timeout scenario. "
+        },
+        {
+            "user": "edsantiago",
+            "body": "@sbrivio-rh PTAL"
+        },
+        {
+            "user": "sbrivio-rh",
+            "body": "@edsantiago is there a way to check what version of the `passt` package is installed here?\n\nI released a new version (packages available in testing for Fedora 37, \"stable\" for Fedora 38, currently unstable for Debian and Ubuntu) fixing occasional TCP stalls on transfers with small receive buffers, which might be the case here."
+        },
+        {
+            "user": "edsantiago",
+            "body": "Yes! At the top of each test log is a dump of important versions. Here I see `passt-0^20230216.g4663ccc-1.fc37-x86_64` in the many-timeout failures, and `0^20221116.gace074c-1.fc37-x86_64` in the one-timeout log."
+        },
+        {
+            "user": "edsantiago",
+            "body": "Well, this is unpleasant. The many-failures one, with `passt-0^20230216.g4663ccc-1.fc37-x86_64`, is a hard failure: it's not a flake. Tests fail repeatedly despite multiple reruns."
+        },
+        {
+            "user": "sbrivio-rh",
+            "body": "Would it be better to skip all the TCP forwarding tests (via tap device only) for the moment being, while I'm investigating this?\n\nI can't reproduce this at the moment, and we have very similar tests in passt's CI which are consistently passing, so it might take a bit -- it's nothing obvious (to me)."
+        },
+        {
+            "user": "sbrivio-rh",
+            "body": "Issue finally reproduced, on Fedora 37 only, but reliably -- I guess it depends on some specific timing, and probably socat sending a single byte right away after the SYN, ACK segment.\n\nThe container sends a FIN, ACK segment, but pasta fails to send an ACK segment back and the connection doesn't close. This appears to be caused by https://passt.top/passt/commit/?id=cc6d8286d1043d04eb8518e39cebcb9e086dca17\n\nI'll debug this further and try to release fixed packages later on Wednesday.\n\nLet me know if I should meanwhile send a pull request to skip those tests for the moment being. Thanks for the report, and sorry for the mess."
+        },
+        {
+            "user": "edsantiago",
+            "body": "Oh, wow, you've had a long evening (or long few hours in your time zone).  Thank you for looking into this. \n\nI don't speak for the team, but my my personal preference right now would be for #17305 to merge. That's a complex PR that has taken many weeks of arduous effort, and keeps running into setbacks. If you can precisely identify the subset of tests that should be skipped, and could post a list or diffs or patch on that PR, I think that'd be the best use of everyone's time. That PR merging will then unfreeze other work.\n\nThanks again for looking into this so promptly."
+        },
+        {
+            "user": "sbrivio-rh",
+            "body": "An updated Fedora package fixing this is pending testing phase here:\n\n  https://bodhi.fedoraproject.org/updates/FEDORA-2023-dc03f3fc08\n  \nand a `dnf` command for the specific upgrade should be available at that page in a few minutes. I need to be offline for a couple of hours. If this doesn't work for you, I'll send a patch on that PR skipping the tests.\n\nIf you're curious: https://passt.top/passt/commit/?id=4ddbcb9c0c555838b123c018a9ebc9b7e14a87e5"
+        },
+        {
+            "user": "sbrivio-rh",
+            "body": "For some reason, the updated package, `passt-0^20230222.g4ddbcb9-1.fc37`, it not yet available from the testing repository -- the push to testing is still pending. This usually takes minutes, but today it's taking hours. There might be some workflow rule I'm not aware of.\n\nLet me know if I should just go ahead with a patch temporarily disabling those tests at this point."
+        },
+        {
+            "user": "edsantiago",
+            "body": "@sbrivio-rh bodhi has been very slow the last few times I've checked, in the last two weeks. O(days). \n\nITM #17305 has merged (YAY!) but with all pasta tests disabled. ALL pasta tests, not just a subset. \n\nIf you wish to submit a PR to reenable tests, skipping only the ones that break in `passt-0^20230216.g4663ccc-1.fc37`, feel free to do so. This step is optional.\n\nOnce `0^20230222.g4ddbcb9-1.fc37` makes it into updates, please coordinate with @cevich to build new VMs and reenable the full suite of pasta tests.\n\nThank you!"
+        },
+        {
+            "user": "sbrivio-rh",
+            "body": "> Oh, wow, you've had a long evening (or long few hours in your time zone). Thank you for looking into this.\n\nRight, yes, thanks for noticing -- it was a perfect storm, also with libvirt and KubeVirt integration issues coming up at the same time.\n\n> ITM #17305 has merged (YAY!) but with all pasta tests disabled. ALL pasta tests, not just a subset.\n\nAbsolutely reasonable, thanks @cevich for the patch.\n\n> If you wish to submit a PR to reenable tests, skipping only the ones that break in `passt-0^20230216.g4663ccc-1.fc37`, feel free to do so. This step is optional.\n\nI'd skip this.\n\n> Once `0^20230222.g4ddbcb9-1.fc37` makes it into updates, please coordinate with @cevich to build new VMs and reenable the full suite of pasta tests.\n---\n@cevich, [`passt-0^20230222.g4ddbcb9-1.fc37`](https://bodhi.fedoraproject.org/updates/FEDORA-2023-dc03f3fc08) is in `updates-testing` now and can be installed with:\n```\nsudo dnf upgrade --enablerepo=updates-testing --refresh --advisory=FEDORA-2023-dc03f3fc08\n```\nFor Debian Sid, version `0.0~git20230216.4663ccc-1` is [available](https://packages.debian.org/sid/passt). Debian packages are _not_ built with `-flto`, so the present [issue](https://passt.top/passt/commit/?id=4ddbcb9c0c555838b123c018a9ebc9b7e14a87e5) doesn't apply to them. Would it be possible to add this package to Debian Sid images as well? I already ran tests for pasta with Podman Debian package `4.4.0+ds1-1` on my local setup with no failures. Thanks."
+        },
+        {
+            "user": "cevich",
+            "body": "> @cevich, [passt-0^20230222.g4ddbcb9-1.fc37](https://bodhi.fedoraproject.org/updates/FEDORA-2023-dc03f3fc08) is in updates-testing now.\n\nThe F37 CI VM images are configured to use `updates-testing` by default, so all I need to do is start a new build.  Should be fairly painless...\n\n> Would it be possible to add this package to Debian Sid images as well?\n\nYep, np."
+        },
+        {
+            "user": "cevich",
+            "body": "@sbrivio-rh with the `c20230223t153813z-f37f36d12` images built, just swap that value in for `IMAGE_SUFFIX` in `.cirrus.yml` (in this PR) and it'll use the new images."
+        },
+        {
+            "user": "sbrivio-rh",
+            "body": "This is now fixed in #17650."
+        },
+        {
+            "user": "edsantiago",
+            "body": "Seen again yesterday, [f37 remote](https://api.cirrus-ci.com/v1/artifact/task/6080114434244608/html/sys-remote-fedora-37-rootless-host-boltdb.log.html#t--00501) on a PR in `main` with, presumably, the same (fixed) VM images with a fixed version of pasta.\n\nI'm reluctant to reopen based solely on one instance in one month... but will leave this here for now."
+        }
+    ]
+}

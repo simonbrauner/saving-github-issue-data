@@ -1,0 +1,46 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 16515,
+    "title": "Various issues in systemd.NotifyProxy",
+    "state": "closed",
+    "labels": [
+        "locked - please file new issue/PR"
+    ],
+    "user": "alexlarsson",
+    "body": "I've been reviewing this code, hoping to find the cause of #16076. I'm not 100% sure I've found the underlying reason, but I have found several issues.\n\nFirst of all, there seems to be a general misconception of how datagram sockets work. Any single write is never split, and is delivered as a separate read, never combined with any other write. This means that the loop in waitForReady() is wrong when combining reads. The receiving end should read one single read at a time (which will be the equivalent of one packet that was sent) and then immediately handle it, then handling further reads separately.\n\nIf the sending side side sends a larger message than the buffer you passed, then you will get a truncated read, and the remaining data is thrown away. If the receive buffer in the kernel is full for the socket, further incoming packets will be dropped.\n\nHere is how systemd handles incoming messages, which we should emulate:\n\n* setsockopt is used on the socket, to set SO_RCVBUF to 8\\*1024\\*1024, which means less risk of packets being dropped. \n* The recvmsg() has a buffer size of PIPE_BUF == 4096 bytes\n* Truncated reads (MSG_TRUNC) are detected and handled as an error\n* Each non-truncated read is treated on its own as one full packet\n* reads are done with recvmsg() which allows passing of file descriptors from the client\n\nSecondly, sd-notify handles something called barriers. What happens then is that the client sends a packet containing only \"BARRIER=1\", which includes a file descriptor. The client side sends this, then waits for the file descriptor to be closed. So, when the server gets a message like this it needs to extract and close all the passed file descriptors.\n\nThe test case is using `systemd-notify --ready`, and that has this code:\n```\n        r = sd_pid_notify(source_pid, false, n);  // main notify\n...\n        if (!arg_no_block) {\n                r = sd_notify_barrier(0, 5 * USEC_PER_SEC);\n```\nIn other words, unless you passed `--no-block`, the client will first send the notify message, then a separate barrier message and then wait until the barrier is handled.\n\nSo, issues here: \n * we must handle barrier messages correctly\n * we must continue to handle messages after the notify message\n\nI think the best way to handle the barrier messages are to just close the fd:s in the message and ignore the message. Alternatively we could send them on to systemd and have it close them, but that seems unnecessary. I think the point of the barrier is to ensure that the remote side has seen the previous messages and we're sure they are not lost in the send buffer of the client or something. Maybe we need to have the notify proxy similarly use a barrier when reporting the notify to systemd though.\n\nFor the continued handling of messages, I'm not sure what the best approach is. There is not real way to tell that the peer side of a datagram socket has exited or closed the fd. The way systemd handles this is that it has only a single notify receive socket in the entire pid 1, and then it looks at the kernel reported peer pid on received messages to see what pid sent the message. Then it keeps the socket open forever.\n\nThirdly, It feels like there is a race condition between errorChan and readyChan when we deal with a timeout. If the timeout races with the readyChan, then both could be sent. I don't think this actually is an issue right now, because WaitAndClose() will just randomly pick one of them and ignore the other. However, long-term if we handle multiple messages, etc it may be an issue.\n\nOther minor issues:\n * Systemd accepts (but warns) about the message text having a single trailing nul\n \nFor details of how systemd works, see manager_dispatch_notify_fd()\nhttps://github.com/systemd/systemd/blob/main/src/core/manager.c#L2444\nthis is called from the mainloop everytime poll/select returns the notify socket fd as readable.\n\n\n\n\n",
+    "comments": [
+        {
+            "user": "alexlarsson",
+            "body": "So, the problem in the tests seems to be that the sd-notify write blocks. This is a sequence like this:\nclient:\n * sd-notify writes READY=1 packet (on a new dgram socket)\n * sd-notify creads socketpair\n * sd-notify writes BARRIER=1 packet, with fd = socketpair[1]  (on a new dgram socket)\n * sd-notify closes socketpair[1] (but the outstanding packet keeps it open)\n * sd-notifies blocks on poll(socketpair[0]) which will return POLLHUP when socketpair[1] is closed\n \nproxy waitForReady gofunc:\n * proxy reads READY=1 packet\n * read size is not bufferSize (or is it???) so we handle the message dirrectly\n * split lies has READY=1 so we signal readyChan\n * waitForReady() exits, killing gofunc\n \nproxy WaitAndClose():\n * we block for readyChan\n * we return nil as no error has happened\n * in defer, the datagram socket is closed and removed\n\nIt seems like sd-notify was successful in sending the barrier packet, but then never gets the POLLHUP. I don't immediately see why this should happen. If the message was not sendmsg()ed at all, then it should have failed immediately, but if it got sent, then the message should be on the receiver side queue, and if that socket is closed the queue should have been drained and the fd closed. The other option is if the server somehow read the second packet too (see read size == bufferSize and the ??? above), and we got the message out of the queue. However, surely a read() instead of a recvmsg() on a socket that doesn't extract the fd:s would close them too, no?\n\n"
+        },
+        {
+            "user": "vrothberg",
+            "body": "Thanks for your help and the great explanation, @alexlarsson. Tackling it requires more concentration than I can get in the train, but we should surely get it done by Podman v4.4 :+1: "
+        },
+        {
+            "user": "vrothberg",
+            "body": "> Thirdly, It feels like there is a race condition between errorChan and readyChan when we deal with a timeout. If the timeout races with the readyChan, then both could be sent. \n\nIf there's a race we select the ready chan first, so I think we're good.\n\n> we must handle barrier messages correctly\n\nI have a PR in the pipeline to fix that.\n\n>  we must continue to handle messages after the notify message\n\nSo that means that kube-play needs to run until all services are down (and the \"service container\" exits).  Only then the notify proxies are safe to be closed. Right?\n"
+        },
+        {
+            "user": "alexlarsson",
+            "body": "> > we must continue to handle messages after the notify message\n> \n> So that means that kube-play needs to run until all services are down (and the \"service container\" exits). Only then the notify proxies are safe to be closed. Right?\n\nIn theory yes, but I think in practice you can probably shut it down after you have gotten a notify and a barrier from each expected container, or some timeout after notify.\n"
+        },
+        {
+            "user": "vrothberg",
+            "body": "@alexlarsson do you think it's fair to assume that the barrier comes right after ready in the same message?  If so, https://github.com/containers/podman/pull/16709 does the trick but I am not 100 percent sure."
+        },
+        {
+            "user": "alexlarsson",
+            "body": "@vrothberg I don't think it comes in the same message. Its two separate messages, but probably sent directly after the notify."
+        },
+        {
+            "user": "vrothberg",
+            "body": "I am not sure whether it's best to just require a non-blocking ready.  That may help in avoiding other expectations toward the protocol that Podman doesn't implement."
+        },
+        {
+            "user": "vrothberg",
+            "body": "Interestingly the systemd-notify in our CI (Fedora:31) is not sending barrier messages at all.  Will continue digging on Monday."
+        }
+    ]
+}

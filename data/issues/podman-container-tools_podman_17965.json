@@ -1,0 +1,38 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 17965,
+    "title": "[RFC] libpod: remove PostConfigureNetNS option",
+    "state": "open",
+    "labels": [
+        "network"
+    ],
+    "user": "Luap99",
+    "body": "We currently have two different code paths for configuring the network namespace.\nNormally we create the netns and configure it and then pass the path down to the oci runtime. However this does not work when a custom userns is used for the container as the netns must be owned by the container userns. In this case we let the oci runtime create the container with an empty netns and then afterwards do our setup.\n\nThis difference is configured via the field `PostConfigureNetNS` in the container config.\n\nOver the year I fixed many bug in the PostConfigureNetNS code path because it is not as tested as the normal one, the latest one is https://github.com/containers/podman/pull/17963.\nWe need special handling for hosts and resolv.conf file generation and the network setup (CNI, netavark, slip4netns, pasta) and this very annoying to maintain because of this complexity.\n\nI wonder why we need the `PostConfigureNetNS` option at all, couldn't we always use the PostConfigureNetNS code path and let the oci runtime create the netns for us? This should work even when there is no extra userns for the container. We would only need to maintain the single code path and not worry about the corner cases.\n\n@mheon @giuseppe PTAL, is there anything I am overlooking?\n",
+    "comments": [
+        {
+            "user": "mheon",
+            "body": "Could be a performance hit for startup time - the usual, non user namespace\npath allows parallel network configuration and storage mounting, while user\nnamespaces force those two to run separately. I have no idea how big of an\nimpact this is though.\n\nOn Tue, Mar 28, 2023 at 11:56 Paul Holzinger ***@***.***>\nwrote:\n\n> We currently have two different code paths for configuring the network\n> namespace.\n> Normally we create the netns and configure it and then pass the path down\n> to the oci runtime. However this does not work when a custom userns is used\n> for the container as the netns must be owned by the container userns. In\n> this case we let the oci runtime create the container with an empty netns\n> and then afterwards do our setup.\n>\n> This difference is configured via the field PostConfigureNetNS in the\n> container config.\n>\n> Over the year I fixed many bug in the PostConfigureNetNS code path because\n> it is not as tested as the normal one, the latest one is #17963\n> <https://github.com/containers/podman/pull/17963>.\n> We need special handling for hosts and resolv.conf file generation and the\n> network setup (CNI, netavark, slip4netns, pasta) and this very annoying to\n> maintain because of this complexity.\n>\n> I wonder why we need the PostConfigureNetNS option at all, couldn't we\n> always use the PostConfigureNetNS code path and let the oci runtime create\n> the netns for us? This should work even when there is no extra userns for\n> the container. We would only need to maintain the single code path and not\n> worry about the corner cases.\n>\n> @mheon <https://github.com/mheon> @giuseppe <https://github.com/giuseppe>\n> PTAL, is there anything I am overlooking?\n>\n> —\n> Reply to this email directly, view it on GitHub\n> <https://github.com/containers/podman/issues/17965>, or unsubscribe\n> <https://github.com/notifications/unsubscribe-auth/AB3AOCHL6E7GWI5PB3LTF2DW6MC4FANCNFSM6AAAAAAWKYVPRM>\n> .\n> You are receiving this because you were mentioned.Message ID:\n> ***@***.***>\n>\n"
+        },
+        {
+            "user": "Luap99",
+            "body": "It is easy enough to measure by using this patch:\n```diff\ndiff --git a/pkg/specgen/generate/namespaces.go b/pkg/specgen/generate/namespaces.go\nindex ff5154cec..7b7dbfc23 100644\n--- a/pkg/specgen/generate/namespaces.go\n+++ b/pkg/specgen/generate/namespaces.go\n@@ -268,7 +268,7 @@ func namespaceOptions(s *specgen.SpecGenerator, rt *libpod.Runtime, pod *libpod.\n                toReturn = append(toReturn, libpod.WithCgroupsMode(s.CgroupsMode))\n        }\n \n-       postConfigureNetNS := !s.UserNS.IsHost()\n+       postConfigureNetNS := true\n        // when we are rootless we default to slirp4netns\n        if rootless.IsRootless() && (s.NetNS.IsPrivate() || s.NetNS.IsDefault()) {\n                s.NetNS.NSMode = specgen.Slirp\n```\n\nUsing the benchmark from hack/perf I see this result:\n```\nBenchmark 1: ../../bin/podman run --name=123 docker.io/library/alpine:latest true\n  Time (mean ± σ):     324.6 ms ±  24.0 ms    [User: 58.3 ms, System: 58.4 ms]\n  Range (min … max):   289.7 ms … 403.8 ms    100 runs\n \nBenchmark 2: ../../bin/podman-post-netns run --name=123 docker.io/library/alpine:latest true\n  Time (mean ± σ):     328.4 ms ±  21.0 ms    [User: 58.3 ms, System: 59.3 ms]\n  Range (min … max):   297.3 ms … 411.8 ms    100 runs\n \nSummary\n  '../../bin/podman run --name=123 docker.io/library/alpine:latest true' ran\n    1.01 ± 0.10 times faster than '../../bin/podman-post-netns run --name=123 docker.io/library/alpine:latest true'\n```\n\nSo on my laptop It seems to be 1ms slower so I would call it insignificant. Also this is a very trivial patch, when we implement this properly we could remove some of the redundant code calls the the PostConfigureNetNS code path."
+        },
+        {
+            "user": "giuseppe",
+            "body": "sorry for missing the notification here.\n\nI think that is a good idea, I cannot think of any case where we need the `!PostConfigureNetNS` case now.\n\nThis was also suggested by @mheon when the bool was originally added (as part of adding support for userns): https://github.com/containers/podman/pull/690/commits/6e0491bee276c1eeec3494e17cbcaf1897545eb3#r185135552\n\nI'd not expect anything to break at this point, the user namespace code path is quite well tested, my suggestion is to go forward with it  "
+        },
+        {
+            "user": "Luap99",
+            "body": "Thanks @giuseppe, I will put it on my TODO list."
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "rhatdan",
+            "body": "Any movement on this?"
+        }
+    ]
+}

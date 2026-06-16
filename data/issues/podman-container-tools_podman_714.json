@@ -1,0 +1,122 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 714,
+    "title": "arg parsing: single-dash options expanded incorrectly",
+    "state": "closed",
+    "labels": [
+        "locked - please file new issue/PR"
+    ],
+    "user": "edsantiago",
+    "body": "Sorry for the unhelpful title; I can't think of a better description. This one has been haunting me today:\n```\n# podman run centos find / -name sdf\nfind: unknown predicate `-n'\n# podman run centos echo find / -name sdf\nfind / -n -a -m -e sdf\n```\nSomewhere in podman-land, `-name` is being rewritten and passed along as `-n -a -m -e`. \n\npodman-0.4.4-2.git9924956.fc27 and 0.5.1-1525212894.git970eaf0.fc27",
+    "comments": [
+        {
+            "user": "mheon",
+            "body": "@baude This sounds like shortopts handling in urfave/cli"
+        },
+        {
+            "user": "rhatdan",
+            "body": "Does it work if you do \n\n podman run centos -- find / -name sdf"
+        },
+        {
+            "user": "rhatdan",
+            "body": "Although the error looks like it is coming from the find command. "
+        },
+        {
+            "user": "edsantiago",
+            "body": "```\n#  podman run centos -- find / -name sdf\ncontainer create failed: container_linux.go:348: starting container process caused \"exec: \\\"--\\\": executable file not found in $PATH\"\n: internal libpod error\n```\nalso tried:\n```\n# podman run -- centos echo find / -name sdf\nfind / -n -a -m -e sdf\n```\n(Translation: AFAICT `--` is not telling podman to stop fiddling with args).\n\n> Although the error looks like it is coming from the find command\n\nYes, because `find / -n` is not valid. `find` is one of those very weird old-style pre-posix commands that uses a single dash with long-name options."
+        },
+        {
+            "user": "mheon",
+            "body": "I know we had issues with shortopts handling early on (`podman run -ti ...` wouldn't work, you needed to explicitly specify `podman run -t -i ...`) that we fixed in `urfave/cli`. I suspect that fix has come back and bit us."
+        },
+        {
+            "user": "TomSweeneyRedHat",
+            "body": "@mheon yep, this smells very much like urfave cli.  I tried a number of twists without luck.  I'd thought off the bat that the '--' would work like Ed mentions, but it's not appearing to."
+        },
+        {
+            "user": "rhatdan",
+            "body": "podman run -- centos sh -c \"find / -name sdf\"\nWorks/"
+        },
+        {
+            "user": "rhatdan",
+            "body": "But this is definately caused by our patch to urvave after seeing the echo example.  @baude You were involved in this patch, do you want to take a look.  I think we need to stop processing after the argv0"
+        },
+        {
+            "user": "edsantiago",
+            "body": "Ping, I'm still seeing this, podman-0.6.3-1.gitcd39b62.fc28"
+        },
+        {
+            "user": "rhatdan",
+            "body": "Yup noone has worked with upstream on this issue."
+        },
+        {
+            "user": "vrothberg",
+            "body": "I'll have a look. This bug is pretty annoying."
+        },
+        {
+            "user": "vrothberg",
+            "body": "The following patch fixes the upper issue. What it does is to query if each \"short flag\" is actually in the flag set. If one or more is not in the set, the string will be left untouched and passed back to further parsing, so that something like `podman run -itrxwerewr` will yield a `flag provided but not defined: -itrxwerewr`.\n\nDo you have feedback before proposing the fix upstream?\n\n```patch\ndiff --git a/vendor/github.com/urfave/cli/command.go b/vendor/github.com/urfave/cli/command.go\nindex 66a58b5a8954..a21a7621153f 100644\n--- a/vendor/github.com/urfave/cli/command.go\n+++ b/vendor/github.com/urfave/cli/command.go\n@@ -182,7 +182,7 @@ func (c *Command) parseFlags(args Args) (*flag.FlagSet, error) {\n \t}\n \n \tif c.UseShortOptionHandling {\n-\t\targs = translateShortOptions(args)\n+\t\targs = translateShortOptions(set, args)\n \t}\n \n \tif !c.SkipArgReorder {\n@@ -231,11 +231,25 @@ func reorderArgs(args []string) []string {\n \treturn append(flags, nonflags...)\n }\n \n-func translateShortOptions(flagArgs Args) []string {\n+func translateShortOptions(set *flag.FlagSet, flagArgs Args) []string {\n+\tallCharsFlags := func (s string) bool {\n+\t\tfor i := range s {\n+\t\t\tf := set.Lookup(string(s[i]))\n+\t\t\tif f == nil {\n+\t\t\t\treturn false\n+\t\t\t}\n+\t\t}\n+\t\treturn true\n+\t}\n+\n \t// separate combined flags\n \tvar flagArgsSeparated []string\n \tfor _, flagArg := range flagArgs {\n \t\tif strings.HasPrefix(flagArg, \"-\") && strings.HasPrefix(flagArg, \"--\") == false && len(flagArg) > 2 {\n+\t\t\tif !allCharsFlags(flagArg[1:]) {\n+\t\t\t\tflagArgsSeparated = append(flagArgsSeparated, flagArg)\n+\t\t\t\tcontinue\n+\t\t\t}\n \t\t\tfor _, flagChar := range flagArg[1:] {\n \t\t\t\tflagArgsSeparated = append(flagArgsSeparated, \"-\"+string(flagChar))\n \t\t\t}\n@@ -243,6 +257,7 @@ func translateShortOptions(flagArgs Args) []string {\n \t\t\tflagArgsSeparated = append(flagArgsSeparated, flagArg)\n \t\t}\n \t}\n+\n \treturn flagArgsSeparated\n }\n \n```"
+        },
+        {
+            "user": "rhatdan",
+            "body": "@vrothberg That looks great to me.  Nice work."
+        },
+        {
+            "user": "vrothberg",
+            "body": "Damn, that's only a half fix as `podman run alpine ls -it` would still be turned into `podman run alpine ls -i -t`."
+        },
+        {
+            "user": "TomSweeneyRedHat",
+            "body": "Yeah, I've tried dealing with urfave parsing in the past and you can get stuck in spidey webs real quick."
+        },
+        {
+            "user": "edsantiago",
+            "body": "Indeed. I've just surfaced from a couple of hours of ratholing in there. Useful as a golang learning exercise, but I got nowhere -- only far enough to suspect that the problem isn't fixable with this set of tools. "
+        },
+        {
+            "user": "vrothberg",
+            "body": "I have a working solution by catching errors, but it's spaghetti goto. I'll draft a PR tomorrow and see what upstream thinks about it. The only other solution I see would be using another `flag` package."
+        },
+        {
+            "user": "vrothberg",
+            "body": "Here's a PR for urfave/cli (hopefully) fixing the issue: https://github.com/urfave/cli/pull/758\n\nSmoke tests were successful and I think there are no side effects."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@vrothberg Won't this still fail if you do an command like\n\npodman run fedora find / -printf ...\n\nWill urvave still see this as a valid -i and -t?\n\nWould a better fix to be just stop interpreting the options after the `fedora` object when we tell it don't sort the options."
+        },
+        {
+            "user": "vrothberg",
+            "body": "> Would a better fix to be just stop interpreting the options after the fedora object when we tell it don't sort the options.\n\nThat's what's happening actually. `set.Parse(args)` will stop interpreting input as flags/options when hitting `fedora`. Everything after that will be interpreted as arguments."
+        },
+        {
+            "user": "vrothberg",
+            "body": ">podman run fedora find / -printf ...\n>\n> Will urvave still see this as a valid -i and -t?\n\nNo it won't. It will stop at `fedora` and use the remainder as arguments."
+        },
+        {
+            "user": "rhatdan",
+            "body": "Awesome."
+        },
+        {
+            "user": "vrothberg",
+            "body": "@rhatdan To be more specific. The parsing errors the patch is catching are always on the left side of the specified image. For instance, when running `podman run -it fedora:latest ls -it`:\n\n- we'll catch the error that `-it` is not defined and transform that into `-i -t`\n- then we reparse everything again with `podman run -i -t fedora:latest ls -it`\n\nWhat the patch also does is to make sure that all short flags in `-abc` are actually defined in the FlagSet, so we get a `-abc is not defined` instead of a `-c is not defined`."
+        },
+        {
+            "user": "rhatdan",
+            "body": "My fear looking through the PRs, there has not been anything merged since Feb 21st.  I am not sure how alive this project is.\n\nWe might need to carry this patch some how."
+        },
+        {
+            "user": "vrothberg",
+            "body": "> We might need to carry this patch some how.\n\nI begin to share your fear. Given the bug is blocking some common usage patterns, I'd like to push it a bit forward and carry the patch until `urfave/cli` is revived. Any objections against committing the change on `vendor/github.com/urfave/cli`?"
+        },
+        {
+            "user": "rhatdan",
+            "body": "If you modify the vendor.conf to point at your repo from vendor/github.com/urfave/cli then I think we can carry it.\n\nSomething like \ngithub.com/urfave/cli UUID https://github.com/vrothberg/cli"
+        },
+        {
+            "user": "vrothberg",
+            "body": "Done. I opened a PR: https://github.com/projectatomic/libpod/pull/1046"
+        }
+    ]
+}

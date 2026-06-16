@@ -1,0 +1,84 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 14425,
+    "title": "Support publishing ports on specific network interfaces",
+    "state": "open",
+    "labels": [
+        "kind/feature",
+        "network",
+        "pasta"
+    ],
+    "user": "PhrozenByte",
+    "body": "/kind feature\n\n**Description**\n\nRight now we can publish a container’s port, or range of ports, to the host using `podman create … --publish [ip:][hostPort:]containerPort …` (et. al.). Even though we can indeed bind to a single IP address, we can't limit the binding to a single interface (using `SO_BINDTODEVICE`, see [socket(7)](https://linux.die.net/man/7/socket)). I suggest adding an option to support this, e.g. `--publish [ip:][hostPort:]containerPort[@interface]`.\n\n**Reasoning**\n\nBinding to an interface is used to limit the listener's scope to a single network interface, which can get quite important in VLAN setups. As we all know, this is different to listening to a single IP address which can, in fact, be used on multiple network interfaces at the same time.\n\nHowever, personally I have another use case in mind: To better utilize `0.0.0.0` resp. `::`. If I try publishing port 53 of a container running a DNS server, it will fail with a \"bind: address already in use\" error. This is expected behaviour, because Podman's `dnsname` plugin will start an Dnsmasq instance listening on `0.0.0.0:53`, limited to the virtual network interface. Thus we can't bind to `0.0.0.0` on all network interface, simply because the address is indeed partially in use by Podman's Dnsmasq. However, this doesn't have to be: If we could tell Podman to limit binding to a single interface using `SO_BINDTODEVICE`, we could indeed publish the container's port to `0.0.0.0:53`, just limited to another device, e.g. `enp1s0`. The option could be used like `podman create … --publish 53:53@enp1s0 …`.\n\n~~**Side note**~~\n\n~~Isn't the documentation lacking info about limiting the protocol with `--publish ip:hostPort:containerPort/protocol`, e.g. `80:80/tcp`?~~ **edit:** Fixed in #14451 \n",
+    "comments": [
+        {
+            "user": "Luap99",
+            "body": "I agree that this would be useful. Not sure about the syntax why would this be the last option after the container port. What about `[ip[@interface]:][hostPort:]containerPort[/protocol]`\n\nThat said implementing something like this is very complicated. They are at least 6 different ways that have to handle port forwarding.\n1. netavark (iptables)\n2. CNI (iptables)\n3. The libpod port binding when (1 or 2 is used)\n4. slirp4netns port forwarder\n5. rootlessport forwarder\n6. gvproxy (for podman machine also has to work on macos)\n\nThese are just the current ones, they are likely more in the future:\n- netavark (firewalld)\n- netavark (nftables)\n- [pasta](https://passt.top/passt/about/#pasta)\n\nSome of the projects are not maintained by us so it would be more difficult to get support for this or maybe they already have support it?"
+        },
+        {
+            "user": "mheon",
+            "body": "I don't know if this is really possible for root Podman's network stack - there's really no firewall equivalent for that sockopt, so we'd basically be doing what we normally do, except looking up the IPs of the interface and using them instead of user-specified IPs."
+        },
+        {
+            "user": "Luap99",
+            "body": "iptables has the `-i` options to filter a specific network interface AFAIK this should do the trick"
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@mheon @Luap99 any movement on this issue?"
+        },
+        {
+            "user": "mheon",
+            "body": "No, no work has been done as of yet"
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "sbrivio-rh",
+            "body": "By the way, I just submitted a [patch](https://lists.passt.top/hyperkitty/list/passt-dev@passt.top/message/QWB2NVPYQAPRPIAD3SVLI2K44BYYTUD4/) for [passt/pasta](https://passt.top) implementing this using `%` as separator.\n\nRationale: RFC 4007, [section 11](https://datatracker.ietf.org/doc/html/rfc4007#section-11), introduces `%` as delimiter between address and zone identifier in the context of IPv6 scoped address architecture (which has some analogies to what's going on here). This delimiter is commonly used in the representation of interface specifications for IPv6 addresses, see also the examples in [section 11.3](https://datatracker.ietf.org/doc/html/rfc4007#section-11.3), so it looks like the most natural choice for IPv4 addresses as well.\n\nI actually plan to send a pull request for Podman [integration of pasta](https://passt.top/passt/about/#pasta_2) soon (I'm still working on test scripts), based on the existing out-of-tree [patch](https://passt.top/passt/tree/contrib/podman/0001-libpod-Add-pasta-networking-mode.patch), now that some distribution packages are available, but I wouldn't include the possibility to specify this using Podman's own port forwarding configuration infrastructure yet, given that the handling of this feature for other networking modes isn't obvious at all.\n\nIt would still be possible to configure this by passing [opaque options](https://passt.top/passt/tree/contrib/podman/0001-libpod-Add-pasta-networking-mode.patch?id=bd3e6f373f0158960e65dd25daf8a186258fa51b#n83) directly to pasta."
+        },
+        {
+            "user": "eriksjolund",
+            "body": "A side-note: \n\nAn alternative to using the command-line option `--publish` is to use socket activation.\n\nIt's possible to use the systemd directive [__BindToDevice__](https://www.freedesktop.org/software/systemd/man/systemd.socket.html#BindToDevice=) and combine it with socket activation of containers to publish a container port on a specific network interface. I verified that it works both for  __systemd system services__ (running as root) and for __systemd user services__ (running as your regular user on the host). \n\nIf the container image does not support _socket activation_, it's possible to create a work-around by using  an additional container running  `/usr/lib/systemd/systemd-socket-proxyd` \n\nThe container image was built from this Containerfile\n\n```\nFROM docker.io/library/fedora\nRUN dnf -y update && \\\n      dnf -y install systemd && \\\n      dnf clean all\n```\n\nHere is a sketch\n\n```\n$ cd ~/.config/systemd/user/\n$ grep ListenStream systemdsocketproxyd.socket \nListenStream=0.0.0.0:3000\n$ grep BindToDevice systemdsocketproxyd.socket\nBindToDevice=enp0s2\n$ grep systemd-socket-proxyd systemdsocketproxyd.service\n\t--network net1 localhost/systemdsocketproxyd /usr/lib/systemd/systemd-socket-proxyd web:80\n$ grep net1 lighttpd.service \n\t--network net1 \\\n$ grep name lighttpd.service \n\t--name web \\\n$ curl $myip:3000\n<!DOCTYPE html>\n<html lang=\"en\">\n    <head>\n        <meta charset=\"utf-8\"/>\n        <title>Hello world</title>\n    </head>\n</html>\n$ curl -v 127.0.0.1:3000\n*   Trying 127.0.0.1:3000...\n* connect to 127.0.0.1 port 3000 failed: Connection refused\n* Failed to connect to 127.0.0.1 port 3000 after 11 ms:  Couldn't connect to server\n* Closing connection 0\n curl: (7) Failed to connect to 127.0.0.1 port 3000 after 11 ms: Couldn't connect to server\n$\n```\n\n($myip is the host IP of the computer)\n\nI plan to write some more detailed step-by-step instructions.\n\n\n\n\n"
+        },
+        {
+            "user": "sbrivio-rh",
+            "body": "Erik, by the way:\n\n> An alternative to using the command-line option `--publish` is to use socket activation.\n> \n> It's possible to use the systemd directive [**BindToDevice**](https://www.freedesktop.org/software/systemd/man/systemd.socket.html#BindToDevice=) and combine it with socket activation of containers to publish a container port on a specific network interface. I verified that it works both for **systemd system services** (running as root) and for **systemd user services** (running as your regular user on the host).\n\nwhile this looks elegant and it's probably a better fit for some use cases, you can do the same with `pasta`, as it uses `SO_BINDTODEVICE` (with kernel availability detected at runtime, it requires Linux kernel 5.7 commit `c427bfec18f2 net: core: enable SO_BINDTODEVICE for non-root users`) to bind listening sockets, if you specify an interface separated by  `%`.\n\nExample from man page:\n```\n                     -t 192.0.2.1%eth0/22\n                            Forward local port 22, bound to 192.0.2.1 and interface eth0, to port 22\n```\nand this is also checked in [tests](\nhttps://github.com/containers/podman/blob/c2a24abc0d33cdb21681cfec63677ac29e92446c/test/system/505-networking-pasta.bats#L105).\n\nThis is only available via opaque options at the moment (`--net=pasta:-t,192.0.2.1%eth0/22,...`), because other back-ends don't support this, so I'm not sure yet what's the best way forward to make this available in Podman's options directly.\n"
+        },
+        {
+            "user": "Luap99",
+            "body": "> This is only available via opaque options at the moment (--net=pasta:-t,192.0.2.1%eth0/22,...), because other back-ends don't support this, so I'm not sure yet what's the best way forward to make this available in Podman's options directly.\n\nWell we can add support to the `--publish` syntax but we would need to agree on such syntax first.\nIf we follow the `ip%interface` then we would need to parse it like this:\n`[[ip][%interface]:][hostPort:]containerPort` assuming you are allowed to specify only the interface without an ip.\n\nAs for other network backends we can just throw an error in podman that it is not supported."
+        },
+        {
+            "user": "sbrivio-rh",
+            "body": "> Well we can add support to the `--publish` syntax but we would need to agree on such syntax first. If we follow the `ip%interface` then we would need to parse it like this: `[[ip][%interface]:][hostPort:]containerPort`\n\nYes, it makes sense to me, just:\n\n> assuming you are allowed to specify only the interface without an ip.\n\nI didn't think of this use case until now. `pasta` takes `::%eth0/n:m` or `0.0.0.0%eth0/n:m` with `n` and `m` being port numbers _but not both for the same `n`_, and yes, `::` there means IPv6-only. Let me fix that.\n\n> As for other network backends we can just throw an error in podman that it is not supported.\n\nIf you show me how/where or if you have some time to implement this, I can do the rest."
+        },
+        {
+            "user": "Luap99",
+            "body": "First add a `HostInterface` field to https://github.com/containers/common/blob/c8d98ebb660e64bfc5479d0dd105b52f20ea58f8/libnetwork/types/network.go#L249\n\nThen add it to the parsing logic here: https://github.com/containers/podman/blob/78f1ebb80ba473f4f9bb016aec5d190645089cce/pkg/specgenutil/util.go#L81\n\nAnd lastly make sure to throw an error if netmode != pasta and hostIp is not empty, do it somewhere in `pkg/specgen` in the Validate() function for both contianer and pod."
+        },
+        {
+            "user": "sbrivio-rh",
+            "body": "`-[t|u] %INTERFACE/PORTS` [support](https://passt.top/passt/commit/?id=98a9a7d9e59f50f4b42e0dd7f52f45241ac60a57) added in passt version [2023_03_29.b10b983](https://passt.top/passt/log/?qt=range&q=2023_03_21.1ee2f7c..2023_03_29.b10b983)."
+        },
+        {
+            "user": "miwagner1",
+            "body": "What about binding a port/s from one container service to another container’s localhost kinda like a p2p link using Unix sockets? I imagine it should be much faster (pasta might be almost ready for this)."
+        },
+        {
+            "user": "sbrivio-rh",
+            "body": "> What about binding a port/s from one container service to another container’s localhost kinda like a p2p link using Unix sockets? I imagine it should be much faster (pasta might be almost ready for this).\n\nThis is a bit unrelated with the ticket at hand, but let me answer here for simplicity.\n\nI suppose the connections where you're looking for the megabazillion bits per second are TCP. You can indeed transfer data (not frames, not packets, just payload) between a TCP and a stream-oriented UNIX domain socket, for example with `socat`. You can also `splice(2)` it from/to a pipe and from there from/to another socket, and have a relatively low overhead (no copies, just syscall overhead). However, this implies having three sockets (two TCP and one UNIX domain socket), which is one too many.\n\nBut you could also splice data (again, using a pipe) between two TCP sockets. [This](https://passt.top/passt/about/#pasta-pack-a-subtle-tap-abstraction) is what pasta already does _between the container and its parent namespace_: look at that orange appendage at the top left of the diagram. [This](https://passt.top/passt/tree/tcp_splice.c) is the implementation.\n\nIt's not implemented between two arbitrary namespaces, because pasta at the moment takes care of a single network namespace or container, but you can already do this:\n\n* from one terminal:\n```\n$ ./pasta --config-net -t 5222\n# iperf3 -s -p 5222\n```\n\n* from another terminal:\n```\n$ ./pasta --config-net -T 5222\n# iperf3 -c 127.0.0.1 -p 5222 -l 1M -Z\nConnecting to host 127.0.0.1, port 5222\n[  5] local 127.0.0.1 port 52028 connected to 127.0.0.1 port 5222\n[ ID] Interval           Transfer     Bitrate         Retr  Cwnd\n[  5]   0.00-1.00   sec  7.52 GBytes  64.6 Gbits/sec   38   4.18 MBytes       \n[  5]   1.00-2.00   sec  7.41 GBytes  63.7 Gbits/sec   28   4.18 MBytes       \n[  5]   2.00-3.00   sec  7.43 GBytes  63.9 Gbits/sec    0   4.18 MBytes       \n[  5]   3.00-4.00   sec  7.38 GBytes  63.4 Gbits/sec    7   4.18 MBytes       \n[  5]   4.00-5.00   sec  7.33 GBytes  62.9 Gbits/sec   13   4.18 MBytes       \n[  5]   5.00-6.00   sec  7.31 GBytes  62.7 Gbits/sec    0   4.18 MBytes       \n[  5]   6.00-7.00   sec  7.25 GBytes  62.3 Gbits/sec   24   4.18 MBytes       \n[  5]   7.00-8.00   sec  7.26 GBytes  62.4 Gbits/sec   14   4.18 MBytes       \n[  5]   8.00-9.00   sec  7.24 GBytes  62.2 Gbits/sec    0   4.18 MBytes       \n[  5]   9.00-10.00  sec  7.28 GBytes  62.6 Gbits/sec   18   4.18 MBytes       \n- - - - - - - - - - - - - - - - - - - - - - - - -\n[ ID] Interval           Transfer     Bitrate         Retr\n[  5]   0.00-10.00  sec  73.4 GBytes  63.1 Gbits/sec  142             sender\n[  5]   0.00-10.07  sec  73.4 GBytes  62.6 Gbits/sec                  receiver\n\niperf Done.\n```\n\n(you can pass equivalent options for `--net=pasta:...` in Podman).\n\nHere we splice between four TCP sockets (first namespace to pasta, pasta to loopback in init namespace, loopback to pasta in init namespace, pasta to second namespace).\n\nIf you want to splice between two sockets instead, you can probably write a separate tool doing that, but don't expect a big increase in throughput -- mind that the kernel copied exactly zero bytes for iperf3 above. However, sure, we have double syscall overhead compared to two sockets.\n\nAnother alternative would be to let pasta take care of multiple namespaces, and then support a port forwarding specification where you don't just specify ports, addresses, interfaces, but also the target namespace. It requires a bit of rework, because at the moment the pasta implementation only supports the notion of \"the detached namespace\" as opposed to \"wherever we run\".\n\nIf you want to work on this I'll be more than happy to give you pointers and assistance, let me know."
+        }
+    ]
+}

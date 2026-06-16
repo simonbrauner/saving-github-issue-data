@@ -1,0 +1,132 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 12749,
+    "title": "podman exec does not join the container network namespace",
+    "state": "closed",
+    "labels": [
+        "kind/bug",
+        "stale-issue",
+        "locked - please file new issue/PR"
+    ],
+    "user": "TristanCacqueray",
+    "body": "**Is this a BUG REPORT or FEATURE REQUEST? (leave only one on its own line)**\n\n/kind bug\n\n**Description**\n\nRunning podman exec to join a container does not attach the container network and keep the host netns.\nThis happens when the target container is started with `--userns keep-id` and `--network container:other-container`.\n\n**Steps to reproduce the issue:**\n\n1. Start the other-container: `podman run --name other-container --rm -it ubi8`\n\n2. Start the target container: `podman run --userns keep-id --network container:other-container --name target --rm -it ubi8`\n\n3. Join the target container: `podman exec target cat /proc/net/dev`\n\n**Describe the results you received:**\n\nThe list of the host network devices.\n\n**Describe the results you expected:**\n\nThe list of the container namespace devices (e.g. lo and tap0).\n\n**Additional information you deem important (e.g. issue happens only occasionally):**\n\nRemoving the `--userns` or the `--network` argument fix the issue, it only happens when both are used at the same time for the target container.\n\nI was not able to bisect the error (for example using podman 3.1.2 and conmon version 2.0.29 on the same host does not fix the issue), but this used to work as expected last December on fedora-35. Running the steps to reproduce the issue on a fedora-31 also does not reproduce the issue.\n\n**Output of `podman version`:**\n\n```\nVersion:      3.4.4\nAPI Version:  3.4.4\nGo Version:   go1.16.8\nBuilt:        Wed Dec  8 21:45:07 2021\nOS/Arch:      linux/amd64\n```\n\n**Output of `podman info --debug`:**\n\nThis happens on a fresh fedora-35.\n\n**Have you tested with the latest version of Podman and have you checked the Podman Troubleshooting Guide? (https://github.com/containers/podman/blob/master/troubleshooting.md)**\n\nNo\n",
+    "comments": [
+        {
+            "user": "mheon",
+            "body": "This makes sense given the way user namespaces work - the second container needs to create a new user namespace, but a process in a user namespace can only use namespaces that were created within that user namespace, so the existing network namespace, created outside the user namespace, is unusable.\n\nWhat I would expect here is that we error that the options are incompatible given this, instead of proceeding and producing an incorrect container."
+        },
+        {
+            "user": "rhatdan",
+            "body": "It might be difficult to discover because you need to examine whether or not the first depend container was created in the same user namespace.\nThoughts @giuseppe \nShould we force any namespace sharing between containers to not be allowed to modify the user namespace.\nIf we went the other way.\n\n$ podman run --userns keep-id --name other-container --rm -it ubi8\n$ podman run --network container:other-container --name target --rm -it ubi8\n\nDoes the second container automatically join the user namespace of the first?"
+        },
+        {
+            "user": "TristanCacqueray",
+            "body": "If I remember correctly, the `other-container` needed to be started with the desired target namespace previously (e.g. fedora-33), but it seems like this was no longer necessary in fedora-34. Thus step1 and step2 seems to work as expected. It's the step3 that stopped working recently.\n\nI forgot to mention but this is with rootless podman."
+        },
+        {
+            "user": "rhatdan",
+            "body": "It might partially work, but I don't think it works correctly. Just imagine if you did this with the --pid or --irc namespace, if these are in different user namespaces, then all hell could break loose."
+        },
+        {
+            "user": "TristanCacqueray",
+            "body": "The full use-case is as follow:\n\n- 1. Create an `infra` container to keep the namespace alive when the openvpn container exit\n- 2. Start the openvpn container with: `podman run --user 0 --network container:infra --cap-add NET_ADMIN ...`\n- 3. Start firefox with: `podman run --user 1000 --userns keep-id --network container:infra ...`\n- 4. Exec into the firefox container to setup kerberos ticket: `podman exec firefox kinit ...`\n\nWhen doing step 1 or 2, I don't know yet what should be the userns, and even though it partially works, it's better than forcing userns. Could the sharing restriction be activated only for the pid or ipc namespaces?"
+        },
+        {
+            "user": "rhatdan",
+            "body": "I don't believe the Kernel will allow this. IE A User Namespace can not join a network namespace created in a different User Namespace."
+        },
+        {
+            "user": "giuseppe",
+            "body": "we could teach crun to first try joining all the other namespaces before joining the user namespace, then join the user namespace and the remaining namespaces that could not be joined first.\n\nLet me move this issue to crun and I'll take a look"
+        },
+        {
+            "user": "giuseppe",
+            "body": "opened a PR here: https://github.com/containers/crun/pull/835"
+        },
+        {
+            "user": "rhatdan",
+            "body": "What happens if you do this with the pid or ipc namespace?"
+        },
+        {
+            "user": "giuseppe",
+            "body": "> What happens if you do this with the pid or ipc namespace?\n\nit triggers the same behavior"
+        },
+        {
+            "user": "giuseppe",
+            "body": "the problem with joining the userns first, is that we lose access to other namespaces owned by a different user namespace.  If we first attempt to join the other namespaces then we can succeed with it."
+        },
+        {
+            "user": "rhatdan",
+            "body": "The problem I am trying to avoid is having a container share an IPC and PID namespace with a container in  a different user namespace.  It might make more sense to do this protection from the container engine then the runtime.\n\nBut I don;t think it should be allowed, because of the problems it can cause."
+        },
+        {
+            "user": "giuseppe",
+            "body": "> The problem I am trying to avoid is having a container share an IPC and PID namespace with a container in a different user namespace. It might make more sense to do this protection from the container engine then the runtime.\n> \n> But I don;t think it should be allowed, because of the problems it can cause.\n\nWhy would it be an issue?\n\nI think it could be a valid use case when the userns is used only to remap the UID/GID, or restrict what IDs are available.  e.g. in a pod you can launch a sidecar container that runs in its own user namespace but still has access to the pod network namespace."
+        },
+        {
+            "user": "rhatdan",
+            "body": "Confusion on the user where root on one container means something different on the other container. I want to avoid Permission denied errors when one process tries to kill another process if they were sharing the same pid namespace.  Of when trying to communicate over an IPC namespace.\n\nI avoid this with SELinux and I think we should avoid this with User Namespace.  Much more likely for someone to do this accidently then for them to do it intentionally.  And I don't see a real world use case where you would want it for a Pod."
+        },
+        {
+            "user": "giuseppe",
+            "body": "should we move this issue back to Podman?\n\nFrom the crun PoV, I think it should still be doing what it is asked to do"
+        },
+        {
+            "user": "TristanCacqueray",
+            "body": "For what it's worth, replacing crun version 1.4 with 0.20.1 fixes the original issue.\nThank you for the prompt feedback."
+        },
+        {
+            "user": "giuseppe",
+            "body": "> Confusion on the user where root on one container means something different on the other container. I want to avoid Permission denied errors when one process tries to kill another process if they were sharing the same pid namespace. Of when trying to communicate over an IPC namespace.\n\nshould we also disallow creating a user namespace for containers that are part of a pod?"
+        },
+        {
+            "user": "rhatdan",
+            "body": "Yes move this back to Podman.  \nWe can have the conversation there, but yes I think having a creating a user namespace in a container that is part of a Pod is wrong.  "
+        },
+        {
+            "user": "TristanCacqueray",
+            "body": "Alternatively, replacing the podman exec (step3) with `sudo nsenter --all --target $pid_in_target_container cat /proc/net/dev` also fixes the original issue."
+        },
+        {
+            "user": "giuseppe",
+            "body": "moved back to Podman"
+        },
+        {
+            "user": "rhatdan",
+            "body": "@giuseppe want to take a stab at blocking this?"
+        },
+        {
+            "user": "giuseppe",
+            "body": "I am fine if we block `--userns` within a pod, but I am not sure about blocking the command reported in the issue.\n\nThe user's intentions are clear with the command `podman run --userns keep-id --network container:other-container ...` and the kernel allows that, and we artificially block it.\n\n@TristanCacqueray what is your use case for using both `--userns keep-id` and `--network container:other-container`?"
+        },
+        {
+            "user": "TristanCacqueray",
+            "body": "@giuseppe my use case is to run a web browser with access to the host filesystem (using `--userns keep-id` to avoid issue with writing user owned files) and access to a network namespace (created by another vpn container). Here is the full setup documentation: https://github.com/podenv/podenv/blob/main/docs/howtos/vpn.md\n\nIf podman is going to block this combo (as it used to if I remember correctly), then I would have to always create the network namespace with the userns, even if it is not necessary. "
+        },
+        {
+            "user": "rhatdan",
+            "body": "You could have created the pod with --userns=keep-id"
+        },
+        {
+            "user": "Joerg-L",
+            "body": "Im comming from discussion https://github.com/containers/podman/discussions/12970#discussioncomment-2041003\nFrom my perspective, havein the option to use user namespace on containers in a pod is a required and not really confusing scenario.\n\nLet me describe the scenario, we are facing right now:\nWe want to run Atlassian Bitbucket to Podman container.\nWith help on the liked disucssion, we were able to get the Container for Bitbucket itself up and running.\n\nHow ever, when running Bitbucket in a container, the integrated Elasticsearch must be replaced with an external one.\nSo we have setupped a second container with Elastiscsearch.\n\nNormally I woul put both together into a Pod to ensure that both are getting started/stopped and so on.\nIn addition, have both in the same pod would allow to access the elastic bod from the bitbucket pod with http://localhost:9200.\n\nAs they are not running in a pod, we need to do the communication by Host IP.\n\nThe issue for running both in a Pod is: the User/Group ID's are different.\n\nBitbucket: Container runs as root, but application is running as UID 2003\nElasticsearch: Container runs as root, but application is running as UID 1000\n\nMy Host User has Id 1024 and the mounted volumes should be accessable for backup/monitoring etc.\n\nThis scenario can be also be extended for a\n- 3rd container to running the database\n- 4th container for running a reverse proxy\n\nHope that clarify, why having the option in place is important."
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@giuseppe @TristanCacqueray Where are we with this one.  Do we currently block --userns and --pod in the same container?"
+        },
+        {
+            "user": "rhatdan",
+            "body": "container-selinux (main) $ podman pod create --name dan\n8d323c4f791279185cca5bfcbadd7a5d7661b216df7c681635d3b859adfbdb2f\ncontainer-selinux (main) $ podman run --pod dan --userns=keep-id alpine echo hi\nError: --userns and --pod cannot be set together\n\nLooks like we do. so closing."
+        },
+        {
+            "user": "TristanCacqueray",
+            "body": "It seems like the original issue got fixed by crun-1.4.1. Thanks @giuseppe !"
+        }
+    ]
+}

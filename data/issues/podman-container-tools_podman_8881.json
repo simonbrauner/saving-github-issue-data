@@ -1,0 +1,43 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 8881,
+    "title": "Cryptic cgroup v2 error message when starting rootfull containers",
+    "state": "closed",
+    "labels": [
+        "kind/bug",
+        "locked - please file new issue/PR"
+    ],
+    "user": "danopia",
+    "body": "**Is this a BUG REPORT or FEATURE REQUEST? (leave only one on its own line)**\n\n/kind bug\n\n**Description**\n\nI've installed Podman from the Kubic repo on a fresh Debian 10 / buster VM, which is provided by Chromebook's \"Linux Beta\" feature.\n\nWhen I try running a container with `sudo`, I get a seemingly incorrect message\n\n**Steps to reproduce the issue:**\n\n1. Obtain Chromebook, enable Linux, install Podman (maybe there's a better way to repro, sorry...)\n\n2. `sudo podman run --rm busybox echo 'hi world'`\n\n**Describe the results you received:**\n\n`Error: OCI runtime error: cgroup v2 not enabled on this host, can't use systemd (rootless) as cgroups manager`\n\n**Describe the results you expected:**\n\n`hi world`\n\n**Additional information you deem important (e.g. issue happens only occasionally):**\n\nThis error is new to me; I have used previous podmans on this computer before wiping the Linux environment and they worked with `sudo`.\n\nThe error message's rootless mention seems incorrect as the command is being blatantly run with `sudo`.\n\nTo the best of my knowledge, this Linux has both cgroup v1 and v2 compiled in, while only v1 is mounted / in use.\n\n**Output of `podman version`:**\n\n```\nVersion:      2.2.1\nAPI Version:  2.1.0\nGo Version:   go1.14\nBuilt:        Thu Jan  1 01:00:00 1970\nOS/Arch:      linux/amd64\n```\n\n**Output of `podman info --debug`:**\n\n```\nhost:\n  arch: amd64\n  buildahVersion: 1.18.0\n  cgroupManager: systemd\n  cgroupVersion: v1\n  conmon:\n    package: 'conmon: /usr/libexec/podman/conmon'\n    path: /usr/libexec/podman/conmon\n    version: 'conmon version 2.0.22, commit: '\n  cpus: 2\n  distribution:\n    distribution: debian\n    version: \"10\"\n  eventLogger: journald\n  hostname: penguin\n  idMappings:\n    gidmap: null\n    uidmap: null\n  kernel: 5.4.67-09356-gf3ed4c0c4a31\n  linkmode: dynamic\n  memFree: 15239045120\n  memTotal: 15260381184\n  ociRuntime:\n    name: runc\n    package: 'cri-o-runc: /usr/lib/cri-o-runc/sbin/runc'\n    path: /usr/lib/cri-o-runc/sbin/runc\n    version: 'runc version spec: 1.0.2-dev'\n  os: linux\n  remoteSocket:\n    path: /run/podman/podman.sock\n  rootless: false\n  slirp4netns:\n    executable: \"\"\n    package: \"\"\n    version: \"\"\n  swapFree: 0\n  swapTotal: 0\n  uptime: 22h 33m 55s (Approximately 0.92 days)\nregistries:\n  search:\n  - docker.io\n  - quay.io\nstore:\n  configFile: /etc/containers/storage.conf\n  containerStore:\n    number: 0\n    paused: 0\n    running: 0\n    stopped: 0\n  graphDriverName: btrfs\n  graphOptions: {}\n  graphRoot: /var/lib/containers/storage\n  graphStatus:\n    Build Version: 'Btrfs v5.9 '\n    Library Version: \"102\"\n  imageStore:\n    number: 1\n  runRoot: /var/run/containers/storage\n  volumePath: /var/lib/containers/storage/volumes\nversion:\n  APIVersion: 2.1.0\n  Built: 0\n  BuiltTime: Thu Jan  1 01:00:00 1970\n  GitCommit: \"\"\n  GoVersion: go1.14\n  OsArch: linux/amd64\n  Version: 2.2.1\n```\n\n**Package info (e.g. output of `rpm -q podman` or `apt list podman`):**\n\n```\n> apt list podman\nListing... Done\npodman/unknown,now 2.2.1~4 amd64 [installed]\npodman/unknown 2.2.1~4 arm64\npodman/unknown 2.2.1~4 armhf\npodman/unknown 2.2.1~4 ppc64el\npodman/unknown 2.2.1~4 s390x\n```\n\n**Have you tested with the latest version of Podman and have you checked the Podman Troubleshooting Guide?**\n\nYes\n\n**Additional environment details (AWS, VirtualBox, physical, etc.):**\n\nAFAIK, Chromebook \"Linux Beta\" is implemented using LXC containers.",
+    "comments": [
+        {
+            "user": "mheon",
+            "body": "After some grepping, this error looks like it's coming out of `runc`. You might want to open an issue against github.com/opencontainers/runc about this?"
+        },
+        {
+            "user": "danopia",
+            "body": "Ah, I suppose that's what the \"OCI runtime error\" prefix was trying to say.\n\nI believe their code actually answers why the error message is showing up. They assume that rootful stuff shouldn't be done if we're already in a userns, falling back to rootless-as-root I guess. And I am in fact inside a userns because Chromebook Linux beta is implemented with LXC.\n\n```\n\t// euid = 0, in a userns.\n\t// As we are unaware of cgroups path, we can't determine whether we have the full\n\t// access to the cgroups path.\n\t// Either way, we can safely decide to use the rootless cgroups manager.\n```\n\nOk, I'll file with upstream after more testing, and see how they feel about this. It does seem like runc already has an escape hatch of [a 'rootless' bool](https://github.com/opencontainers/runc/blob/5efdc0c5a42d7965141271448dba6af4e1429962/rootless_linux.go#L14) which I assume can't be reached through podman as is?"
+        },
+        {
+            "user": "danopia",
+            "body": "I figured out what was causing my regression, kinda.\n\nThis binary that I don't know where it came from: (dpkg says it doesn't own it)\n```\n> ls -l /usr/lib/cri-o-runc/sbin/runc \n-rwxr-xr-x 1 root root 13441208 Dec  8 21:05 /usr/lib/cri-o-runc/sbin/runc*\n> /usr/lib/cri-o-runc/sbin/runc --version\nrunc version spec: 1.0.2-dev\n```\n\nI removed it so now only the debian runc is left:\n```\n> runc --version\nrunc version 1.0.0~rc6+dfsg1\ncommit: 1.0.0~rc6+dfsg1-3\nspec: 1.0.1\n```\n\nAnd now rootfull things work again.\n\n```\n> sudo podman run --rm busybox echo 'hi world'\nhi world\n```\n\nWild."
+        },
+        {
+            "user": "mheon",
+            "body": "That is a very old `runc` so it makes sense that it would have issues. We used to ship a `runc` at that location, but that was the better part of two years ago."
+        },
+        {
+            "user": "danopia",
+            "body": "It's actually the other way around on this setup — _older_ runc versions (including rc6) _don't_ have any obvious issue. Something snuck in a modern runc since I built this container a week ago and that broke me.\n\nI just ran an automatic git bisect which is decisively showing that this runc commit is what breaks my podman: https://github.com/opencontainers/runc/commit/bf15cc99b1e7b486dfbb394992fcc4b38157d56e so it's starting to look like a pretty straightforward issue for runc to triage.\n\nApparently, due to LXC, I've always been running containers in a rootless-as-root mode. The more you know...\n\nI'm going to go ahead and close this as the issue is proven to be runc."
+        },
+        {
+            "user": "kolyshkin",
+            "body": "@AkihiroSuda PTAL (looks like a regression?)"
+        },
+        {
+            "user": "AkihiroSuda",
+            "body": "Fix: https://github.com/opencontainers/runc/pull/2725\n"
+        }
+    ]
+}

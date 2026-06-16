@@ -1,0 +1,72 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 23831,
+    "title": "Podman over SSH in native mode does not use custom config `~/.ssh/config`",
+    "state": "closed",
+    "labels": [
+        "kind/bug",
+        "stale-issue",
+        "locked - please file new issue/PR"
+    ],
+    "user": "evolutics",
+    "body": "### Issue Description\n\nConnecting to a remote Podman socket over native SSH (e.g., `podman --host ssh://my-host --ssh native ps`) fails, despite the local `~/.ssh/config` file containing an entry for `Host my-host` (i.e., `ssh my-host` succeeds).\n\n### Steps to reproduce the issue\n\nSet up:\n\n1. Run a test VM locally using Vagrant:\n\n   ```bash\n   vagrant init bento/fedora-40\n   vagrant up\n   ```\n\n1. Set up SSH access to the VM:\n\n   ```bash\n   vagrant ssh-config --host my-host >>~/.ssh/config\n   ssh my-host echo 'SSH setup is OK'\n   ```\n\n1. Set up Podman on the VM (with Docker API), running an example container:\n\n   ```bash\n   ssh my-host <<EOF\n   sudo dnf --assumeyes install podman\n   podman info\n\n   systemctl --user enable --now podman\n   sudo loginctl enable-linger\n   sudo ln --force --symbolic /usr/bin/podman /usr/local/bin/docker\n\n   podman run --detach docker.io/hashicorp/http-echo:1.0\n   EOF\n   ```\n\nTest:\n\n- Local Docker can connect to the remote Podman service, showing 1 container:\n\n  ```\n  docker --host ssh://my-host ps\n  ```\n\n- But local Podman cannot connect to remote Podman – see error below:\n\n  ```\n  podman --host ssh://my-host --ssh native ps\n  ```\n\nTear down:\n\n1. Remove Vagrant resources:\n\n   ```\n   vagrant destroy\n   rm --force --recursive .vagrant Vagrantfile\n   ```\n\n1. Undo changes to `~/.ssh/config`.\n\n### Describe the results you received\n\n```console\n$  podman --host ssh://my-host --ssh native ps\nCannot connect to Podman. Please verify your connection to the Linux system using `podman system connection list`, or try `podman machine init` and `podman machine start` to manage a new Linux VM\nError: unable to connect to Podman socket: failed to connect: dial tcp: lookup my-host: device or resource busy: ssh://my-host\n```\n\n### Describe the results you expected\n\n```console\n$  docker --host ssh://my-host ps\nCONTAINER ID   IMAGE                     COMMAND   CREATED              STATUS              PORTS     NAMES\nabcdef123456   hashicorp/http-echo:1.0   \"\"        About a minute ago   Up About a minute             foo_bar\n```\n\n### podman info output\n\n```yaml\n$ podman version\nClient:       Podman Engine\nVersion:      5.2.2\nAPI Version:  5.2.2\nGo Version:   go1.22.5\nBuilt:        Tue Jan  1 01:00:00 1980\nOS/Arch:      linux/amd64\n\n$ uname --all\nLinux foo-desktop 5.15.0-119-generic #129-Ubuntu SMP Fri Aug 2 19:25:20 UTC 2024 x86_64 GNU/Linux\n\n\n$ vagrant ssh -- podman version\nClient:       Podman Engine\nVersion:      5.2.2\nAPI Version:  5.2.2\nGo Version:   go1.22.6\nBuilt:        Wed Aug 21 00:00:00 2024\nOS/Arch:      linux/amd64\n\n$ vagrant ssh -- uname --all\nLinux fedora 6.8.7-300.fc40.x86_64 #1 SMP PREEMPT_DYNAMIC Wed Apr 17 19:21:08 UTC 2024 x86_64 GNU/Linux\n```\n\n\n### Podman in a container\n\nNo\n\n### Privileged Or Rootless\n\nRootless\n\n### Upstream Latest Release\n\nYes\n\n### Additional environment details\n\n–\n\n### Additional information\n\nPossibly related:\n\n- https://github.com/containers/podman/issues/21113\n- https://github.com/containers/podman/pull/16601",
+    "comments": [
+        {
+            "user": "afbjorklund",
+            "body": "This is a known shortcoming, you have to add the basic ssh config to a podman \"system connection\"\n\n```\nHost\n  HostName\n  User\n  Port\n  IdentityFile\n```\n\nA workaround is to set up the ssh tunnel yourself (with the ssh config), and use `unix:` instead of `ssh:`\n\n* https://github.com/containers/podman/issues/21916"
+        },
+        {
+            "user": "evolutics",
+            "body": "Thanks for your fast explanation!\n\n> This is a known shortcoming, you have to add the basic ssh config to a podman \"system connection\"\n\nDoes this mean that I'd have to unpack my (possibly generated) `~/.ssh/config` file to translate the supported subset of options to `podman system connection add`? The [manual](https://docs.podman.io/en/latest/markdown/podman-system-connection-add.1.html) seems to suggest so.\n\nA workaround would be to extend the `$PATH` with a folder containing a custom `ssh` executable that essentially forwards to `/usr/bin/ssh -F /my/ssh/config`. This works with Docker, however not with Podman – I guess I am misunderstanding what `--ssh native` does exactly."
+        },
+        {
+            "user": "afbjorklund",
+            "body": "I think it should be possible for podman to parse the basics, but you would lose out on any other ssh features...\n\n* https://github.com/containers/podman/issues/21113#issuecomment-1873910478\n\nThe same issue exists in Lima, and is worse now when Podman Desktop can parse connections but not forwards...\n\n* https://github.com/containers/podman-desktop/issues/8281#issuecomment-2260233308"
+        },
+        {
+            "user": "afbjorklund",
+            "body": "> I guess I am misunderstanding what `--ssh native` does exactly.\n\nIt seems to be used a little inconsistently around the podman code base.\n\nSome parts are using the \"SSHMode\", but some are still calling `ssh.Dial`.\n\ni.e. not using the containers-common wrapper, but golang.org/x/crypto/ssh\n\n"
+        },
+        {
+            "user": "afbjorklund",
+            "body": "I think it has been this way since Podman v2, that is before the connections...\n\ne.g. https://boot2podman.github.io/2020/07/22/machine-replacement.html\n\n```bash\nexport CONTAINER_HOST=ssh://vagrant@127.0.0.1:2222/run/user/1000/podman/podman.sock\nexport CONTAINER_SSHKEY=$PWD/.vagrant/machines/default/virtualbox/private_key\n```\n\nBut then came Podman Machine v3, and replaced the Fedora and the VirtualBox."
+        },
+        {
+            "user": "Luap99",
+            "body": "ssh=native was never properly finished AFAIK, it doesn't seem to be tested either.\n\nI do agree this should work with native mode as we call the ssh binary which should read you ssh config so yes this seems like a bug to me."
+        },
+        {
+            "user": "afbjorklund",
+            "body": "Most of the current systems seem to not be supporting `ssh:` at all (even though it was introduced in Docker 18.09), but instead rely on some _other_ system creating a tunnel for them (in case the server does not support the old `tcp:` that is).\n\ni.e. like Java or JavaScript, or what have you... (interestingly, even Windows supports unix domain sockets these days)\nLike the library that Podman Desktop is using, that requires it to create a local tmp socket rather than use it directly."
+        },
+        {
+            "user": "afbjorklund",
+            "body": "If wanting to support the Docker syntax, then there also needs to be something added for the default path. With the docker client, the $DOCKER_HOST is coming from the environment on the remote side but with podman it is local...\n\nSo `--host ssh://my-host` is not going to fly with podman, because it doesn't have a path to `podman.sock` - in pretty much the same way that `--host ssh://my-host/run/podman/podman.sock` fails with a docker client because it **does** have a path.\n"
+        },
+        {
+            "user": "afbjorklund",
+            "body": "The patched version looks like this:\n\n`Error: unable to connect to Podman socket: Get \"http://d/v4.9.3/libpod/_ping\": ssh: rejected: connect failed (open failed)`\n\nInstead of the default podman version:\n\n`Error: unable to connect to Podman socket: failed to connect: dial tcp: lookup lima-podman: no such host`\n\nSo the parsing of the ssh config goes OK:\n\n```\nDEBU[0000] Alias: lima-podman                           \nDEBU[0000] User: anders                                 \nDEBU[0000] Hostname: 127.0.0.1                          \nDEBU[0000] Port: 39901                                  \nDEBU[0000] Identity: \"/home/anders/.lima/_config/user\"  \n```\n\ncommit 59c8f28173a8c65d181c08622947135101fc9ef1 (https://github.com/kevinburke/ssh_config)\n\n----\n\nBut the connection still fails, due to path.\n\nAnd it is hard to \"guess\" (need to read env)\n\n* https://github.com/containers/podman/issues/17452\n\nThe remote uid (and thus systemd dir) could be anything.\n\n---\n\nSomething similar to this, connect to the remote server and try to find the socket path.\n\nhttps://docs.docker.com/engine/security/rootless/#expose-docker-api-socket-through-ssh\n\nI think with Podman, you would call `podman info` on the remote side and parse the output?\n\n```\n  remoteSocket:\n    exists: true\n    path: /run/user/1000/podman/podman.sock\n```\n\nLike so:\n\n`podman info --format '{{.Host.RemoteSocket.Path}}'`\n\nAnd use this value, instead of the empty path in url (if none has been provided by the caller)\n\n```\nDEBU[0000] Path: /run/user/1000/podman/podman.sock      \n```\n\ncommit a928ac1438058eaed6aacc17fd03dea41df8c432 (https://pkg.go.dev/golang.org/x/crypto/ssh)\n\n---\n\nFound another bug with the user being _required_, similar to the earlier bug with port being required...\n\nIt tried to authenticate as user \"\", instead of the current user. The workaround was adding a `$USER@`\n\ncommit ce4ccbd349f51c8aaaa22cd3b2f6fb2751b5542d (like 14ef6a91bd9beffd94c1b231c7ab185de3e5ae9e)\n\nWill rebase to HEAD"
+        },
+        {
+            "user": "afbjorklund",
+            "body": "Parsing the basic 4 values and querying for the 5th seems to be working - even with \"golang\":\n\n```console\n$ podman-remote --host ssh://lima-podman version\nCannot connect to Podman. Please verify your connection to the Linux system using `podman system connection list`, or try `podman machine init` and `podman machine start` to manage a new Linux VM\nError: unable to connect to Podman socket: failed to connect: dial tcp: lookup lima-podman: no such host\n$ ./bin/podman-remote --host ssh://lima-podman version\nClient:       Podman Engine\nVersion:      4.9.3\nAPI Version:  4.9.3\nGo Version:   go1.22.3\nGit Commit:   a928ac1438058eaed6aacc17fd03dea41df8c432\nBuilt:        Sun Sep  1 22:29:36 2024\nOS/Arch:      linux/amd64\n\nServer:       Podman Engine\nVersion:      5.2.2\nAPI Version:  5.2.2\nGo Version:   go1.22.6\nBuilt:        Wed Aug 21 02:00:00 2024\nOS/Arch:      linux/amd64\n```\n\nIt doesn't use any of the other features of the ssh_config, so that does need the \"native\" ssh...\n\nThe most important one is the `ControlMaster auto`*\n\n----\n\n\\* https://docs.docker.com/engine/security/protect-access/#ssh-tips\n\nOthers include using AES hardware crypto (where available), etc etc\n\nLima handles this automatically, when setting up the port forwarding:\n\n```yaml\nportForwards:\n- guestSocket: \"/run/user/{{.UID}}/podman/podman.sock\"\n  hostSocket: \"{{.Dir}}/sock/podman.sock\"\n```"
+        },
+        {
+            "user": "evolutics",
+            "body": "Thank you very much for your hard work on this.\n\nFor anyone stumbling across this issue, above mentioned workaround with the SSH tunnel looks like so:\n\nKeep\n\n```bash\nssh -F ssh_config -L \"${PWD}/my.sock:/run/user/1000/podman/podman.sock\" my-host\n```\n\nrunning, where `-F ssh_config` can be omitted if `~/.ssh/config` should apply. Also, `/run/user/1000/podman/podman.sock` is just an example; it may be different on your remote host (see `podman info`).\n\nNow `podman --host \"unix://${PWD}/my.sock\" ps` works."
+        },
+        {
+            "user": "afbjorklund",
+            "body": "> For anyone stumbling across this issue, above mentioned workaround with the SSH tunnel...\n\nIt's not only a workaround, but also an _optimization_ that is used by Podman Desktop (and Lima)\n\n> ...podman.sock is just an example; it may be different on your remote host (see podman info).\n\ni.e. `ssh -F ssh_config my-host podman info`, not the socket location on the local host (client).\n\n---\n\nOne remaining issue is how to separate a local unix socket, versus a \"remote\" tunneled unix socket\n\n* https://github.com/containers/podman-desktop/issues/8353\n\nIt might need some kind of UUID for the host, to see if we are still on the same machine - or not.\n\n* https://github.com/containers/podman-desktop/issues/8281\n\n"
+        },
+        {
+            "user": "afbjorklund",
+            "body": "Another (actual) workaround would be to use `ssh -G`, with the `ssh -F` if needed.\n\nAnd let `ssh` handle the parsing of the `ssh_config`, and just look for the results:\n\n```console\n$ ssh -G lima-podman | grep -E \"^(user|hostname|port|identityfile) \"\nuser anders\nhostname 127.0.0.1\nport 38241\nidentityfile /home/anders/.lima/_config/user\n```\n\nAnd then feed that as input to `podman system connection add`, to look up the path."
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        }
+    ]
+}

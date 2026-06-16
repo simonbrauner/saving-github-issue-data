@@ -1,0 +1,42 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 445,
+    "title": "Bug: locking contention between create and ps -a",
+    "state": "closed",
+    "labels": [
+        "locked - please file new issue/PR"
+    ],
+    "user": "baude",
+    "body": "It looks like there is a locking issue between podman create and ps -a where both operations get hung waiting on a lock.  You can replicate this by...\n\nin one terminal run:\n```\nwhile true; do clear && sudo podman ps -a && sleep .5; done\n```\nAnd in another do:\n```\nfor i in `seq 0 100`; do sudo podman create alpine ls; sudo podman create alpine ls; sudo podman rm -l; done\n```\nAfter a short time, both sessions will lock...stopping one of them, the other will continue",
+    "comments": [
+        {
+            "user": "baude",
+            "body": "@mheon im running a heavily debug'd version of podman and I am observing some interesting results.\nConsider the following from podman create\n```\nNew create is beginning\ncalled from /home/bbaude/git/src/github.com/projectatomic/libpod/_output/src/github.com/projectatomic/libpod/vendor/github.com/containers/storage/store.go#505 -> /var/lib/containers/storage/storage.lock\ncalled from /home/bbaude/git/src/github.com/projectatomic/libpod/_output/src/github.com/projectatomic/libpod/vendor/github.com/containers/storage/store.go#659\ncalled from /home/bbaude/git/src/github.com/projectatomic/libpod/_output/src/github.com/projectatomic/libpod/vendor/github.com/containers/storage/layers.go#380 -> /var/lib/containers/storage/overlay-layers/layers.lock\ncalled from /home/bbaude/git/src/github.com/projectatomic/libpod/_output/src/github.com/projectatomic/libpod/vendor/github.com/containers/storage/store.go#577\ncalled from /home/bbaude/git/src/github.com/projectatomic/libpod/_output/src/github.com/projectatomic/libpod/vendor/github.com/containers/storage/images.go#224 -> /var/lib/containers/storage/overlay-images/images.lock\ncalled from /home/bbaude/git/src/github.com/projectatomic/libpod/_output/src/github.com/projectatomic/libpod/vendor/github.com/containers/storage/store.go#590\ncalled from /home/bbaude/git/src/github.com/projectatomic/libpod/_output/src/github.com/projectatomic/libpod/vendor/github.com/containers/storage/containers.go#190 -> /var/lib/containers/storage/overlay-containers/containers.lock\ncalled from /home/bbaude/git/src/github.com/projectatomic/libpod/_output/src/github.com/projectatomic/libpod/libpod/runtime.go#256 -> /var/run/libpod/alive.lck\n--->\ncalled from /home/bbaude/git/src/github.com/projectatomic/libpod/_output/src/github.com/projectatomic/libpod/libpod/container_internal.go#163 -> /var/run/libpod/lock/fc075d331de79ec0365252342917891f7f5d41f94ece0fd55454a97e7e824014\nfc075d331de79ec0365252342917891f7f5d41f94ece0fd55454a97e7e824014\n```\n\nAll of the lock calls above the --> are coming from the getruntime in the create command.  Now lets look at ps -a.\n```\n± |locks U:6 ?:15 ✗| → sudo podman ps -a\ncalled from /home/bbaude/git/src/github.com/projectatomic/libpod/_output/src/github.com/projectatomic/libpod/vendor/github.com/containers/storage/store.go#505 -> /var/lib/containers/storage/storage.lock\ncalled from /home/bbaude/git/src/github.com/projectatomic/libpod/_output/src/github.com/projectatomic/libpod/vendor/github.com/containers/storage/store.go#659\ncalled from /home/bbaude/git/src/github.com/projectatomic/libpod/_output/src/github.com/projectatomic/libpod/vendor/github.com/containers/storage/layers.go#380 -> /var/lib/containers/storage/overlay-layers/layers.lock\ncalled from /home/bbaude/git/src/github.com/projectatomic/libpod/_output/src/github.com/projectatomic/libpod/vendor/github.com/containers/storage/store.go#577\ncalled from /home/bbaude/git/src/github.com/projectatomic/libpod/_output/src/github.com/projectatomic/libpod/vendor/github.com/containers/storage/images.go#224 -> /var/lib/containers/storage/overlay-images/images.lock\ncalled from /home/bbaude/git/src/github.com/projectatomic/libpod/_output/src/github.com/projectatomic/libpod/vendor/github.com/containers/storage/store.go#590\ncalled from /home/bbaude/git/src/github.com/projectatomic/libpod/_output/src/github.com/projectatomic/libpod/vendor/github.com/containers/storage/containers.go#190 -> /var/lib/containers/storage/overlay-containers/containers.lock\ncalled from /home/bbaude/git/src/github.com/projectatomic/libpod/_output/src/github.com/projectatomic/libpod/libpod/runtime.go#256 -> /var/run/libpod/alive.lck\n--->\ncalled from /home/bbaude/git/src/github.com/projectatomic/libpod/_output/src/github.com/projectatomic/libpod/libpod/boltdb_state_internal.go#241 -> /var/run/libpod/lock/fe7c85a08eca29bb7b2566918af90d30c390491f67cddca750cf43c7418947ea\nCONTAINER ID   IMAGE    COMMAND   CREATED AT                      STATUS    PORTS   NAMES\nfe7c85a08eca   alpine   ls        2018-03-02 19:58:48 -0600 CST   Created           sleepy_wiles\n```\nHere again, all the locks are coming prior to getRuntime.  And when these two go into lock contention, it is over this lock:\n\n```\nNew create is beginning\ncalled from /home/bbaude/git/src/github.com/projectatomic/libpod/_output/src/github.com/projectatomic/libpod/vendor/github.com/containers/storage/store.go#505 -> /var/lib/containers/storage/storage.lock\ncalled from /home/bbaude/git/src/github.com/projectatomic/libpod/_output/src/github.com/projectatomic/libpod/vendor/github.com/containers/storage/store.go#659\ncalled from /home/bbaude/git/src/github.com/projectatomic/libpod/_output/src/github.com/projectatomic/libpod/vendor/github.com/containers/storage/layers.go#380 -> /var/lib/containers/storage/overlay-layers/layers.lock\n```\n\nSo I'm really now thinking this lock contention is a result of getruntime."
+        },
+        {
+            "user": "mheon",
+            "body": "It might be store initialization, then? We don't do much else with c/storage in NewRuntime\n\nIf so that explains why CRI-O hasn't seen this in their perf testing - they only need to run store init once, when the daemon starts up."
+        },
+        {
+            "user": "baude",
+            "body": "is storage initialization done in cs?"
+        },
+        {
+            "user": "mheon",
+            "body": "@baude I'm thinking specifically about https://github.com/projectatomic/libpod/blob/master/libpod/runtime.go#L137\n\nThat's our only significant interaction with c/storage in NewRuntime. It can either retrieve an existing store or make a new one, which leads me to believe it's probably fairly heavyweight?"
+        },
+        {
+            "user": "baude",
+            "body": "Well this can occur with two different terminals creating containers too ..."
+        },
+        {
+            "user": "mheon",
+            "body": "If it actually is runtime creation, we can lock runtime creation. We already lock a (small) part of it, so extending it to the entire runtime would not be hard. It wouldn't really cost us much in the way of performance single-threaded either, since we already make the lock and lock/unlock it, we'd just be locking more.\n\nThe big hit would be starting multiple podman processes concurrently. I don't know if that is a perf hit we really care about. CRI-O uses would not be affected at all, given they only call NewRuntime once.\n\nOf course, this doesn't address the actual race in c/storage. We should try and characterize that and report it upstream."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@nalind PTAL"
+        }
+    ]
+}

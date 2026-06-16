@@ -1,0 +1,228 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 10454,
+    "title": "podman rm, with more than one arg: error removing container, unlinkat, EBUSY",
+    "state": "closed",
+    "labels": [
+        "flakes",
+        "rootless",
+        "locked - please file new issue/PR"
+    ],
+    "user": "edsantiago",
+    "body": "It looks like the cause of our new unlinkat/EBUSY flake is `podman rm` with more than one argument:\n```console\n$ while :;do ./bin/podman run --name foo alpine true;./bin/podman run --name bar alpine true;./bin/podman rm foo bar || break;done\n....\nError: error removing container 6b1063e2084c626ce8c4c11b02ee9caa8848a4f625a256d02febaa54e448a0c4 root filesystem: 1 error occurred:\n        * unlinkat /home/esm/.local/share/containers/storage/overlay/bb7a8f6f9ba33943c30956aca2e90533a6aca86546c48b513fc55407603f83a8/merged: device or resource busy\n```\nIt can take one minute, but more typically it's about five.\n\nmaster @ 78df4f6fb2e2a404ace69219a50652f4335b7ce1. Running rootless on f34.",
+    "comments": [
+        {
+            "user": "edsantiago",
+            "body": "Got it to fail with `--log-level=debug`:\n```\nDEBU[0000] environment variable TMPDIR is already defined, skip the settings from containers.conf\nINFO[0000] Setting parallel job count to 25\nDEBU[0000] Starting parallel job on container 2e7fd598ead121a836c788756db812685e3daa9f2698dfc08c21bfca32ed9d9f\nDEBU[0000] Starting parallel job on container b2097e1c0ef4716bf6dc0d0f0871511a78a2effa1ab6d2aa03754ef985fe8ae3\nDEBU[0000] Removing container b2097e1c0ef4716bf6dc0d0f0871511a78a2effa1ab6d2aa03754ef985fe8ae3\nDEBU[0000] Removing all exec sessions for container b2097e1c0ef4716bf6dc0d0f0871511a78a2effa1ab6d2aa03754ef985fe8ae3\nDEBU[0000] Cleaning up container b2097e1c0ef4716bf6dc0d0f0871511a78a2effa1ab6d2aa03754ef985fe8ae3\nDEBU[0000] Network is already cleaned up, skipping...\nDEBU[0000] Container b2097e1c0ef4716bf6dc0d0f0871511a78a2effa1ab6d2aa03754ef985fe8ae3 storage is already unmounted, skipping...\nDEBU[0000] Container b2097e1c0ef4716bf6dc0d0f0871511a78a2effa1ab6d2aa03754ef985fe8ae3 storage is already unmounted, skipping...\nDEBU[0010] failed to delete container \"b2097e1c0ef4716bf6dc0d0f0871511a78a2effa1ab6d2aa03754ef985fe8ae3\": 1 error occurred:\n        * unlinkat /home/esm/.local/share/containers/storage/overlay/d7c83d85fbae9140223161f715bd606cf051ac591ade4d6f6bb833b43313676f/merged: device or resource busy\n\nDEBU[0010] Failed to remove container b2097e1c0ef4716bf6dc0d0f0871511a78a2effa1ab6d2aa03754ef985fe8ae3: error removing container b2097e1c0ef4716bf6dc0d0f0871511a78a2effa1ab6d2aa03754ef985fe8ae3 root filesystem: 1 error occurred:\n        * unlinkat /home/esm/.local/share/containers/storage/overlay/d7c83d85fbae9140223161f715bd606cf051ac591ade4d6f6bb833b43313676f/merged: device or resource busy\n\nDEBU[0010] Removing container 2e7fd598ead121a836c788756db812685e3daa9f2698dfc08c21bfca32ed9d9f\nDEBU[0010] Removing all exec sessions for container 2e7fd598ead121a836c788756db812685e3daa9f2698dfc08c21bfca32ed9d9f\nDEBU[0010] Cleaning up container 2e7fd598ead121a836c788756db812685e3daa9f2698dfc08c21bfca32ed9d9f\nDEBU[0010] Network is already cleaned up, skipping...\nDEBU[0010] Container 2e7fd598ead121a836c788756db812685e3daa9f2698dfc08c21bfca32ed9d9f storage is already unmounted, skipping...\nDEBU[0010] Container 2e7fd598ead121a836c788756db812685e3daa9f2698dfc08c21bfca32ed9d9f storage is already unmounted, skipping...\n2e7fd598ead121a836c788756db812685e3daa9f2698dfc08c21bfca32ed9d9f\nError: error removing container b2097e1c0ef4716bf6dc0d0f0871511a78a2effa1ab6d2aa03754ef985fe8ae3 root filesystem: 1 error occurred:\n        * unlinkat /home/esm/.local/share/containers/storage/overlay/d7c83d85fbae9140223161f715bd606cf051ac591ade4d6f6bb833b43313676f/merged: device or resource busy\n```"
+        },
+        {
+            "user": "rhatdan",
+            "body": "@mheon I believe this could happen if the c.state.State == define.ContainerStateStopped and you attempt to remove it.  Should we wait in the condition?  If we wait, will the status be able to change?"
+        },
+        {
+            "user": "mheon",
+            "body": "I don't think that's possible - the container is already locked, there's no potential for a race.\n\n`DEBU[0010] Container 2e7fd598ead121a836c788756db812685e3daa9f2698dfc08c21bfca32ed9d9f storage is already unmounted, skipping...`\n\nThat right there is extremely suspicious. The container is marked as unmounted in the DB, yet clearly it's still mounted because it's failing. I'm not sure how this happens - maybe the cleanup process already fired and failed to unmount?"
+        },
+        {
+            "user": "rhatdan",
+            "body": "@edsantiago could you attempt to remove the container afterwards to prove this is a race.\n\nI was thinking the container could be stopped but not cleaned up yet, and we go in and attempt to remove it."
+        },
+        {
+            "user": "edsantiago",
+            "body": "I'm not sure what you mean by \"remove the container afterwards\" -- in all cases, both containers are gone: the `rm` is successful, at least as far as I can tell. `podman ps -a` always shows empty. Is that what you're asking?"
+        },
+        {
+            "user": "mheon",
+            "body": "@rhatdan We clean up as part of removal - you can see it in the logs.\n\nThe container is guaranteed to be gone after `podman rm` runs - if we're leaving anything behind, it's a storage container."
+        },
+        {
+            "user": "rhatdan",
+            "body": "So we don't know if there is any storage container left? If there is a failure on removing from storage, should we remove from the database?"
+        },
+        {
+            "user": "rhatdan",
+            "body": "The only reason that the image would be busy, would be if something is mounted on the image or if a process is running on the image."
+        },
+        {
+            "user": "mheon",
+            "body": "@rhatdan It's *much* better to get rid of the containers, even if there's a storage container left over - we had so many issues in the early days with containers that could not be removed at all without manual intervention. Defaulting to getting rid of the container is much safer."
+        },
+        {
+            "user": "rhatdan",
+            "body": "Ok but any thoughts on what is happening?"
+        },
+        {
+            "user": "mheon",
+            "body": "Initial thought: cleanup process has already fired but failed to clean up, and the container was marked as unmounted despite this failure. As to why: lingering container process using the mountpoint, maybe? We really need to get the initial error message on the unmount attempt. Does this replicate outside of CI?"
+        },
+        {
+            "user": "edsantiago",
+            "body": ">Does this replicate outside of CI?\n\nTrivially. See initial comment for one-line reproducer."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@edsantiago 10452 is always this flake.  I think the problem can happen with a normal race."
+        },
+        {
+            "user": "edsantiago",
+            "body": "New information: there is a ten-second pause when this happens:\n```console\n$ while :;do ./bin/podman run --name foo -d alpine true;./bin/podman run --name bar -d alpine true;./bin/podman run --name fubar -d alpine true;./bin/podman rm foo bar fubar || break;done | ts\n....\nMay 25 09:30:55 2928a791accaadf6d5555a329220bd5522db587e9ad89a4a18e456438f3d48e6\nMay 25 09:30:55 15341f6fea9dfca020df227ebb4a8e9a2a7d1c008c69a207dcbe68491a49bb39\nMay 25 09:30:56 925501b27ffb98593115c1d75e5be70cbff091b7780a9e53e32d1aa5ef779258\nMay 25 09:30:56 2928a791accaadf6d5555a329220bd5522db587e9ad89a4a18e456438f3d48e6\nMay 25 09:30:56 15341f6fea9dfca020df227ebb4a8e9a2a7d1c008c69a207dcbe68491a49bb39\nMay 25 09:30:56 67bcf3f0e0fe0d87d39b449b8c8ceee02edfcf39933f48cd000486d1052bf063\nMay 25 09:30:57 ebb7c59a425b8facedf789c598ad0661e6ccf77d80ea25e940a7c7efcc6cd339\nMay 25 09:30:57 b6ed86f90f3508656641049d005e1a0e6ccdfaebfbf1ff17315e308c053879c5\nError: error removing container ebb7c59a425b8facedf789c598ad0661e6ccf77d80ea25e940a7c7efcc6cd339 root filesystem: 1 error occurred:\n        * unlinkat /home/esm/.local/share/containers/storage/overlay/0fb14d50003fcbd3457f3afe4ea185d4d26af544cb70bee28bf3ad317976026c/merged: device or resource busy\n\n\nMay 25 09:31:08 67bcf3f0e0fe0d87d39b449b8c8ceee02edfcf39933f48cd000486d1052bf063\nMay 25 09:31:08 b6ed86f90f3508656641049d005e1a0e6ccdfaebfbf1ff17315e308c053879c5\n```"
+        },
+        {
+            "user": "edsantiago",
+            "body": "Here's my latest reproducer, slightly updated to make output more readable:\n```console\n$ while :;do echo;./bin/podman run --name foo -d alpine true;./bin/podman run --name bar -d alpine true;./bin/podman run --name fubar -d alpine true;./bin/podman rm foo bar fubar || break;done | ts\n...\nMay 25 09:32:54\nMay 25 09:32:54 32e042fab9276c040c9ef69a1bed91955e6716b9f8cab0930d17b398d1059e23\nMay 25 09:32:55 d588d4d67feabac480202da381fb5610437941fdcf1a1631524661d8bef214d2\nMay 25 09:32:55 d4083e76ed34d419f4604669ced0ebeda6af5446eea751b7497dc10920e1486f\nMay 25 09:32:56 d4083e76ed34d419f4604669ced0ebeda6af5446eea751b7497dc10920e1486f\nMay 25 09:32:56 32e042fab9276c040c9ef69a1bed91955e6716b9f8cab0930d17b398d1059e23\nMay 25 09:32:56 d588d4d67feabac480202da381fb5610437941fdcf1a1631524661d8bef214d2\nMay 25 09:32:56\nMay 25 09:32:56 b79a385ab25dfd5ba8687d39273013ab7c25f9a33a6174bdd38bad4b156f0056\nMay 25 09:32:57 9ab95a14ed09e07ebfa9ede24fb3b7479a2380dd58e3455316f5765f59d8ee19\nMay 25 09:32:57 4982b2c0bc7f6bc4313663d56337c6854638651b4b754fe6fb75a7d30ae75d4f\nError: error removing container 9ab95a14ed09e07ebfa9ede24fb3b7479a2380dd58e3455316f5765f59d8ee19 root filesystem: 1 error occurred:\n        * unlinkat /home/esm/.local/share/containers/storage/overlay/7d7b1833de538603870e84beed40c294dc1f1a101a1e3ae58bf852a84766889e/merged: device or resource busy\n\n\nMay 25 09:33:08 b79a385ab25dfd5ba8687d39273013ab7c25f9a33a6174bdd38bad4b156f0056\nMay 25 09:33:08 4982b2c0bc7f6bc4313663d56337c6854638651b4b754fe6fb75a7d30ae75d4f\n```"
+        },
+        {
+            "user": "edsantiago",
+            "body": "With `podman-3.1.2-3.fc34` on my laptop, changing `./bin/podman rm ...` to `/usr/bin/podman rm ...`, the reproducer still fails.\n\nHowever: if I change **all** `./bin/podman` to `/usr/bin/podman` (i.e. the `podman run`s) ... it runs fine for thirty minutes and is still happily going. The implication, at least in my simple reading, is that (a) the problem is new since 3.1.2 and (b) the problem is in `podman run`, not `podman rm`. Does that make sense to anyone?"
+        },
+        {
+            "user": "rhatdan",
+            "body": "I just tried\n```set -x\npodman rm -a -f\nfor i in {1..100}; do podman run --name test$i alpine true; done\nx=$(for i in {1..100}; do echo -n \"test$i \"; done)\npodman rm $x\n```\nAnd I am not getting any errors.\n\n"
+        },
+        {
+            "user": "edsantiago",
+            "body": "What is the value of \"podman\"? Are you using system podman, or `./bin/podman` from your tree?\n\nFWIW your reproducer triggers the failure on my system:\n```\n$ for i in {1..100}; do ./bin/podman run --name test$i alpine true; done\n$ ./bin/podman rm $(seq --format=\"test%.0f\" 1 100)\n....\n56205dd46c54060b7db86b4a0433bd21d8dc65bf32557be115b9ab9715e56291\nError: error removing container ea2bc91f5a4d45fa6cc555aabc4a303a1bb8058ef1d6e59ff9182db7ef83eda8 root filesystem: 1 error occurred:\n        * unlinkat /home/esm/.local/share/containers/storage/overlay/095937d3ee050e905abc877a3b99daf4681bbceff3d659269e17e98631c5cbf5/merged: device or resource busy\n```\nI can also reproduce it if I use `/usr/bin/podman` for the `rm`. It even fails twice:\n```\nf452547ae8a7aaf3324a92c1e632c94a92ec2271162fc4c64c0436994dca38fc\nerror removing container 154b29386b2dd66791d2a7aebf55854947896f14c05dd716e2ff611e4424237b root filesystem: 1 error occurred:\n        * unlinkat /home/esm/.local/share/containers/storage/overlay/986ef7ba9bec3718ef04f862271832889dbf54e1150bd64060da7a3a4a34f190/merged: device or resource busy\n\n\nError: error removing container dc01084c75c5a2442f55b554060eb535e926a47a56324707c739c4f105284028 root filesystem: 1 error occurred:\n        * unlinkat /home/esm/.local/share/containers/storage/overlay/6831f220168b8ac49b4206b99585c4dbcc10a973303e316210933f9436ef3ed7/merged: device or resource busy\n```\nI cannot reproduce the flake if I use `/usr/bin/podman` (3.1.2) for the `run` commands. IOW, I still believe the flake is a new bug in `podman run`, or at least something different that it is doing."
+        },
+        {
+            "user": "rhatdan",
+            "body": "Well I can not get this to fail, but I am not using fuse-overlayfs.\n@giuseppe Any ideas.\n\nWe are only seeing this on Ubuntu machines in CI system, although @edsantiago and @mheon have gotten it to fail on Fedora. With the reproducer above.\n\n@mheon Was the fuse-overlayfs failure repeatable?\n\nNewer versions of podman are executing the overlay fs with new options?  Could this be related?"
+        },
+        {
+            "user": "rhatdan",
+            "body": "Running\n$ for i in {1..100}; do ./bin/podman run --name test$i alpine true; done\n$ ./bin/podman rm $(seq --format=\"test%.0f\" 1 100)\nOn my machine works perfectly, but I am not using fuse-overlayfs, native overlay since I have the newer kernel."
+        },
+        {
+            "user": "edsantiago",
+            "body": "FYI my kernel is 5.11.17-300.fc34\n\nI'm not feeling a great desire to `git bisect` right now, but if my hints above (10-second delay, problem in `podman run` not `podman rm`) don't help anyone, I will do so tomorrow."
+        },
+        {
+            "user": "rhatdan",
+            "body": "I just forced fuse-overlay and it still does not fail for me.\n\n $ for i in {1..100}; do ./bin/podman run --name test$i alpine true; done; ./bin/podman rm $(seq --format=\"test%.0f\" 1 100)\n"
+        },
+        {
+            "user": "edsantiago",
+            "body": "```console\n$ podman info|grep -1i fuse                                                                                                                           -\n    overlay.mount_program:\n      Executable: /usr/bin/fuse-overlayfs\n      Package: fuse-overlayfs-1.5.0-1.fc34.x86_64\n      Version: |-\n        fusermount3 version: 3.10.3\n        fuse-overlayfs: version 1.5\n        FUSE library version 3.10.3\n        using FUSE kernel interface version 7.31\n  graphRoot: /home/esm/.local/share/containers/storage\n```"
+        },
+        {
+            "user": "giuseppe",
+            "body": "I think it could also be a regression in the kernel, I am still troubleshooting but after some time using the reproducer provided by @edsantiago I am able to reproduce locally.\n\nIt gets the system in a weird state:\n\n```\n$ podman unshare\n$ grep fuse-overlayfs /proc/self/mountinfo \n2497 896 0:121 / /home/gscrivano/.local/share/containers/storage/overlay/07fc566c5d6611235bae328ec3a556a5efaf436cff9ac083e806ba72527f7210/merged rw,nodev,noatime - fuse.fuse-overlayfs fuse-overlayfs rw,user_id=0,group_id=0,default_permissions,allow_other\n$ umount /home/gscrivano/.local/share/containers/storage/overlay/07fc566c5d6611235bae328ec3a556a5efaf436cff9ac083e806ba72527f7210/merged\numount: /home/gscrivano/.local/share/containers/storage/overlay/07fc566c5d6611235bae328ec3a556a5efaf436cff9ac083e806ba72527f7210/merged: not mounted.\n$ fusermount3 -u /home/gscrivano/.local/share/containers/storage/overlay/07fc566c5d6611235bae328ec3a556a5efaf436cff9ac083e806ba72527f7210/merged\nfusermount3: failed to unmount /home/gscrivano/.local/share/containers/storage/overlay/07fc566c5d6611235bae328ec3a556a5efaf436cff9ac083e806ba72527f7210/merged: Invalid argument\n```\n\nand strace says:\n\n```\numount2(\"/home/gscrivano/.local/share/containers/storage/overlay/07fc566c5d6611235bae328ec3a556a5efaf436cff9ac083e806ba72527f7210/merged\", 0) = -1 EINVAL (Invalid argument)\n```\n\nInteresting, if I join just the mount namespace as root on the host, I am able to umount it."
+        },
+        {
+            "user": "edsantiago",
+            "body": ">could also be a regression in the kernel\n\nIt could be, but why can I not reproduce the problem with `/usr/bin/podman` (3.1.2)? \n\nIncidentally, this is also [happening with podman rm -a](https://storage.googleapis.com/cirrus-ci-6707778565701632-fcae48/artifacts/containers/podman/5883113000665088/html/sys-podman-ubuntu-2010-rootless-host.log.html#t--00025), not just explicitly-enumerated containers."
+        },
+        {
+            "user": "rhatdan",
+            "body": "Yes I switched the test to run with three podman rm commands rather then one, and it still flaked.  It is definitely something to do with rootless podman rm failing. because of a mount point in use.\n\nCould this be some kind of mount space leak?"
+        },
+        {
+            "user": "edsantiago",
+            "body": "## sys: podman start --all - start all containers\n* ubuntu-2010 : sys podman ubuntu-2010 rootless host\n  * PR #10452\n    * [05-25 12:04](https://storage.googleapis.com/cirrus-ci-6707778565701632-fcae48/artifacts/containers/podman/6558486038315008/html/sys-podman-ubuntu-2010-rootless-host.log.html)\n    * [05-25 11:00](https://storage.googleapis.com/cirrus-ci-6707778565701632-fcae48/artifacts/containers/podman/5468506922680320/html/sys-podman-ubuntu-2010-rootless-host.log.html)\n    * [05-25 10:36](https://storage.googleapis.com/cirrus-ci-6707778565701632-fcae48/artifacts/containers/podman/5883113000665088/html/sys-podman-ubuntu-2010-rootless-host.log.html)\n  * PR #10446\n    * [05-24 22:16](https://storage.googleapis.com/cirrus-ci-6707778565701632-fcae48/artifacts/containers/podman/6279866510213120/html/sys-podman-ubuntu-2010-rootless-host.log.html)\n    * [05-24 21:18](https://storage.googleapis.com/cirrus-ci-6707778565701632-fcae48/artifacts/containers/podman/4907326193795072/html/sys-podman-ubuntu-2010-rootless-host.log.html)\n    * [05-24 18:53](https://storage.googleapis.com/cirrus-ci-6707778565701632-fcae48/artifacts/containers/podman/6558995461701632/html/sys-podman-ubuntu-2010-rootless-host.log.html)\n    * [05-24 17:56](https://storage.googleapis.com/cirrus-ci-6707778565701632-fcae48/artifacts/containers/podman/4699317404434432/html/sys-podman-ubuntu-2010-rootless-host.log.html)\n    * [05-24 17:19](https://storage.googleapis.com/cirrus-ci-6707778565701632-fcae48/artifacts/containers/podman/6099066187677696/html/sys-podman-ubuntu-2010-rootless-host.log.html)\n    * [05-24 16:56](https://storage.googleapis.com/cirrus-ci-6707778565701632-fcae48/artifacts/containers/podman/4875239264878592/html/sys-podman-ubuntu-2010-rootless-host.log.html)\n  * PR #10430\n    * [05-25 18:38](https://storage.googleapis.com/cirrus-ci-6707778565701632-fcae48/artifacts/containers/podman/6453615855403008/html/sys-podman-ubuntu-2010-rootless-host.log.html)\n  * PR #10427\n    * [05-21 10:50](https://storage.googleapis.com/cirrus-ci-6707778565701632-fcae48/artifacts/containers/podman/5893859780591616/html/sys-podman-ubuntu-2010-rootless-host.log.html)\n  * PR #10387\n    * [05-24 10:30](https://storage.googleapis.com/cirrus-ci-6707778565701632-fcae48/artifacts/containers/podman/6645354771775488/html/sys-podman-ubuntu-2010-rootless-host.log.html)\n    * [05-24 10:19](https://storage.googleapis.com/cirrus-ci-6707778565701632-fcae48/artifacts/containers/podman/5672827610202112/html/sys-podman-ubuntu-2010-rootless-host.log.html)\n    * [05-24 09:46](https://storage.googleapis.com/cirrus-ci-6707778565701632-fcae48/artifacts/containers/podman/5420103111016448/html/sys-podman-ubuntu-2010-rootless-host.log.html)\n    * [05-24 08:35](https://storage.googleapis.com/cirrus-ci-6707778565701632-fcae48/artifacts/containers/podman/4911054460289024/html/sys-podman-ubuntu-2010-rootless-host.log.html)\n  * PR #10219\n    * [05-20 07:47](https://storage.googleapis.com/cirrus-ci-6707778565701632-fcae48/artifacts/containers/podman/5484453767151616/html/sys-podman-ubuntu-2010-rootless-host.log.html)\n* ubuntu-2104 : sys podman ubuntu-2104 rootless host\n  * PR #10436\n    * [05-23 07:32](https://storage.googleapis.com/cirrus-ci-6707778565701632-fcae48/artifacts/containers/podman/5359562929733632/html/sys-podman-ubuntu-2104-rootless-host.log.html)\n    * [05-22 06:08](https://storage.googleapis.com/cirrus-ci-6707778565701632-fcae48/artifacts/containers/podman/6192373060337664/html/sys-podman-ubuntu-2104-rootless-host.log.html)\n  * PR #10411\n    * [05-20 11:05](https://storage.googleapis.com/cirrus-ci-6707778565701632-fcae48/artifacts/containers/podman/5292268274843648/html/sys-podman-ubuntu-2104-rootless-host.log.html)\n\nAlso failing in run-basic test, which does `podman rm -a`:\n## sys: podman run - basic tests\n* ubuntu-2010 : sys podman ubuntu-2010 rootless host\n  * PR #10452\n    * [05-25 10:36](https://storage.googleapis.com/cirrus-ci-6707778565701632-fcae48/artifacts/containers/podman/5883113000665088/html/sys-podman-ubuntu-2010-rootless-host.log.html)\n  * PR #10387\n    * [05-24 10:30](https://storage.googleapis.com/cirrus-ci-6707778565701632-fcae48/artifacts/containers/podman/6645354771775488/html/sys-podman-ubuntu-2010-rootless-host.log.html)\n* ubuntu-2104 : sys podman ubuntu-2104 rootless host\n  * PR #10219\n    * [05-20 07:46](https://storage.googleapis.com/cirrus-ci-6707778565701632-fcae48/artifacts/containers/podman/6047403720572928/html/sys-podman-ubuntu-2104-rootless-host.log.html)\n\nHmmmm, this is not failing on fedora CI, only ubuntu CI, and both ubuntu 2010 and 2104. To me that argues a little against it being a kernel issue (but I'm no expert)"
+        },
+        {
+            "user": "edsantiago",
+            "body": "Oh, **YUK**. Here's one with a single-argument `rm`:\n## sys: podman volume prune\n* ubuntu-2010 : sys podman ubuntu-2010 rootless host\n  * PR #10430\n    * [05-25 20:02](https://storage.googleapis.com/cirrus-ci-6707778565701632-fcae48/artifacts/containers/podman/5280473027969024/html/sys-podman-ubuntu-2010-rootless-host.log.html)\n\n(not too surprising, since Dan saw something similar in #10464, but still distressing)"
+        },
+        {
+            "user": "edsantiago",
+            "body": "Sorry, @vrothberg. Looks like #10219, which is consistent with the 2021-05-20 appearance of this flake.\n```\n8352e5bc3b280ecc0e9be45e6911fd6f8b9b45f0 is the first bad commit\ncommit 8352e5bc3b280ecc0e9be45e6911fd6f8b9b45f0\nAuthor: Valentin Rothberg <rothberg@redhat.com>\nDate:   Wed May 5 15:43:50 2021 +0200\n\n    add libimage events\n\n    libimage now supports events which `libpod.Runtime` now uses for image\n    events.\n\n    Signed-off-by: Valentin Rothberg <rothberg@redhat.com>\n\n go.mod                                             |  2 +-\n go.sum                                             |  4 +-\n libpod/runtime.go                                  | 90 +++++++++++++++++++---\n test/system/090-events.bats                        | 36 +++++++++\n .../containers/common/version/version.go           |  2 +-\n vendor/modules.txt                                 |  2 +-\n 6 files changed, 119 insertions(+), 17 deletions(-)\n```"
+        },
+        {
+            "user": "giuseppe",
+            "body": "ouch, we end up mounting `~/.local/share/containers/storage/overlay` on top of the fuse mount.\n\n@rhatdan when the issue happens for you, can you confirm that these two steps work:\n\n```\n$ podman unshare\n$ umount ~/.local/share/containers/storage/overlay\n\n$ umount ~/.local/share/containers/storage/overlay/path/to/the/fuse/mount\n```"
+        },
+        {
+            "user": "edsantiago",
+            "body": "```console\n$ podman unshare\n# umount ~/.local/share/containers/storage/overlay\n# mount|grep /home/esm/.local/share/containers/storage|awk '{print $3}'\n[ lots and lots]\n# mount|grep /home/esm/.local/share/containers/storage|awk '{print $3}'|xargs -l1 umount    ! succeeds\n```"
+        },
+        {
+            "user": "edsantiago",
+            "body": "I really wanted to be wrong, but I can't reproduce the flake with 62c14dcc4  (the commit just prior to #10219). "
+        },
+        {
+            "user": "vrothberg",
+            "body": "> I really wanted to be wrong, but I can't reproduce the flake with [62c14dc](https://github.com/containers/podman/commit/62c14dcc4d62e01d585149adfb2900a55cc531a6) (the commit just prior to #10219).\n\nI like that more :^) I meditated over dinner on how #10219 may have caused it but turned in circles."
+        },
+        {
+            "user": "edsantiago",
+            "body": "I may not have been clear: my comment above indicates that #10219 is almost 100% guaranteed to be the culprit. I'm sorry."
+        },
+        {
+            "user": "vrothberg",
+            "body": "On nooos :^) I read _can_ reproduce."
+        },
+        {
+            "user": "vrothberg",
+            "body": "@edsantiago can you reproduce after reverting commit  8352e5bc3b280ecc0e9be45e6911fd6f8b9b45f0?"
+        },
+        {
+            "user": "edsantiago",
+            "body": "@vrothberg did you really want me to try to resolve the conflicts in `git revert 8352e`? That would take me the majority of the day, and I'm not confident I could get it right."
+        },
+        {
+            "user": "vrothberg",
+            "body": "> @vrothberg did you really want me to try to resolve the conflicts in `git revert 8352e`? That would take me the majority of the day, and I'm not confident I could get it right.\n\nNo, absolutely not, sorry for not checking if it reverts cleanly.  Can you try with https://paste.centos.org/view/a5a90a57?"
+        },
+        {
+            "user": "vrothberg",
+            "body": "Too late to function properly.  Need to massage the patch."
+        },
+        {
+            "user": "vrothberg",
+            "body": "That'll compile: https://paste.centos.org/view/a51c1483"
+        },
+        {
+            "user": "vrothberg",
+            "body": "The thing is that `(libimage.Rutime*).Shutdown(...)` executes the same code as before.  The only thing that #10219 really added is a _small_ delay before shutting down the store.  But my eyes are tired and maybe I miss the obvious."
+        },
+        {
+            "user": "edsantiago",
+            "body": "Here's [the attempt I came up with](https://paste.centos.org/view/336c8221). It looks pretty similar to yours. I cannot (can not) reproduce the flake with that patch. Three iterations so far (with 10219, it almost always fails in one iteration). Sorry again."
+        },
+        {
+            "user": "edsantiago",
+            "body": "@containers/podman-maintainers may I humbly suggest that this is an all-hands-on-deck moment?"
+        },
+        {
+            "user": "mheon",
+            "body": "Most suspicious bit I can see is switching from shutting down the store directly, to calling the Libimage shutdown function. That would be the first thing I look at."
+        },
+        {
+            "user": "vrothberg",
+            "body": "@edsantiago, thanks a lot for testing!\n\nOne last request, could you test: https://paste.centos.org/view/fa6a32d4?\n\nHere, we're not using libimage to shutdown the store.  I do not yet know why that would make any difference but I cannot rule it out at that point."
+        },
+        {
+            "user": "vrothberg",
+            "body": "> Most suspicious bit I can see is switching from shutting down the store directly, to calling the Libimage shutdown function. That would be the first thing I look at.\n\nhttps://paste.centos.org/view/fa6a32d4 reverts that.  But as mentioned above, libimage shutdown does exactly that as well.  It's not obvious to me yet how that would impact.\n\nAnyhow, I have to leave the keyboard.  Good luck, folks!"
+        },
+        {
+            "user": "edsantiago",
+            "body": "Four iterations so far with the above patch (fa6a32d4). No flakes. To be clear: `r.libimageRuntime.Shutdown()` seems to be the cause of the flake."
+        },
+        {
+            "user": "edsantiago",
+            "body": "Well.... I left the reproducer running anyway, and it just triggered. I don't know how many iterations, but according to the github timestamp above it took 26 minutes. This tells me that #10219 *did not* cause the problem, it just made it more pronounced."
+        },
+        {
+            "user": "edsantiago",
+            "body": "Another unhelpful data point: I reverted back to 62c14dc (commit before #10219), this time letting the reproducer run uninterrupted. Three hours later, no failures.  Is it possible that the simple existence of `libimageEventsShutdown` is causing the problem? This code is too Go-idiomatic for my C-trained brain."
+        },
+        {
+            "user": "vrothberg",
+            "body": "Thanks a lot for all the data points, @edsantiago.  I am under the impression that #10219 is merely increasing the chance of hitting the issue; maybe because it takes slightly longer to shutdown the store."
+        },
+        {
+            "user": "edsantiago",
+            "body": "I left 62c14dc running all night. 605 iterations, not a single crash."
+        },
+        {
+            "user": "vrothberg",
+            "body": "@giuseppe may have found the source in c/storage. Could be an issue in comparing time stamps."
+        },
+        {
+            "user": "giuseppe",
+            "body": "opened a PR: https://github.com/containers/storage/pull/926"
+        }
+    ]
+}

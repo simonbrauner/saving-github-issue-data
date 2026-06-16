@@ -1,0 +1,155 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 3540,
+    "title": "[intermittent] podman ps --size sometimes returns '0B', 'error unmounting'",
+    "state": "closed",
+    "labels": [
+        "stale-issue",
+        "locked - please file new issue/PR"
+    ],
+    "user": "edsantiago",
+    "body": "Seeing this on f29 only; in particular, a non-dnf-upgraded f29. And only intermittently:\n```\n# podman run alpine true;podman run alpine dd if=/dev/zero of=/bigfile bs=1M count=10\n10+0 records in\n10+0 records out\n\n# podman ps --size -a\nERRO[0000] error unmounting /var/lib/containers/storage/overlay/d90aed636ff383f7c3d36367864a87cea6e02e40e51e67913d7df5591553e53e/merged: invalid argument\nERRO[0000] error getting rw size for \"25ed230c29166e2df5d6c01da29e4e385619b3378b366ba8a84c1c656b293fc3\": error creating overlay mount to /var/lib/containers/storage/overlay/d90aed636ff383f7c3d36367864a87cea6e02e40e51e67913d7df5591553e53e/merged: device or resource busy\nCONTAINER ID  IMAGE                            COMMAND               CREATED        STATUS                    PORTS  NAMES             SIZE\n25ed230c2916  docker.io/library/alpine:latest  dd if=/dev/zero o...  2 seconds ago  Exited (0) 2 seconds ago         nifty_burnell     0B (virtual 5.58MB)\n79415a40fc42  docker.io/library/alpine:latest  true                  3 seconds ago  Exited (0) 3 seconds ago         eloquent_noether  0B (virtual 5.58MB)\n```\nIt only seems to happen when there are two containers; I haven't yet seen it with only one.\n\nThe '0B' thing is sporadic; sometimes it displays 10.5MB. \n\npodman-1.4.4-2.fc29.x86_64; kernel 5.1.16-200.fc29.x86_64\n\nI cannot reproduce on f30. This leads me to suspect that there's a dependency somewhere that needs to be updated. (And if this is the case, the RPM should be rebuilt to Require it). Any ideas on whether this seems plausible, and where I should begin checking?",
+    "comments": [
+        {
+            "user": "rhatdan",
+            "body": "Could it be kernel related?  Something to do with the MetaCopy flag?"
+        },
+        {
+            "user": "edsantiago",
+            "body": "Kernel is latest available on f29, but yes, I suppose it could be metacopy. Let me try removing that from the options."
+        },
+        {
+            "user": "edsantiago",
+            "body": "I think that's it. With `mountopt = \"nodev\"` I cannot reproduce this, even with automated infinite-loop testing. \n\nIf this is the case, I think it might be prudent to package a new containers-common.fc29 _without_ the `metacopy` option, then build a new podman that `Requires:` this version. \n\nVery nice thinking, @rhatdan. Thanks for the lead."
+        },
+        {
+            "user": "rhatdan",
+            "body": "My concern here is that you are revealing a new bug.\n\n@rhvgoyal WDYT?\n"
+        },
+        {
+            "user": "rhvgoyal",
+            "body": "@edsantiago when this happens, you can also capture kernel logs (from dmesg or journal or serial console). May be check journal and there might be some message about why mount failed."
+        },
+        {
+            "user": "edsantiago",
+            "body": "Good idea. Log (journalctl) attached. The most prominent diagnostic seems to be:\n```\nkernel: overlayfs: lowerdir is in-use as upperdir/workdir\n```\nAgain, kernel is 5.1.16-200.fc29. On f30, kernel is 5.0.9-301.fc30 but latest available is 5.1.16-300. I'm going to upgrade my f30 and reboot, and see what happens.\n\n[podman-metacopy.log](https://github.com/containers/libpod/files/3374783/podman-metacopy.log)\n"
+        },
+        {
+            "user": "edsantiago",
+            "body": "Well, well, well. Problem now manifests on f30 with 5.1.16-300.fc30. @rhvgoyal looks like this is headed toward your court. I'll file a kernel bz."
+        },
+        {
+            "user": "rhvgoyal",
+            "body": "Latest kernels have added logic to do more rigorous checks to make sure no invalid configuration (overlapping layers are being used). So in this case a directory which is lowerdir is also being  used as uppperdir/workdir and that sounds like a problem in conatiner/storage."
+        },
+        {
+            "user": "rhvgoyal",
+            "body": "Here is the upstream commit.\n\ncommit 146d62e5a5867fbf84490d82455718bfb10fe824\nAuthor: Amir Goldstein <amir73il@gmail.com>\nDate:   Thu Apr 18 17:42:08 2019 +0300\n\n    ovl: detect overlapping layers\n"
+        },
+        {
+            "user": "rhvgoyal",
+            "body": "cc @nalind \n\nNalin, do you see how this can happen. How a lowerdir is also being used as upperdir/workdir."
+        },
+        {
+            "user": "edsantiago",
+            "body": "@rhvgoyal thanks; you've saved me the effort of bisecting and filing a bz. I will stand back now and let (plural) you narrow down the root cause. And, reopening in case it's something fixable in podman."
+        },
+        {
+            "user": "rhvgoyal",
+            "body": "cc @amir73il"
+        },
+        {
+            "user": "cgwalters",
+            "body": "Ah...I started hitting this problem a lot recently, and it being a newer kernel explains a lot."
+        },
+        {
+            "user": "cgwalters",
+            "body": "For anyone else like me who would currently choose a functioning container stack and the possibility of (uncharacterized?) undefined behavior over random `EBUSY` errors during builds:\n\nThe upstream patch [mentioned above](https://github.com/containers/libpod/issues/3540#issuecomment-509808287) was [backported to the Linux stable branch](https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git/commit/?h=linux-5.1.y&id=99eb836cd9a4df455ae90807bc00ee635be342f0) in 5.1.15 as well, so you'll need to revert to an earlier kernel or revert the patch in the 5.1 branch (which is currently used by Fedora) as well.\n\n"
+        },
+        {
+            "user": "edsantiago",
+            "body": "@cgwalters a simpler safer workaround might be to remove `,metacopy=on` from `mountopt` in `/etc/containers/storage.conf`. AIUI that option is only needed for some advanced rootless cases."
+        },
+        {
+            "user": "amir73il",
+            "body": "FYI, the offending kernel patch was also backported to v4.19.56.\nI will work on a kernel \"fix\" to not enforce this with index=off.\nMost likely the root cause is container runtime leaking an old overlay mount, whose upper dir\nis now attempted to be used in a lower dir stack of a new container, see for reference:\nhttps://github.com/moby/moby/issues/37970\n@rhvgoyal I can't find the \"proper\" docker fix for leaked mounts, but I remember it was discussed.\n"
+        },
+        {
+            "user": "rhvgoyal",
+            "body": "@amir73il AFAIK we never fully solved the issue of leaked mounts. We have tried few different things to minimize it. I agree though that this most likely is a result of leaked mount.\n\nFor now enforcing error with index=on sounds reasonable. Having said that, that also means that these container runtime will not be able to use index=on till they figure out some proper solution for leaked mount points."
+        },
+        {
+            "user": "rhvgoyal",
+            "body": "@amir73il Or we could think of creating a new mount option which does more strict configuration check and enforces errors. (That way people can use index=on without having to worry about leaked mounts).\n\nOtherwise we will just discourage using index=on. "
+        },
+        {
+            "user": "amir73il",
+            "body": "@rhvgoyal we already have made this compromise about index=on and conflicting upperdir usage. For now my intention is the regain the status quo that my patch has broken.\n\nAbout discouraging using index=on, I am seeing this as encouraging container runtimes to fix mount leaks ;-)"
+        },
+        {
+            "user": "amir73il",
+            "body": "Can anyone test the kernel fix above?\nIt's against current mainline but should apply cleanly to any affected release/stable kernel"
+        },
+        {
+            "user": "cgwalters",
+            "body": "> @cgwalters a simpler safer workaround might be to remove ,metacopy=on from mountopt in /etc/containers/storage.conf. AIUI that option is only needed for some advanced rootless cases.\n\nTried that\n\n```\nroot@orion ~# diff -u /{usr/,}etc/containers/storage.conf\n--- /usr/etc/containers/storage.conf\t1969-12-31 19:00:00.000000000 -0500\n+++ /etc/containers/storage.conf\t2019-07-13 13:55:51.947493289 -0400\n@@ -33,7 +33,7 @@\n override_kernel_check = \"true\"\n \n # mountopt specifies comma separated list of extra mount options\n-mountopt = \"nodev,metacopy=on\"\n+mountopt = \"\"\n \n # Remap-UIDs/GIDs is the mapping from UIDs/GIDs as they should appear inside of\n # a container, to UIDs/GIDs as they should appear outside of the container, and\nroot@orion ~# \n```\n\nbut I still see it.  Going to try testing [the patch](https://github.com/containers/libpod/issues/3540#issuecomment-510573165)."
+        },
+        {
+            "user": "cgwalters",
+            "body": "@amir73il I read your patch and it looks sane; trying it out, it works for me as expected.  I see in `dmesg` various:\n`[  476.602680] overlayfs: lowerdir is in-use as upperdir/workdir of another mount, accessing files from both mounts will result in undefined behavior.`\nAnd `podman build` works (as well as it did before).\nFeel free to add `Tested-by: Colin Walters <walters@verbum.org>`.\n"
+        },
+        {
+            "user": "rhatdan",
+            "body": "It is my belief that we have a leak in Podman, and this kernel message is actually incorrect, but as far as the kernel is concerned it sees the leak.\n\nContainer A mounts in the host namespace\nContainer B runs and gets the mount from Container A Leaked to it, and this causes the issue.\n"
+        },
+        {
+            "user": "mheon",
+            "body": "In support of this - we have some tests for bind mounts with nonrecursive bind, and they're failing because containers have extraneous mounts leaking in (not from the bind mount, but SHM mount points, seemingly from other containers?)."
+        },
+        {
+            "user": "amir73il",
+            "body": "@rhatdan in what way is the kernel message incorrect?\n\"in-use as upperdir/workdir\" means its in use by an overlay mount that has not been unmounted yet - yeh that's what mount leaks would do.\nI have posted an RFC patch for a \"proper\" solution:\nhttps://lore.kernel.org/linux-fsdevel/20190715133839.9878-1-amir73il@gmail.com/\nInstead of executing \"umount container A\", Podman would execute \"shutdown fs of container A; umount container A\".\nThe \"shutdown fs\" operation would release the \"in-use\" upperdir/workdir and then overlayfs new mounts won't care about the leaked mounts.\nIf user can access files after fs shutdown through leaked mount in container B they would get EIO."
+        },
+        {
+            "user": "rhvgoyal",
+            "body": "@amir73il If I unmount \"merged\" directory and then delete that directory, then any other leaked mount points on this directory in other mount namespaces go away, I think (As long as other containers are not accessing this directory. If this is unintentional leak, other containers will not be accessing that mount point). I think Eric Biederman made this change. If  that's correct, then I am wondering why we don't use this mechanism instead."
+        },
+        {
+            "user": "amir73il",
+            "body": "@rhvgoyal I have no objection for using this method. I remember it was suggested at the time of v4.13 kernel regression. Not sure why it wasn't done then..."
+        },
+        {
+            "user": "rhvgoyal",
+            "body": "@rhatdan  can we try this directory removal solution and see if it helps with leaked mount points"
+        },
+        {
+            "user": "rhvgoyal",
+            "body": "Container removal already cleans up everything. I think for rest of the operations, we probably will have to make sure that after every unmount (once all container/storage reference on merged dir are gone), remove\nmerged directory and that hopefully takes down all the leaked mount points."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@ amir73il  the error indicates that one containers upper is being used as the Lower inside of a different container.  This is NOT happening.   There is no way in the code that we are using the Upper directory in any other container.  The upper is being used inside of its own container and is leaked into the second container. \nAnd the kernel is fooled into thinking this is a separate mount of the Upper."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@rhvgoyal Would https://github.com/containers/storage/pull/390 fix the issue, or at least mitigate it?"
+        },
+        {
+            "user": "rhvgoyal",
+            "body": "I think this should help with the issue of unintentionally leaking mount points."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@edsantiago Could you verify that this is still an issue with master/podman 1.5.0"
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "This issue had no activity for 30 days. In the absence of activity or the \"do-not-close\" label, the issue will be automatically closed within 7 days."
+        },
+        {
+            "user": "rhatdan",
+            "body": "I believe this is fixed, Reopen if I am mistaken."
+        }
+    ]
+}

@@ -1,0 +1,40 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 19545,
+    "title": "podman logs --tail, with json-file, misses partial lines",
+    "state": "closed",
+    "labels": [
+        "flakes",
+        "kind/bug",
+        "locked - please file new issue/PR"
+    ],
+    "user": "edsantiago",
+    "body": "[ Split off from #18501 ]\n\nBasically, podman does not correctly handle a log like this:\n```console\n$ cat -vET ~/.local/share/containers/storage/overlay-containers/$cid/userdata/ctr.log\n2023-08-07T19:56:34.223758260-06:00 stdout F podman^M$\n2023-08-07T19:56:34.223758260-06:00 stdout P podman$\n2023-08-07T19:56:34.223816701-06:00 stdout F ^M$             <------ this actually goes with the prior line\n2023-08-07T19:56:34.223816701-06:00 stdout F podman^M$\n$ bin/podman logs --tail 2 $cid | cat -vET\n^M$\npodman^M$\n```\nCauses flakes in e2e tests, because they use `podman run -dt`, which is IMHO a bug, except that it let us find this issues, so maybe it's not a bug. (I cleaned up `run -it` in #18343 but did not touch `-dt`)\n\nReproducer:\n```console\n$ nl=\"        <----- basically doublequote, enter, doublequote, enter\n\"\n$ cr=\"^M\"      <-------- control-V for quote-next-character, control-M for CR\n$ while :;do cid=$(bin/podman run --log-driver json-file -dt quay.io/libpod/testimage:20221018 sh -c \"echo podman;echo podman;echo podman\");bin/podman wait $cid;logs=$(bin/podman logs --tail 2 $cid); test \"$logs\" = \"podman${cr}${nl}podman${cr}\" || break;bin/podman rm $cid;done\n```",
+    "comments": [
+        {
+            "user": "Luap99",
+            "body": "From a quick look at the code it looks like it tries to handle this case but it is clearly no working properly. I take a stab at it."
+        },
+        {
+            "user": "Luap99",
+            "body": "Also FYI, `json-file` == `k8s-file` in case you see the same thing there as well"
+        },
+        {
+            "user": "edsantiago",
+            "body": "This is an easy one; I have a fix in progress, with tests. Give me an hour or two... unless you already have it fixed."
+        },
+        {
+            "user": "Luap99",
+            "body": "I have a fix (proper rework to simplify the code) but no tests written yet.  "
+        },
+        {
+            "user": "edsantiago",
+            "body": "I'll let you continue with your fix then, since it's probably better Go than mine. Here's a test, use whatever you like from it.\n\n```bash\n# #19545\n@test \"podman logs --tail, json-file with partial lines\" {\n    cname=\"tail_container\"\n\n    # \"-t\" gives us ^Ms (CRs) in the log\n    run_podman run --name $cname --log-driver json-file -t $IMAGE echo hi\n\n    # Hand-craft a log file with partial lines and carriage returns\n    run_podman inspect --format '{{.HostConfig.LogConfig.Path}}' $cname\n    logpath=\"$output\"\n    timestamp=$(awk '{print $1}' <\"$logpath\")\n    cr=$'\\r'\n    nl=$'\\n'\n    cat >| $logpath <<EOF\n$timestamp stdout F podman1$cr\n$timestamp stdout P podman2\n$timestamp stdout F $cr\n$timestamp stdout F podman3$cr\nEOF\n\n    expect1=\"podman3${cr}\"\n    expect2=\"podman2${cr}${nl}podman3${cr}\"\n    expect3=\"podman1${cr}${nl}podman2${cr}${nl}podman3${cr}\"\n\n    # This always worked\n    run_podman logs --tail 1 $cname\n    assert \"$output\" = \"$expect1\" \"--tail 1\"\n\n    # Prior to this PR, the first line would be \"^M\" without the podman\n    run_podman logs --tail 2 $cname\n    assert \"$output\" = \"$expect2\" \"--tail 2\"\n\n    # Confirm that we won't overrun\n    for i in 3 4 5; do\n        run_podman logs --tail $i $cname\n        assert \"$output\" = \"$expect3\" \"--tail $i\"\n    done\n\n    run_podman rm $cname\n}\n```"
+        },
+        {
+            "user": "Luap99",
+            "body": "Thanks for the test, I will also add unit tests as there seems to be quite a few different cases that all need to be covered.\n\nAlso note that the `\\r` is only a symptom which likely results in the partial lines in the first place but the partial line handling is broken no matter what. "
+        }
+    ]
+}

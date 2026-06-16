@@ -1,0 +1,48 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 28051,
+    "title": "network configuration with something like lxc-user-nic",
+    "state": "closed",
+    "labels": [
+        "kind/feature",
+        "network",
+        "locked - please file new issue/PR"
+    ],
+    "user": "luzidd",
+    "body": "### Feature request description\n\nPodman already uses a setuid/setcap tool for setting uidmap & gidmap. If it used a tool like lxc-user-nic to configure virtual bridges it would be possible to avoid the overhead of slirp4netns or pasta.\n\n### Suggest potential solution\n\n_No response_\n\n### Have you considered any alternatives?\n\n_No response_\n\n### Additional context\n\n_No response_",
+    "comments": [
+        {
+            "user": "Luap99",
+            "body": "Generally I do not want more setuid binaries in the call path so I am opposed on doing that.\n\nAnd practically speaking this cannot work with podman design, calling setuid root binaries from within the podman userns is impossible because root is not mapped into it and we will have no privileges over the host netns at this point.\nThis would mean the network setup path would need to run outside of the userns which is impossible because creating a network namespace to begin with requires the use of the userns.\n\nThe only reason newuidmap and newgidmap work is because they are called outside the userns as part of the parent which creates the child process running in the userns.\n\n\nIf you want rootful networking you can run podman as root and use something like --userns=auto to still have the containers sandboxed in a unique userns. Or roll you own external scripts that can manage the rootless netns of a container, see last slide of https://containers.github.io/podman.io_old/old/community/meeting/notes/2021-10-05/Podman-Rootless-Networking.pdf\n\nBut in general I think it would be helpful what you mean with \"avoid the overhead\"? Sure as external process there will always be some overhead but have you actually measured the impact? Pasta at least is very actively developed by @sbrivio-rh and AFAIK they are working on performance improvements such as zero copy.\n\nThe best way forward is to improve pasta and not invest into solutions that weaken the security.\n "
+        },
+        {
+            "user": "luzidd",
+            "body": "I haven't measured the overhead and i'm pretty sure that in my use cases the performance of pasta would never be a bottleneck.\n\nOn the other hand, having a bridge in the init netns with delegated permissions to the user could be nice and it could be done without setuid helpers i think.\n\nI'm thinking about creating a netavark plugin (maybe called `rootless-host-bridge`) that would talk to a privileged dbus service.\n\nThe service would get SO_PEERCRED, a pidfs file handle referencing the container or netns_fd and the network config from the netavark plugin.\nIt must check if the netns actually belongs to the user.\nIf yes, it reads `/etc/containers/netavark-plugins/rootless-host-bridge/<user>.conf` to get the bridge name and subnet the user is authorized for, creates a veth pair, moves one end into the namespace and configures it."
+        },
+        {
+            "user": "sbrivio-rh",
+            "body": "> On the other hand, having a bridge in the init netns with delegated permissions to the user could be nice\n\nIt might be nice but mind that it breaks network isolation quite badly: you could spoof and in general send out arbitrary packets from containers at that point.\n\nThere's a reason why you need privileges to create interfaces, it's not something that should be \"fixed\"."
+        },
+        {
+            "user": "luzidd",
+            "body": "The privileged service would set the firewall rules, so per default it would behave as nat, from the host and lan perspective that would be equivalent to pasta/slirp. The user using podman can't create arbitrary interfaces or bind arbitrary IPs or ports, the config for the privileged service needs to whitelist the bridge name, subnets and define firewall rules."
+        },
+        {
+            "user": "sbrivio-rh",
+            "body": "> The user using podman can't create arbitrary interfaces\n\nYou don't need to create arbitrary interfaces to send out arbitrary packets. A bridge to a container is all you need. You can then use AF_PACKET or raw sockets inside it."
+        },
+        {
+            "user": "luzidd",
+            "body": "While it's not risk free, why wouldn't filtering on the host mitigate this? Docker is doing that for years.\n\nAlso i found that modern Linux supports the netkit device type, created by Meta for attaching bpf programs to fast path and filter traffic.\n\nNetkit supports a l2 mode, in which it works similar to a veth, attachable to bridges. And the default l3 mode, no MAC, no ARP etc.\n\nThe service would attach a bpf filter program to the netkit devices to allowlist MAC addresses/IPs etc."
+        },
+        {
+            "user": "Luap99",
+            "body": "> You don't need to create arbitrary interfaces to send out arbitrary packets. A bridge to a container is all you need. You can then use AF_PACKET or raw sockets inside it.\n\nWell expect by default we do not hand out CAP_NET_RAW to the container, so unless a user is adding this the container should not be able to do this."
+        },
+        {
+            "user": "sbrivio-rh",
+            "body": "> While it's not risk free, why wouldn't filtering on the host mitigate this? Docker is doing that for years.\n\nSure, it will probably _mitigate_ this. I'm just arguing it's not exactly... secure by design.\n\n> Also i found that modern Linux supports the netkit device type, created by Meta for attaching bpf programs to fast path and filter traffic.\n\nIt was written by Isovalent developers as far as I know, but anyway:\n\n> Netkit supports a l2 mode, in which it works similar to a veth, attachable to bridges. And the default l3 mode, no MAC, no ARP etc.\n\n...while you don't need ARP or MAC addresses in the \"L3 mode\", it's still substantially bypassing the isolation between namespaces. Of course, you need appropriate capabilities to set that up.\n\n> > You don't need to create arbitrary interfaces to send out arbitrary packets. A bridge to a container is all you need. You can then use AF_PACKET or raw sockets inside it.\n> \n> Well expect by default we do not hand out CAP_NET_RAW to the container, so unless a user is adding this the container should not be able to do this.\n\nRight, but the attack model I'm considering here is where the container _user_ (not the container itself) can gain additional capabilities by setting up bridged containers, without the need for further capabilities."
+        }
+    ]
+}

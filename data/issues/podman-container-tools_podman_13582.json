@@ -1,0 +1,134 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 13582,
+    "title": "'podman pull' no simple way to check if newer image was pulled",
+    "state": "open",
+    "labels": [
+        "kind/feature"
+    ],
+    "user": "andrinbr",
+    "body": "/kind feature\n\n**Description**\n\nIt would be nice if there was a status line when pulling an image to determine if a newer version was pulled. This would help with automation.\n\n\n**Describe the results you received:**\nExample with podman pulling an image which is new:\n```\npodman pull docker.io/busybox\nTrying to pull docker.io/library/busybox:latest...\nGetting image source signatures\nCopying blob 554879bb3004 done  \nCopying config 2fb6fc2d97 done  \nWriting manifest to image destination\nStoring signatures\n2fb6fc2d97e10c79983aa10e013824cc7fc8bae50630e32159821197dda95fe3\n```\n\nExample with podman pulling the same image again:\n```\npodman pull docker.io/busybox\nTrying to pull docker.io/library/busybox:latest...\nGetting image source signatures\nCopying blob 554879bb3004 skipped: already exists  \nCopying config 2fb6fc2d97 done  \nWriting manifest to image destination\nStoring signatures\n2fb6fc2d97e10c79983aa10e013824cc7fc8bae50630e32159821197dda95fe3\n```\n\nOne could only determine the image already was up-to-date by looking at the \"Copying blob\" lines.\n\n**Describe the results you expected:**\nExample with docker pull with a new image:\n```\ndocker pull docker.io/busybox\nUsing default tag: latest\nTrying to pull repository docker.io/library/busybox ...\nlatest: Pulling from docker.io/library/busybox\n554879bb3004: Pull complete\nDigest: sha256:caa382c432891547782ce7140fb3b7304613d3b0438834dce1cad68896ab110a\nStatus: Downloaded newer image for docker.io/busybox:latest\n```\n\nExample with docker pull on the same existing image:\n```\ndocker pull docker.io/busybox\nUsing default tag: latest\nTrying to pull repository docker.io/library/busybox ...\nlatest: Pulling from docker.io/library/busybox\nDigest: sha256:caa382c432891547782ce7140fb3b7304613d3b0438834dce1cad68896ab110a\nStatus: Image is up to date for docker.io/busybox:latest\n```\n\nWith docker pulling the image, it is very easy to distinguish between a new image \"Downloaded newer image\" and an unmodified one \"Image is up to date\".\n\n\n**Output of `podman version`:**\n\n```\nVersion:      3.4.2\nAPI Version:  3.4.2\nGo Version:   go1.16.12\nBuilt:        Wed Feb  2 00:59:28 2022\nOS/Arch:      linux/amd64\n```",
+    "comments": [
+        {
+            "user": "vrothberg",
+            "body": "Thanks for reaching out, @andrin55!\n\nI think there's some valuable information in the Docker output that we could use as well.\n\n@mtrmac WDYT?  "
+        },
+        {
+            "user": "giuseppe",
+            "body": "in the podman case, would that be vulnerable to a race condition if another client pulled the image in the meanwhile?\n\nWouldn't it be safer to just run something like `podman inspect -f '{{.Id}}' $IMAGE` before and after the pull and compare if they are different?"
+        },
+        {
+            "user": "mtrmac",
+            "body": "Hum, there is `copy.Options.OptimizeDestinationImageAlreadyExists`; that is _not_ the default because it is an extra cost to check for presence at the destination, but it might make sense to enable for `podman pull`.\n\n(Note that that code has, I think, very unlikely to have been tested against c/storage. Also, I vaguely seem to remember there might have been a reason not to do this optimization, but I can’t think of any specific reason now.)"
+        },
+        {
+            "user": "mtrmac",
+            "body": "(Note that this is _only_ affecting the human-readable log output; it would not show up in the API.)"
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@mtrmac @vrothberg Anything ever happen with this?"
+        },
+        {
+            "user": "mtrmac",
+            "body": "Given\n> (Note that this is only affecting the human-readable log output; it would not show up in the API.)\n\nand the _very small_ impact on actual run time, this seems rather low-priority to me. It’s worth trying / investigating but not something I expect to prioritize at least within the next month."
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "rhatdan",
+            "body": "Any objections to changing copy.Options.OptimizeDestinationImageAlreadyExists to default to on, or customizable in containers/common, so that we can see if this is better?"
+        },
+        {
+            "user": "mtrmac",
+            "body": "> Any objections to changing copy.Options.OptimizeDestinationImageAlreadyExists to default to on\n\nTo the extent it can be called an objection, “read the code / test this to verify it works as expected first, don’t just blindly try”.\n\n> or customizable in containers/common, so that we can see if this is better?\n\nI don’t see why this would be a per-site option. Either it should be a global default, or an option to decide per use (maybe based on the repo in question, and how it is used on that system); I find it hard to imagine a situation where there is something specific to the _machine_ that would drive such a decision, so that it would make sense to configure in `/etc`. Also, it doesn’t make much sense to me to recommend `OptimizeDestinationImageAlreadyExists` as a way to help automation, while at the same time letting users configure the system to disable that behavior, silently breaking that automation.\n\n---\n\nNote that turning `OptimizeDestinationImageAlreadyExists` on would only change the text output to stdout; it would not provide an API-consumable value (and the text of the output to stdout is _not_ at all an API commitment — if it were, we could’t do the contemplated change in the first place).\n\nRe-reading the original report, because the original motivation is\n> This would help with automation.\n\nthis is something between “completely useless” and “users would depend on it but their automation is going to break and they are going to be unhappy”. (Also, nitpicking, the `OptimizeDestinationImageAlreadyExists` does not trigger on some code paths that were originally thought to be too hard or too rare; it’s not a reliable way to tell that the image has _not_ been updated.)\n\nTo actually implement this as requested, some variant of \n> Wouldn't it be safer to just run something like `podman inspect -f '{{.Id}}' $IMAGE` before and after the pull and compare if they are different?\n\n(or possibly getting the image ID before pull, and the image ID that is the outcome of pull and returned by `copy.Image`) would be necessary, whether outside Podman or as a built-in Podman feature providing an API-exposed (CLI-automation-consumable?) value."
+        },
+        {
+            "user": "rhatdan",
+            "body": "On 5/25/22 15:09, Miloslav Trmač wrote:\n>\n>     Any objections to changing\n>     copy.Options.OptimizeDestinationImageAlreadyExists to default to on\n>\n> To the extent it can be called an objection, “read the code / test \n> this to verify it works as expected first, don’t just blindly try”.\n>\nIf you feel the code is buggy, then that is reasonable to leave off.  \nCurrently there is no way for user to turn this flag on, so the code \nwill never get improved.  I would have thought that this flag would \noptimize pulling of images, but if you don't believe it will ,then what \nis the purpose of the flag?\n>\n>     or customizable in containers/common, so that we can see if this\n>     is better?\n>\n> I don’t see why this would be a per-site option. Either it should be a \n> global default, or an option to decide per use (maybe based on the \n> repo in question, and how it is used on that system); I find it hard \n> to imagine a situation where there is something specific to the \n> /machine/ that would drive such a decision, so that it would make \n> sense to configure in |/etc|. Also, it doesn’t make much sense to me \n> to recommend |OptimizeDestinationImageAlreadyExists| as a way to help \n> automation, while at the same time letting users configure the system \n> to disable that behavior, silently breaking that automation.\n>\nFind then should it be added a customizable field in registries.conf?  I \nam not necessarily looking to solve this issue, but more to the fact \nthat a fancy new option was brought to my attention and I want to know \nif it actually Optimizes anything, and if it does, I would like allow \nusers to turn it on, or potentially turn it on by default and then allow \nusers who have issues with it, turn it off.\n> ------------------------------------------------------------------------\n>\n> Note that turning |OptimizeDestinationImageAlreadyExists| on would \n> only change the text output to stdout; it would not provide an \n> API-consumable value (and the text of the output to stdout is /not/ at \n> all an API commitment — if it were, we could’t do the contemplated \n> change in the first place).\n>\n> Re-reading the original report, because the original motivation is\n>\n>     This would help with automation.\n>\n> this is something between “completely useless” and “users would depend \n> on it but their automation is going to break and they are going to be \n> unhappy”. (Also, nitpicking, the \n> |OptimizeDestinationImageAlreadyExists| does not trigger on some code \n> paths that were originally thought to be too hard or too rare; it’s \n> not a reliable way to tell that the image has /not/ been updated.)\n>\n> To actually implement this as requested, some variant of\n>\n>     Wouldn't it be safer to just run something like |podman inspect -f\n>     '{{.Id}}' $IMAGE| before and after the pull and compare if they\n>     are different?\n>\n> (or possibly getting the image ID before pull, and the image ID that \n> is the outcome of pull and returned by |copy.Image|) would be \n> necessary, whether outside Podman or as a built-in Podman feature \n> providing an API-exposed (CLI-automation-consumable?) value.\n>\n> —\n> Reply to this email directly, view it on GitHub \n> <https://github.com/containers/podman/issues/13582#issuecomment-1137751255>, \n> or unsubscribe \n> <https://github.com/notifications/unsubscribe-auth/AAPIPQ45X5D3HQBTQUYGPHDVLZ3GVANCNFSM5RIB4SRQ>.\n> You are receiving this because you commented.Message ID: \n> ***@***.***>\n>\n"
+        },
+        {
+            "user": "mtrmac",
+            "body": "> If you feel the code is buggy, then that is reasonable to leave off.\n\nI’d not _known_ to be buggy. It just wasn’t originally made with pulls in mind, so it might need a look in that situation. (That was just a minor pushback to the idea that trying the option is a way to tell whether it works correctly.)\n\n> I would have thought that this flag would optimize pulling of images, but if you don't believe it will ,then what is the purpose of the flag?\n\nIt doesn’t “optimize pulling” to be always better; if that were possible, we would just make that the default behavior and not an option. It’s users’ choice of a trade-off to make pulls of already-present images faster, by making pulls of not-yet-present images slower. It is, probably (no data), usually the wrong trade-off — but for pulls, assuming local storage accesses are negligible, it might be worth it.\n\n\n> Find then should it be added a customizable field in registries.conf?\n\nNo, it’s not a per-registry trade-off either. It’s a per-user-behavior + per-repo-management-policy trade-off. The same repo might benefit from that flag when used by a frequent puller, and not benefit from it when used by a rare puller, or by someone who deletes pulled images.\n\n>  I am not necessarily looking to solve this issue, but more to the fact that a fancy new option was brought to my attention and I want to know if it actually Optimizes anything\n\nhttps://github.com/containers/image/blob/89f33ce0559760ee07567e00bb6dc0753b2468b2/copy/copy.go#L163-L165"
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@vrothberg @mtrmac What should we do with this issue?"
+        },
+        {
+            "user": "mtrmac",
+            "body": "See the end of https://github.com/containers/podman/issues/13582#issuecomment-1137751255 for what I think makes sense doing. I’m not going to work on making that a Podman-integrated feature for the foreseeable future."
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "vrothberg",
+            "body": "I think `podman pull` should receive a new `--policy` flag that does the same as `podman create --pull` (i.e., pull should support pull policies).  This way, user can do a `podman pull --policy=newer`.  If an image gets pulled, it's newer.  No need to parse a progress bar."
+        },
+        {
+            "user": "rhatdan",
+            "body": "SGTM"
+        },
+        {
+            "user": "mtrmac",
+            "body": "@vrothberg At least the original report mentions automation; so _assuming_ that is an important constraint (which we haven’t had explicitly confirmed, to be fair) there should be some way for the code invoking Podman to tell whether the image was pulled… maybe an exit code? OTOH a pull “succeeding” with a non-zero exit code seems unexpected.\n\nI’m also not sure that users who ask “was a new image pulled” are going to look for an option driving _when_ we decide to pull an image. That feels fairly indirect to me.\n\nUltimately the user can already do this via https://github.com/containers/podman/issues/13582#issuecomment-1074898678 and I’m not sure any new option is going to make this _significantly_ easier.\n\n---\n\n… actually, more than a year after filing the original report… I am very unclear on why this is desirable at all. I mean, either the consumer needs a fresh image, and the unavoidable cost is having to pull, or the consumer doesn’t need a fresh image, and then pulling is not worth the extra effort.\n\nWhat _decision_ is going to be made based on whether a new image was pulled? Especially when that information is only available _after_ the fact, i.e. after the costly time etc. to pull an image was already <s>pulled</s> spent.\n\n@andrin55 could you clarify what decision do you plan to make based on pulling a new image, please? And to be explicit, is it scripted or by a human visually inspecting text?"
+        },
+        {
+            "user": "andrinbr",
+            "body": "@mtrmac the idea behind the additional output is to run \"podman pull\" in a shell script or ansible playbook and determine based on the returned output if the container needs to be recreated. \n\nAdditionally it would provide a more user friendly way to inform the user that a new image was downloaded instead of comparing the hash manually. "
+        },
+        {
+            "user": "mtrmac",
+            "body": "@andrin55 Thanks, that use case definitely makes sense.\n\nIt seems to me it doesn’t really matter whether _this pull_ pulled a different image — the question to ask is whether an image (which exists locally? or should this be asked about an image which is still on the registry and not yet pulled?) differs from the image currently running in the container. E.g. suppose the `:latest` tag is moved to a newer version, and then, due to a critical problem, rolled back to a previous one. In that case, [assuming for some reason that a previous pull did not trigger a container restart, e.g. because a script was aborted] even if the pull of the rollback did fetch a “new” (i.e. a different) image, if it is rolled back exactly to the image already running in the container, the container should not be restarted."
+        },
+        {
+            "user": "vrothberg",
+            "body": "It is very similar (identical?) to what `podman auto-update` does.  An image will pulled (and a container using it updated) if the image on the registry differs (i.e., has a different digest).\n\nI still believe we need something like `podman pull --policy=newer` since `podman pull` will otherwise always pull the image."
+        },
+        {
+            "user": "mtrmac",
+            "body": "@vrothberg What’s the difference between fetching metadata, and not pulling the image because the image is locally available, and between always pulling the image, but upon reading the metadata, detecting the layers and the config are all present locally, and nothing needs to be written to storage?\n\nTo me, that’s almost a distinction with no difference. Strictly speaking, the set of metadata and the set of HTTP request is a bit different, and the progress messages obviously differ, but the net end-user effect is the same. Conceptually, a “check + pull if newer” should never _need_ to be faster than “pull + optimize”. We aren’t quite there (e.g. we always fetch the config), but if did have that performance characteristic, why make the user think whether `--policy=newer` should be used?"
+        },
+        {
+            "user": "vrothberg",
+            "body": "> @vrothberg What’s the difference between fetching metadata, and not pulling the image because the image is locally available, and between always pulling the image, but upon reading the metadata, detecting the layers and the config are all present locally, and nothing needs to be written to storage?\n\nI don't see a big difference.\n\n> [..] why make the user think whether --policy=newer should be used?\n\nI don't feel strongly.  A `--policy=newer` seems straight forward to script as _any_ output indicates that something got pulled."
+        },
+        {
+            "user": "mailinglists35",
+            "body": "tl;dr what's a non-simple way to check if my cached image is the same or different from upstream image?"
+        },
+        {
+            "user": "rhatdan",
+            "body": "skopeo inspect of remote image and compare ID to local image?"
+        },
+        {
+            "user": "gvenzl",
+            "body": "I just ran into this issue as well and would be grateful if there was an easy way to verify if the cached images is different from upstream."
+        },
+        {
+            "user": "yeroc",
+            "body": "Running into this myself as well.  Similar use case to the one mentioned where we're doing automation and need to know whether to restart the service based on whether or not a pull resulted in a new image."
+        },
+        {
+            "user": "arrfab",
+            "body": "I'd like see something at least documented too.\nI have a workflow where a script (itself triggered by some other systemd unit) is supposed to do this :  `podman run --pull=newer` and when testing that interactively (shell) it seems to indeed check remotve tag and then pull (if newer on registry) but it doesn't seem to work as local image for same unprivileged user when script it called through other service (no shell).\nAre we doing something wrong ? \nWould something be needed to ensure image would be always verified if :latest tag is updated upstream and so automatically being pulled ? What's the best way to do this ? :) \n"
+        }
+    ]
+}

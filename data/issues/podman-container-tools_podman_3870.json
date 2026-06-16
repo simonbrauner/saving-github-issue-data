@@ -1,0 +1,102 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 3870,
+    "title": "podman-remote rmi: device or resource busy",
+    "state": "closed",
+    "labels": [
+        "locked - please file new issue/PR"
+    ],
+    "user": "edsantiago",
+    "body": "@cevich is seeing frequent system-test errors [\\[1\\]](https://cirrus-ci.com/task/4956166604455936?command=system_test#L180) with podman-remote\n```\n$  ./bin/podman-remote rmi -f build_test\n# Error: error removing containers [10b343023c7d6187aa521fad47934b5d558adc53964ab491017e34d909782751] for image \"8659137a98bd8c7f3528c1c2c09a0fc8115bc32ce7659bc7a1d31b7d73dd3029\": could not remove container \"10b343023c7d6187aa521fad47934b5d558adc53964ab491017e34d909782751\": remove /var/lib/containers/storage/overlay-containers/10b343023c7d6187aa521fad47934b5d558adc53964ab491017e34d909782751/userdata/shm: device or resource busy\n```\nThis is (I think) Ubuntu. I cannot reproduce on my Fedora laptop, even running the varlink server with `nice 19` and even with cores disabled to emulate a slow system. My attempted reproducer is a simplified variant of the `build` system test:\n```bash\n#!/bin/bash\n\nset -xe\n\ntmpdir=$(mktemp -d --tmpdir podman-remote-test.XXXXXX)\ncat >$tmpdir/Dockerfile <<EOF\nFROM quay.io/libpod/alpine_labels:latest\nRUN apk add nginx\nRUN echo hi >/myfile\nEOF\n\npr() { /path/to/podman-remote \"$@\"; }\n\nwhile :;do\n    pr build -t build_test --format=docker $tmpdir\n    pr run --rm build_test cat /myfile\n    pr rmi -f build_test\ndone\n```\nMy only guess is that this might be a race condition with `podman-remote run --rm`: does anyone know if it is guaranteed to block?\n\nmaster @ 1ad8fe52412c8cef215e5a5af312e5db680c3916. I am sorry for not being able to reproduce it but Chris seems to run into it constantly.",
+    "comments": [
+        {
+            "user": "cevich",
+            "body": "Thanks Ed.\n\nThinking about this more, I'm not seeing those particular failures anywhere else.  So there must be something _special_ about PR #3754.  That could simply be new/different VM imges - including images with embedded bugs.\n\nNote: The two failures are on F29 and F30 (not Ubuntu) images:\n\n* `fedora-30-libpod-5420341990522880`\n* `fedora-29-libpod-5420341990522880`\n\nI'll try your reproducer (above) using those images vs what we have on master..."
+        },
+        {
+            "user": "cevich",
+            "body": "@edsantiago good news is, I was able to reproduce the error using your script above and the F30 VM image from my PR.  Trying the VM image from master (expecting no error) now..."
+        },
+        {
+            "user": "cevich",
+            "body": "...as expected, no error using the VM image from master (fedora-30-libpod-5751722641719296).\n\nExcellent, so now (hopefully) it's a matter of comparing differences. Since the libpod code is common in both VMs, they're running in the same cloud-environment, so there must be a configuration or packaging difference or something like that."
+        },
+        {
+            "user": "cevich",
+            "body": "Same on both VMs:\n\n* `libvarlink-util-18-1.fc30.x86_64`\n* `container-selinux-2.113.0-1.dev.git4f7d6bb.fc30.noarch`\n* `runc-1.0.0-93.dev.gitb9b6cc6.fc30.x86_64`\n* `systemd-241-10.git511646b.fc30.x86_64`\n* `slirp4netns-0.4.0-4.git19d199a.fc30.x86_64`\n* `containernetworking-plugins-0.8.1-1.fc30.x86_64`\n* `containers-common-0.1.37-2.fc30.x86_64`\n\nhrmmmmm."
+        },
+        {
+            "user": "cevich",
+            "body": "Ran reproducer again, and it worked fine for a while, failing after maybe 10 passes.  So there's def. some race condition here that's somehow more likely with the images in my PR vs from master, even with the exact same libpod code :confounded: \n\nMaybe I should try taking the podman and podman-remote binaries from the breaking-VM over to the working-VM to see if the behavior moves/changes?\n\nNot sure what else could be involved here, @mheon have any ideas?"
+        },
+        {
+            "user": "cevich",
+            "body": "confirmed: it's not the binaries, behavior remains the same after copying from breaking -> working VM.\n\nNoticed this difference though, the breaking VM is running `kernel-5.2.8-200` vs working VM (from master) is using `kernel-5.2.7-200`.  Going to try upgrading that kernel, rebooting, and see if the problem starts happening..."
+        },
+        {
+            "user": "cevich",
+            "body": "JJF**($!!343$hg80*&#//**** :angry: \n\nupdated both VMs to `5.2.9-200.fc30.x86_64` rebooted, but the pattern remains: Problem reproduces on `fedora-30-libpod-5420341990522880` but not `fedora-30-libpod-5751722641719296`."
+        },
+        {
+            "user": "rhatdan",
+            "body": "This could definitely cause a race.\n    pr build -t build_test --format=docker $tmpdir\n    pr run --rm build_test cat /myfile\nWhen this command finishes the image is still mounted.  conmon will execute `podman container cleanup`, but after the run command finishes.\n    pr rmi -f build_test\nIf this command executes before `podman container cleanup` finishes you can get this error. "
+        },
+        {
+            "user": "rhatdan",
+            "body": "@mheon Is my assumption correct.  Does podman container cleanup take care of the --rm as well?"
+        },
+        {
+            "user": "edsantiago",
+            "body": "Thanks @rhatdan. If this is the case, would it be possible to have `run --rm` block until conmon finishes cleanup?\n\nAnd if that's not possible, I'd like to request a clear documentation update stating something like:\n\n     podman-remote run --rm actually means \"remove the container some time in\n     the future, not necessarily now\", and is not actually guaranteed to remove\n     the container. If you actually want to deterministically remove the container,\n     perhaps because you want to rmi its parent container, please run [some sort\n     of TBI command that blocks until container is removed]"
+        },
+        {
+            "user": "rhatdan",
+            "body": "Yes I agree it should be cleaned up, but I am not sure if my theory is correct.\n"
+        },
+        {
+            "user": "mheon",
+            "body": "`podman run --rm` should, if attached (not run with `-d`), block until container removal is complete. I don't think there's a potential for races, either."
+        },
+        {
+            "user": "rhatdan",
+            "body": "Well @edsantiago is seeing what looks like a race when using the varlink connection."
+        },
+        {
+            "user": "edsantiago",
+            "body": "Small correction: I've never seen it; only @cevich has seen it. "
+        },
+        {
+            "user": "cevich",
+            "body": "@mheon wrong answer.  The correct answer is: Oh, I saw this problem yesterday and just merged a fix :grinning: \n\n@mheon remember this is podman-remote -> podman.  Perhaps podman-remote is exiting before podman/conmon finish their job?\n\nWith Ed's reproducer script, this very reliably reproduces for me (using hack/get_ci_vm.sh on the images mentioned).  Would running in debug mode help at all?  How can we prove/disprove Dan's theory?  Or maybe is there a way we can tell the audit subsystem to log process-exits (with timestamps)?\n"
+        },
+        {
+            "user": "cevich",
+            "body": "@mheon I managed to catch this in the act by instrumenting the system-test that reproduces it:\n\n```diff\n--- a/test/system/070-build.bats\n+++ b/test/system/070-build.bats\n@@ -26,9 +26,11 @@ EOF\n     PODMAN_TIMEOUT=240 run_podman build -t build_test --format=docker $tmpdir\n     is \"$output\" \".*STEP 4: COMMIT\" \"COMMIT seen in log\"\n \n+    run_podman ps -a\n     run_podman run --rm build_test cat /$rand_filename\n     is \"$output\"   \"$rand_content\"   \"reading generated file in image\"\n \n+    run_podman ps -a\n     run_podman rmi -f build_test\n }\n \n```\n\nYou can see what the test is doing in the diff.  When it reproduces, it happens on that last rm -f line:\n\n```\n[+0100s] not ok 28 podman build - basic test\n[+0100s] # (from function `die' in file test/system/helpers.bash, line 264,\n[+0100s] #  from function `run_podman' in file test/system/helpers.bash, line 164,\n[+0100s] #  in test file test/system/070-build.bats, line 34)\n[+0100s] #   `run_podman rmi -f build_test' failed with status 2\n[+0100s] # $ ./bin/podman-remote rm --all --force\n[+0100s] # $ ./bin/podman-remote images --all --format {{.Repository}}:{{.Tag}} {{.ID}}\n[+0100s] # quay.io/libpod/alpine_labels:latest   4fab981df737\n[+0100s] # $ ./bin/podman-remote build -t build_test --format=docker /tmp/podman_bats.hPzLvX/build-test\n[+0100s] # STEP 1: FROM quay.io/libpod/alpine_labels:latest\n[+0100s] # STEP 2: RUN apk add nginx\n[+0100s] # fetch http://dl-cdn.alpinelinux.org/alpine/v3.8/main/x86_64/APKINDEX.tar.gz\n[+0100s] # fetch http://dl-cdn.alpinelinux.org/alpine/v3.8/community/x86_64/APKINDEX.tar.gz\n[+0100s] # (1/2) Installing pcre (8.42-r0)\n[+0100s] # (2/2) Installing nginx (1.14.2-r1)\n[+0100s] # Executing nginx-1.14.2-r1.pre-install\n[+0100s] # Executing busybox-1.28.4-r1.trigger\n[+0100s] # OK: 6 MiB in 15 packages\n[+0100s] # 27af317be9360cdb9cf9ec92e3852518e34831223001012fb28aaf496d2462ff\n[+0100s] # STEP 3: RUN echo UkyW3wKhN0Uk8z1zdTzgjXxyUypI0WBjXmaKij34vb2vC9cHA2 > /UdFKEYczgNKHkBKXaNwL\n[+0100s] # STEP 4: COMMIT build_test\n[+0100s] # 102f5447866173d6e131165b85c0955f970cba4d5f2197cd40e1bd506824ce78\n[+0100s] # $ ./bin/podman-remote ps -a\n[+0100s] # CONTAINER ID  IMAGE  COMMAND  CREATED  STATUS  PORTS  NAMES\n[+0100s] # $ ./bin/podman-remote run --rm build_test cat /UdFKEYczgNKHkBKXaNwL\n[+0100s] # UkyW3wKhN0Uk8z1zdTzgjXxyUypI0WBjXmaKij34vb2vC9cHA2\n[+0100s] # $ ./bin/podman-remote ps -a\n[+0100s] # CONTAINER ID  IMAGE                        COMMAND               CREATED                 STATUS                             PORTS  NAMES\n[+0100s] # e32470ce70ef  localhost/build_test:latest  cat /UdFKEYczgNKH...  Less than a second ago  Exited (0) Less than a second ago         keen_cohen\n[+0100s] # $ ./bin/podman-remote rmi -f build_test\n[+0100s] # Error: error removing containers [e32470ce70ef1fabf805c6db9d2bdb763bb0b802e79ac6d2a8b38e21171ac8e4] for image \"102f5447866173d6e131165b85c0955f970cba4d5f2197cd40e1bd506824ce78\": could not remove container \"e32470ce70ef1fabf805c6db9d2bdb763bb0b802e79ac6d2a8b38e21171ac8e4\": unlinkat /var/lib/containers/storage/overlay-containers/e32470ce70ef1fabf805c6db9d2bdb763bb0b802e79ac6d2a8b38e21171ac8e4/userdata/shm: device or resource busy\n[+0100s] # [ rc=2 (** EXPECTED 0 **) ]\n[+0100s] # #/vvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv\n[+0100s] # #| FAIL: exit code is 2; expected 0\n[+0100s] # #\\^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n```\n\nSo clearly a race here ***is*** possible, but perhaps (somehow) more likely when podman-remote is being used?\n\nis it impossible for the `run ... --rm` to verify removal before exit?\n\n[(ref. cirrus task)](https://cirrus-ci.com/task/6575890999279616)"
+        },
+        {
+            "user": "mheon",
+            "body": "Have we ever seen this without remote being involved? This should not be possible for local Podman."
+        },
+        {
+            "user": "cevich",
+            "body": "@mheon As best as I can recall, I have not seen it.  Even with podman-remote it doesn't always happen.  Is it possible for podman-remote to special-case this, and verify removal happens before exiting (assuming there was no networking-error)?"
+        },
+        {
+            "user": "rhatdan",
+            "body": "Looking at the difference between pkg/adapter/containers.go and pkg/adapter/containers_remote.go.\nContainers.go has a call to \n\n```\t\nif ecode, err := ctr.Wait(); err != nil {\n```\n\nAnd containers_remote.go does not.  I would guess this is the issue."
+        },
+        {
+            "user": "mheon",
+            "body": "Oh. That sounds like it."
+        },
+        {
+            "user": "cevich",
+            "body": "Oh that's a HUGE relief, thanks @rhatdan !"
+        },
+        {
+            "user": "mheon",
+            "body": "Closing as #3934 is merged"
+        }
+    ]
+}

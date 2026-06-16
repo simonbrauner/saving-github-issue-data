@@ -1,0 +1,50 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 15128,
+    "title": "FR: Rollback of podman auto-update shall include volume contents",
+    "state": "closed",
+    "labels": [
+        "kind/feature"
+    ],
+    "user": "Zocker1999NET",
+    "body": "<!--\n---------------------------------------------------\nBUG REPORT INFORMATION\n---------------------------------------------------\nUse the commands below to provide key information from your environment:\nYou do NOT have to include this information if this is a FEATURE REQUEST\n\n**NOTE** A large number of issues reported against Podman are often found to already be fixed\nin more current versions of the project.  Before reporting an issue, please verify the\nversion you are running with `podman version` and compare it to the latest release\ndocumented on the top of Podman's [README.md](../README.md).  If they differ, please\nupdate your version of Podman to the latest possible and retry your command before creating\nan issue.\n\nAlso, there is a running list of known issues in the [Podman Troubleshooting Guide](https://github.com/containers/podman/blob/main/troubleshooting.md),\nplease reference that page before opening a new issue.\n\nIf you are filing a bug against `podman build`, please instead file a bug\nagainst Buildah (https://github.com/containers/buildah/issues). Podman build\nexecutes Buildah to perform container builds, and as such the Buildah\nmaintainers are best equipped to handle these bugs.\n-->\n\n**Is this a BUG REPORT or FEATURE REQUEST? (leave only one on its own line)**\n\n/kind feature\n\n**Description**\n\nIt would be great if `podman auto-update` could also backup the volume's contents of the container and rollback those as well if the container fails to start. This could help to mitigate problems arising if e.g. the new container version tried to migrate the databases to a new version and failed unexpectedly.\n\nThis should only affect read-write mounted volumes as other volumes could not be damaged by the updated version. Volumes with a certain label might be ignored as well (e.g. because it is not expected to be affected negatively by the update).\n\nThe feature may require volumes to only be mounted into the one container which should be updated as otherwise other containers might fail because of the unexpected rollback. This requirement might be lifted by adding a special label to the volume (e.g. if other containers are expected to handle such changes correctly).\n\nThis feature may be optional and disabled by default to not break the current expectation of auto-update just ignoring the volumes.",
+    "comments": [
+        {
+            "user": "mheon",
+            "body": "Could potentially be handled by checkpointing the container and then restoring that checkpoint if the update fails"
+        },
+        {
+            "user": "Luap99",
+            "body": "I think this is an interesting use case but it it looks hard to get right.\n\n> The feature may require volumes to only be mounted into the one container which should be updated as otherwise\n\nWell this does still not mean the the volume is not used by others. It can still be used by other users or applications on the host.\n\nAnother problem would be where to store the backup? We need to duplicate all data which is expensive and it could run out of disk space.\n\n\nAlso should this work for all volumes (including normal bind mounts `-v /data:/data`) or only named volumes?\n\n\nI think the only way that would reasonable work is if it is opt in and configurable on a per volume basis (using a volume labels can work but will exclude bind mounts)\n\n\nAlso the rollback functionality is based on sdnotify, see https://docs.podman.io/en/latest/markdown/podman-auto-update.1.html#rollback\nSo your container has to use sdnotify and only sends the READY message after it changes volume content in order for this feature to make sense.\n\n\n@vrothberg WDYT?"
+        },
+        {
+            "user": "Zocker1999NET",
+            "body": "> Also should this work for all volumes (including normal bind mounts `-v /data:/data`) or only named volumes?\n\nI thought about excluding bind mounts for the beginning as there it isn't easy to check whether other apps are also accessing the data.\n\n> It can still be used by other users or applications on the host.\n\nIn theory, yes, but I would assume that volumes shall only be accessed by podman containers."
+        },
+        {
+            "user": "vrothberg",
+            "body": "The use case sounds convincing and I am interested in finding a solution.  I am not an expert in database, so I do not know how common this scenario is.  I would expect that such updates are idempotent but there may be other scenarios.\n\nIt's definitely a feature where users \"know what they are doing\"."
+        },
+        {
+            "user": "rhatdan",
+            "body": "This would seem to scream out for some kind of checkpointing/snap shooting file system like BTRFS. Could this be done in a Volume Driver which could take a snapshot on update?"
+        },
+        {
+            "user": "Luap99",
+            "body": ">  I am not an expert in database, so I do not know how common this scenario is.\n\nI would say that it is definitely common that applications change the database schema on updates, making a rollback impossible. We even did this in Podman v4.\nHowever the problem is that this is often done by another application.\n\nLets consider my nextcloud setup:\nI have a nextcloud instance on my server. This contains a nextcloud db container and another nextcloud application container (webserver with php)\n\nWhen I update nextcloud it will often update the db. Now if the nextcould update fails for some reason and we get a rollback it might fail because the db schema was already updated. (AFAIK nextcoud does not support sdnotify so this is just an imaginary example)\n\nThe reason I bring this use case up is because often the dependencies go across containers. In this case restoring volumes on the nexcould container would not help, we would have to stop the db container make a backup resume the db now update nexcloud if it fails stop the db, restore db backup, start db, downgrade nextcloud.\n\nOf course if we limit it to volumes for the updated container it will be simpler but also will not work in scenarios where the db and application are separated.\n\n-----\n\n> This would seem to scream out for some kind of checkpointing/snap shooting file system like BTRFS. Could this be done in a Volume Driver which could take a snapshot on update?\n\nYes that would make things a lot more performant and we would avoid duplication.\n"
+        },
+        {
+            "user": "vrothberg",
+            "body": "> This would seem to scream out for some kind of checkpointing/snap shooting file system like BTRFS. Could this be done in a Volume Driver which could take a snapshot on update?\n\nDeferring that to volume drivers would be very nice and easy to plug into auto updates."
+        },
+        {
+            "user": "Zocker1999NET",
+            "body": "> However the problem is that this is often done by another application.\n\nI would exclude supporting this scenario from this feature, as that depends on the composing of the containers, which Podman is not aware of. podman-compose or Kubernetes are aware of that and so IMO would need to handle that (or additional tools which are aware of the composing as well).\n\nIt sounds nice to be able to checkpoint volumes, maybe this could also exposed as own features (`volume commit` & `volume restore`), which auto-update then uses.\n\nFor the local driver on a FS without native copy-on-write support, maybe overlayfs could be used?"
+        },
+        {
+            "user": "rhatdan",
+            "body": "I actually think that would be a nice advance to podman volume support.  Good idea.\nPodman does support kubernetes.YAML file so the question is does Kubernetes support something in the YAML file to tell us to snap shot and restore volumes, or is this something handled by a controller?"
+        }
+    ]
+}

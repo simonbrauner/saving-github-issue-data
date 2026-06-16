@@ -1,0 +1,150 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 14531,
+    "title": "Active podman process blocks system reboot/shutdown ",
+    "state": "closed",
+    "labels": [
+        "locked - please file new issue/PR"
+    ],
+    "user": "1player",
+    "body": "**Is this a BUG REPORT or FEATURE REQUEST? (leave only one on its own line)**\n\n/kind bug\n\n**Description**\n\nAn active podman process is unable to be cleanly stopped by systemd reboot/shutdown, and thus has to be killed after the 2min grace period expires.\n\n**Steps to reproduce the issue:**\n\n1. `podman run -it docker.io/library/busybox`\n2. Inside the container: `sleep infinity`\n3. Reboot the system\n\n**Describe the results you received:**\n\nShutdown procedure hangs for ~2 minutes because podman can't be stopped. Then podman is killed and shutdown is complete.\n\n**Describe the results you expected:**\n\nThe podman container to be cleanly terminated as the system shuts down.\n\n**Package info (e.g. output of `rpm -q podman` or `apt list podman`):**\n\npodman-4.1.0-1.fc36.x86_64\n\n**Have you tested with the latest version of Podman and have you checked the Podman Troubleshooting Guide? (https://github.com/containers/podman/blob/main/troubleshooting.md)**\n\nYes\n\n**Additional environment details (AWS, VirtualBox, physical, etc.):**\n\nExperienced this issue on Fedora Workstation 36 and Fedora Silverblue 36.\n\nDownstream bug reports: \n\n* podman: https://bugzilla.redhat.com/show_bug.cgi?id=2084498 \n* toolbox: https://bugzilla.redhat.com/show_bug.cgi?id=2081664",
+    "comments": [
+        {
+            "user": "vrothberg",
+            "body": "Thanks for reaching out, @1player.\n\nI don't think there is much Podman can do. `sleep` in busybox does not seem to respond to SIGSTOP, so systemd has to wait for the grace period to end until it can kill the process."
+        },
+        {
+            "user": "Luap99",
+            "body": "I agree, it is best to call `podman stop` before shutdown. This uses a 10 seconds timeout before sending SIGKILL, can be changed with `-t`"
+        },
+        {
+            "user": "rhatdan",
+            "body": "I wrote this in bugzilla too:\nhttps://bugzilla.redhat.com/show_bug.cgi?id=2084498\n```\nI believe that podman run/start should catch SIGTERM and then execute podman stop on its pods/containers. This would cause the containers to exit properly or exit after 10 seconds.\nThis might be a slight deviation from Docker in some corner cases, but I believe this is the right behaviour. Especially if a container is running with a STOP_SIGNAL that is different\nthen SIG_TERM.  In the common case where a container is sending SIG_TERM, there is no change except the container gets killed after 10 seconds.  In the case where STOP_SIGNAL is set\nthen the container has a chance to close cleanly (systemd based containers for example). \nThe only case that really changes is a corner case where user expects SIGTERM of Podman to send SIGTERM to container, when the container is not useing STOP_SIGNAL==SIGTERM.  In this case\nusers could just call `podman kill --signal SIGTERM $CTR`\n\nFrom a user point of view, I think this is the most user friendly way to handle this.\n```"
+        },
+        {
+            "user": "vrothberg",
+            "body": "@rhatdan, I don't think that would help in this scenario.\n\nIf there's a container running that does not adhere to sigterm/stop etc. Then systemd is blocked on the process. \n\nWe could think of a `podman-shutdown.service` that is being called on shutdown though."
+        },
+        {
+            "user": "rhatdan",
+            "body": "Whell it would exit with a SIGKILL after 10 seconds.  Having a podman-shutdown.service might make some sense and do a \npodman pod stop --all\npodman stop --all\n"
+        },
+        {
+            "user": "mheon",
+            "body": "Stop timeout is also user-configurable, so someone could theoretically have a container with a stop timeout of 90 seconds to ensure their container always has time to perform its safe shutdown routine, but that would still stall the system for 90 seconds on shutdown, potentially."
+        },
+        {
+            "user": "1player",
+            "body": "> I don't think there is much Podman can do. `sleep` in busybox does not seem to respond to SIGSTOP, so systemd has to wait for the grace period to end until it can kill the process.\n\nI think the `sleep` in my example is a red herring. I notice this problem every time I use `toolbox` on a Fedora machine. Whenever I reboot, systemd complains it's not able to stop podman.\n\nI have switched to `distrobox` since, and I have the same problem. Should these two utilities pass some special option to podman to avoid this?"
+        },
+        {
+            "user": "1player",
+            "body": "Sorry for double posting, but please also note this comment of mine from https://bugzilla.redhat.com/show_bug.cgi?id=2081664#c2\n\n> As additional details, journalctl suggests that the hung shutdown is caused by /usr/bin/conmon not responding to signals. It only seems to be stuck when running an interactive process.\n> Example:\n> If I run `toolbox run sleep infinity`, the toolbox container can be stopped immediately with `podman stop` or sending SIGINT to the conmon process.\n> If I run `toolbox run /bin/sh`, the toolbox container CANNOT be stopped by `podman stop` (fails with: \"container  has active exec sessions, refusing to clean up: container state improper\"), and conmon doesn't respond to SIGINT.\n\nIs this happening because of podman \"refusing to clean up\"?\n\n\n"
+        },
+        {
+            "user": "vrothberg",
+            "body": "> I have switched to distrobox since, and I have the same problem. Should these two utilities pass some special option to podman to avoid this?\n\nI would expect the tools to manage the containers and call `podman stop`.\n\n> Is this happening because of podman \"refusing to clean up\"?\n\nThat may explain _why_ the containers are still running: `podman stop` failed."
+        },
+        {
+            "user": "Meister1593",
+            "body": "Is issue still tracked? This is quite annoying bug, is there a workaround?\nForcefully killing containers through scripts at least."
+        },
+        {
+            "user": "vrothberg",
+            "body": "> Is issue still tracked? This is quite annoying bug, is there a workaround? Forcefully killing containers through scripts at least.\n\nThe issue in https://github.com/89luca89/distrobox/issues/340 looks different than the one discussed here:\n\n> container has active exec sessions, refusing to clean up: container state improper\n\nI do not know what distrobox does but it needs to exit from all exec sessions before.  At the moment, I don't see how this relates to the initial bug here when the container ignores a signal and gets killed after a grace period."
+        },
+        {
+            "user": "1player",
+            "body": "This is not limited to distrobox. podman exhibits the exact same behaviour. It seems that running some applications inside the container puts it in a state that podman/conmon refuses to stop it gracefully upon system shutdown.\n\nI run emacs and pretty much all my dev tools inside a distrobox container, and most times it hangs on shutdown, but sometimes it doesn't.\n\nI do not understand, as explained in https://github.com/containers/podman/issues/14531#issuecomment-1150028469, why running `toolbox run /bin/sh` is reason enough for `podman stop` to quit working. I imagine the `sh` process would answer to a SIGTERM, and thus terminating a container should be possible.\n\nMaybe it is caused by subshells spawned inside the container, which causes podman to refuse terminating it, hence the delay until SIGKILL is called."
+        },
+        {
+            "user": "Luap99",
+            "body": "It is your container process that is not responding to the signal, AFAIK shells do not shutdown on SIGTERM."
+        },
+        {
+            "user": "1player",
+            "body": "> It is your container process that is not responding to the signal, AFAIK shells do not shutdown on SIGTERM.\n\nAre you saying that this is a toolbox and distrobox bug, and not podman?"
+        },
+        {
+            "user": "Luap99",
+            "body": "yes, what is podman/systemd supposed to do when you container process does not shutdown on a normal stop signal, i.e. SIGTERM. So the only thing to do is to wait and send SIGKILL after timeout. You can change the stop signal and timeout with `--stop-signal` and `--stop-timeout` but I guess this only works when it is stopped via podman and not if systemd tries to kill it.\n"
+        },
+        {
+            "user": "1player",
+            "body": "> yes, what is podman/systemd supposed to do when you container process does not shutdown on a normal stop signal, i.e. SIGTERM. So the only thing to do is to wait and send SIGKILL after timeout. You can change the stop signal and timeout with `--stop-signal` and `--stop-timeout` but I guess this only works when it is stopped via podman and not if systemd tries to kill it.\n\nSorry for being obtuse, but then why podman just throws its hands in the air and says `container has active exec sessions, refusing to clean up: container state improper` when running `podman stop`? It looks like it's refusing to do anything, not that it has sent a signal and nothing has responded. "
+        },
+        {
+            "user": "Luap99",
+            "body": "I think you have to stop all exec session before, not sure if podman stop should to do that. @mheon might know that better? "
+        },
+        {
+            "user": "mheon",
+            "body": "Podman stop should do it. This is probably a distinct issue. Open a new bug with the full template filled out, please."
+        },
+        {
+            "user": "1player",
+            "body": "Is it really a distinct issue? As I described above, this seems to be the cause of this problem. Podman refusing to stop a container because \"it has active exec session\", thus causing issues with toolbox, thus causing shutdown issues.\n\nThere are no particular logs to see, except that upon shutdown, journalctl points out that `conmon` had to be SIGKILL'd, as I mentioned above. I've provided a simple reproduction example, not sure what more can I do.\n\nHere's the gist of it: a podman container should always be able to be stopped, except in case of an unresponsive process, which I would expect `podman stop` to send a SIGKILL in that case. But otherwise, `podman stop` should stop a container, and not complain about \"active exec sessions\" which I'm not sure I understand what it means concretely."
+        },
+        {
+            "user": "mheon",
+            "body": "Are you certain Podman is refusing to *stop* the container? That error message doesn't read as a stop error to me, but a cleanup error. The container should have exited at this point, Podman is just having trouble cleaning up after it."
+        },
+        {
+            "user": "mheon",
+            "body": "Given this, it definitely smells like a different issue. Podman is seemingly having trouble handling cleanup on containers as the system shuts down, which is distinct from this issue where Podman takes a long time to kill containers that refuse to gracefully exit, causing shutdown to hang."
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@vrothberg @giuseppe @mheon Do any of the fixups made recently to deadlocks address this issue?"
+        },
+        {
+            "user": "mheon",
+            "body": "I suspect not.\n\nOn Sat, Jul 30, 2022 at 10:11 Daniel J Walsh ***@***.***>\nwrote:\n\n> @vrothberg <https://github.com/vrothberg> @giuseppe\n> <https://github.com/giuseppe> @mheon <https://github.com/mheon> Do any of\n> the fixups made recently to deadlocks address this issue?\n>\n> —\n> Reply to this email directly, view it on GitHub\n> <https://github.com/containers/podman/issues/14531#issuecomment-1200213122>,\n> or unsubscribe\n> <https://github.com/notifications/unsubscribe-auth/AB3AOCG2LNWDWU6WJOWAIM3VWVAZVANCNFSM5YGNWQ2A>\n> .\n> You are receiving this because you were mentioned.Message ID:\n> ***@***.***>\n>\n"
+        },
+        {
+            "user": "1player",
+            "body": "BTW, Fedora is supposed to shorten the timeout before unresponsive processes are SIGKILLed [from 2 minutes down to 15 seconds](https://pagure.io/fedora-workstation/issue/163), so if this is still open when that change ships, users won't notice anything during shutdown but containers will still be killed forcefully.\n\nAs a big toolbox/distrobox user, I get this issue 4 out of every 5 times I reboot my workstation, and I don't keep any long running services inside the container."
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "1player",
+            "body": "This is still an issue and making life on Fedora Silverblue more painful than it needs to be."
+        },
+        {
+            "user": "vrothberg",
+            "body": "@1player can you share the exact systemd unit that you run Podman in?"
+        },
+        {
+            "user": "queeup",
+            "body": "@vrothberg, you can test it with this container service on Silverblue. It takes 2 min to reboot/shutdown.\n\n- syncthing-test.service\n  - `systemctl --user start syncthing-test.service` \n  - Then reboot.the system.\n\nPS: This is syncthing official container, I didn't add any volume or any published port.\n\nDockerfile: https://github.com/syncthing/syncthing/blob/main/Dockerfile\n\nOnly way to reboot this systemd container service without waiting is use `--no-healthcheck` on podman args.\n\n```ini\n# autogenerated by Podman 4.3.1\n# Tue Dec  6 16:27:12 +03 2022\n\n[Unit]\nDescription=Podman syncthing-test.service\nDocumentation=man:podman-generate-systemd(1)\nWants=network-online.target\nAfter=network-online.target\nRequiresMountsFor=%t/containers\n\n[Service]\nEnvironment=PODMAN_SYSTEMD_UNIT=%n\nRestart=no\nTimeoutStopSec=70\nExecStartPre=/bin/rm \\\n    -f %t/%n.ctr-id\nExecStart=/usr/bin/podman run \\\n    --cidfile=%t/%n.ctr-id \\\n    --cgroups=no-conmon \\\n    --rm \\\n    --sdnotify=conmon \\\n    --replace \\\n    --detach \\\n    --name syncthing-test docker.io/syncthing/syncthing\nExecStop=/usr/bin/podman stop \\\n    --ignore -t 10 \\\n    --cidfile=%t/%n.ctr-id\nExecStopPost=/usr/bin/podman rm \\\n    -f \\\n    --ignore -t 10 \\\n    --cidfile=%t/%n.ctr-id\nType=notify\nNotifyAccess=all\n\n[Install]\nWantedBy=default.target\n``` "
+        },
+        {
+            "user": "vrothberg",
+            "body": "Thanks for sharing, @queeup!  I will take a look tomorrow.  It's surprising to me as the stop-timeout is set to 10.  So the container should - in theory - be killed after 10 seconds."
+        },
+        {
+            "user": "vrothberg",
+            "body": "I can reproduce"
+        },
+        {
+            "user": "vrothberg",
+            "body": "The image ships a health check (see below) so Podman will run it on container start.  But even a simple `alpine top` container with `--health-cmd /bin/ls` causes the boot to timeout/hang.\n\n```JSON\n\"Healthcheck\": {                      \n  \"Test\": [                           \n    \"CMD-SHELL\",                      \n    \"nc -z 127.0.0.1 8384 || exit 1\"  \n  ],                                  \n  \"Interval\": 60000000000,            \n  \"Timeout\": 10000000000              \n},                                    \n```"
+        },
+        {
+            "user": "vrothberg",
+            "body": "I wished having found more time to work on this bug.  One thing I noticed while debugging is that we're stuck on stopping the transient health-check timer.\n\nI hope to find some time tomorrow."
+        },
+        {
+            "user": "vrothberg",
+            "body": "https://github.com/containers/podman/pull/16785 fixes the issue and will make it into Podman 4.4."
+        }
+    ]
+}

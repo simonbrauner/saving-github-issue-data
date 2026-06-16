@@ -1,0 +1,72 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 10726,
+    "title": "Podman should support pulling multiple images in a single command ",
+    "state": "closed",
+    "labels": [
+        "Good First Issue",
+        "kind/feature",
+        "locked - please file new issue/PR"
+    ],
+    "user": "infiniteregrets",
+    "body": "\n**Is this a BUG REPORT or FEATURE REQUEST? (leave only one on its own line)**\n\n/kind feature\n\n**Description**\nCurrently podman pull command accepts only one argument and it would be really nice if it could support pulling images in a single command.\n\n```\n[mehul@fedora bin]$ ./podman pull alpine busybox\nError: accepts 1 arg(s), received 2\n```\nIf someone wants to pull multiple images and if they are not familiar with bash scripting then they might have to do it manually by calling the command over and over. Instead it would be nice to have something like:\n```\npodman pull alpine busybox fedora ubuntu\n```\n\n**Output of `podman version`:**\n\n```\n[mehul@fedora bin]$ ./podman --version\npodman version 3.3.0-dev\n```\nI think this could be a useful feature, but I am not completely sure about it's use case except I felt that it was redundant to type the command again when I was working on something.  I can try to work on this if this is agreed upon! \n\nThank you",
+    "comments": [
+        {
+            "user": "rhatdan",
+            "body": "I don't really see the value in this, since as you say, you could do it with bash.  Also containers/image is going to prevent you from pulling more then 6 layers at a time, so you would not get any more performance.  @vrothberg @mtrmac WDYT?"
+        },
+        {
+            "user": "afbjorklund",
+            "body": "We even had to add a lock* (mutex) when running `load` with exec, since otherwise the simultaneous load would overwhelm the node... When using docker this throttling happened in the daemon, but when forking podman commands we had to do it explicitly. \n\n\\* https://github.com/kubernetes/minikube/commit/98a2a557c584ee5eeae9355a2922bd8fd9da4a48\n\nLike: `kubeadm config images pull`"
+        },
+        {
+            "user": "mtrmac",
+            "body": "Yeah, I don’t quite see the benefit.\n\nIt doesn’t make all that much sense to me to add a command just to avoid iteration, because iteration is a concept that’s going to be needed anyway (e.g. presumably after pulling the images, it will be necessary to run them — and that’s not nearly as easy to do in one command because CLI arguments need to be provided). So there would have to be something _special_ about `podman pull` that makes this useful:\n- Is it very common to pull several images in sequence? Podman maintainers probably have a much better idea, but I don’t expect so: experimentation happens one command ~ one image at a time; any large-scale deployment of many containers would benefit from an automation solution (K8s, compose, Ansible, shell scripts) that hides the details of the CLI format.\n- Would there be performance benefits? I don’t expect anything noticeable; I’d expect pulls to be I/O+decompression-dominated, so just avoiding the process startup overhead to pull one image at a time to be quite negligible (unless we screwed up somewhere, but then we should just fix that instead of papering it over). There really isn’t that much local state, and c/storage state needs to be potentially refreshed every time it drops the relevant locks.\n- As for performance benefits of pulling _in parallel_, first of all, such a mass use should again imply an automation solution that can handle that already, possibly using CRI-O and not Podman. Also, it’s tempting to guess that it would mostly lead to more threads competing over the same resources (and the same c/storage lock), just a waste — but ultimately this needs to be measured, and tuned to the relevant machine. I don’t know whether Podman wants to be in the business of auto-tuning parallelism/load to a machine, it feels like a higher-level task to me (a lowly CLI binary can tell how many threads it could possibly occupy but not not what else runs on the system and what are the trade-offs; even on a 100-CPU machine it might be desirable to only use 1 core for pulling images, favoring availability/performance of the actual application)."
+        },
+        {
+            "user": "afbjorklund",
+            "body": "> Is it very common to pull several images in sequence? \n\nWe use it for caching the Kubernetes images, using the afore-mentioned `kubeadm config images` commands.\nOut of the box it only supports downloading and caching in docker daemon, so did some make / shell wrappers.\n\n```\nUsage:\n  kubeadm config images [flags]\n  kubeadm config images [command]\n\nAvailable Commands:\n  list        Print a list of images kubeadm will use. The configuration file is used in case any images or image repositories are customized\n  pull        Pull images used by kubeadm\n```\n\nIt is more useful to have this possibility when doing \"save\", but I just used `xargs` when doing the \"pull\".\n(The bigger problem was that having multiple images in one archive was broken upstream for a long time)\n\n```make\nimages.txt:\n\t$(KUBEADM) config images list > $@\n\techo \"quay.io/coreos/flannel:v0.13.0\" >> $@\n\nimages.tar: images.txt\n\txargs -n 1 $(DOCKER) pull < $<\n\txargs $(DOCKER) save < $< > $@\n```\n\n----\n\nNever reflected much on it, since \"docker pull\" didn't do it.\n\n```console\n$ docker pull alpine busybox\n\"docker pull\" requires exactly 1 argument.\nSee 'docker pull --help'.\n\nUsage:  docker pull [OPTIONS] NAME[:TAG|@DIGEST]\n\nPull an image or a repository from a registry\n```\n"
+        },
+        {
+            "user": "vrothberg",
+            "body": "I have no objections against supporting pulling more than one image.  The pulls should not happen in parallel but in sequence.  Everything could be handled on the command-level:\n```golang\nfor _, arg := range args {\n    pulledImages, err := Pull(arg, ...)\n}\n```\n\nIn fact, I desired such a feature a number of times already. `podman pull image1, image2, image3` ... grab a coffee ... continue working."
+        },
+        {
+            "user": "vrothberg",
+            "body": "Regarding performance benefits et al:  I thinks it's purely a UX improvement."
+        },
+        {
+            "user": "infiniteregrets",
+            "body": "> In fact, I desired such a feature a number of times already. podman pull image1, image2, image3 ... grab a coffee ... continue working.\n\nExactly, I don't think there is a limit for sequential pulling of images so I think this should exist "
+        },
+        {
+            "user": "mtrmac",
+            "body": "> > Is it very common to pull several images in sequence? \n>\n> We use it for caching the Kubernetes images, using the afore-mentioned `kubeadm config images` commands.\n> Out of the box it only supports downloading and caching in docker daemon, so did some make / shell wrappers.\n\nI meant to ask about pulling several images in sequence _in interactive use_. Scripts do that of course, but those also have rather weaker relevance for CLI design ergonomics.\n\n---\n\n> I have no objections against supporting pulling more than one image. The pulls should not happen in parallel but in sequence.\n\n(I don’t feel strongly about this at all.) In my view the added convenience for a _sequential_ pull is very minimal; while the cost is that we give up the _option_ to define some other semantics for the CLI; either for a new UI entirely (“podman pull $method $image”?) or for some other multi-pull (e.g. the vaguely possible parallel pull with some load limit would now require an extra `--parallel` option). It’s a hard (and yet rather inconsequential) call: my guess is that the option is significantly more valuable than the extra convenience, but I can easily accept if others valued it the opposite way."
+        },
+        {
+            "user": "mtrmac",
+            "body": "> Also containers/image is going to prevent you from pulling more then 6 layers at a time, so you would not get any more performance.\n\nc/image doesn’t have global state for this; there are 6 layers pulled at a time _for a single pull_, and if the caller initiates concurrent pulls in concurrent coroutines, each pull will try to pull 6 layers in parallel. (Each caller can also decide the level of parallelism in `copy.Options`, and such a caller probably should do so.)"
+        },
+        {
+            "user": "rhatdan",
+            "body": "If they are purely sequential, then I am fine with this, change to Podman pull.  I am not that worried about the CLI changing in the future."
+        },
+        {
+            "user": "infiniteregrets",
+            "body": "Okay then, is this something that can be added or does it break the way the CLI is defined? "
+        },
+        {
+            "user": "rhatdan",
+            "body": "It can be added and it will change the CLI but not in a compatibility way. So it should be fine to add.\nFor now we could just add it to the cmd/ branch. I don't see that this needs to be added to the server side."
+        },
+        {
+            "user": "infiniteregrets",
+            "body": "Alrighty, I'll open a PR"
+        },
+        {
+            "user": "vrothberg",
+            "body": "> It can be added and it will change the CLI but not in a compatibility way. So it should be fine to add.\n> For now we could just add it to the cmd/ branch. I don't see that this needs to be added to the server side.\n\nI agree.  The restriction to just one argument should be lifted to \"at least one\" and the pull code moved into a loop."
+        }
+    ]
+}

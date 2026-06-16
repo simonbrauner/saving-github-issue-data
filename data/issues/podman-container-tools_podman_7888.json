@@ -1,0 +1,90 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 7888,
+    "title": "Support accessing localhost from a rootless container on network",
+    "state": "closed",
+    "labels": [
+        "rootless",
+        "kind/feature",
+        "CNI",
+        "slirp4netns",
+        "locked - please file new issue/PR"
+    ],
+    "user": "tmds",
+    "body": "I have a webserver running on localhost:\n\n```\n$ curl http://localhost:5000\nHello World!\n```\n\nI create a container that is on a network. I'd like the container to be able to the localhost webserver.\n\n```\n$ podman network create mynet\n$ podman run -ti --network mynet busybox /bin/sh\n/ # wget http://10.0.2.2:5000\nConnecting to 10.0.2.2:5000 (10.0.2.2:5000)\nwget: can't connect to remote host (10.0.2.2): Network is unreachable\n```\n\n`--network slirp4netns:allow_host_loopback=true` (added in https://github.com/containers/podman/commit/7722b582b4f09df64fb55e3ab9669392754ce75c) option allows a container to access `localhost`, but it can't be combined with a `--network`:\n\n```\n$  podman run -ti --network mynet busybox /bin/sh\n/ # ping other_container\nPING other_container (10.88.23.8): 56 data bytes\n64 bytes from 10.88.23.8: seq=0 ttl=64 time=0.098 ms\n64 bytes from 10.88.23.8: seq=1 ttl=64 time=0.107 ms\n^C\n--- other_container ping statistics ---\n2 packets transmitted, 2 packets received, 0% packet loss\nround-trip min/avg/max = 0.098/0.102/0.107 ms\n/ # exit\n$  podman run -ti --network mynet --network slirp4netns:allow_host_loopback=true busybox /bin/sh\n/ # ping other_container\nping: bad address 'other_container'\n```\n\ncc @AkihiroSuda @giuseppe ",
+    "comments": [
+        {
+            "user": "rhatdan",
+            "body": "Why not just use\npodman run --net=host ...\n"
+        },
+        {
+            "user": "rhatdan",
+            "body": "If this is just a flag that you would pass to slirp4netns, then I think we would consider it.\n\n@AkihiroSuda WDYT?  Want to open a PR to make this happen?"
+        },
+        {
+            "user": "mheon",
+            "body": "I think we have two options at this point:\n\n1. Allow the `--network` flag to be passed multiple times, so we can have `--net slirp4netns:opt1=val1,opt2=val2 --net cninet2,cninet2`\n2. Add a new flag for adding network options separately from `--net` - so `--net cninet1,cninet2 --network-opt slirp4netns:opt1=val1,opt2=val2` or similar"
+        },
+        {
+            "user": "rhatdan",
+            "body": "I would prefer options 1."
+        },
+        {
+            "user": "AkihiroSuda",
+            "body": "The infra is launched per user, not per pod, so the slirp options need to be global containers.conf fields"
+        },
+        {
+            "user": "tmds",
+            "body": "> podman run --net=host ...\n\nBecause I don't want to have all pods sharing the same port space.\n\n> The infra is launched per user, not per pod, so the slirp options need to be global containers.conf fields\n\nI don't understand what this means in practice. What happens is the same user launches 1 pod without `slirp4netns:allow_host_loopback=true` and then one pod with the argument?\n\nMaybe it is an option to handle localhost access at the network level: when creating a network add an option that indicates `localhost` should be accessible as a host on the new network?"
+        },
+        {
+            "user": "AkihiroSuda",
+            "body": "> What happens is the same user launches 1 pod without slirp4netns:allow_host_loopback=true and then one pod with the argument?\n\nThis isn't possible because all the CNI networks and the CNI pods share the singleton(-per-user) slirp4netns (and rootless-cni-infra) instance.\n\n> when creating a network add an option that indicates localhost should be accessible as a host on the new network?\n\nSGTM, but the implementation would be slightly complicated like this:\n* The singleton rootless-cni-infra would be launched with `allow_host_loopback=true`\n* However, the CNI networks inside `rootless-cni-infra` would be created with an iptables rule that blocks connections to 10.2.2.2 by default\n* When a CNI network is being created with the proposed `loopback` option, the iptables rule should be disabled."
+        },
+        {
+            "user": "tmds",
+            "body": "> SGTM, but the implementation would be slightly complicated like this:\n\nI like it is granular at the network level (vs affecting all containers), and it being controllable from the cli."
+        },
+        {
+            "user": "tmds",
+            "body": "@AkihiroSuda I don't find docs for this: what should I put in `$HOME/.config/containers/containers.conf` to set `slirp4netns:allow_host_loopback=true`?"
+        },
+        {
+            "user": "AkihiroSuda",
+            "body": "Unimplemented yet, the conversation above is discussion toward implementing it."
+        },
+        {
+            "user": "tmds",
+            "body": "@rhatdan @mheon what are your thoughts on the suggested approach?\n\n> when creating a network add an option that indicates localhost should be accessible as a host on the new network\n\n@AkihiroSuda provided some info about what the implementation could look like: https://github.com/containers/podman/issues/7888#issuecomment-703515751"
+        },
+        {
+            "user": "rhatdan",
+            "body": "@AkihiroSuda I will add a flag to containers.conf to allow users to specify that they want this on by default.\nThen we can use this flag to tell rootless podman to setup slirp4netns to share loopback by default.  Does this sound good to you?"
+        },
+        {
+            "user": "AkihiroSuda",
+            "body": "SGTM"
+        },
+        {
+            "user": "tmds",
+            "body": "@rhatdan can you make some time for adding this flag?"
+        },
+        {
+            "user": "AkihiroSuda",
+            "body": "Workaround: This NoRouter manifest allows a container to access port 80 of the host as 127.0.42.100:8080\n\n```yaml\nhosts:\n  host:\n    vip: \"127.0.42.100\"\n    ports: [\"8080:127.0.0.1:80\"]\n  podman:\n    cmd: \"podman exec -i some-container norouter\"\n    vip: \"127.0.42.101\"\n```\n\n```console\n$ norouter a.yaml\n```\n\nhttps://github.com/norouter/norouter "
+        },
+        {
+            "user": "rhatdan",
+            "body": "@ashley-cui Now that containers.conf is updated, can you complete this feature?"
+        },
+        {
+            "user": "rhatdan",
+            "body": "@ashley-cui https://github.com/containers/common/releases/tag/v0.30.0 is ready to vendor into Podman."
+        },
+        {
+            "user": "ashley-cui",
+            "body": "@rhatdan If it's just wiring in containers.conf, then I can try to knock it out this afternoon "
+        }
+    ]
+}

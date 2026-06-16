@@ -1,0 +1,144 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 6412,
+    "title": "Container Timeout",
+    "state": "closed",
+    "labels": [
+        "Good First Issue",
+        "kind/feature",
+        "locked - please file new issue/PR"
+    ],
+    "user": "npmccallum",
+    "body": "**Is this a BUG REPORT or FEATURE REQUEST? (leave only one on its own line)**\n\n/kind feature\n\n**Description**\n\nI want to use `podman run --rm ...` to run a container that is removed on exit. I *also* want the container to be forcibly killed if it is still running after `n` seconds.\n\nYes, I can write a podman state manager to call `podman stop`. But that requires me to do a lot of work. It is also racy and bug prone.\n\nI could use the `timeout` command (from coreutils) to send a signal. But podman has only two modes for signal handling. The default mode forwards the signal to pid 1 in the container. However, pid 1 could just ignore the signal to bypass the timeout. If I use `--sig-proxy=false` then podman doesn't forward the signal to the container. But it also doesn't stop the container. Therefore, the container bypasses the timeout.\n\nI tried looking at the `--timeout` option for `conmon`, but that [doesn't do what we need](https://github.com/containers/conmon/issues/162).\n\nI see two ways forward.\n\n1. Add support for `--sig-proxy=stop`. This mode would not proxy the signal to the container and would instead terminate the container (and, implicitly, do the `--rm`). Then timeout support could be implemented using the `timeout` utility from coreutils.\n\n2. Add a new option for `--timeout=n` which would cause `podman run --rm --timeout=30` to forcibly shut down the container and remove it after 30 seconds. I think I would prefer this option since it doesn't require another process.",
+    "comments": [
+        {
+            "user": "rhatdan",
+            "body": "Would the container get the SIGSTOP (Actually --stop-signal value) signal or SIGKILL?  \nMost likely I just answered my own question.  Since if you want SIGKILL you can just add --stop-signal=kill\n\nIf I restart the container, does it run for another 30 seconds?"
+        },
+        {
+            "user": "rhatdan",
+            "body": "@mheon @vrothberg @baude WDYT?"
+        },
+        {
+            "user": "rhatdan",
+            "body": "We would need to wire this into conmon. since it is the only thing left running when you run with --detatch.\n@haircommander FYI"
+        },
+        {
+            "user": "vrothberg",
+            "body": "This sounds completely reasonable to me.\nNaming nit: to prevent confusion, I suggest to name it `--rm-timeout`."
+        },
+        {
+            "user": "mheon",
+            "body": "My concern would be the complexity of stopping the container exclusively from within Conmon. I don't really want to implement the full logic of `podman stop` again in C (SIGTERM, timeout, SIGKILL, timeout, plus handling for containers without a PID namespace through runtime `kill --all`). If we can keep it simple (single SIGKILL, or a SIGTERM + simple fixed timeout + SIGKILL, and no containers without a PID namespace) it sounds a lot more reasonable."
+        },
+        {
+            "user": "haircommander",
+            "body": "theoretically, we could also pass conmon a list of args for a podman call, like we do for exit command"
+        },
+        {
+            "user": "haircommander",
+            "body": "another thing to note is that conmon doesn't technically know when a container starts. It knows when the container starts logging things, and starts behaving like it's started, but this is not precise. We'd have to have podman send data down a pipe to tell conmon \"hey, I started the container\", and *then* we'd start the timeout."
+        },
+        {
+            "user": "rhatdan",
+            "body": "I don't see this as an --rm-timeout.  I don't think --rm is required.\nIf I want to run a container for one hour then I could do\npodman create --timeout=360 ...\npodman start ...\npodman start ..."
+        },
+        {
+            "user": "rhatdan",
+            "body": "Doesn't conmon get the contents of the --stop-signal?"
+        },
+        {
+            "user": "npmccallum",
+            "body": "> Would the container get the SIGSTOP (Actually --stop-signal value) signal or SIGKILL?\n> Most likely I just answered my own question. Since if you want SIGKILL you can just add --stop-signal=kill\n\n```\n$ podman run --stop-signal=kill --rm -it fedora\n# trap '' TERM\n#\n```\n\n```\nkill -TERM $PODMAN_PID\n```\n\nPodman forwards the `SIGTERM` to PID 1. PID 1 swallows the `SIGTERM`. If I send `SIGKILL` to `podman`, the `--rm` is never performed and the container is still running.\n\nIt is therefore my understanding that `--stop-signal=kill` only changes the signal sent to PID 1 during `podman stop`.\n\n> If I restart the container, does it run for another 30 seconds?\n\nThis is a singleton container running untrusted code. We never want to restart it. That would allow the untrusted code to persist across the timeout."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@vrothberg Could you take this one on?"
+        },
+        {
+            "user": "vrothberg",
+            "body": "> @vrothberg Could you take this one on?\n\nThis looks like larger chunk of work as it spans across libpod and conmon. I think that I should rather work on the parallel-copy detection over in c/image. WDYT?"
+        },
+        {
+            "user": "rhatdan",
+            "body": "Sounds good, we can give this to @ashley-cui @QiWang19 @ParkerVR or @ryanchpowell Or anyone else who wants to grab it."
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@QiWang19 PTAL"
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@QiWang19 Did you get a chance to look at this?"
+        },
+        {
+            "user": "QiWang19",
+            "body": "> @QiWang19 Did you get a chance to look at this?\n\nI haven't started working on this now but can add it to my list\n\n"
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "kblin",
+            "body": "Hi folks,\n\nI'd also love to have this feature for a system running long-running number-crunchy jobs.\nFor my use case, the number-crunchy jobs report status via stdout, and I have a process that forks and executes `podman run --detach=false ...` and then consumes the output from the container to forward the status to a database. I can of course set a timer and have that trigger `podman kill` after the timeout expires, but having a timeout built in would be so much nicer."
+        },
+        {
+            "user": "rhatdan",
+            "body": "Interested in opening a PR for this feature?"
+        },
+        {
+            "user": "kblin",
+            "body": "I'm not sure I understand the architecture good enough to know where to start. Does this go into podman? Conmon?"
+        },
+        {
+            "user": "rhatdan",
+            "body": "Both.  You would need a way to trigger the command within podman.  Basically add a --timeout flag (and maybe --timeout-signal), that conmon would know to kill the container.\nThen you would need an option in podman to activate it.  podman run --timeout 20m ...\n\nThis would cause conmon to send run with --timeout 20m And after 20 minutes, conmon would send a stop signal to pid1, and 10 seconds later send the kill signal."
+        },
+        {
+            "user": "kblin",
+            "body": "After staring at the code for a couple of hours, I'm still not quite sure where I'd pass a new `--timeout` flag added to `podman run`, not to mention that I can't figure out why my \n```golang\nflags.UintVar(&runOpts.Timeout, \"timeout\", 0, \"Stop the container after [timeout] seconds, or 0 to not time out the container\")\n```\nends up generating a `--time` and not a `--timeout` parameter after running `make`.\n\nI also still have no idea where in conmon I'd send the stop signal to the container's pid 1.\n\nThat's about all the time I had to spend on something I can script with a timed callback to run `podman kill` on my side. If this is a \"good first issue\", I don't think I want to see the other ones. :wink: "
+        },
+        {
+            "user": "rhatdan",
+            "body": "Some first issues are meatier then others, thanks for trying."
+        },
+        {
+            "user": "kblin",
+            "body": "If nobody picked it up by the next time I have a day or two to spare I might give it another shot. 🙂"
+        },
+        {
+            "user": "rhatdan",
+            "body": "Sounds good."
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@kblin Did you ever get a chance to look at this?"
+        },
+        {
+            "user": "kblin",
+            "body": "I didn't have the time to spare yet."
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        }
+    ]
+}

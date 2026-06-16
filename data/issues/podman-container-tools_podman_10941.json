@@ -1,0 +1,163 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 10941,
+    "title": "podman top not work with userns=keep-id container",
+    "state": "closed",
+    "labels": [
+        "kind/bug",
+        "locked - please file new issue/PR"
+    ],
+    "user": "pendulm",
+    "body": "**Is this a BUG REPORT or FEATURE REQUEST? (leave only one on its own line)**\n\n/kind bug\n\n\n**Description**\n\n\n\n**Steps to reproduce the issue:**\n\n1.\ntop with --userns=keep-id container\n```\n[mike@x240 podman]$ podman  run --name redis1 -d --userns=keep-id redis\nd2f77ab7b4ebbd22a36b9853d28f6bdcdc452a7544f5432fea79d6f9006c151e\n[mike@x240 podman]$ podman top redis1  user,huser\nError: error executing \"nsenter -U -t 1 cat /proc/1/status\": exit status 127\n```\n\n2.\ntop with normal container\n```\n[mike@x240 podman]$ podman  run --name redis2 -d  redis\ne87792f5a1c5f8bf850cbee5ce91fef259819d9f790b061f864fcec820a5c53f\n[mike@x240 podman]$ podman top redis2  user,huser\nUSER        HUSER\nredis       100998\n```\n3.\n\n**Describe the results you received:**\n\n\n**Describe the results you expected:**\n\n\n**Additional information you deem important (e.g. issue happens only occasionally):**\n\n**Output of `podman version`:**\n\n```\nVersion:      3.2.2\n```\n\n\n",
+    "comments": [
+        {
+            "user": "vrothberg",
+            "body": "Thanks for reporting, @pendulm.\n\nThat's something we need to fix in `containers/psgo`.  Not yet sure if we need to pass some information from Podman down to psgo or if it can auto-detect."
+        },
+        {
+            "user": "vrothberg",
+            "body": "I am a bit lost.  It looks like we shouldn't join the user NS but do.  @giuseppe, do you know what's going on?"
+        },
+        {
+            "user": "giuseppe",
+            "body": "`nsenter -U -t 1 cat /proc/1/status` looks like the wrong command to run?  Why is it trying to join PID 1?\n\nDoes it work differently if you run `podman unshare podman top redis1  user,huser` ?"
+        },
+        {
+            "user": "giuseppe",
+            "body": "From what I can see, the error seems to be in the target pid used to join the user namespace.\n\nThe command should look like `nsenter -U -t $CONTAINER_PID cat /proc/1/status`"
+        },
+        {
+            "user": "vrothberg",
+            "body": "> `nsenter -U -t 1 cat /proc/1/status` looks like the wrong command to run? Why is it trying to join PID 1?\n> \n> Does it work differently if you run `podman unshare podman top redis1 user,huser` ?\n\nSame issue."
+        },
+        {
+            "user": "giuseppe",
+            "body": "I think it is trying to join the wrong pid, it should not be 1"
+        },
+        {
+            "user": "0x0D15",
+            "body": "Any update? I encountered this as well, however I seem to be getting another error:\n```\n$ podman run --detach --userns keep-id --name a busybox sleep 20\n$ podman top a\nError: error executing \"nsenter -U -t 1 cat /proc/1/status\": exec: \"nsenter\": executable file not found in $PATH\n```\nWithout keep-id everything works perfectly."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@vrothberg PTAL"
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "rhatdan",
+            "body": "Seems to work on main branch.\n\n```\n$ podman -v\npodman version 4.0.0-dev\n$ podman run --detach --userns keep-id --name a busybox sleep 20\nResolved \"busybox\" as an alias (/etc/containers/registries.conf.d/000-shortnames.conf)\nTrying to pull docker.io/library/busybox:latest...\nGetting image source signatures\nCopying blob 24fb2886d6f6 done  \nCopying config 16ea53ea7c done  \nWriting manifest to image destination\nStoring signatures\n622e891d74910139caa659567e326218a88b141462b080d5cd71f13dbb409d51\n$ podman top a\nUSER        PID         PPID        %CPU        ELAPSED       TTY         TIME        COMMAND\ndwalsh      1           0           0.000       5.234386111s  ?           0s          sleep 20 \n```"
+        },
+        {
+            "user": "dcermak",
+            "body": "I can reproduce this issue with the latest podman version from main as well as with 3.4.4, but only with certain images.\n\nFor example:\n```ShellSession\n$ podman run --userns=keep-id --rm -d registry.opensuse.org/opensuse/tumbleweed-dnf sleep infinity\n$ podman top $CONTAINER_ID\nError: error executing \"nsenter -U -t 1 cat /proc/1/status\": exec: \"nsenter\": executable file not found in $PATH\n$ podman run --userns=keep-id --pull always --rm -d registry.opensuse.org/opensuse/busybox sleep infinity\n$ podman top $CONTAINER_ID\nError: error executing \"nsenter -U -t 1 cat /proc/1/status\": exit status 1\n```\nwhereas the above commands work for `docker.io/alpine` or `registry.opensuse.org/opensuse/leap`.\n\nI have tried using strace to figure what exactly is going wrong here, but I fail to find the place where the actual issue appears."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@vrothberg PTAL\n"
+        },
+        {
+            "user": "cyphar",
+            "body": "I took a look at this (it's happening with Tumbleweed images). It turns out it just boils down to `util-linux` not being present in Tumbleweed containers -- installing `util-linux` fixes the issue for such containers. The reason why busybox works is because it has an `nsenter` binary (or rather a busybox entrypoint).\n\nHowever I'm slightly more confused why `nsenter` is necessary at all (and not in the regular case), and why the `nsenter` inside the container is being used. I get this is happening inside `github.com/containers/psgo` (in particular `readStatusUserNS`) but given that we have the PID 1 details for the container, why join the container namespace at all (and why do it from inside the container itself -- surely if you've joined the container you don't need to join the user namespace of PID 1 -- surely you're already in the right user namespace?).\n\nEDIT: Ah, the join namespace code gets triggered automatically if the namespaces don't match. Why isn't `podman top` joining the user namespace in the `keep-ids` case?\n\nThe `registry.opensuse.org/opensuse/busybox` container is failing for a separate reason, though I haven't figured out why. In both busybox images `nsenter -U -t 1 cat /proc/1/status` fails due to an `-EINVAL` from `setns(3, CLONE_NEWUSER)` but I haven't figured out whether this is due to the seccomp profile of the container and why this doesn't affect `podman top` on the Docker Hub busybox container but it does affect the openSUSE one..."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@vrothberg is on PTO and will be back on Monday, so he should be able to answer.  I think the issue is psgo attempts to show IDs from the User Namespace perspective as well as from the hosts.  So entering the User Namespace is attempting to show what the HUSER versus USER, HGROUP versus GROUP of processes within the container."
+        },
+        {
+            "user": "vrothberg",
+            "body": "I need some time to look into it since I haven't looked at this code in a long while. "
+        },
+        {
+            "user": "cyphar",
+            "body": "A quick update from looking at this again:\n\nThis happens no matter what userns mode you use, so long as the container uses user namepsaces you hit this issue.\n\nThe `nsenter` is coming from github.com/containers/psgo, seemingly podman top hasn't joined the user namespace of the container. It seems that either `podman top` should join all of the namespaces (including the user namespace) or `psgo` should be called from the host so you can use the host `nsenter` binary. Given that `psgo` appears to be able to handle namespaces, it might not be necessary to join the container at all outside of calling `psgo`? I suspect that not joining the user namespace was a security decision, though as long as `podman top` doesn't do an `exec` inside the user namespace and you have the non-dumpable bit set you should be relatively safe.\n\nHowever if the only reason the namespace is being joined is in order to convert uids and gids, this can be done in Go entirely by just reading `/proc/1/[ug]id_map` and then applying the mappings to all of the users. That way podman doesn't need to cross any security boundaries and it would probably make things faster as well."
+        },
+        {
+            "user": "cyphar",
+            "body": "It should also be noted that this behaviour means that `podman top` is relying on code inside the container as part of its operations, but it would be trivial for a malicious container to create a bad `nsenter` binary that returns different results. I don't know how hardened psgo is against bad input, but at the very least this could result in `podman top` returning bad information to the caller.\n\nI'm also fairly sure that `podman top` is not being run with all of the container security profiles applied (right now it appears it runs as root without joining the container user namespaces which is a bit concerning), which means a container could (by placing a malicious binary in `/bin/nsenter`) potentially make syscalls and do other operations that the container itself couldn't make. If we had a bug like this in runc I would probably consider assigning a CVE for it, but I don't know how much of an issue this is for podman.\n\nIf `nsenter` is only being used to translate UIDs and GIDs, then it seems a lot safer to me to be doing the translation without running code in the container. At the very least, it seems inadvisable to run code inside the container like this (in fact it smells a bit like a security bug IMHO)."
+        },
+        {
+            "user": "cyphar",
+            "body": "https://github.com/containers/psgo/pull/92 should resolve the issue, though I'm not quite sure how to test whether the mapping functionality works. I couldn't figure out how to get the mapping functionality to work with the `bin/psgo` sample binary even on HEAD."
+        },
+        {
+            "user": "vrothberg",
+            "body": "With containers/psgo#92 merged, we can close the issue. It'll get vendored before we cut a new release."
+        },
+        {
+            "user": "cyphar",
+            "body": "@vrothberg Did you plan to make a security advisory for the issue? Unless I'm mistaken this is technically a privilege escalation vector (though not a complete escalation since most of the namespaces are still joined)."
+        },
+        {
+            "user": "vrothberg",
+            "body": "> @vrothberg Did you plan to make a security advisory for the issue? Unless I'm mistaken this is technically a privilege escalation vector (though not a complete escalation since most of the namespaces are still joined).\n\nThanks for checking!  I am not (yet) convinced there's a security issue since we joined the user namespace and mount namespace of the container. But I may be off. Can you elaborate how we could escalate? We should probably move over to email (rothberg@redhat.com) to not paste an attack here."
+        },
+        {
+            "user": "dcermak",
+            "body": "This issue has now been fixed in the `main` branch, but released podman versions like 3.4 still suffer from this bug. Could this be backported to the 3.4 branch as well please?"
+        },
+        {
+            "user": "rhatdan",
+            "body": "We don't backport unless it is to supported Branches like in RHEL, and even there we frown on it."
+        },
+        {
+            "user": "vrothberg",
+            "body": "> We don't backport unless it is to supported Branches like in RHEL, and even there we frown on it.\n\nThat doesn't apply to the current state since we cannot bump Fedora 35 to v4.0.  We actually did backport quite some patches to Podman v3.4 because of that."
+        },
+        {
+            "user": "dcermak",
+            "body": "Daniel J Walsh ***@***.***> writes:\n\n> We don't backport unless it is to supported Branches like in RHEL, and even there we frown on it.\n\nThis issue most certainly impacts RHEL as well. It impacts everything\nbut the main branch (and possibly the 4.0 release)\n"
+        },
+        {
+            "user": "nickthetait",
+            "body": "I'm trying to determine the security impact for this bug. It might deserve assigning a CVE (which I can take care of). Forgive my basic questions as I'm not very familiar with Podman yet. Below are my guesses/questions to the CVSS score, used in determining severity. Please correct me if any assumptions are wrong.\n\n**Attack Vector**\nLocal - An attacker would need direct access to the host machine?\n\n**Attack Complexity**\nHigh\nSome restrictions are beyond the attackers control: it must be a container using a type of `--userns`. This is not the default correct? \nAnother hurdle would be creating a bad `nsenter` binary.\n\n**Privileges Required**\nLow - Any regular user could execute `podman top`\n\n**User Interaction**\nNone - No phishing required, attacker can just run the command at their leisure. Or would an attacker implant their binary and wait for an admin to run `podman top` which could trigger something evil?\n\n**Scope**\nUnchanged\n\n**Confidentiality Impact**\nLow? - Help me understand the implication of this statement: \"since most of the namespaces are still joined\". What boundaries remain around the container? \n\n**Integrity Impact**\nNone?\n\n**Availability Impact**\nNone?"
+        },
+        {
+            "user": "vrothberg",
+            "body": ">  Local - An attacker would need direct access to the host machine?\n\nNo.  As an attacker I would try push a malicious image on a public registry and wait for users to run it and run `podman top`.\n\n> Some restrictions are beyond the attackers control: it must be a container using a type of --userns. This is not the default correct?\n\nIt is largely independent from how the container is run.\n\n> Another hurdle would be creating a bad nsenter binary.\n\nI don't think that's a hurdle. A simple Dockerfile is sufficient.\n\n> None - No phishing required, attacker can just run the command at their leisure. Or would an attacker implant their binary and wait for an admin to run podman top which could trigger something evil?\n\nThe latter.  As mentioned above, I would try to push an evil image on a public registry.\n\n> Low? - Help me understand the implication of this statement: \"since most of the namespaces are still joined\". What boundaries remain around the container?\n\nIt is possible to send signals to the host's systemd which allows, in principle, to reboot the machine. AFAICS, we're not in the user NS of the container but the main one of Podman (if run rootless). We're only in the container's mount NS."
+        },
+        {
+            "user": "nickthetait",
+            "body": "That helps a lot! I will be assigning a CVE.\n\nCan we come up with a better title for the security issue? The current title \"podman top not work with userns=keep-id container\" was how it was discovered but the userns switch is actually irrelevant to the security impact. How about \"Privilege escalation in 'podman top'\"?\n\nPodman will need to be updated to use a fixed version of psgo right?"
+        },
+        {
+            "user": "vrothberg",
+            "body": "> How about \"Privilege escalation in 'podman top'\"?\n\nSounds good to me, thanks.\n\n> Podman will need to be updated to use a fixed version of psgo right?\n\nv4.0 has the fix. Older ones need to be updated."
+        },
+        {
+            "user": "cyphar",
+            "body": "> > Low? - Help me understand the implication of this statement: \"since most of the namespaces are still joined\". What boundaries remain around the container?\n> \n> It is possible to send signals to the host's systemd which allows, in principle, to reboot the machine. AFAICS, we're not in the user NS of the container but the main one of Podman (if run rootless). We're only in the container's mount NS.\n\nYeah we're only in the mount ns. There are a few other attacks you should be able to do carry out in addition to the one mentioned (you might be able to get access to the host filesystem using `open_by_handle_at` using a similar exploit to CVE-2014-3519 because the seccomp profile is not applied -- and from there you have full system filesystem access).\n\nYou can also probably access any databases on the host through SYSV memory sharing and so on, and you could intercept (and send out) any network traffic you like. Basically, you can probably gain full access to the host with a clever enough exploit AFAICS.\n\nThe impact should be high."
+        },
+        {
+            "user": "nickthetait",
+            "body": "Thanks for helping figure out the severity. CVE-2022-1227 has been assigned."
+        },
+        {
+            "user": "dcermak",
+            "body": "Nick Tait ***@***.***> writes:\n\n> Thanks for helping figure out the severity. CVE-2022-1227 has been assigned.\n\nDoes that mean we'll get a backport to 3.4?\n"
+        },
+        {
+            "user": "vrothberg",
+            "body": "Yes."
+        },
+        {
+            "user": "cyphar",
+            "body": "@vrothberg Now that there is a CVE assigned, can you add me to the credits section of the vulnerability entry? Thanks."
+        },
+        {
+            "user": "vrothberg",
+            "body": "> @vrothberg Now that there is a CVE assigned, can you add me to the credits section of the vulnerability entry? Thanks.\n\nThat is outside my competences but @nickthetait may be able to help."
+        },
+        {
+            "user": "nickthetait",
+            "body": "Yep, done."
+        },
+        {
+            "user": "vrothberg",
+            "body": "Thank you, @nickthetait!"
+        }
+    ]
+}

@@ -1,0 +1,66 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 19018,
+    "title": "Add documentation & better support for HPC/non-root shared `additionalimagestore` updater",
+    "state": "open",
+    "labels": [
+        "kind/feature"
+    ],
+    "user": "yeswalrus",
+    "body": "### Feature request description\n\nIn HPC cluster environments, where there are a large number of separate users on separate colocated machines connected to a large shared file store, it is extremely valuable to be able to have an `additionalimagecache` directory located in the cluster's shared storage. This prevents every machine in the cluster needing to make a local copy, which can be time consuming and wastes space.\n\nHPC clusters are often extremely security sensitive, so it's ideal for the user account responsible for updating the shared cache to not require root access. This is possible to do right now, but is relatively undocumented. Please add official documentation & guidance for the workflow I've discovered, perhaps updating the primary blog post on using `additionalimagestores`, and support this workflow officially. \n\n\n### Suggest potential solution\n\nI can imagine several improvements to `podman pull` that would improve this workflow:\n - Set permissions as part of pull, removing the need for running `chmod -R` after on the whole directory\n - Do not modify the cache directory if the image already exists\n - Allow pulling multiple images in a single command\n - When pulling, either split the database or write to a backup file & swap at the end to avoid long periods where the cache is invalidated\n\n### Have you considered any alternatives?\n\nSince the core request is to update the documentation & officially support this sort of workflow, the alternative is that you don't do that & we keep using this workflow, and possibly publish my own blogpost.\n\n### Additional context\n\nThe following python script, run by a non-root account, appears to work in an HPC cluster with a relatively old version of podman (2.2.1):\n```\nimport sys, subprocess\n\nPODMAN_CACHE_DIR = \"/sharefs/podman_cache_0\"\nPODMAN_CACHE_DIR_BACKUP = \"/sharefs/podman_cache_1\"\nPODMAN_CACHE_DIR_SYMLINK = \"/sharefs/podman_cache\"\n\nimage_names = sys.argv[1:]\n\nuncached_images = [image_name for image_name in image_names if subprocess.run([\"podman\", \"--root\", PODMAN_CACHE_DIR, \"image\", \"exists\", image_name]).returncode != 0]\n\nif len(uncached_images) == 0:\n    print(f\"All images ({image_names}) already exist in cache\")\n    exit(0)\n\nprint(f\"Adding images to cache: {uncached_images}\")\n\n# Begin by updating the symlink to point to the backup dir\n# From the time we start pulling the image until the time we finish the chmod, trying to access\n# the primary cache will result in failure\nif subprocess.run([\"ln\", \"-sTf\", PODMAN_CACHE_DIR_BACKUP, PODMAN_CACHE_DIR_SYMLINK]).returncode != 0:\n    print(\"Failed updating symlink\")\n    exit(-1)\n\nfor image_name in uncached_images:\n    if subprocess.run([\"podman\", \"--root\", PODMAN_CACHE_DIR, \"image\", \"pull\", image_name]).returncode != 0:\n        print(\"error while pulling image\")\n        exit(-1)\n\nprint(\"Images updated, running chmod...\")\n# Using podman unshare prevents errors when running chmod on the cache directory\nif subprocess.run([\"podman\", \"unshare\", \"chmod\", \"-Rf\", \"ag+rx\", PODMAN_CACHE_DIR]).returncode != 0:\n    print(\"error while updating permissions on cache dir\")\n    exit(-1)\n\n# Now that cache update is complete, move the symlink back to the primary cache dir & copy our contents to the backup folder\nprint(\"Updating symlink...\")\nif subprocess.run([\"ln\", \"-sTf\", PODMAN_CACHE_DIR, PODMAN_CACHE_DIR_SYMLINK]).returncode != 0:\n    print(\"Failed updating cache symlink\")\n    exit(-1)\n\nprint(\"Restoring backups...\")\nif subprocess.run(f\"cp -ru {PODMAN_CACHE_DIR}/* {PODMAN_CACHE_DIR_BACKUP}\", shell=True).returncode != 0:\n    print(\"Failed updating backup cache\")\n    exit(-1)\n```",
+    "comments": [
+        {
+            "user": "vrothberg",
+            "body": "Thanks for reaching out, @yeswalrus!\n\n@giuseppe @rhatdan WDYT?  I am not sure the `chmod -Rf` trick will work in all cases, would it?"
+        },
+        {
+            "user": "rhatdan",
+            "body": "It will require you to use fuse-overlayfs as well, as I understand it."
+        },
+        {
+            "user": "giuseppe",
+            "body": "yes and set `force_mask=\"shared\"` in the `storage.conf` file\n"
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@yeswalrus Interested in writing the documentation?"
+        },
+        {
+            "user": "rhatdan",
+            "body": "@giuseppe @vrothberg Should we blog on this?  How do setup an additional store to be shared amongst non root users?"
+        },
+        {
+            "user": "vrothberg",
+            "body": "> @giuseppe @vrothberg Should we blog on this? How do setup an additional store to be shared amongst non root users?\n\nAbsolutely.   Just need to find a new blog site :´("
+        },
+        {
+            "user": "rhatdan",
+            "body": "Just use podman.io"
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "jharmison-redhat",
+            "body": "Bumping to remove stale - I'd appreciate this blog right about now, even for non-remote filesystems, thanks to how osbuild-composer embeds images for the root user only into /usr/share/containers/storage/overlay-images ..."
+        },
+        {
+            "user": "martinfg2",
+            "body": "Note that configuring a system-wide login script to set CONTAINERS_STORAGE_CONF=/etc/containers/storage.conf allows that file to act as both rootful and rootless podman storage.conf.  However, I'm not part of the Podman/containers development team, so there may be a good reason to have a separate file.\n\nHowever, the basic problem of needing to chmod -R a+rx <addlimagestorepath> every time an image is added remains.  If this step is missed, then every other non-root podman user on the system is unable to do any podman function unless they modify their personal storage.conf to remove the additionalimagestores line.  Instead, they get an error \"...open <addlimagespath>/overlay-images/images.json: permission denied\".  For a large multi-user Linux server, this is a big problem.  \n\nI second the request to fully document the process, and respectfully request that the chmod be integrated into \"podman --root=<sharedstore> pull...\" so it cannot be missed.  "
+        },
+        {
+            "user": "rhatdan",
+            "body": "If users want to improve the documentation on this, go for it.\n\n@martinfg2 please open a different discussion/issue on getting podman pull support to automatically do the chmod -R a+rx."
+        },
+        {
+            "user": "martinfg2",
+            "body": "Done:\nhttps://github.com/containers/podman/issues/20826\n"
+        }
+    ]
+}

@@ -1,0 +1,78 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 1506,
+    "title": "In read-only container, opening file for append still causes change to be shown in podman diff",
+    "state": "closed",
+    "labels": [
+        "locked - please file new issue/PR"
+    ],
+    "user": "adelton",
+    "body": "<!--\n---------------------------------------------------\nBUG REPORT INFORMATION\n---------------------------------------------------\nUse the commands below to provide key information from your environment:\nYou do NOT have to include this information if this is a FEATURE REQUEST\n\n**NOTE** A large number of issues reported against Podman are often found to already be fixed\nin more current versions of the project.  Before reporting an issue, please verify the\nversion you are running with `podman version` and compare it to the latest release\ndocumented on the top of Podman's [README.md](../README.md).  If they differ, please\nupdate your version of Podman to the latest possible and retry your command before creating\nan issue.\n\nIf you are filing a bug against `podman build`, please instead file a bug\nagainst Buildah (https://github.com/projectatomic/buildah/issues). Podman build\nexecutes Buildah to perform container builds, and as such the Buildah\nmaintainers are best equipped to handle these bugs.\n-->\n\n**Is this a BUG REPORT or FEATURE REQUEST?**:\n\n[//]: # Uncomment only one, leave it on its own line:\n\n[//]: # **kind bug**\n\n**Description**\n\n<!--\nBriefly describe the problem you are having in a few paragraphs.\n-->\n\nIn read-only container, opening file for append still causes change to be shown in podman diff.\n\n**Steps to reproduce the issue:**\n\n1. `podman run --read-only --name container -ti registry.access.redhat.com/rhel7 bash -c 'echo Test >> /var/log/btmp ; sleep 600' `\n2. In another terminal: `podman diff container | grep /var/log/btmp`\n\n**Describe the results you received:**\n\n```\nC /var/log/btmp\n```\n\n**Describe the results you expected:**\n\nNothing reported about `/var/log/btmp` since the container is read-only and that append-open failed anyway.\n\n**Additional information you deem important (e.g. issue happens only occasionally):**\n\n**Output of `podman version`:**\n\n```\nVersion:       0.7.3\nGo Version:    go1.9.2\nOS/Arch:       linux/amd64\n```\n\n**Output of `podman info`:**\n\n```\nhost:\n  MemFree: 3677413376\n  MemTotal: 5030330368\n  SwapFree: 5234487296\n  SwapTotal: 5234487296\n  arch: amd64\n  cpus: 8\n  hostname: machine.example.com\n  kernel: 3.10.0-862.14.3.el7.x86_64\n  os: linux\n  uptime: 3m 33.9s\ninsecure registries:\n  registries: []\nregistries:\n  registries:\n  - registry.access.redhat.com\nstore:\n  ContainerStore:\n    number: 0\n  GraphDriverName: overlay\n  GraphOptions:\n  - overlay.override_kernel_check=true\n  GraphRoot: /var/lib/containers/storage\n  GraphStatus:\n    Backing Filesystem: xfs\n    Native Overlay Diff: \"true\"\n    Supports d_type: \"true\"\n  ImageStore:\n    number: 1\n  RunRoot: /var/run/containers/storage\n\n```\n\n**Additional environment details (AWS, VirtualBox, physical, etc.):**\n\nThis is RHEL 7.5.\n\nThis is based on https://bugzilla.redhat.com/show_bug.cgi?id=1611623.",
+    "comments": [
+        {
+            "user": "mheon",
+            "body": "Thanks for the report, I'll look into it today"
+        },
+        {
+            "user": "mheon",
+            "body": "I suspect there's a flag we're not providing to c/storage related to read-only that's causing it to allow overlay copyup to happen"
+        },
+        {
+            "user": "rhatdan",
+            "body": "No this is normal running of a containers.  Their is content that we add to containers on the fly.\n\n```\n# podman run --read-only --name test fedora echo hello\nhello\n# podman diff test\nC /run\nA /run/.containerenv\nA /run/secrets\n```\nThe question I have is should we mask these from podman diff, so that they don't show up.  I actually think their are a few more /etc/hosts, and /etc/resolv.conf if they did not exists.\n\nSince we know the list of inodes that are hard coded to add we should just whitelist these.\n\n@nalind @rhvgoyal WDYT?"
+        },
+        {
+            "user": "adelton",
+            "body": "Note that in this issue I don't speak about `/run/secrets` and other similar changes done during the container / pod setup.\nWhat I'm concerned about is an operation executed from within the read-only container (opening the file for append) leaves some traces on the overlay / in the diff output -- ctime is modified. Attempt to open the file for write (but not append) fails as well and is not listed in diff output, I'd like the same for append."
+        },
+        {
+            "user": "mheon",
+            "body": "I don't see any relevant flags we would pass to c/storage. I'll ask @nalind if this looks like something on the storage side."
+        },
+        {
+            "user": "mheon",
+            "body": "Alright, trying to reproduce locally gets me an error as I can't append to a read-only filesystem.\n\nMaybe we're mounting some tmpfses as RW when they should be RO"
+        },
+        {
+            "user": "mheon",
+            "body": "All our automatic bind-mounts (/etc/hosts, /etc/resolv.conf, etc) seem to be unconditionally RW - we need to change them to be RO if the container is RO"
+        },
+        {
+            "user": "mheon",
+            "body": "Is /var/log an image volume for the RHEL7 image? That might explain what's going on"
+        },
+        {
+            "user": "rhatdan",
+            "body": "@adelton Give me an example other then those stated by @mheon of writable content that shows up in the diff?\n"
+        },
+        {
+            "user": "adelton",
+            "body": "> Alright, trying to reproduce locally gets me an error as I can't append to a read-only filesystem.\n\nYes, you get an error. But if you then run `podman diff`, you will see that file listed as modified."
+        },
+        {
+            "user": "adelton",
+            "body": "The problem is not specific to RHEL image or `/var/log`:\n\n```\n$ sudo podman run --read-only --name test-append busybox sh -c 'echo Test >> /bin/sh'\nsh: can't create /bin/sh: Read-only file system\n$ sudo podman diff test-append\nC /bin\nC /bin/sh\nC /etc\nA /etc/hostname\nA /etc/hosts\nA /etc/resolv.conf\nA /proc\nA /run\nA /run/.containerenv\nA /run/secrets\nA /sys\n```\nI don't care about any of the `/etc`, `/proc`, `/run`, or `/sys` entries.\n\nBut the fact that (correctly) failed open of `/bin/sh` for append shows that `C /bin/sh` does not seem right.\n\nNote that it's only append which causes the problem, normal write behaves as expected -- the open is denied and `/bin/sh` is not mentioned in the diff output:\n\n```\n$ sudo podman run --read-only --name test-write busybox sh -c 'echo Test > /bin/sh'\nsh: can't create /bin/sh: Read-only file system\n$ sudo podman diff test-write\nC /etc\nA /etc/hostname\nA /etc/hosts\nA /etc/resolv.conf\nA /proc\nA /run\nA /run/.containerenv\nA /run/secrets\nA /sys\n```"
+        },
+        {
+            "user": "mheon",
+            "body": "Huh. Confirmed - you get a read-only filesystem error, but `podman diff` does show a diff."
+        },
+        {
+            "user": "mheon",
+            "body": "There is no actual diff in the contents of the file.\n@rhatdan I'm pretty sure this is overlay copyup happening, with the subsequent write being denied?"
+        },
+        {
+            "user": "rhatdan",
+            "body": "Looks like a bug in overlay.  @rhvgoyal PTAL"
+        },
+        {
+            "user": "adelton",
+            "body": "First stab by @rhatdan at fixing the issue: https://github.com/opencontainers/runc/pull/1896."
+        },
+        {
+            "user": "rhatdan",
+            "body": "Actually I closed this since it is a kernel issue and @rhvgoyal points out that it is fixed in upstream kernel.\n\n```\ndwalsh: latest upstream kernel first checks whether write access on filesystem is allowed or not. And later it does copy up. And that's why this problem is not present in 4.19-rc1 onwards.\n```"
+        }
+    ]
+}

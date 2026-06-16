@@ -1,0 +1,43 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 7982,
+    "title": "Podman with Kubernetes executor in Gitlab CI",
+    "state": "closed",
+    "labels": [
+        "stale-issue",
+        "locked - please file new issue/PR"
+    ],
+    "user": "tvvignesh",
+    "body": "Hi. I am trying to run Podman in Gitlab CI using the Kubernetes executor (GKE with containerd specifically) (https://docs.gitlab.com/runner/executors/kubernetes.html) and am struggling to build the image. Details below.\n\n**My Sample Dockerfile:**\n```Dockerfile\nFROM node:10-alpine\n\nRUN node -v\n```\n\n**My Sample CI:**\n```yml\nimage: \"quay.io/podman/stable\"\n\nbuildah:\n  tags:\n    - tag1\n    - tag2\n  variables:\n    STORAGE_DRIVER: \"vfs\"\n    IMAGE_TAG: $CI_REGISTRY_IMAGE:edge\n  script:\n    - whoami\n    - podman version\n    - echo \"Logging into $CI_REGISTRY\"\n    - podman login -u gitlab-ci-token -p $CI_BUILD_TOKEN $CI_REGISTRY\n    - podman build --security-opt seccomp=unconfined --security-opt label=disabled --runtime-flag debug -t ${IMAGE_TAG} .\n    - podman images\n    - podman push ${IMAGE_TAG}\n    - podman logout $CI_REGISTRY\n```\n\nWhile I wanted to go with the restricted PSP (https://raw.githubusercontent.com/kubernetes/website/master/content/en/examples/policy/restricted-psp.yaml) I thought I should get it running first, so I have given all permissions to the PSP exactly using this PSP and have no securityContext in the POD as well: https://raw.githubusercontent.com/kubernetes/website/master/content/en/examples/policy/privileged-psp.yaml\n\n**Case 1: All permissions given, and replacing vfs with overlayfs driver**\n<img width=\"458\" alt=\"1\" src=\"https://user-images.githubusercontent.com/1165845/95622624-7e463c80-0a91-11eb-9838-00b6ed2415b4.png\">\n\nWhen trying to use overlayfs I did add mount settings like this to gitlab runner but it didn't help:\n```\n[[runners.kubernetes.volumes.host_path]]\n      name = \"buildah\"\n      mount_path = \"/var/lib/containers/\"\n      read_only = false\n```\n\n**Case 2: All permissions given, vfs driver**\n<img width=\"426\" alt=\"2\" src=\"https://user-images.githubusercontent.com/1165845/95622785-d0875d80-0a91-11eb-9f2f-2bc49d046141.PNG\">\n\nI am stuck with this error. I did see in this blog: https://blog.42.be/2018/10/buildah-inside-centos-container.html that they are facing the same error and they fixed it by enabling user namespace.\n\nSo, I tried adding the `--userns` flag and set its value to both `host` and `container` and it did not work.\n\nI saw a similar issue https://github.com/containers/podman/issues/3402 using Go and I am facing the same issue with Node running Podman as root.\n\nAlso saw somewhat similar issue here with arm (I am using amd64) but not sure if its related: https://gitlab.com/gitlab-org/gitlab-runner/-/issues/4246\n\n**Case 3: Trying out security-opt**\nI did add the security-opt flag as per this comment: https://github.com/containers/buildah/issues/2175#issuecomment-639382961 but that didn't work either and I get the same error as above.\n\nAlso tried adding `--security-opt seccomp=/usr/share/containers/seccomp.json` but that didn't seem to work either.\n\n`podman build --security-opt seccomp=unconfined -t ${IMAGE_TAG} .`\n\n<img width=\"423\" alt=\"3\" src=\"https://user-images.githubusercontent.com/1165845/95624220-23621480-0a94-11eb-8234-77f7f2de1340.PNG\">\n\n**Case 4: Trying to set the storage driver to fuse**\nI did try changing storage driver to fuse by setting `STORAGE_DRIVER: \"fuse\"` but it didn't work since it said fuse is not supported. \n\nTried both `fuse` and `/dev/fuse`\n\n<img width=\"431\" alt=\"4\" src=\"https://user-images.githubusercontent.com/1165845/95624302-47255a80-0a94-11eb-96d3-ccf674d9acf0.PNG\">\n\nIs there any way or guide/recommendation to run Podman in Kubernetes executor providing minimum privilege as possible to build images? Currently I am stuck with Case 2 above. \n\nSince I don't have any docker here (everything is running within Containerd since it is using the Kubernetes executor), I don't think that is the problem? I am using the `quay.io/podman/stable` image as well. \n\nAlso referred to https://medium.com/prgcont/using-buildah-in-gitlab-ci-9b529af19e42 but that didn't help due to the errors above.\n\nAny help is appreciated. Thanks.",
+    "comments": [
+        {
+            "user": "mheon",
+            "body": "It looks like whatever you're running Podman inside is blocking the `mount` syscall (likely via Seccomp or capabilities). I believe you may be able to use Buildah with the VFS graph driver and chroot-only containers to build, but Podman itself cannot function without the ability to mount filesystems. You will have to loosen the permissions on the Kube container that Podman is being run inside if you want to do this."
+        },
+        {
+            "user": "tvvignesh",
+            "body": "> It looks like whatever you're running Podman inside is blocking the `mount` syscall (likely via Seccomp or capabilities). I believe you may be able to use Buildah with the VFS graph driver and chroot-only containers to build, but Podman itself cannot function without the ability to mount filesystems. You will have to loosen the permissions on the Kube container that Podman is being run inside if you want to do this.\n\n@mheon Thanks for the quick reply. Has anyone tried a sample of Podman executing in containerd - GKE? I am not using anything else since Gitlab runner just spawns a pod in K8 (https://docs.gitlab.com/runner/executors/kubernetes.html)\n\nPodman is running as root within containerd with all permissions given to it (not sure about filesystem mounting though). Are you talking about something like this - https://docs.gitlab.com/runner/executors/kubernetes.html#using-volumes Is there any volume to be specifically mounted to use inside kubernetes? I did try mounting `/var/lib/containers` as shown above but that didn't work.\n\nI have no issues using Buildah since I just want to build images, not run containers within my CI pipeline but I thought Podman itself uses buildah underneath. Am I missing something here?"
+        },
+        {
+            "user": "TomSweeneyRedHat",
+            "body": "@tvvignesh Podman does use Buildah for the `build` command, but it invokes the `buildah bud` command with slightly different default options, most notably `--layers`.   @rhatdan any thoughts on what the VFS angle might be doing here?"
+        },
+        {
+            "user": "tvvignesh",
+            "body": "@TomSweeneyRedHat Hmm. Thanks for the clarification. Not sure how that would affect my build though, but still just tried using buildah rather and I get this:\n\n<img width=\"554\" alt=\"1\" src=\"https://user-images.githubusercontent.com/1165845/95633328-1568bf80-0aa5-11eb-9bc1-8eecefe8d303.png\">\n\n<img width=\"669\" alt=\"2\" src=\"https://user-images.githubusercontent.com/1165845/95633334-1863b000-0aa5-11eb-9f98-aaa63f07d1d9.PNG\">\n\nAnd this is all I have in my CI: `buildah bud -t ${IMAGE_TAG} .`\n\nGet the same error as podman with overlayfs"
+        },
+        {
+            "user": "tvvignesh",
+            "body": "More details on the environment I am running this in:\n\n```\nServer Version: 19.03.2\nStorage Driver: overlay2\nBacking Filesystem: extfs\nKernel version\n5.4.0-1024-gcp\nOS image\nUbuntu 18.04.5 LTS\nContainer runtime version\ncontainerd://1.2.10\nkubelet version\nv1.18.6-gke.4801\nkube-proxy version\nv1.18.6-gke.4801\n```"
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "rhatdan",
+            "body": "The issue is that the default seccomp rules that are being used are blocking the mount syscall and a few others.  We do not believe that these should be blocked by default and use less stringent rules for seccomp.json then Docker did.  Which allows buildah to be run within a locked down container.\n\nIf you switch to using /usr/share/containers/seccomp.json from containers-common, package you should be able to get this to work.\n\nIf you switched to CRI-O backend then it should work out of the box."
+        }
+    ]
+}

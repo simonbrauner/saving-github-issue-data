@@ -1,0 +1,99 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 4794,
+    "title": "Filesystem isolation layer",
+    "state": "closed",
+    "labels": [
+        "kind/feature",
+        "locked - please file new issue/PR"
+    ],
+    "user": "abitrolly",
+    "body": "/kind feature\n\n**Description**\n\n`podman` + `SELinux` = Leaky Abstraction. In my story containers provide isolated environment to help users concentrate on getting their app logic right and not think about low level details and permissions required to keep their systems stable and secure.\n\nThat worked good with Docker + Ubuntu, except for the part that `docker` process is itself is run as root, and that made users like me feel uneasy. `podman` appearance solved exactly this problem for me.\n\nWhat makes my think that `podman` on Fedora is a leaky abstraction is that after one year of trying to adopt `podman` into my workflow I know a lot of information that I don't need to know, and yet I am still not there.\n\nYesterday I was able [to solve the problem I started with](https://bugs.launchpad.net/snapcraft/+bug/1807240) a year ago thanks to the knowledge that I acquired about SELinux labelling, :z and :Z prefixes, USER and uid/gid mappings (that are not directly related to this issue, but learning them was necessary to remove unfitting pieces of different puzzle from my head). **The problem is that python function `shutil.copystat` copies extended attributes** and because container uses the same filesystem as host, SELinux denies this operation when you, for example, `copystat` files from `/bin` to keep them executable or read-only as before. There was a mistake in my volume mount command, which resulted in copying files from `/bin` instead of from mounted `/src/bin`. But I could figure it out only a year later when I did **the same** mistake.\n\nI thought that the problem is solved. I copy files for my build inside container only from `/src/bin`. But today I realized that problem is not solved, because the build system copies system installed libs to build subtree, and  `SELinux vs copystat` problem popped up again. I don't see who can I fix this, and I don't think that going down this rabbit hole is right way anyway.\n\nWhat I really want from `podman` is **Filesystem isolation level** where the filesystem in container is completely isolated from the host, and volumes are no different from any other isolated container dir. No filesystem operation from inside container should trigger SELinux or other additional filesystem or kernel drivers on the host, and hence no SELinux properties (or any other kernel drivers) should be visible in container. If volume on the host contains those labels, the modifications to these files and labels should be done as if those files are created and modified by any user level program, such as `vim`.\n\n**Steps to reproduce the issue:**\n\n1. Build any [snap with `[stage-packages]`](https://github.com/yakshaveinc/linux/blob/6db3d85a07a8866abc452f4a6e93b3ac45211721/snapcrafting/amend/snapcraft.yaml#L25-L27)\n```\npodman run --rm -it -v /home/user/linux:/src:Z -w /src/snapcrafting/amend yakshaveinc/snapcraft:core18 snapcraft\n```\n\n**Describe the results you received:**\n```\n...\n  File \"/snap/snapcraft/current/usr/lib/python3.5/shutil.py\", line 252, in copy2\n    copystat(src, dst, follow_symlinks=follow_symlinks)\n  File \"/snap/snapcraft/current/usr/lib/python3.5/shutil.py\", line 219, in copystat\n    _copyxattr(src, dst, follow_symlinks=follow)\n  File \"/snap/snapcraft/current/usr/lib/python3.5/shutil.py\", line 159, in _copyxattr\n    os.setxattr(dst, name, value, follow_symlinks=follow_symlinks)\nPermissionError: [Errno 13] Permission denied: '/src/snapcrafting/amend/parts/amend/ubuntu/download/libgssapi3-heimdal_7.5.0+dfsg-1_amd64.deb'\n...\n```\n\n**Describe the results you expected:**\n```\n...\nCleaning later steps and re-staging amend ('stage' property changed)\nPriming amend \n'confinement' property not specified: defaulting to 'strict'\n'grade' property not specified: defaulting to 'stable'\nSnapping 'amend' |                                                                                                                                         \nSnapped amend_0.1.0_amd64.snap\n```\n\n**Additional information you deem important (e.g. issue happens only occasionally):**\n\nTo keep the user story short - **as a user of container I don't want to think about SELinux attributes on my host if my unprivileged container with a volume deep inside my home tries to play with some files**.\n\nThe solution I tested for LXD on Ubuntu is to mount filesystem as 9p over the network through FUSE https://github.com/yakshaveinc/linux/issues/32 I don't have money to keep focus and make a proper solution out of it (add encryption and integrate with LXD), but as proof of concept it works.\n\n**Output of `podman version`:**\n```\nVersion:            1.6.2\nRemoteAPI Version:  1\nGo Version:         go1.13.1\nOS/Arch:            linux/amd64\n```",
+    "comments": [
+        {
+            "user": "rhatdan",
+            "body": "Not really sure what is going on.  I attempted to run your container on Fedora 31, but I am not sure what goes into /src/snapcrafting/amend\n\nIn side of the container SELinux should be seen as disabled so that the tools running in the container should not be trying to do SELinux operations. I think the shutil.py package is grabbing all XAttrs that is sees and attempting to apply them.  And the SELinux label of the container is not allowed.\n\nshutil.py should become more aware of what it is doing or you need to disable SELinux separation.\n\npodman run -ti --security-opt label=disable\n\n\n"
+        },
+        {
+            "user": "rhatdan",
+            "body": "It looks like shuti.copyxattr now has support for ignoring these errors as least on Fedora 31?\n\n/usr/lib64/python3.7/shutil.py\n\n```    def _copyxattr(src, dst, *, follow_symlinks=True):\n        \"\"\"Copy extended filesystem attributes from `src` to `dst`.\n\n        Overwrite existing attributes.\n\n        If `follow_symlinks` is false, symlinks won't be followed.\n\n        \"\"\"\n\n        try:\n            names = os.listxattr(src, follow_symlinks=follow_symlinks)\n        except OSError as e:\n            if e.errno not in (errno.ENOTSUP, errno.ENODATA, errno.EINVAL):\n                raise\n            return\n        for name in names:\n            try:\n                value = os.getxattr(src, name, follow_symlinks=follow_symlinks)\n                os.setxattr(dst, name, value, follow_symlinks=follow_symlinks)\n            except OSError as e:\n                if e.errno not in (errno.EPERM, errno.ENOTSUP, errno.ENODATA,\n                                   errno.EINVAL):\n                    raise\n```"
+        },
+        {
+            "user": "abitrolly",
+            "body": "> I think the shutil.py package is grabbing all XAttrs that is sees and attempting to apply them. And the SELinux label of the container is not allowed.\n\nI also think so. Why `shutil.py` is able to read those host level XAttrs in the first place? Placing requirements on what software should and should not call is what I call leaky abstraction of containerization for users.\n\nInside container the Python used is `/snap/snapcraft/current/usr/lib/python3.5` and that's not going to change soon, because it is Python of LTS release. \n\n> `--security-opt label=disable` \n\nHelp says `Turn off label separation for the container`, but what does it exactly do?"
+        },
+        {
+            "user": "rhatdan",
+            "body": "It basically turns off SELinux labels, and runs container with an unconfined label.\nDoes the shutil.py inside of the container have the same code that I attached?"
+        },
+        {
+            "user": "abitrolly",
+            "body": "No. It was modified 7 months ago and it is not the same in Python 3.5 branch.\n\nhttps://github.com/python/cpython/blame/master/Lib/shutil.py\n\nhttps://github.com/python/cpython/blob/3.5/Lib/shutil.py"
+        },
+        {
+            "user": "rhatdan",
+            "body": "Well there is not much we can do other then have you disable SELinux separation until this is fixed.  If this even works with SELinux separation turned off."
+        },
+        {
+            "user": "abitrolly",
+            "body": "This is the container https://hub.docker.com/layers/yakshaveinc/snapcraft/core18/images/sha256-a7f7a8395ff9e060fe073652c8f3663c03229c6a0b8c01f89282081ab83fc2e1"
+        },
+        {
+            "user": "abitrolly",
+            "body": "@rhatdan does `--security-opt label=disable` mean that container will be able to read my SSH keys if I by mistake give it my home?"
+        },
+        {
+            "user": "rhatdan",
+            "body": "Yes.  If it broke out to the file system, there would be nothing preventing the reading of these files if the process was running as your UID or as root."
+        },
+        {
+            "user": "baude",
+            "body": "@rhatdan what  gives on this one?"
+        },
+        {
+            "user": "rhatdan",
+            "body": "This needs to be fixed in the python3 package, I don't see anything for us to do here."
+        },
+        {
+            "user": "abitrolly",
+            "body": "`podman` still needs filesystem isolation layer to be adopted by general public. I wouldn't bother writing this post long if it was no so critical. An ability to easily share work directory without reading a ton of info about UID/GID/SELinux/:x and :X prefixes/ACL like I did is critical for mass adoption. Otherwise from a public project it becomes a corporate policy."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@abitrolly Not sure what you mean but this, The same issue would happen in Docker with SELinux turned on.  And it and Podman have been adopted by the \"generate public\"."
+        },
+        {
+            "user": "abitrolly",
+            "body": "Partially the reason I started to use `podman` is to avoid problems with\n`docker` on SELinux enabled systems. The former can run unpriviliged\ncontainers and is engineered from scratch to be awesome, but it doesn't fix\nthe problem with sharing volumes r/w. Maybe that's not the use case for\ncontainers at all, and I better find resources to complete my plan9 to be\nindependent of problems with filesystems and SELinux.\n\nOn Wed, Feb 19, 2020, 12:21 AM Daniel J Walsh <notifications@github.com>\nwrote:\n\n> @abitrolly <https://github.com/abitrolly> Not sure what you mean but\n> this, The same issue would happen in Docker with SELinux turned on. And it\n> and Podman have been adopted by the \"generate public\".\n>\n> —\n> You are receiving this because you were mentioned.\n> Reply to this email directly, view it on GitHub\n> <https://github.com/containers/libpod/issues/4794?email_source=notifications&email_token=ACC72MZTPIT3WEFU7HEO3EDRDRGL7A5CNFSM4KDDAPMKYY3PNVWWK3TUL52HS4DFVREXG43VMVBW63LNMVXHJKTDN5WW2ZLOORPWSZGOEMFC2FI#issuecomment-587869461>,\n> or unsubscribe\n> <https://github.com/notifications/unsubscribe-auth/ACC72M2FGZE77EA44FDGL73RDRGL7ANCNFSM4KDDAPMA>\n> .\n>\n"
+        },
+        {
+            "user": "rhatdan",
+            "body": "Well we can always drive python3 to fix the issue with shutils.  Which they have  a partial fix for.  The bottom line is, the kernel prevents setting SELinux XAttrs on file systems that were mounted with the context mount, or on file systems that do not support SELinux labels.  Since we are using fuse-overlay for rootless containers, we end up with this restriction.  You could remove fuse-overlay and it would be allowed on a \"vfs\" driver, but that has a lot of headaches.  At some point in the future, overlayfs might be allowed to be used by rootless user, which could also alleviate this problem.  Until then Podman has to live with the limitations of what Rootless accounts provides."
+        },
+        {
+            "user": "abitrolly",
+            "body": "I probably miss the point. Speaking user stories, **as a user** I don't\nwant to know how SELinux works with XAttrs, how `vfs` and `fuse-overlay`\noperate and why `overlayfs` is worse or better to use `podman` for writing\nthe results of running a container over my project dir (which is a Git\ncheckout).\n\nThat's why I think that it is easier to instruct container to mount volume\nover network, and provide the volume through 9p share (9pfs server). Then\nSELinux will deny 9pfs server from reading my .ssh/ files, but will not\nmeddle with access to my project files.\n\nOn Wed, 19 Feb 2020 at 17:34, Daniel J Walsh <notifications@github.com>\nwrote:\n\n> Well we can always drive python3 to fix the issue with shutils. Which they\n> have a partial fix for. The bottom line is, the kernel prevents setting\n> SELinux XAttrs on file systems that were mounted with the context mount, or\n> on file systems that do not support SELinux labels. Since we are using\n> fuse-overlay for rootless containers, we end up with this restriction. You\n> could remove fuse-overlay and it would be allowed on a \"vfs\" driver, but\n> that has a lot of headaches. At some point in the future, overlayfs might\n> be allowed to be used by rootless user, which could also alleviate this\n> problem. Until then Podman has to live with the limitations of what\n> Rootless accounts provides.\n>\n> —\n> You are receiving this because you were mentioned.\n> Reply to this email directly, view it on GitHub\n> <https://github.com/containers/libpod/issues/4794?email_source=notifications&email_token=ACC72M47JBNVIDWECI7TLOLRDU7OFA5CNFSM4KDDAPMKYY3PNVWWK3TUL52HS4DFVREXG43VMVBW63LNMVXHJKTDN5WW2ZLOORPWSZGOEMIDC3Y#issuecomment-588263791>,\n> or unsubscribe\n> <https://github.com/notifications/unsubscribe-auth/ACC72M32MVYITR27J6JXAWDRDU7OFANCNFSM4KDDAPMA>\n> .\n>\n\n\n-- \nAnatoli Babenia\n\n+1 (650) 605-3365\n+375 (29) 320-4241\n"
+        },
+        {
+            "user": "abitrolly",
+            "body": "The filesystem isolation layer with 9pfs could also fix this [top voted](https://github.com/moby/moby/issues?q=is%3Aissue+sort%3Areactions-%2B1-desc) Docker problem https://github.com/moby/moby/issues/2259"
+        },
+        {
+            "user": "abitrolly",
+            "body": "Looks like I managed to screw up my system with `podman` `:z` flag - https://github.com/teemtee/tmt/issues/1179  I am certain that it is because of `podman`, because it is the only thing I use that interacts with SELinux labels. Any hints how to fix that without disabling SELInux completely?"
+        },
+        {
+            "user": "rhatdan",
+            "body": "restorecon -v -R -F PATHTOBADDIR.\n"
+        },
+        {
+            "user": "abitrolly",
+            "body": "Why it doesn't work without `-F`?\n```\n➜  ~ restorecon -v ~\n/home/anatoli not reset as customized by admin to system_u:object_r:container_file_t:s0:c385,c528\n```\nHow `podman` manages to customize labels as admin if it is running rootless? Why it doesn't pay attention that mounted dirs are already have some labels that are not supposed to be overwritten?"
+        },
+        {
+            "user": "rhatdan",
+            "body": "Shoot, I thought that overroad customizable types.\n\nYou can hack this by doing two commands.\n\nchcon -t user_home_t -R PATHTOBADDIR\nrestorecon -v -R -F PATHTOBADDIR"
+        }
+    ]
+}

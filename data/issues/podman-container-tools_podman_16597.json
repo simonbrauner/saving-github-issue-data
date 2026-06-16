@@ -1,0 +1,82 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 16597,
+    "title": "Varios quadlet kube defaults",
+    "state": "closed",
+    "labels": [
+        "locked - please file new issue/PR"
+    ],
+    "user": "alexlarsson",
+    "body": "For `.container` files, quadlet uses various non-standard defaults for some things. I don't know if the same exact choices are right for .kube file, but it may be interesting to think about them.\n\nSome interesting changes that quadled containers do:\n\n`--pull=never` (i.e. `ImagePullPolicy`): This is a change from the default of `IfNotPresent`. The reason I did this is that it feels rather weird to have a system service on boot start pulling down images, and I would rather just have it fail, as this feels like a sysadmin error.\n\n`--readonly` (i.e. `securityContext.readOnlyRootFilesystem`): This is the default for quadlet because the containers are not persistent (run with --rm), so ideally they should not use the rootfs for any storage anyway.\n\n`--cap-drop=all` (`securityContext.capabilities.drop`) - more secure default\n\n`--security-opt=no-new-privileges` (`securityContext.allowPrivilegeEscalation`) - more secure default\n\nSo, there are two questions. Do we want to also change these defaults for quadlet kube, and how do we pass such default changes to `podman kube play`.\n",
+    "comments": [
+        {
+            "user": "vrothberg",
+            "body": "Most of these defaults would hurt many current users of `podman generate systemd`.\n\nCould we solve this via CONTAINERS_CONF as discussed yesterday?  I am looking at use cases where users just want to start a container systemd service at runtime without reboot.  Especially when being shared on the web, git, etc. I'd expect these things to \"just work\" without having to, for instance, pre-fetch the images."
+        },
+        {
+            "user": "Luap99",
+            "body": "Using `CONTAINERS_CONF` is problematic since it will remove defaults that are set in `/usr/share/containers/containers.conf`, also see https://github.com/containers/podman/issues/15413"
+        },
+        {
+            "user": "vrothberg",
+            "body": "Yes, we talked about that yesterday.  We were thinking about adding CONTAINERS_CONF_ADDITIONAL (naming unclear) which will be loaded last.  This way, all system/user settings will honored while allowing to override them where/when needed."
+        },
+        {
+            "user": "alexlarsson",
+            "body": "I'm not sure how this would be used by quadlet. We can inject env vars easily into the podman run by setting environment keys in the service file. However, its a bit harder to generate a file somewhere to pass in as a filename, because lifetime tracking etc of the file is hard for a one-shot thing like a generator."
+        },
+        {
+            "user": "vrothberg",
+            "body": "Fair point.\n\nMy main concern is that these defaults are too strict for most users.  They totally make sense for the auto use case but less for an ordinary sysadmin.  The user experience would suffer IMO - @rhatdan would probably use the goldie locks story.\n\nCould we hide these settings behind an opt-in field in the .container files?  `LockedDown=true`?"
+        },
+        {
+            "user": "alexlarsson",
+            "body": "Yeah, i'm not 100% saying these need to be the same. Just that it may be useful to discuss them. \n\nIn the \"regular\" quadlet `*.container` files these are all just default changes and there are keys in the `[Container]` section to change them back. So, by default in a quadlet service file you get e.g. `--readonly`, unless you add `ReadOnly=false` to the `app.container` file. Maybe this is not a good idea as the behaviour here should match what the default behaviour that the yaml would get when running in kubernetes.\n\nAnyway, we have this one chance to set the defaults as quadlet is a new way to run apps. Once its released we have to keep those defaults forever for backwards compat."
+        },
+        {
+            "user": "vrothberg",
+            "body": "> Yeah, i'm not 100% saying these need to be the same. Just that it may be useful to discuss them.\n\nUnderstood.\n\nI think only `--security-opt=no-new-privileges` should be set by default.  All others should be opt-in rather than opt-out.  As mentioned above, I think they are too strict and too many workloads won't run by default."
+        },
+        {
+            "user": "ygalblum",
+            "body": "I think we are mixing two different requirements here. On one hand we have default values - i.e. use when nothing else is set -  and on the other, overrides - i.e. always use no matter was is set.\n\nAs @rhatdan wrote in the `--read-only` [ticket](https://github.com/containers/podman/pull/16545#issuecomment-1324777573), the command line arguments override whatever was set in the YAML files. But, the values in `containers.conf`, are only used if nothing else is set.\n\nWhich one are we trying to solve here?"
+        },
+        {
+            "user": "vrothberg",
+            "body": "@ygalblum, I am talking about default setting (i.e., the settings without user intervention).  I want these to be as  portable as possible such that users migrating to Quadlet have a \"it just works\" experience.\n\nTo make services even more secure and further lock them down, we can tweak these defaults.  Whether all these settings can be tweaked at the moment, I don't know."
+        },
+        {
+            "user": "rhatdan",
+            "body": "Lets talk about this after the thankgiving break.  I love having another chance to change defaults for \"containers in production\", as tight as possible.  But diagnosing what goes wrong might be difficult."
+        },
+        {
+            "user": "rhatdan",
+            "body": "We need to discuss this as the cabal meeting on Thursday."
+        },
+        {
+            "user": "vrothberg",
+            "body": "Let's try to come to conclusion.  We've been chatting about this stuff yesterday and we also have this thread here.\n\n* `--pull=never` this makes sense for auto but not for other use cases.  Users would have to pre-pull images on their own which is a bad user experience. Imagine users want to deploy their K8s YAMLs along with their .kube files: Do we really expect them to pre-pull images?\n* `--readonly` @Luap99 has demoed yesterday that this will break 50 percent of the containers running on his home server. I don't think that's a great user experience either.\n* `--cap-drop=all` certainly more secure since most containers will not work :^)\n* `--security-opt=no-new-privileges` that will probably work but I have no data point\n\nThese settings may make sense in a highly curated environment such as automotive. But they do not make sense for ordinary sysadmins. For such changes we should really be use-case driven or have at least some data points. A gut feeling for new defaults that haven't been tested at all in the wild is risky.\n\nAs mentioned in many other threads.  I think that auto should ship a special and curated containers.conf."
+        },
+        {
+            "user": "Luap99",
+            "body": "I agree with @vrothberg points.\nI just want to clarify that my comment yesterday was about breaking containers was with `--cap-drop=all`. I never tested with --readonly but I am sure that there are many containers that will break. I checked on my system by running `podman diff` and while not many, some containers listed files outside of typical tmpfs locations (`/tmp`, `/run`)."
+        },
+        {
+            "user": "alexlarsson",
+            "body": "@vrothberg Should we not have these as defaults for regular (non-kube) quadlet too then?\n"
+        },
+        {
+            "user": "vrothberg",
+            "body": "Yes, I think the defaults should largely be default indepenendet of how podman is being called. User experience, test coverage, and \"known to work\" are my main motivators for that."
+        },
+        {
+            "user": "vrothberg",
+            "body": "@alexlarsson can we close the issue after https://github.com/containers/podman/pull/16714 is merged."
+        },
+        {
+            "user": "alexlarsson",
+            "body": "Yeah, lets close it"
+        }
+    ]
+}

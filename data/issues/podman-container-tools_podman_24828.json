@@ -1,0 +1,67 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 24828,
+    "title": "Use systemd-nsresourced to allocate user namespaces and UID/GID ranges",
+    "state": "closed",
+    "labels": [
+        "kind/feature",
+        "locked - please file new issue/PR"
+    ],
+    "user": "ruihe774",
+    "body": "### Feature request description\n\nCurrently, podman uses `newuidmap` and `newgidmap` from `shadow-utils` to set up UID/GID mapping for user namespaces of rootless containers. This requires predefined UID/GID ranges in `/etc/subuid` and `/etc/subgid`. In some configurations, for example users managed by `systemd-homed` (#12590) and users managed by a network authentication system, users do not have records in `/etc/subuid` and `/etc/subgid`, preventing podman from creating rootless containers.\n\nSystemd 256 has introduced a service `systemd-nsresourced` that exposes a Varlink interface `io.systemd.NamespaceResource`. Unprivileged clients may allocate a user namespace, and then request a transient UID/GID range to be assigned to it via this service. Users do no need to have predefined sub-UID/GID ranges. I wonder whether podman can use `systemd-nsresourced` to allocate user namespaces and UID/GID ranges for rootless containers.\n\n### Suggest potential solution\n\nPodman can add a code path to use `systemd-nsresourced` to allocate user namespaces and UID/GID ranges. If it is not running, podman can fallback to `newuidmap` and `newgidmap`. This ensures backward compatibility.\n\n### Have you considered any alternatives?\n\nNo.\n\n### Additional context\n\nhttps://github.com/systemd/systemd/pull/26826\n[man:systemd-nsresourced.service(8)](https://www.man7.org/linux/man-pages/man8/systemd-nsresourced.8.html)\n\n<details>\n<summary>Interface `io.systemd.NamespaceResource`</summary>\n\n```console\n$ varlinkctl introspect /run/systemd/io.systemd.NamespaceResource io.systemd.NamespaceResource\ninterface io.systemd.NamespaceResource\n\nmethod AllocateUserRange(\n        name: string,\n        size: int,\n        target: ?int,\n        userNamespaceFileDescriptor: int\n) -> ()\n\nmethod RegisterUserNamespace(\n        name: string,\n        userNamespaceFileDescriptor: int\n) -> ()\n\nmethod AddMountToUserNamespace(\n        userNamespaceFileDescriptor: int,\n        mountFileDescriptor: int\n) -> ()\n\nmethod AddControlGroupToUserNamespace(\n        userNamespaceFileDescriptor: int,\n        controlGroupFileDescriptor: int\n) -> ()\n\nmethod AddNetworkToUserNamespace(\n        userNamespaceFileDescriptor: int,\n        networkNamespaceFileDescriptor: int,\n        namespaceInterfaceName: ?string,\n        mode: string\n) -> (\n        hostInterfaceName: string,\n        namespaceInterfaceName: string\n)\n\nerror UserNamespaceInterfaceNotSupported()\n\nerror NameExists()\n\nerror UserNamespaceExists()\n\nerror DynamicRangeUnavailable()\n\nerror NoDynamicRange()\n\nerror UserNamespaceNotRegistered()\n\nerror UserNamespaceWithoutUserRange()\n\nerror TooManyControlGroups()\n\nerror ControlGroupAlreadyAdded()\n```\n\n</details>",
+    "comments": [
+        {
+            "user": "Luap99",
+            "body": "I have only looked briefly at this when it was added but I don't think it is possible to switch to that with the current podman storage design.\n\nWe write the subuid's on disk in your home directory as plain directories/files so this cannot work when the uid's are transient. And even systemd goes to great length to lock this uid \"backdoor\" down via BPF:\n\n> In order to ensure that clients cannot gain\n       persistency in their transient UID/GID range a BPF-LSM based\n       policy is enforced that ensures that user namespaces set up this\n       way can only write to file systems they allocate themselves or\n       that are explicitly allowlisted via systemd-nsresourced.\n\nAnd if we go into the nspawn man page:\n\n> systemd-nspawn may be invoked with or without privileges. The\n>       full functionality is currently only available when invoked with\n>       privileges. When invoked without privileges, various limitations\n>       apply, including, but not limited to:\n>\n>  Only disk image based containers are supported (i.e.\n           --image=). Directory based ones (i.e.  --directory=) are not\n           supported.\n\nSo my understanding is it is impossible to use a normal directory layout. \n\n"
+        },
+        {
+            "user": "ruihe774",
+            "body": "Can `AddMountToUserNamespace()` address this problem? According to the description, it is possible to use the method to add a mounted overlayfs to the allowlist. I haven't tried it yet."
+        },
+        {
+            "user": "Luap99",
+            "body": "I am not sure how the mounting is supposed to work but I don't that is the problem. We can natively mount overlayfs in a user namesapce without privilege escalation. The issue I think is that we cannot write files with these extra uids to disk which means all images would be limited to one uid, or need something like fuse-overlayfs that can map uids dynamically in the extended attributes."
+        },
+        {
+            "user": "ruihe774",
+            "body": "> The issue I think is that we cannot write files with these extra uids to disk which means all images would be limited to one uid\n\nAccording to my understanding of the [BPF-LSM code of nsresourced](https://github.com/systemd/systemd/blob/main/src/nsresourced/bpf/userns_restrict/userns-restrict.bpf.c), this is not enforced. For a mount that is in the userns or in the allowlist, operations in it are all allowed. The \"no extra uids\" limit is enforced by mountfsd. As we can mount overlayfs without privilege, we do not need to use mountfsd and can therefore bypass the limit.\n\nThey are all my guesses. I haven't confirmed them yet. Sorry\n\n"
+        },
+        {
+            "user": "giuseppe",
+            "body": "as @Luap99 said, I don't think this can work with podman.  We need a persistent allocation of IDs, otherwise you'll need to recreate the entire storage every time the user namespace is destroyed."
+        },
+        {
+            "user": "ruihe774",
+            "body": "> as [@Luap99](https://github.com/Luap99) said, I don't think this can work with podman. We need a persistent allocation of IDs, otherwise you'll need to recreate the entire storage every time the user namespace is destroyed.\n\nYeah, this is a problem."
+        },
+        {
+            "user": "giuseppe",
+            "body": "and I am quite sure that the ebpf filter doesn't allow to write any persistent file to a file system not owned by the user namespace.  That means you'd need to use a tmpfs to store the images, or as @Luap99 said, use something like fuse-overlayfs to map from your UID:GID to the expected IDs inside the user namespace."
+        },
+        {
+            "user": "runiq",
+            "body": "I agree that a persistent mapping would be necessary for 'normal' use, but what about running Podman containers with `--userns=auto`? That also automatically allocates ID subranges from the `container` user's (typically huge) subuid/subgid range, so it sounds like a good match to me."
+        },
+        {
+            "user": "giuseppe",
+            "body": "we still need to store the images with a consistent mapping and that we have access to.\n\nIt could work with \"throw-away\" use cases, where your storage won't survive the allocation given to you by systemd, but not sure it is worth the effort for such a restricted use case.  If anyone is willing to open a PR, we can consider it"
+        },
+        {
+            "user": "zroug",
+            "body": "Rather than storing file ownership as seen from outside the container, ownership as seen from within the container could be stored as an extended attribute on the storage layer. Precedence for this has already been established for file permissions with the `storage.options.overlay.force_mask` option. I've opened an issue regarding this feature (https://github.com/containers/container-libs/issues/97).\n\nI think this would be a useful feature because it would make handling subuid and subgid ranges so much easier."
+        },
+        {
+            "user": "giuseppe",
+            "body": "That option already controls how image files are stored, it affects pulls too not only the container at runtime "
+        },
+        {
+            "user": "zroug",
+            "body": "Yes, so if we had a similar option for storing mapped UIDs and GIDs in extended attributes, unmapped UIDs and GIDs would never touch the disk. Wouldn't that be exactly what's required for dynamic UID/GID mappings to work?"
+        },
+        {
+            "user": "giuseppe",
+            "body": "That might work, but keep in mind that all the containers must be created from the same user namespace so we have to change how that works first, then force fuse-overlayfs. "
+        }
+    ]
+}

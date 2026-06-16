@@ -1,0 +1,91 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 2504,
+    "title": "podman: --add-host does not work when specifying --pod",
+    "state": "closed",
+    "labels": [
+        "kind/bug",
+        "locked - please file new issue/PR"
+    ],
+    "user": "muayyad-alsadi",
+    "body": "/kind bug\n\n**Description**\n\nwhen we specify`--pod=mypod` \n\n```\n$ podman pod create --name=mypod\na81e2efafd48451354ebc5051d7d2babeb9a90e71411af73be75323d60891190\n$ podman run --pod=mypod --add-host 'foobar:127.0.0.1' --rm -ti busybox ping -c 5 foobar\nping: bad address 'foobar'\n```\n\nbut normally it would work like this\n\n```\n$ podman run --add-host 'foobar:127.0.0.1' --rm -ti busybox ping -c 5 foobar\nPING foobar (127.0.0.1): 56 data bytes\n64 bytes from 127.0.0.1: seq=0 ttl=64 time=0.041 ms\n64 bytes from 127.0.0.1: seq=1 ttl=64 time=0.082 ms\n64 bytes from 127.0.0.1: seq=2 ttl=64 time=0.092 ms\n64 bytes from 127.0.0.1: seq=3 ttl=64 time=0.058 ms\n64 bytes from 127.0.0.1: seq=4 ttl=64 time=0.128 ms\n\n--- foobar ping statistics ---\n5 packets transmitted, 5 packets received, 0% packet loss\nround-trip min/avg/max = 0.041/0.080/0.128 ms\n```\n\n",
+    "comments": [
+        {
+            "user": "mheon",
+            "body": "@baude had some talk of doing this in an automated fashion (run a little DNS server, and automatically add hostnames to it as containers/pods are created).\n\nThat said, no reason we can't do `--add-host` when sharing the network namespace.\n\n@rhatdan I don't think we coded containers in a netns to share `/etc/hosts` like we did for `resolv.conf` - does it make sense to do that at the same time as this?"
+        },
+        {
+            "user": "rhatdan",
+            "body": "Yes.  Containers in a pod should share the same /etc/hosts and /etc/resolv.conf."
+        },
+        {
+            "user": "muayyad-alsadi",
+            "body": "> Yes. Containers in a pod should share the same /etc/hosts and /etc/resolv.conf.\n\nno problem, I can live with that\n\n> run a little DNS server\n\njust give me `--add-host` on `podman pod create`"
+        },
+        {
+            "user": "rhatdan",
+            "body": "Yes the commands to configure each of the Namespaces should be available on the podman pod create CLI."
+        },
+        {
+            "user": "muayyad-alsadi",
+            "body": "> Yes the commands to configure each of the Namespaces should be available on the podman pod create CLI.\n\nso can I do \n\n```\npodman pod create --name mypod --add-host redis:127.0.0.1\n```"
+        },
+        {
+            "user": "haircommander",
+            "body": "@muayyad-alsadi I am not opposed to that change, though I have a PR open for a fix for your original issue (doing --add-host on the run call instead of pod create). adding --add-host on pod create will require a larger change.\n\n@mheon adding --add-host on pod create will fix the restart problem, but make the hosts in a pod immutable after creation (unless we want both changes). I'm not married either way, but if we do --add-host on pod create, we mine as well add all other namespace configuration commands of a container create/run. WDYT cc: @rhatdan "
+        },
+        {
+            "user": "mheon",
+            "body": "@haircommander IMO we go with both changes - `--add-host` on pods modifies the infra container's hosts file as it is created, `--add-host` on containers appends to the existing one"
+        },
+        {
+            "user": "haircommander",
+            "body": "@mheon yeah I like that too. I'll leave the first PR as is, as they're distinct use cases and it will take some wiring to get pod create to pass a create config to the infra container"
+        },
+        {
+            "user": "muayyad-alsadi",
+            "body": "my objective is to get at least one good way to make my [podman-compose](https://github.com/muayyad-alsadi/podman-compose) work, I've pushed 6 ways and none of them currently work.\n\nyou can test it with (and different way transform)\n\n```\n./podman-compose.py -t cntnet -f examples/awx/docker-compose.yml up\n```\n\ncntnet does something like\n\n```\npodman run --name=my_pause -d --add-host redis:127.0.0.1 --add-host web:127.0.0.1 -p 8088:8088 k8s.gcr.io/pause:3.1\npodman run --name=my_redis -d --network container:my_pause redis:alpine\npodman run --name=my_web -d --network container:my_pause busybox httpd -f -p 8088\n```\n\nI got the following (with podman 1.1.0 and also with latest commit)\n\n```\n$ podman run --name=my_pause -d --add-host redis:127.0.0.1 --add-host web:127.0.0.1 -p 8088:8088 k8s.gcr.io/pause:3.1\n$ podman run --name=my_redis -d --network container:my_pause redis:alpine\nError: failed to mount shm tmpfs \"/home/demo/.local/share/containers/storage/vfs-containers/e1cc4abe51dfc00f0eb9dd50fc3bea095e3cbefcc66d2721113a65403e85a016/userdata/shm\": operation not permitted\n$ podman run --name=my_web -d --network container:my_pause busybox httpd -f -p 8088\nError: failed to mount shm tmpfs \"/home/demo/.local/share/containers/storage/vfs-containers/93765a95c9cd32160a1aee7edf65927e3b19f8a9411bc08d985fd5be1898f06f/userdata/shm\": operation not permitted\n```\n\n"
+        },
+        {
+            "user": "muayyad-alsadi",
+            "body": "I'm using latest podman commit  `4b80517`\n\nit seems that it did not work yet, I've used add host on c1\n\n```\n$ podman pod create --name mypod -p 8080:80\n1aa8d9cff9c9274e90b3d6539af1e5bf5ac0f6c12a2093ef6a6ee1f73e374dfc\n$ podman run -d --add-host redis:127.0.0.1 --name c1 --pod mypod busybox httpd -f -p 80\ne70eb4b2e74729df5a5d01b159e54efb03d5e06e625ab475ef3909c89f3f9081\n$ podman run -d --add-host busybox:127.0.0.1 --name c2 --pod mypod redis:alpine\nfca569a706c1dab1cf1bd5009efbd54a066c8fcd49fe840ca7f9ac815fea6929\n$ podman exec c1 ping redis\nping: bad address 'redis'\nError: exit status 1\n$ podman exec c1 sh -c 'echo \"info\" | nc 127.0.0.1 6379'\nworks fine\nredis_version:5.0.3\n$ podman exec c1 cat /etc/hosts \n127.0.0.1   localhost localhost.localdomain localhost4 localhost4.localdomain4\n::1         localhost localhost.localdomain localhost6 localhost6.localdomain6\n```\n\nthis is not correct behaviour, here is the correct behaviour (same podman version)\n\n```\n$ podman run --rm -ti --add-host monkey:127.0.0.1 busybox cat /etc/hosts\n127.0.0.1   localhost localhost.localdomain localhost4 localhost4.localdomain4\n::1         localhost localhost.localdomain localhost6 localhost6.localdomain6\n\n127.0.0.1 monkey\n```"
+        },
+        {
+            "user": "muayyad-alsadi",
+            "body": "I was trying to guess what to pass to `--share`\n\n```\n$ podman pod create --name mypod --share=\"\" -p 8080:80\nError: unable to create pod: Pods must have an infra container to share namespaces\n$ podman pod create --name mypod --share=\"none\" -p 8080:80\nError: unable to create pod: Pods must have an infra container to share namespaces\n```\n\nthis half-worked, I don't know why I can't restart it and what should I pass for `--share` to get my two containers share only network.\n\n```\n$ podman pod create --name mypod --share=\"cgroup,ipc\" -p 8080:80\n$ podman run -d --add-host redis:127.0.0.1 --name c1 --pod mypod busybox httpd -f -p 80\n$ podman run -d --add-host busybox:127.0.0.1 --name c2 --pod mypod redis:alpine\n$ podman exec c1 ping -c 5 redis\nPING redis (127.0.0.1): 56 data bytes\n64 bytes from 127.0.0.1: seq=0 ttl=64 time=0.047 ms\n64 bytes from 127.0.0.1: seq=4 ttl=64 time=0.031 ms\n\n--- redis ping statistics ---\n5 packets transmitted, 5 packets received, 0% packet loss\nround-trip min/avg/max = 0.031/0.038/0.047 ms\n\n$ podman restart c1\nError: container create failed: nsenter: failed to open /proc/20442/ns/ipc: Permission denied\ncontainer_linux.go:344: starting container process caused \"process_linux.go:297: getting the final child's pid from pipe caused \\\"EOF\\\"\"\n: internal libpod error\n```\n"
+        },
+        {
+            "user": "haircommander",
+            "body": "@muayyad-alsadi the referenced fix isn't upstream yet, you can checkout my branch if you want to try it out, though it may change before it makes it upstream. \n\nYou can avoid the pod and do this until that fix goes upstream, however:\npodman run -d --add-host redis:127.0.0.1 --name c1 busybox httpd -f -p 80\npodman run --net container:c1 busybox ping -c 5 redis\n\nThough I don't think this will work for multiple containers as the example above has."
+        },
+        {
+            "user": "muayyad-alsadi",
+            "body": "@haircommander  I've implemented this and it did not work see my [`cntnet` comment above](https://github.com/containers/libpod/issues/2504#issuecomment-469457156)\n\nI got failed to mount shm tmpfs\n"
+        },
+        {
+            "user": "muayyad-alsadi",
+            "body": "```\n$ podman run -d --add-host redis:127.0.0.1 --name c1 busybox httpd -f -p 80\na5aaa11ff6cabc554f83203d139c73f5a7ac2c9965f7e15488d4a80e7369c5c2\n$ podman run --net container:c1 busybox ping -c 5 redis\nError: failed to mount shm tmpfs \"/home/demo/.local/share/containers/storage/vfs-containers/34bed25987df37b0f50cc7576899c68ead675b4c45e19695825d2b7f20dab856/userdata/shm\": operation not permitted\n```"
+        },
+        {
+            "user": "haircommander",
+            "body": "@muayyad-alsadi whoops was running in root and didn't have that problem. Let me investigate"
+        },
+        {
+            "user": "haircommander",
+            "body": "@mheon @giuseppe seems like a mountSHM call is failing when we share a netNS with another container in rootless. That doesn't make sense, right?"
+        },
+        {
+            "user": "mheon",
+            "body": "I think that's worth a separate issue. Wonder how we never ran into it before, to be honest."
+        },
+        {
+            "user": "muayyad-alsadi",
+            "body": "> I think that's worth a separate issue.\n\nshould I create one? or #2545 is enough?\n\n> Wonder how we never ran into it before, to be honest.\n\nmy script [podman-compose.py](https://github.com/muayyad-alsadi/podman-compose/blob/master/podman-compose.py) has 6 modes (via `-t`) to run unmodified docker-compose files and I shipped two example `yml` files one of them is [ansible awx](https://github.com/muayyad-alsadi/podman-compose/blob/master/examples/awx/docker-compose.yml). none of the 6 modes currently work despite that all of them should work.\n\nthe script is very simple, it just run podman using subprocess, and it prints the commands it runs.\n\n```\n./podman-compose.py -t cntnet -f examples/awx/docker-compose.yml up\n```\n\nthe only working example is to use host network and manually modify [docker-compose.yml](https://github.com/muayyad-alsadi/podman-compose/blob/master/examples/awx-working/docker-compose.yml) to have environments that points to localhost\n\n```\n./podman-compose.py -t hostnet -f examples/awx-working/docker-compose.yml up\n```"
+        },
+        {
+            "user": "haircommander",
+            "body": "@muayyad-alsadi #2545 addresses the weird output you got when trying to do --share \"\" in a pod (it should have worked, and the documentation wasn't clear on why it didn't). I opened a new issue #2556 to address the odd error \"failed to mount tmpfs\""
+        }
+    ]
+}

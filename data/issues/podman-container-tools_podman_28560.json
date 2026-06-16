@@ -1,0 +1,74 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 28560,
+    "title": "Podman Quadlet converting ampersand to unicode escape sequence in container run",
+    "state": "closed",
+    "labels": [
+        "kind/bug"
+    ],
+    "user": "InfoSec812",
+    "body": "### Issue Description\n\nI am deploying a multi-container application using Quadlets and Traefik. One container, frontend, handles `design.<domain>`. Another container handles `design.<domain>/api`. In Traefik, I use labels to configure the load balancer as follows:\n\nFrontend:\n```\nLabel=traefik.enable=true\nLabel=traefik.docker.network=frontend\nLabel=traefik.http.routers.penpot-frontend.rule=Host(`design.<domain>`)\nLabel=traefik.http.routers.penpot-frontend.entrypoints=https\nLabel=traefik.http.routers.penpot-frontend.priority=1\nLabel=traefik.http.routers.penpot-frontend.service=penpot-frontend-http\nLabel=traefik.http.routers.penpot-frontend.tls.certresolver=traefiktls\nLabel=traefik.http.services.penpot-frontend-http.loadbalancer.server.port=8080\n```\n\nBackend:\n```\nLabel=traefik.enable=false\nLabel=traefik.docker.network=frontend\nLabel=\"traefik.http.routers.penpot-backend.rule=Host(`design.<domain>`) && PathPrefix(`/api/`)\"\nLabel=traefik.http.routers.penpot-backend.entrypoints=https\nLabel=traefik.http.routers.penpot-backend.service=penpot-backend-http\nLabel=traefik.http.routers.penpot-backend.tls.certresolver=traefiktls\nLabel=traefik.http.services.penpot-backend-http.loadbalancer.server.port=6060\n```\n\nRunning the \"frontend\" container has no problems. The \"backend\" however converts the double ampersands to:\n\n```\n\"traefik.http.routers.penpot-backend.rule\": \"Host(`design.<domain>`) \\u0026\\u0026 PathPrefix(`/api/`)\"\n```\n\nAnd that cannot be parsed by Traefik to handle the rule.\n\n### Steps to reproduce the issue\n\nSteps to reproduce the issue\n1. Create a Quadlet which has a label with ampersands in the value\n2. Run the container\n3. Inspect the container and see that the ampersand has been converted to a unicode escape sequence\n\n\n### Describe the results you received\n\nAmpersands in my labels are converted to unicode escape sequences\n\n### Describe the results you expected\n\nDescribe the results you expected\n\n### podman info output\n\n```yaml\nIf you are unable to run podman info for any reason, please provide the podman version, operating system and its version and the architecture you are running.\n```\n\n### Podman in a container\n\nNo\n\n### Privileged Or Rootless\n\nNone\n\n### Upstream Latest Release\n\nYes\n\n### Additional environment details\n\nAdditional environment details\n\n### Additional information\n\nAdditional information like issue happens only occasionally or issue happens with a particular architecture or on a particular setting",
+    "comments": [
+        {
+            "user": "baude",
+            "body": "care to submit a pr to fix this ?"
+        },
+        {
+            "user": "ygalblum",
+            "body": "Can you elaborate on your environment? Which version of Podman and Quadlet are you using. I've tested this on Fedora with both 5.7.1 and 5.8.2 and got something different (same in both of my cases)\n\nMy `.container` file:\n```\n[Container]\nImage=fedora:43\nLabel=\"traefik.http.routers.penpot-backend.rule=Host(`design.<domain>`) && PathPrefix(`/api/`)\"\n```\n\nAnd the service unit file has:\n```\nExecStart=/usr/bin/podman run --name systemd-%N --replace --rm --cgroups=split --sdnotify=conmon -d --label \"traefik.http.routers.penpot-backend.rule=Host(`design.<domain>`)\\x20&&\\x20PathPrefix(`/api/`)\" fedora:43\n```\nNotice that it escaped the spaces but not the `&&`"
+        },
+        {
+            "user": "InfoSec812",
+            "body": "podman version 5.8.0\n\nI'll see if there is an updated package for CentOS Stream 10 and report back"
+        },
+        {
+            "user": "InfoSec812",
+            "body": "Same result.\n\n```\n❯ podman inspect penpot-backend | grep PathPrefix\n                    \"traefik.http.routers.penpot-backend.rule\": \"Host(`design.<domain>`) \\u0026\\u0026 PathPrefix(`/api/`)\",\n                    \"traefik.http.routers.penpot-backend.rule=Host(`design.<domain>`) \\u0026\\u0026 PathPrefix(`/api/`)\",\n❯ podman --version\npodman version 5.8.2\n```"
+        },
+        {
+            "user": "InfoSec812",
+            "body": "@ygalblum I can confirm that the generated unit file has something similar to what you show with the spaces escaped, but not the ampersands. However, `podman inspect` shows the ampersands escaped and not the spaces. Perhaps this is a systemd error? But it **WAS** working until recently."
+        },
+        {
+            "user": "ygalblum",
+            "body": "OK, thanks for clarifying. \n\nI've tried running the ExecStart command manually (with some changes because it is not within systemd):\n```\n$ podman run -it --rm --name fedora --label 'traefik.http.routers.penpot-backend.rule=Host(`design.<domain>`) && PathPrefix(`/api/`)' fedora:43\n```\n\nAnd then inspect shows:\n```\n$ podman inspect fedora | grep PathPrefix\n                    \"traefik.http.routers.penpot-backend.rule\": \"Host(`design.\\u003cdomain\\u003e`) \\u0026\\u0026 PathPrefix(`/api/`)\",\n                    \"traefik.http.routers.penpot-backend.rule=Host(`design.\\u003cdomain\\u003e`) \\u0026\\u0026 PathPrefix(`/api/`)\",\n```\nSo, interestingly, in my case, also `<` and `>` were escaped.\n\nBut, in any case, this does not seem like a Quadlet issue, but rather a Podman issue."
+        },
+        {
+            "user": "ygalblum",
+            "body": "I've done some more digging and this escaping is from the output of `podman inspect` (from `json.Marshal`) nothing internal to Podman.\n\nThe way to see it is be running:\n```\n$ podman inspect --format '{{index .Config.Labels \"traefik.http.routers.penpot-backend.rule\"}}' fedora\nHost(`design.<domain>`) && PathPrefix(`/api/`)\n``` \n"
+        },
+        {
+            "user": "ygalblum",
+            "body": "Also, just to verify, I've compiles and old version (v5.2) and it has the same behaviour (both with the json marshalling and without)"
+        },
+        {
+            "user": "InfoSec812",
+            "body": "OMG! I'm an **IDIOT**! Please disregard this whole thread. Somewhere along the way I had set `Label=traefik.enable=false`..."
+        },
+        {
+            "user": "ygalblum",
+            "body": "🤦🏼‍♂️ It's even there in the issue's description. Glad it worked out"
+        },
+        {
+            "user": "Luap99",
+            "body": "The escaping is done by the json parser, I am however highly confused why. The inspect code uses PrintGenericJSON() https://github.com/containers/podman/blob/cc2e2c94b84693367ce972d4c6e2d8557ecd0a73/cmd/podman/utils/utils.go#L153-L160\n\nSo we ask it to explicitly not do that as it is only useful in HTML context where you want to avoid HTML/js injection I guess. For the cli output escaping them makes no sense I wonder if this is a go std bug somehow?"
+        },
+        {
+            "user": "Luap99",
+            "body": "Ok so yeah this is a a bug with podman container inspect code specifically as we overwrite the MarshalJSON() on the type which hold the labels"
+        },
+        {
+            "user": "ygalblum",
+            "body": "But, I don't think it's in the function you pasted here. The following code:\n```golang\npackage main\n\nimport (\n\t\"encoding/json\"\n\t\"os\"\n)\n\nfunc PrintGenericJSON(data any) error {\n\tenc := json.NewEncoder(os.Stdout)\n\t// by default, json marshallers will force utf=8 from\n\t// a string.\n\tenc.SetEscapeHTML(false)\n\tenc.SetIndent(\"\", \"     \")\n\treturn enc.Encode(data)\n}\n\nfunc main() {\n\tv := map[string]string{\"foo\": \"&&\"}\n\tPrintGenericJSON(v)\n}\n```\nprints:\n```shell\ngo run main.go\n{\n     \"foo\": \"&&\"\n}\n```"
+        },
+        {
+            "user": "Luap99",
+            "body": "https://github.com/containers/podman/pull/28575 will fix it"
+        },
+        {
+            "user": "InfoSec812",
+            "body": "Thanks all for the information!"
+        }
+    ]
+}

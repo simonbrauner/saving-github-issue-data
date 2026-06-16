@@ -1,0 +1,47 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 23919,
+    "title": "Allow mounts to be specified in a file",
+    "state": "closed",
+    "labels": [
+        "kind/feature",
+        "locked - please file new issue/PR"
+    ],
+    "user": "chetan-reddy",
+    "body": "### Feature request description\n\nI've been using Guix profiles as a read-only rootfs base 'image' with something like\n`sudo podman run ... -v /gnu/store:/gnu/store:ro --readonly --rootfs /path/to/guix/profile:O /some/command`\nInstead of mounting the whole /gnu/store into the container, I'd like to mount only the sub-directories that the profile actually requires. It's usually a pretty long list (often hundreds of directories), and passing them using `-v` or `--mount` options becomes unwieldy. \n\n\n\n### Suggest potential solution\n\nJust like the `--env` option has a corresponding `--env-file` option, would it be possible to add a `--mounts-file` with each line in the file required to be the same format as an argument to `--mount`\n\n\n### Have you considered any alternatives?\n\nAFAICT, I can't use podman-compose in my setup because podman-compose does not support `--rootfs` directories. See containers/podman-compose#197\n\n### Additional context\n\nAdd any other context or screenshots about the feature request here.",
+    "comments": [
+        {
+            "user": "giuseppe",
+            "body": "have you looked at `/usr/share/containers/mounts.conf`?\n\nYou can create it under `/etc/containers` to customize it"
+        },
+        {
+            "user": "baude",
+            "body": "you can also define this as a RUN label.  See `podman container runlabel`"
+        },
+        {
+            "user": "chetan-reddy",
+            "body": "> have you looked at `/usr/share/containers/mounts.conf`?\n\nThanks for the pointer. From the documentation for mounts.conf on the [install page](https://podman.io/docs/installation#mountsconf)\n\n> Note this is not a volume mount. The content of the volumes is copied into container storage, not bind mounted directly from the host.\n\nI want my /gnu/store directories to be bind mounted read-only, not copied. Also, the mounts.conf file seems to apply to all containers, whereas I want to specify different `--mounts-file` config for different containers (different guix rootfs 'images' need different sets of /gnu/store subdirs). "
+        },
+        {
+            "user": "chetan-reddy",
+            "body": "> you can also define this as a RUN label. See `podman container runlabel`\n\nThanks for the pointer. From the documentation, it seems like you first need to have/build an image with a label before you can use `podman container runlabel`. I'm running the containers with no image, the guix profile is like an exploded image that i point to directly using the `--rootfs` option of `podman run` .\n\nMaybe all these details of Guix are just confusing the issue. To simplify a bit, I have containers that each need hundreds of (different)mounts, and I'd like to specify the mounts in a file instead of on the command line. Just like `--env-file` or `--label-file` options of `podman run`, I'm requesting a `--mount-file` or `--mounts-file` option."
+        },
+        {
+            "user": "chetan-reddy",
+            "body": "I discovered that `podman run` has this undocumented `--default-mounts-file` option that almost does what I want, except (as documented for the global `mounts.conf` file on the [install page](https://podman.io/docs/installation#mountsconf) ), it copies the directories into /run/containers/storage/overlay-containers/.../userdata and bind mounts the copies into the container with `ro,noexec` . No mount options can be supplied in the file passed to `--default-mounts-file` , so I can't disable the `noexec` which is required to make the /gnu/store packages usable. Even if I could disable the `noexec`, in my case it's totally wasteful to copy the data into container storage instead of directly bind mounting from the host."
+        },
+        {
+            "user": "chetan-reddy",
+            "body": "OK. I found a solution that works for me. I can create a `containers_hack_1.conf` file listing all the mounts:\n\n> [containers]\nmounts=[\n    \"type=bind,source=/gnu/store/3jhfhxdf6v5ms10x5zmnl166dh3yhbr1-bash-minimal-5.1.16,destination=/gnu/store/3jhfhxdf6v5ms10x5zmnl166dh3yhbr1-bash-minimal-5.1.16,ro\",\n    \"type=bind,source=/gnu/store/87z5k84hxbqs87plgwsl2v6a4j7m3k7h-bash-static-5.1.16,destination=/gnu/store/87z5k84hxbqs87plgwsl2v6a4j7m3k7h-bash-static-5.1.16,ro\",\n...\n]\n\nand then pass it to `podman run` via the `CONTAINERS_CONF=/path/to/containers_hack_1.conf` environment variable. While a `--mount-file` option would be far more elegant than this environment variable, I can live with this. \n\nI do think that supporting this properly via a `--mount-file` option will enable the use of guix/nix profiles for elegant reproducible rootfs base 'images' for containers - far better than downloading non-reproducible and hard to trust images from public docker registries. Please feel free to close this ticket if you don't think adding `--mount-file` is worth the effort. \n\n"
+        },
+        {
+            "user": "giuseppe",
+            "body": "I think the solution you've found is more flexible than having yet another file (or we extend the existing `mounts.conf to support other kinds of mounts).\n\nYou could also use modules, to append some `containers.conf` options to your existing configuration.\n"
+        },
+        {
+            "user": "chetan-reddy",
+            "body": "> You could also use modules, to append some `containers.conf` options to your existing configuration.\n\nThanks for the pointer. The `--module /abs/path/to/my_container_mounts.conf` makes this solution neat. Just in case it helps someone in the future, here's how to efficiently run a guix profile containing some packages with podman\n\n1 - Create the guix profile root and the formatted /gnu/store mounts (example creates a profile with rtorrent)\n\n`guix shell --root=guix_rtorrent_root --emulate-fhs --container rtorrent -- /bin/sh -c \"echo /gnu/store/*\"  | xargs -n1 | awk -- '{printf \"\\\"type=bind,source=%s,destination=%s,ro,nosuid\\\",\\n\", $1, $1}' > guix_rtorrent_mounts`\n\n2 - Create the containers.conf module for the mounts\n\n`{ echo -e \"[containers]\\nmounts=[\" ; cat guix_rtorrent_mounts ; echo \"]\" ; } > guix_rtorrent_mounts_module`\n\n3 - Pass the module to podman's `--module` option. Note that it **must** be passed as an absolute path.\n\n`sudo podman --module=$PWD/guix_rtorrent_mounts_module run -it --user 1000:1000 --read-only --rootfs ./guix_rtorrent_root:O /bin/rtorrent`\n\nThe above example is simple and has no advantages over native guix shell containers, but you can pass mounts containing untrusted binaries that use guix just for the base image dependencies and use podman's `--runtime` flag to run securely with  gvisor's `runsc` etc"
+        }
+    ]
+}

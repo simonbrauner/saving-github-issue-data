@@ -1,0 +1,52 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 28211,
+    "title": "incorrect use of ImageCopyTmpDir()",
+    "state": "open",
+    "labels": [
+        "kind/bug",
+        "stale-issue",
+        "breaking-change"
+    ],
+    "user": "Luap99",
+    "body": "So this is a bit of a complicated dependency chain.\n\nThe root problem, the ImageCopyTmpDir container.conf field accept a special value `storage` which means it resolves the graphroot directory as `filepath.Join(c.Engine.graphRoot, \"tmp\")`\nhttps://github.com/containers/container-libs/blob/d48bc74146d6b7947269f5bd6da6e750470454e8/common/pkg/config/config.go#L1152-L1169\n\nThe main issue is that containers.conf cannot know what the graphroot actually is, so to know it it decides to always parse storage.conf\nhttps://github.com/containers/container-libs/blob/d48bc74146d6b7947269f5bd6da6e750470454e8/common/pkg/config/default.go#L346-L356\n\nThe obvious flaw there being that containers.conf always triggers a storage.conf reading regardless of that value ever being used or not and more importantly both podman and buildah expose cli option to override the graphroot so in such case it would always use the incorrect path from the default config.\n\nThe only solution I see here is updating that function to accept graphroot as argument. This means updating all callers which can get complicated, in particular this function is being used in buildahs GetTempDir() function which is called in a lot of places and not all of these places even have direct access to the graphroot so it needs then even larger changes to fully propagate this through the full call stack.\nhttps://github.com/containers/buildah/blob/547feda8ed383ef63cb911e6fbdb7cad68edcaa8/internal/tmpdir/tmpdir.go#L12\nhttps://github.com/containers/buildah/blob/547feda8ed383ef63cb911e6fbdb7cad68edcaa8/pkg/parse/parse.go#L1311\n\nThen on podman side at least it is quickly obvious that this is being called also client side, there simply is no sane concept of graphroot for macos/windows so if any user would have that set there it will certainly fail, and hence the always triggering the load of storage.conf indirectly via containers.conf on the remote client makes no sense.\nAnd if the graphroot is propagated trough the call stack then it should be clear where the use is incorrect on the client side as it will never have access to the graphroot field there.\n\n\nNext ImageCopyTmpDir() is being called in the setup and we override TMPDIR with it\nhttps://github.com/containers/podman/blob/014fd196d5b128f9a65119f25c2ad14c3b176a71/cmd/podman/root.go#L383-L390\nhttps://github.com/containers/buildah/blob/547feda8ed383ef63cb911e6fbdb7cad68edcaa8/cmd/buildah/main.go#L234-L235\n\nGit history points to https://github.com/containers/podman/commit/565688d7824c2ac26f7da620a419b34c9fe7aa59\nhttps://github.com/containers/buildah/commit/e53fc16b9f470a137abf182b0561a16447bfd5b7\n\nSo the history being that we want to pull the big image tmp file sunder /var/tmp which makes sense but AFAICT that is what the BigFilesTemporaryDir system context option is for that we also already set in podman and buildah.\n\nGiven that I really do not see why we would want to globally hard code TMPDIR like that. So I think that part should just outright be dropped.\n\n\nPersonally I don't think fixing this would be super complicated but given it means work in at least three repos and updating a lot of callers it would still take quite some time and who knows what other surprises might appear.\n",
+    "comments": [
+        {
+            "user": "Luap99",
+            "body": "cc @mtrmac @Honny1 @nalind @mheon "
+        },
+        {
+            "user": "mheon",
+            "body": "I know https://github.com/containers/podman/commit/565688d7824c2ac26f7da620a419b34c9fe7aa59 had a bug (probably old enough that it predated Jira and was a Bugzilla?) associated with it but I cannot recall exact details. I think you are correct that it's just setting that BigFilesTemporaryDir already sets but we could have been hacking around a bug in how that's implemented? Not 100%\n\nOn the whole, I think we should go ahead and get this fixed up, a large part of the attractiveness of refactors like this is that we can just go in and get things done right."
+        },
+        {
+            "user": "Luap99",
+            "body": "Well the PR of the commit links https://bugzilla.redhat.com/show_bug.cgi?id=1769918. Yet I cannot follow the logic of why we would have to set TMPDIR like that, as @mtrmac pointed out on the bug c/image cannot use TMPDIR because the default is often a tmpfs which is not suitable. The bz links back to https://github.com/containers/image/pull/747 which added the BigFilesTemporaryDir field so I am not sure how why we came up with all this force TMPDIR thing here at all."
+        },
+        {
+            "user": "mheon",
+            "body": "This is old enough that I can remember it happening, but not the details about why we did exactly what we did. However, given it was reported through BZ, we should still have it in our test plans, so I don't think it's a big problem."
+        },
+        {
+            "user": "mheon",
+            "body": "(In the sense that, if we do break it, we'll know)"
+        },
+        {
+            "user": "mtrmac",
+            "body": "> Given that I really do not see why we would want to globally hard code TMPDIR like that. So I think that part should just outright be dropped.\n\nFrom a quick search, there is at least `cmd/podman/images.load` → `pkg/util.Tmpdir` == `Getenv`.\n\nAnd because `ImageCopyTmpDir` starts with a `Getenv`, it’s _possible_ that we are papering around inconsistencies about determining the directory, by the main code (both in Buildah and Podman) always/almost always doing `Setenv`.\n\nCompare also https://github.com/containers/podman/pull/28179#discussion_r2874994456 about the inconsistencies of handling `$TMPDIR` and the configuration.\n\n---\n\nI continue to think that `TMPDIR` was never intended to mean “the directory for _large_ files” (mostly because it predates, by decades, systemd unilaterally deciding that `/tmp` should be `tmpfs` [admittedly there was ~no standards body to decide that at that point, FHS was dormant]).\n\n[Well I’m a bit dubious about the principle of `TMPDIR` in general — if it is an environment variable, presumably it would _typically_ be set for the whole shell session, and then… why not mount the desired filesystem to `/tmp` directly? But that’s neither here nor there.]\n\nThat makes Podman/Buildah’s use of it for large files non-standard… but after so many years, I think it makes sense for Podman to continue accepting `$TMPDIR` as `BigFilesTemporaryDir`. _We do have the opportunity to change that in Podman 6_, though.\n\nNow, consider a user who _did_ set a `BigFilesTemporaryDir` in `containers.conf`, and look at `Config.ImageCopyTmpDir`, which _starts_ with a `Getenv`. _Under the theory_ that `$TMPDIR` should point at a “directory for big files”, the `containers.conf` value is more narrowly scoped so it _should_ take precedence for everything Podman does, including it subprocesses, so _under that theory_ I think it makes sense for Podman to set `$TMPDIR` for its children. Now, I disagree with that theory, but there is this lens where I think it does make _some_ sense.\n\n(I would also guess that the original implementation never been thought through at the level of detail we are doing now…)"
+        },
+        {
+            "user": "Honny1",
+            "body": "I agree with @Luap99. This should be fixed. However, I'm not sure if anyone is relying on this hardcoded variable. We should probably do that in `6.0`."
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "mheon",
+            "body": "No time to get this in before 6. Too many changes."
+        }
+    ]
+}

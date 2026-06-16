@@ -1,0 +1,88 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 18972,
+    "title": "podman doesn't honour `init_path` for its pause containers",
+    "state": "closed",
+    "labels": [
+        "Good First Issue",
+        "kind/bug",
+        "locked - please file new issue/PR"
+    ],
+    "user": "gsalvatella",
+    "body": "### Issue Description\n\nChanging the `init_path` parameter in `container.conf` results in containers using a different init binary than the default (`catatonit`). However, pause containers created within pods still [require](https://github.com/containers/podman/blob/main/pkg/specgen/generate/pause_image.go) `catatonit` (unless `infra_image` is explicitly passed). This generates an error if `catatonit` is not found in the system.\n\nNOTE: since `catatonit` is GPLv3, it must be replaced in some systems.\n\n### Steps to reproduce the issue\n\nSteps to reproduce the issue\n1. Install an alternative container init system (e.g. `tini`) and uninstall `catatonit`\n2. Point `init_path` to the new init binary (e.g. `/usr/bin/tini`)\n3. Launch a pod (e.g. `podman kube play manifest.yml`)\n\n\n### Describe the results you received\n\n```\nError: image for service container: building local pause image: finding pause binary: exec: \"catatonit\": executable file not found in $PATH\n```\n\n### Describe the results you expected\n\nThe pod starts normally, using the new init system for the containers.\n\n### podman info output\n\n```yaml\npodman >= 4\n```\n\n\n### Podman in a container\n\nNo\n\n### Privileged Or Rootless\n\nNone\n\n### Upstream Latest Release\n\nYes",
+    "comments": [
+        {
+            "user": "rhatdan",
+            "body": "Interested in opening a PR to fix?"
+        },
+        {
+            "user": "gsalvatella",
+            "body": "Sure, but I'd like to hear your thoughts on what the best approach would be. Currently you are using catatonit's `-P` flag to start a pause container. However most alternative init systems do not have this flag. \n\nAlso do you want catatonit to be a hard dependency of podman? If so, an alternative approach would be to re-license catatonit to Apache."
+        },
+        {
+            "user": "giuseppe",
+            "body": "I think the solution here is to build your own image and then use that as `infra_image` in `containers.conf`, you can even customize the command with `infra_command`.\n\nWe cannot use a generic init binary. The `-P` to catatonit was added to support this use case.  And I don't think it makes sense to support another init system for building the pause image.  In fact, the init system is not even needed for the infra container, we need just a process that sits there and keeps the namespaces alive.\n\ne.g. you could do:\n\n```\ninfra_command = \"top\"\ninfra_image = \"alpine\"\n```\n"
+        },
+        {
+            "user": "rhatdan",
+            "body": "Ok since @giuseppe gave a solution, I am closing. Feel free to continue the conversation here."
+        },
+        {
+            "user": "gsalvatella",
+            "body": "@giuseppe you're right that the init system is not directly related to the pause container, conceptually. But how it's currently set up both are entangled:\n\n1. From a user perspective the current behavior is unexpected. The user changes `init_path` to replace the init system and immediately gets an error that catatonit is not found.\n2. `infra_command` and `infra_image` become not just options, but required arguments when `init_path` is changed?\n3. Some environments cannot rely on an additional image being available. They may not even have an internet connection to pull it from either, e.g. building locally from scratch\n\nI see two approaches here:\n\n- If catatonit is seen as a hard dependency of podman (because of default pause containers), then it should always be present in the system. Either merge it into podman or license it equally.\n- If it's not a hard dependency, provide a default pause container that is not based on it.\n\nPlease let me know your thoughts\n\n"
+        },
+        {
+            "user": "rhatdan",
+            "body": "@cyphar WDYT on the license?"
+        },
+        {
+            "user": "Arctize",
+            "body": "I think this is a fair issue. While it's relatively straight forward to install e.g. `tini` and override `init_path`, it's not so easy to replace the use of catatonit in the infra container. The fact that Podman can build the pause container image internally is very convenient. Like @gsalvatella mentioned, needing to pull an extra image can become a bit of a burden. So it's a bit unfortunate that Podman is [hard wired to use catatonit for this](https://github.com/containers/podman/blob/49e0bde2bfd7cfcc7761f5940921d764bfa1f997/pkg/specgen/generate/pause_image.go#L55C6-L55C6) (given its license).\n\n> we need just a process that sits there and keeps the namespaces alive.\n\nLooking at the [pause process used in the Kubernetes pause containers](https://github.com/kubernetes/kubernetes/blob/master/build/pause/linux/pause.c), and it seems to take on the role of an init / process reaper as well. Not quite sure if / why that's needed. But replacing catatonit with that static `pause` binary seems to work, i.e. Podman can start pods with the self-generated pause container.\n\nWould it make sense to offer an option to specify an alternative executable for generating the pause container? Or maybe even bake such a pause process into podman, to lighten this GPL3 dependency."
+        },
+        {
+            "user": "giuseppe",
+            "body": "we've picked `catatonit` because it is already a dependency for Podman, and it is a static binary.  There is no `pause` process on the host that we can reuse.  The same `podman` binary cannot be used since it has a lot of dynamic dependencies, as well as `conmon`.\n\nI don't see a way to use `tini` or any other simple init program unless we add another feature there.  There is no generic way to let them sit idle and replace the `pause` process.\n\nSo how exactly would you expect podman to behave in this case?\n\nI still think you can build your image locally and use that for the infra container when you need such a level of control."
+        },
+        {
+            "user": "gsalvatella",
+            "body": "If re-licensing is out of the question, could an alternative be using an additional binary that does just the pausing? It would be extremely simple and decouple the init system from the default pause container."
+        },
+        {
+            "user": "rhatdan",
+            "body": "You could do this yourself and just store it where catatonit is installed."
+        },
+        {
+            "user": "gsalvatella",
+            "body": "Sure, but it would still be a hack. Users won't expect that changing the init system breaks their application because pause containers can't be started anymore. Why not properly separating these concerns?"
+        },
+        {
+            "user": "rhatdan",
+            "body": "Mainly because this is the first time this concern was raised Most users are fine with gplv3 code and use catonit.  If you want to change the way it works, I suggest you open a PR and handle all the corner cases."
+        },
+        {
+            "user": "giuseppe",
+            "body": "let's try the simplest thing first :) @cyphar, would you have problems relicensing catatonit to gplv2+?"
+        },
+        {
+            "user": "gsalvatella",
+            "body": "@rhatdan I'd be ok with it :smiley:, but sure, let's see if the most direct approach works first..."
+        },
+        {
+            "user": "cyphar",
+            "body": "I would have to ask all of the other contributors whether they'd be willing to relicense it. Let me take a look at how feasible that is... (I might go with MPLv2 or something.)"
+        },
+        {
+            "user": "cyphar",
+            "body": "AFAICS, aside from @vrothberg and @giuseppe and a SUSE guy there's only one other contributor to `catatonit.c` (who submitted a trivial-but-correct one-line patch). We can try to ping them to ask if they would be okay with changing the license (though I think legally speaking we wouldn't actually need their approval, it's much better to be safe than sorry)."
+        },
+        {
+            "user": "gsalvatella",
+            "body": "@cyphar There's actually an [issue](https://github.com/openSUSE/catatonit/issues/23) opened there for more than a year now. Maybe you want to discuss it there?"
+        },
+        {
+            "user": "vrothberg",
+            "body": "@cyphar I am OK :+1: "
+        }
+    ]
+}

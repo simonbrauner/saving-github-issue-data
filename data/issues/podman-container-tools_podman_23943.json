@@ -1,0 +1,74 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 23943,
+    "title": "\"podman volume rm\" behaviour",
+    "state": "open",
+    "labels": [
+        "stale-issue"
+    ],
+    "user": "rhatdan",
+    "body": "### Discussed in https://github.com/containers/podman/discussions/23922\n\n<div type='discussions-op-text'>\n\n<sup>Originally posted by **tokudan** September 10, 2024</sup>\nI've been very surprised by the unpredictable behaviour of the podman volume rm command.\nIt boils down to this:\n```\n$ podman volume create x\nx\n$ podman volume create xa\nxa\n$ podman volume rm x\nx\n$ podman volume rm x\nxa\n```\nPodman deletes the volume \"xa\". Obviously this is a constructed example, but in practice, just running \"podman volume rm x\" again if you're were interrupted and not sure if you already did it, probably happens.\n\nThe function of the \"rm\" command is so obvious that I don't actually look up the manpage if I don't want some special behaviour. The manpage actually documents that behaviour:\n> Volumes can be removed individually by providing their full name or a unique partial name.\n\nI think guessing what a user wants to delete is pretty dangerous and makes it unpredictable.\nIf I copy a volume to backup its contents, I cannot give it a similar name as \"forgejo-backup\" could be removed, because I run \"podman rm forgejo\". Am I sure no automatic process has removed the production volume while I was busy? Are there any automatic cleanup jobs running, that might cause me to remove the backup instead of the volume I specify?\n\n/bin/rm removes exactly what you tell it to remove. Which is obviously were \"podman volume rm\" got its name.\nI believe \"podman volume rm\" should behave the same, at least by default.\n\nThe guesswork that \"podman volume rm\" is doing probably saved someone some keystrokes. I'd argue that's the point of tab completion, but I think the guesswork should be opt-in.</div>",
+    "comments": [
+        {
+            "user": "rhatdan",
+            "body": "I agree this is an issue and we should not be removing volumes this way.\n\n@mheon PTAL"
+        },
+        {
+            "user": "mheon",
+            "body": "I would have to double-check, but I believe this is a duplicate of Docker behavior, and as such I don't think we can change it. And even if we could, I'm not sure we should.\n\nIf you were two have two volumes, `ab` and `abc`, and `podman volume rm a` - you'd get an error about an ambiguous name. But this scenario, `a` is a fully qualified name, we will remove it happily - and I think changing that is also very unexpected behavior. Any sort of Bash script that operates on Podman, for example, will expect that `podman volume rm $name` will always work, so long as `$name` is the full name of the volume, even if there's a second volume with $name as a prefix to its own name. Breaking the assumption that removal by full name always works seems dangerous."
+        },
+        {
+            "user": "rhatdan",
+            "body": "The issue is if you only have one volume named abc, and do `podman volume rm a` it is removing abc, as I understand it, which seems very dangerous."
+        },
+        {
+            "user": "mheon",
+            "body": "Only once `a` is gone. Once `a` is gone, we will remove `abc` as long as there are no other volumes whose names start with `a`; otherwise we error. Unambiguous partial names are allowed."
+        },
+        {
+            "user": "rhatdan",
+            "body": "Yup, but I find that surprising and likely to cause volumes to be removed by accident.\n"
+        },
+        {
+            "user": "rhatdan",
+            "body": "And I see little upside in this other then perhaps Docker does it this way.\n\nAs the reporter states it easy enough to do `podman volume rm a<tab>`"
+        },
+        {
+            "user": "eriksjolund",
+            "body": "\n\nDocker has different behaviour \n```\n$ docker volume ls\nDRIVER    VOLUME NAME\n$ docker volume create x\nError response from daemon: create x: volume name is too short, names should be at least two alphanumeric characters\n$ docker volume create xx\nxx\n$ docker volume create xxa\nxxa\n$ docker volume rm xx\nxx\n$ docker volume rm xx\nError response from daemon: get xx: no such volume\n$ docker volume rm xxa\nxxa\n$\n```\n\nTested with docker 27.1.2\n\n\nMore info about the system:\n<details>\n  <summary>Click me</summary>\n\n```\n$ docker version\nClient:\n Version:           27.1.2\n API version:       1.46\n Go version:        go1.23.0\n Git commit:        1.fc42\n Built:             Wed Aug 21 00:00:00 2024\n OS/Arch:           linux/arm64\n Context:           default\n\nServer:\n Engine:\n  Version:          27.1.2\n  API version:      1.46 (minimum version 1.24)\n  Go version:       go1.23.0\n  Git commit:       1.fc42\n  Built:            Wed Aug 21 00:00:00 2024\n  OS/Arch:          linux/arm64\n  Experimental:     false\n containerd:\n  Version:          1.7.21\n  GitCommit:        1.fc42\n runc:\n  Version:          1.1.12\n  GitCommit:        \n tini-static:\n  Version:          0.19.0\n  GitCommit:        \n$ rpm -qf /usr/bin/docker\ndocker-cli-27.1.2-1.fc42.aarch64\n$ rpm -q moby-engine\nmoby-engine-27.1.2-1.fc42.aarch64\n$ rpm-ostree status\nState: idle\nwarning: Failed to query journal: couldn't find current boot in journal\nDeployments:\n● ostree-remote-image:fedora:docker://quay.io/fedora/fedora-coreos:rawhide\n                   Digest: sha256:b49001cc46b33e163c44eef55f26a722acf21d1bc0dceac3dac99bcc9a97f34e\n                  Version: 42.20240830.91.0 (2024-08-30T14:00:28Z)\n```\n\n</details>\n"
+        },
+        {
+            "user": "baude",
+            "body": "this seems valid then ... lets tidy it up ?"
+        },
+        {
+            "user": "mheon",
+            "body": "Could still be considered a breaking change since we're altering behvaior on `volume rm` rather significantly. @Luap99 Thoughts?"
+        },
+        {
+            "user": "Luap99",
+            "body": "Well other commands behave sort of similar with partial ids. The difference in volume is that there is only one Name field and not Name and ID as separate things so the logic here got conflated into the same things which is not nice.\n\nOf course if there is an exact match we must remove that is clear but if docker doesn't remove partial name matches then I think we should not either. Although I would compare this behavior against an actual ID (anonymous volume).\n\nAs far as breaking people, I am not sure that happens much in practice. Scripts should use the full name anyway and would need to get out of their way to rely on the partial lookup and for interactive use shell completion should be good enough.\n"
+        },
+        {
+            "user": "zackattackz",
+            "body": "Apologies if this isn't the place to ask, but would this be a good beginner issue? I'm interested to look into it if it isn't already being worked on by someone else."
+        },
+        {
+            "user": "Luap99",
+            "body": "@zackattackz You can try for sure, I don't think it is to easy as you have to find the right places where to logic applies and the compare this against the docker behavior but it should not be super difficult either I guess."
+        },
+        {
+            "user": "zackattackz",
+            "body": "@Luap99 \nYeah it probably would be better if someone who's already familiar with the code worked on it. But I figured it could be a good opportunity to get some familiarity with the code base. If it's not urgent I'd like to try :)"
+        },
+        {
+            "user": "zackattackz",
+            "body": "PR made at #24027"
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        }
+    ]
+}

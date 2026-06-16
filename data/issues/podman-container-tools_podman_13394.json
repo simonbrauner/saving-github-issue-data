@@ -1,0 +1,98 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 13394,
+    "title": "`podman machine` writes absolute QEMU path to the VM config",
+    "state": "closed",
+    "labels": [
+        "kind/bug",
+        "macos",
+        "In Progress",
+        "machine",
+        "locked - please file new issue/PR"
+    ],
+    "user": "zowoq",
+    "body": "<!--\n---------------------------------------------------\nBUG REPORT INFORMATION\n---------------------------------------------------\nUse the commands below to provide key information from your environment:\nYou do NOT have to include this information if this is a FEATURE REQUEST\n\n**NOTE** A large number of issues reported against Podman are often found to already be fixed\nin more current versions of the project.  Before reporting an issue, please verify the\nversion you are running with `podman version` and compare it to the latest release\ndocumented on the top of Podman's [README.md](../README.md).  If they differ, please\nupdate your version of Podman to the latest possible and retry your command before creating\nan issue.\n\nAlso, there is a running list of known issues in the [Podman Troubleshooting Guide](https://github.com/containers/podman/blob/main/troubleshooting.md),\nplease reference that page before opening a new issue.\n\nIf you are filing a bug against `podman build`, please instead file a bug\nagainst Buildah (https://github.com/containers/buildah/issues). Podman build\nexecutes Buildah to perform container builds, and as such the Buildah\nmaintainers are best equipped to handle these bugs.\n-->\n\n**Is this a BUG REPORT or FEATURE REQUEST? (leave only one on its own line)**\n\n/kind bug\n\n\n**Description**\n```\n❯ head -n5 ~/.config/containers/podman/machine/qemu/podman-machine-default.json\n{\n \"CPUs\": 1,\n \"CmdLine\": [\n  \"/nix/store/w4y0hnhq3amjc1g3wwzahwyl2rdnm8z7-qemu-6.2.0/bin/qemu-system-x86_64\",\n  \"-m\",\n```\n\nUsing an absolute path is a bit problematic for `nixpkgs` as the QEMU written to the config might not be the same as the QEMU currently in the users PATH or it may have been removed which then causes an error.\n\n```\n❯ podman machine start\nStarting machine \"podman-machine-default\"\nINFO[0000] waiting for clients...\nINFO[0000] new connection from  to /tmp/podman/qemu_podman-machine-default.sock\nError: fork/exec /nix/store/w4y0hnhq3amjc1g3wwzahwyl2rdnm8z7-qemu-6.2.0/bin/qemu-system-x86_64: no such file or directory\n```\n\n**Output of `podman version`:**\n\n```\nClient:       Podman Engine\nVersion:      4.0.1\nAPI Version:  4.0.1\nGo Version:   go1.17.7\n\nBuilt:      Tue Jan  1 10:00:00 1980\nOS/Arch:    darwin/amd64\n\nServer:       Podman Engine\nVersion:      4.0.1\nAPI Version:  4.0.1\nGo Version:   go1.16.14\n\nBuilt:      Sat Feb 26 03:05:11 2022\nOS/Arch:    linux/amd64\n```",
+    "comments": [
+        {
+            "user": "baude",
+            "body": "the path to qemu is discovered using FindExec at the time of init.  So this is basically the same as using path at that time.  It seems like you want to rediscover the qemu path each time we init, start, and stop?"
+        },
+        {
+            "user": "zowoq",
+            "body": "> It seems like you want to rediscover the qemu path each time we init, start, and stop?\n\nI'd prefer that it doesn't record the path to qemu at all and just always use `qemu-system-{aarch64,x86_64}` in `$PATH`."
+        },
+        {
+            "user": "baude",
+            "body": "@zowoq understood ... and I sincerely sympathize.  here is the problem.  In the past, we had bug reports that basically pleaded for the hardcoded path because other products had \"side-installed\" qemu for something else and they prepended that to the path, and that qemu failed to boot vms.  in fact, i am considering doing the same but not prepending it to path.  I will keep you in mind though and see if we can't make this work for everyone."
+        },
+        {
+            "user": "zowoq",
+            "body": "I see `FindHelperBinary` was mentioned on your open PR, we're already using `CONTAINERS_HELPER_BINARY_DIR` for `gvproxy` on darwin, using it for the `qemu` binary could work for us.\n\nFrom the same PR I see that some other paths are used on `aarch64-darwin` (`getEdk2CodeFd`) that I hadn't noticed previously, they won't work with `nixpkgs`. We don't have a way of getting this path besides looking for it relative to `qemu` binary. With how `nix` works it could be installed in one of multiple locations or not even installed at all, only run via a temporary session where it is added to PATH."
+        },
+        {
+            "user": "baude",
+            "body": "Yes, indeed.  However, to make FindHelperBinary actually work, a change needs to be made in containers-common and be vendored through all of our container projects.  I will create the PR for common once I am done getting the darwin mounting stuff working.  very close now."
+        },
+        {
+            "user": "tricktron",
+            "body": "@zowoq I created the following file under `/etc/containers/containers.conf.d/99-gvproxy-path.conf`\n```config\n[engine]\nhelper_binaries_dir = [\"/etc/profiles/per-user/<user>/bin\"]\n```\nNow podman writes the following path into the json: `/etc/profiles/per-user/<user>/bin/qemu-system-aarch64`.\n\nSo you can just enter your `nix/nix-darwin/home-manager/nixos` path there.\n"
+        },
+        {
+            "user": "zowoq",
+            "body": "@tricktron I'm trying to get this fixed for all nixpkgs users so they don't need to deal with manual configuration."
+        },
+        {
+            "user": "zowoq",
+            "body": "Seems `CONTAINERS_HELPER_BINARY_DIR` isn't respected if it is changed after the vm is created?\n\n```shell\n> where qemu-system-x86_64\n  qemu-system-x86_64 not found\n> ./bin/darwin/podman machine rm --force\n> CONTAINERS_HELPER_BINARY_DIR=/path/to/qemu_1 ./bin/darwin/podman machine init --now\n> ./bin/darwin/podman machine stop\n> rm -rf /path/to/qemu_1\n> CONTAINERS_HELPER_BINARY_DIR=/path/to/qemu_2 ./bin/darwin/podman machine start\n```\n`podman machine start` should work with `qemu_2` but instead it fails trying to use `qemu_1`?"
+        },
+        {
+            "user": "Luap99",
+            "body": "> @zowoq understood ... and I sincerely sympathize. here is the problem. In the past, we had bug reports that basically pleaded for the hardcoded path because other products had \"side-installed\" qemu for something else and they prepended that to the path, and that qemu failed to boot vms. in fact, i am considering doing the same but not prepending it to path. I will keep you in mind though and see if we can't make this work for everyone.\n\nHow about keeping the hardcoded path but in case the binary is no longer there still fall back to the same detection logic as for machine init."
+        },
+        {
+            "user": "zowoq",
+            "body": "> How about keeping the hardcoded path but in case the binary is no longer there still fall back to the same detection logic as for machine init.\n\nAn improvement as it would avoid the breakage from the example in the top post but it is still rather problematic for us. Since I opened this issue the `/nix/store` path for `qemu` has changed four or five times but unless the store path have been garbage collected the VM will still use the original `qemu`. Perhaps a better example would be a `qemu` version bump:  currently the nixpkgs `qemu` is `6.2.0`, if it was updated to `6.2.1` the VM will continue to use `6.2.0` until the store path is garbage collected."
+        },
+        {
+            "user": "Luap99",
+            "body": "I think this is the best we can get: https://github.com/containers/podman/pull/13620"
+        },
+        {
+            "user": "zowoq",
+            "body": "Is it not possible to have it always use the `qemu` that is set by `CONTAINERS_HELPER_BINARY_DIR`?"
+        },
+        {
+            "user": "zowoq",
+            "body": "> Is it not possible to have it always use the `qemu` that is set by `CONTAINERS_HELPER_BINARY_DIR`?\n\n@Luap99 Should I open a new issue for this?"
+        },
+        {
+            "user": "Luap99",
+            "body": "Well the idea is to keep the behaviour as @baude said. First use the path which was used for init.\n\nIsn't this something you could patch downstream, this problems looks very nixos specific. "
+        },
+        {
+            "user": "zowoq",
+            "body": "I don't see how an env var being disregarded on subsequent invocations of `podman machine` is a `nixpkgs` specific issue.\n\nWe'd have to carry and rebase a patch forever for something that seems like it would be a relatively simple fix upstream? e.g. If `QemuCommand` exists in `CONTAINERS_HELPER_BINARY_DIR` use it otherwise continue with the current behaviour?"
+        },
+        {
+            "user": "Luap99",
+            "body": "I understand that.\nThe problem with using `CONTAINERS_HELPER_BINARY_DIR` is that this was mainly added for testing purposes.\nThe env var is not documented. I would never expected someone to use it outside of this context. I have no problem with you using it for this, it is just that relying on an undocumented implementation details is often not a good idea.\nSo the first step would be to document `CONTAINERS_HELPER_BINARY_DIR` as official way to set this directory.\n\nTo this specific issue, are you proposing to first check the env var, use qemu from there when available, if not use stored path from config. If still not found fall back to full helper binaries in containers.conf and path? I guess that would work but it is a bit ugly because we would need to check the env var extra.\n\nTo me this looks like a general problem with nix, if you keep you old qemu around why should it use the new one at a different path. I am really missing the concept here, why would the same package be installed with different version at different paths.\n\nAlso note that FindHelperBinary() is called with true as second argument so you can already use $PATH for qemu."
+        },
+        {
+            "user": "zowoq",
+            "body": "> The problem with using `CONTAINERS_HELPER_BINARY_DIR` is that this was mainly added for testing purposes. The env var is not documented. I would never expected someone to use it outside of this context. I have no problem with you using it for this, it is just that relying on an undocumented implementation details is often not a good idea. So the first step would be to document `CONTAINERS_HELPER_BINARY_DIR` as official way to set this directory.\n\nTBH I'd be very happy if `CONTAINERS_HELPER_BINARY_DIR`/`FindHelperBinary` and all the other preconfigured paths here and in `containers/common` went away and `podman` just looked for everything in $PATH. (cni plugins are probably the only ones that need any special handling.)\n\n> To this specific issue, are you proposing to first check the env var, use qemu from there when available, if not use stored path from config. If still not found fall back to full helper binaries in containers.conf and path?\n\nYes, that would work.\n\n> To me this looks like a general problem with nix, if you keep you old qemu around why should it use the new one at a different path. I am really missing the concept here, why would the same package be installed with different version at different paths.\n\nWe aren't choosing to keep it around and it isn't actually installed, `/nix/store` is the users package cache. Really abbreviated explanation is that `nix` creates symlinks from `/nix/store` into a directory which is in the users $PATH, whichever `qemu` is symlinked is the one that is installed and should be used.\n\n> Also note that FindHelperBinary() is called with true as second argument so you can already use $PATH for qemu.\n\nAfraid I don't understand what you mean with this."
+        },
+        {
+            "user": "Luap99",
+            "body": "> > Also note that FindHelperBinary() is called with true as second argument so you can already use $PATH for qemu.\n> \n> Afraid I don't understand what you mean with this.\n\nThe function already looks in $PATH so I am not sure why you use `CONTAINERS_HELPER_BINARY_DIR`, that doesn't change the fact that it will still record the full path on init. So if this is already symlinked it should just work?"
+        },
+        {
+            "user": "zowoq",
+            "body": "> The function already looks in $PATH so I am not sure why you use `CONTAINERS_HELPER_BINARY_DIR`, that doesn't change the fact that it will still record the full path on init.\n\n\n$PATH not working because of recording the full path is why I originally opened the issue. I would like for `CONTAINERS_HELPER_BINARY_DIR` to work as we discussed above:\n\n> first check the env var, use qemu from there when available, if not use stored path from config.\n\n> So if this is already symlinked it should just work?\n\nNo it does not work. That is why I'm asking for this:\n\n> first check the env var, use qemu from there when available, if not use stored path from config.\n"
+        },
+        {
+            "user": "zaphar",
+            "body": "If there was some way for us to tell podman where qemus edk2 path was so non standard install setups will still function that would be great. Right now podman on darwin at least assumes that you have either installed qemu from source with standard install locations or that you installed via non-local brew.\n\nI have in the past done local brew installs as well as installed stuff in local only paths. podman won't work in those circumstances."
+        }
+    ]
+}

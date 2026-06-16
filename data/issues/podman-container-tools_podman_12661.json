@@ -1,0 +1,73 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 12661,
+    "title": "run: iptables/modprobe call in unprivileged context fails due to permissions",
+    "state": "closed",
+    "labels": [
+        "kind/bug",
+        "In Progress",
+        "network",
+        "locked - please file new issue/PR"
+    ],
+    "user": "lucab",
+    "body": "NOTE: The full story and more details behind this are at https://github.com/coreos/fedora-coreos-tracker/issues/1046.\n\nIn the context of Fedora CoreOS CI we do perform some **unprivileged** podman run.\nOne of them does the following:\n```\n$ podman network create testnetwork\n$ podman run --rm -t --network=testnetwork registry.fedoraproject.org/fedora:35 getent hosts google.com\n```\n\nOn current rawhide (F36) it started failing if the `ip_tables` module isn't already loaded.\n\nWhat's interesting is that in this unprivileged context there is a call to `iptables` / `modprobe` which is failing with `Operation not permitted`. It seems to happen while `tearing down partially created network namespace`.\n\nI'm unsure if the fallback/teardown is actually supposed to be performed this way for an unprivileged run.\nIs this perhaps going by mistake through an execution flow that assumes it is running privileged?\n\nFor reference, the full error is\n```\n$ podman run --rm -t --network=testnetwork registry.fedoraproject.org/fedora:35 getent hosts google.com\n\nERRO[0000] error loading cached network config: network \"testnetwork\" not found in CNI cache \nWARN[0000] falling back to loading from existing plugins on disk \nERRO[0000] Error tearing down partially created network namespace for container 539c41e10d9b5b62c020b71ed73891bf97c257e974928507dd1b967b33cb0125: error removing pod practical_lamport_practical_lamport from CNI network \"testnetwork\": running [/usr/sbin/iptables -t nat -D POSTROUTING -s 10.89.0.2 -j CNI-bd2745568755c29ef2bf4f1a -m comment --comment name: \"testnetwork\" id: \"539c41e10d9b5b62c020b71ed73891bf97c257e974928507dd1b967b33cb0125\" --wait]: exit status 3: modprobe: ERROR: could not insert 'ip_tables': Operation not permitted\n                                                               iptables v1.8.7 (legacy): can't initialize iptables table `nat': Table does not exist (do you need to insmod?)\n                Perhaps iptables or your kernel needs to be upgraded. \nError: error configuring network namespace for container 539c41e10d9b5b62c020b71ed73891bf97c257e974928507dd1b967b33cb0125: error adding pod practical_lamport_practical_lamport to CNI network \"testnetwork\": failed to list chains: running [/usr/sbin/iptables -t nat -S --wait]: exit status 3: modprobe: ERROR: could not insert 'ip_tables': Operation not permitted\niptables v1.8.7 (legacy): can't initialize iptables table `nat': Table does not exist (do you need to insmod?)\nPerhaps iptables or your kernel needs to be upgraded.\n```\n",
+    "comments": [
+        {
+            "user": "mheon",
+            "body": "@Luap99 Looks like CNI is trying to run the IPTables code despite being rootless?"
+        },
+        {
+            "user": "Luap99",
+            "body": "This is expected, normally iptables will load the necessary modules for you but this does not work as rootless user. You either have to load the kernel modules manually as root before or you cannot use networks and have to run with slirp4netns."
+        },
+        {
+            "user": "dustymabe",
+            "body": "There might be some middle ground here when thinking about this from a UX perspective. @Luap99 what you said is true about the rootless user not really being able to control this, but `systemd` upstream [just changed some default behavior](https://github.com/coreos/fedora-coreos-tracker/issues/1046#issuecomment-996053567) and you're probably going to have a lot more people bumping up into this limitation.\n\nMaybe podman could provide a service that an admin could enable that would load the iptables module. So you could tell users when they hit this problem they need to `sudo systemctl enable podman-iptables-module.service`. Maybe the error message could even have that information in it. Or maybe we'd want to make it on by default? Not sure, just throwing out ideas."
+        },
+        {
+            "user": "Luap99",
+            "body": "@dustymabe Right the UX sucks at the moment. However there is not much we can do at the moment. This error comes from CNI which executes iptables this fails. Our only possibility would be to string parse the error message in order to create a better one.\nThis might change with our new netavark network stack where we could create better errors, however we also use iptables commands there so I expect the same error. I think this is another reason why we should implement nftables support for netavark.\n\nI think the needed modules are different when iptables-nft is used vs iptables-legacy. Loading modules by default on boot makes sense too me when other applications no longer load it for us. I am not sure if we need a systemd unit, adding the needed modules to `/etc/modules-load.d` should work too."
+        },
+        {
+            "user": "Luap99",
+            "body": "Either way someone has to figure out which modules are actually needed, it is definitely more than just `ip_tables`. "
+        },
+        {
+            "user": "dustymabe",
+            "body": "@Luap99 - anything more we can do here? Should this be re-opened? Should the conversation move somewhere else? "
+        },
+        {
+            "user": "lucab",
+            "body": "> Loading modules by default on boot makes sense too me when other applications no longer load it for us. I am not sure if we need a systemd unit, adding the needed modules to /etc/modules-load.d should work too.\n\nI think we (and generally all distros) would be happy if podman package could carry a fragment doing that.\nA `/usr/lib/modules-load.d/podman-network-iptables.conf` would fit nicely,\nCan you please re-open this ticket and push in that direction?"
+        },
+        {
+            "user": "Luap99",
+            "body": "I think the main point is that someone has to verify which modules are needed right now. This will be different depending on if your system uses `iptables-legacy` or `iptables-nft`."
+        },
+        {
+            "user": "dustymabe",
+            "body": "I went back and looked at `rawhide` (`36.20211210.91.0`) from before our tests started failing. Here is what is loaded before and after `podman` was able to load the kernel modules:\n\n```\n[core@cosa-devsh ~]$ iptables --version\niptables v1.8.7 (legacy)\n[core@cosa-devsh ~]$ podman network create testnetwork\n/var/home/core/.config/cni/net.d/testnetwork.conflist\n[core@cosa-devsh ~]$ lsmod | grep table\nip_tables              36864  0\n[core@cosa-devsh ~]$ podman run --rm -t --network=testnetwork registry.fedoraproject.org/fedora:35 getent hosts google.com\nTrying to pull registry.fedoraproject.org/fedora:35...\nGetting image source signatures\nCopying blob c6183d119aa8 done  \nCopying config e417cd49a8 done  \nWriting manifest to image destination\nStoring signatures\n2607:f8b0:4009:801::200e google.com\n[core@cosa-devsh ~]$ lsmod | grep table\niptable_filter         16384  0\niptable_nat            16384  0\nnf_nat                126976  2 iptable_nat,xt_MASQUERADE\nip_tables              36864  2 iptable_filter,iptable_nat\n```\n\n\n\n\nIf I do this same test on the same system but with iptables-nft here is what I see:\n\n```\n[core@cosa-devsh ~]$ iptables --version\niptables v1.8.7 (nf_tables)\n[core@cosa-devsh ~]$\n[core@cosa-devsh ~]$ lsmod | grep table\nip_tables              36864  0\n[core@cosa-devsh ~]$ podman network create testnetwork\n/var/home/core/.config/cni/net.d/testnetwork.conflist\n[core@cosa-devsh ~]$ podman run --rm -t --network=testnetwork registry.fedoraproject.org/fedora:35 getent hosts google.com\nTrying to pull registry.fedoraproject.org/fedora:35...\nGetting image source signatures\nCopying blob c6183d119aa8 done\nCopying config e417cd49a8 done\nWriting manifest to image destination\nStoring signatures\n2607:f8b0:4009:803::200e google.com\n[core@cosa-devsh ~]$ lsmod | grep table\nnf_tables             290816  3 nft_compat,nft_counter,nft_chain_nat\nnfnetlink              24576  2 nft_compat,nf_tables\nip_tables              36864  0\n```\n"
+        },
+        {
+            "user": "Luap99",
+            "body": "@dustymabe Thanks that is is very helpful\n\n@baude @mheon WDYT? Just add the modules to a config file and ship it via the podman rpm?"
+        },
+        {
+            "user": "mheon",
+            "body": "Seems sensible. I'm a little worried about loading nftables on systems that only use iptables (or vice versa, when we get full nftables support into Netavark) but it shouldn't be a big deal."
+        },
+        {
+            "user": "Luap99",
+            "body": "I just installed f36 and default is iptables-nft where it will work out of the box. It looks like the nf_tables module can be loaded by an unprivileged user so we do not have to add this explicitly.\n@lucab @dustymabe Is there any reason why FCOS uses iptables-legacy in the first place?\n\nSince old upgrades might still use iptables-legacy I will add the `ip_tables` and `ip6_tables` modules to the list but I am not sure if we want to keep this is the long run."
+        },
+        {
+            "user": "dustymabe",
+            "body": "> I just installed f36 and default is iptables-nft where it will work out of the box. It looks like the nf_tables module can be loaded by an unprivileged user so we do not have to add this explicitly. \n\nInteresting. I did not know that. Do you know what causes a module to require privilege versus not?\n\n> @lucab @dustymabe Is there any reason why FCOS uses iptables-legacy in the first place?\n\nUp until this point we've defaulted to iptables-legacy but we'll be migrating people by default with the switch to F36. \n> \n> Since old upgrades might still use iptables-legacy I will add the `ip_tables` and `ip6_tables` modules to the list but I am not sure if we want to keep this is the long run.\n\nWe do offer people the option to stay on iptables-legacy, though, so the above is appreciated for a while at least.\n"
+        },
+        {
+            "user": "Luap99",
+            "body": "> > I just installed f36 and default is iptables-nft where it will work out of the box. It looks like the nf_tables module can be loaded by an unprivileged user so we do not have to add this explicitly.\n> \n> Interesting. I did not know that. Do you know what causes a module to require privilege versus not?\n\nI don't know. I just tested it with f36 and check the nf_tables was not loaded before I run the podman command with iptables-legacy.\n\n\n\n> > Since old upgrades might still use iptables-legacy I will add the `ip_tables` and `ip6_tables` modules to the list but I am not sure if we want to keep this is the long run.\n> \n> We do offer people the option to stay on iptables-legacy, though, so the above is appreciated for a while at least.\n\nYes we should keep it for a while until we know that almost all users have iptables-nft."
+        }
+    ]
+}

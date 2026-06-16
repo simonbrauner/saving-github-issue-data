@@ -1,0 +1,35 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 21288,
+    "title": "`podman machine start` fails after reboot (recurrence of #10824 but with the `applehv` provider.)",
+    "state": "closed",
+    "labels": [
+        "kind/bug",
+        "locked - please file new issue/PR"
+    ],
+    "user": "nnhanndakara",
+    "body": "### Issue Description\n\nIt appears that the previous issue (#10824) which seemed to be specific to the qemu machine provider is now reoccurring with the `applehv` machine provider. Once you `podman machine init` and `podman machine start`, if you then reboot the host, `$TMPDIR` is purged, and the paths in `.config/containers/podman/machine/applehv/podman-machine-default.json` referring to the `podman ` subdirectory of `$TMPDIR` become invalid. As requested in the previous ticket, I've tried `podman machine stop` before rebooting. The result is the same.\n\n### Steps to reproduce the issue\n\nSteps to reproduce the issue\n1. Install podman and dependencies (vfkit, gvproxy, etc.)\n2. Enable the `applehv` provider via `.config/containers/containers.conf`.\n3. `podman machine init --now` (or `init` + `start`.)\n4. `podman machine stop` (optionally.)\n5. Reboot the host.\n6. `podman machine start`.\n\n### Describe the results you received\n\n`podman --log-level=debug machine start` returns a failure to start gvproxy due to missing path. Output below:\n\n```\nINFO[0000] podman filtering at log level debug\nDEBU[0000] Using Podman machine with `applehv` virtualization provider\nDEBU[0000] connection refused: http://localhost:8081/vm/state\nStarting machine \"podman-machine-default\"\nDEBU[0000] connection refused: http://localhost:8081/vm/state\nDEBU[0000] gvproxy binary being used: /Users/nn/.sandbox/libexec/podman/gvproxy\nDEBU[0000] [-debug -mtu 1500 -ssh-port 51540 -listen-vfkit unixgram:///var/folders/cv/w6b1bgq95x35fzl9y6c10kl40000gn/T/podman/gvproxy.sock -forward-dest /run/user/501/podman/podman.sock -forward-user core -forward-identity /Users/nn/.ssh/podman-machine-default -forward-sock /Users/nn/.local/share/containers/podman/machine/applehv/podman.sock -pid-file /var/folders/cv/w6b1bgq95x35fzl9y6c10kl40000gn/T/podman/gvproxy.pid]\nDEBU[0000] gvproxy unixgram socket \"/var/folders/cv/w6b1bgq95x35fzl9y6c10kl40000gn/T/podman/gvproxy.sock\" not found: stat /var/folders/cv/w6b1bgq95x35fzl9y6c10kl40000gn/T/podman/gvproxy.sock: no such file or directory\nError: gvproxy exited unexpectedly with exit code 1\nDEBU[0000] Shutting down engines\n```\n\n### Describe the results you expected\n\n`podman machine start` returns successfully.\n\n### podman info output\n\n```yaml\nOS: darwin/arm64\nprovider: applehv\nversion: 4.8.3\n\nThis issue pertains to a `podman machine start` failure, so the above is the only non-error output.\n```\n\n\n### Podman in a container\n\nNo\n\n### Privileged Or Rootless\n\nRootless\n\n### Upstream Latest Release\n\nYes\n\n### Additional environment details\n\nHost is macOS Sonoma (14.3).\nHost architecture is aarch64/arm64.\nThe variant is the Apple M3 Pro which necessitated the use of the `applehv` provider (due to upstream qemu issues with EDK2 and the shim.)\n\n### Additional information\n\n_No response_",
+    "comments": [
+        {
+            "user": "nnhanndakara",
+            "body": "As with #10824, I can confirm that simply shimming podman with a pre-check that creates `\"${TMPDIR%%/}/podman\"` works as a temporary workaround."
+        },
+        {
+            "user": "nnhanndakara",
+            "body": "Ahh, there's no attempt to create the podman temporary directory if it's missing. The qemu provider does it in `pkg/machine/applehv/machine.go` (in `Start()`, specifically), but `pkg/machine/applehv/machine.go` makes no similar attempt. As an initial attempt, the following patch works in my sandbox (based off of what was done in the qemu provider):\n\nEdit: Revised to build against HEAD not stable. Also noticed `getRuntimeDir()` does more than just get the runtime directory, so I've revised the patch to call `getRuntimeDir()` and nothing else as it already tries to create the podman directory.\n\n```patch\n--- machine.go.orig\t2024-01-17 22:17:52\n+++ machine.go\t2024-01-17 22:19:07\n@@ -572,6 +572,11 @@\n \t\treturn machine.ErrVMAlreadyRunning\n \t}\n\n+\t_, err = m.getRuntimeDir()\n+\tif err != nil {\n+\t\treturn err\n+\t}\n+\n \t// TODO handle returns from startHostNetworking\n \tforwardSock, forwardState, err := m.startHostNetworking()\n \tif err != nil {\n```"
+        },
+        {
+            "user": "rhatdan",
+            "body": "Care to open a PR to fix?"
+        },
+        {
+            "user": "jfrantzius",
+            "body": "Hi @rhatdan , I tested the fix with `brew install podman --HEAD`, which seemed to work well:\n```\npodman --version\npodman version 5.0.0-dev\n```\nSo I'm now on commit 2ba3605 of the podman main branch:\n```\nbrew info podman\n==> podman: stable 4.9.0 (bottled), HEAD\nTool for managing OCI containers and pods\nhttps://podman.io/\n/opt/homebrew/Cellar/podman/HEAD-2ba3605 (198 files, 72.8MB) *\n  Built from source on 2024-01-29 at 16:36:08\n```\nStopping the machine, restarting the laptop and starting up the machine worked a few times, but today I got the same error again:\n```\n❯\npodman --debug machine start\nINFO[0000] podman filtering at log level debug\nDEBU[0000] Using Podman machine with `applehv` virtualization provider\nDEBU[0000] connection refused: http://localhost:50478/vm/state\nStarting machine \"podman-machine-default\"\nDEBU[0000] connection refused: http://localhost:50478/vm/state\nDEBU[0000] creating runtimeDir: /var/folders/04/bfd6wk9n385174twdm8hx_dc0000gp/T/podman\nDEBU[0000] gvproxy binary being used: /opt/homebrew/Cellar/podman/HEAD-2ba3605/libexec/podman/gvproxy\nDEBU[0000] [-debug -mtu 1500 -ssh-port 50479 -listen-vfkit unixgram:///var/folders/04/bfd6wk9n385174twdm8hx_dc0000gp/T/podman/gvproxy.sock -forward-user root -forward-identity /Users/joerg.frantzius/.local/share/containers/podman/machine/machine -forward-sock /Users/joerg.frantzius/.local/share/containers/podman/machine/applehv/podman.sock -forward-dest /run/podman/podman.sock -pid-file /var/folders/04/bfd6wk9n385174twdm8hx_dc0000gp/T/podman/gvproxy.pid]\nDEBU[0000] gvproxy unixgram socket \"/var/folders/04/bfd6wk9n385174twdm8hx_dc0000gp/T/podman/gvproxy.sock\" not found: stat /var/folders/04/bfd6wk9n385174twdm8hx_dc0000gp/T/podman/gvproxy.sock: no such file or directory\nError: gvproxy exited unexpectedly with exit code 0\nDEBU[0000] Shutting down engines\n```\nMy vfkit is this:\n```\n❯\nvfkit --version\nvfkit version: 0.5.1\n```\nMaybe this bug should be reopened?"
+        },
+        {
+            "user": "jfrantzius",
+            "body": "OK the error message is the same as in https://github.com/containers/podman/issues/21442 , but as described there, my `applehv` machine from current main branch does survive reboot, so it looks like this issue is indeed fixed (on main branch)."
+        }
+    ]
+}

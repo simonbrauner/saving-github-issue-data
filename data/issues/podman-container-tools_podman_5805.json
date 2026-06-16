@@ -1,0 +1,190 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 5805,
+    "title": "Communication between containers on separate networks",
+    "state": "closed",
+    "labels": [
+        "kind/bug",
+        "CNI",
+        "planning",
+        "network",
+        "locked - please file new issue/PR"
+    ],
+    "user": "aparhatus",
+    "body": "Is communication between rootful containers on separate networks allowed by design? In Docker, containers on separate networks cannot access each other out of the box, whereas here they appear to:\n\n```\n[root@sandbox ~]# podman run --network network1 --name container1 -d docker.io/library/nginx\ncb9d8e5ac20f25bf52866d1e468d139aff2b33de53b9c143d20fe1fed200fe97\n[root@sandbox ~]# podman inspect -f \"{{ .NetworkSettings.Networks.network1.IPAddress }}\" container1\n10.89.0.4\n[root@sandbox ~]# podman run --network network2 --rm -it curlimages/curl 10.89.0.4\n<!DOCTYPE html>\n<html>\n<head>\n<title>Welcome to nginx!</title>\n...\n```\n\nThe networks were created with `podman network create <name>`.\n\nIs there any way to get the same behaviour as with Docker, where containers cannot reach each other directly in this fashion and instead have to go through published ports on the host?\n\n**Output of `podman version`:**\n\n```\nVersion:            1.8.2\nRemoteAPI Version:  1\nGo Version:         go1.12.12\nOS/Arch:            linux/amd64\n```",
+    "comments": [
+        {
+            "user": "mheon",
+            "body": "No way at present, though I imagine you could add firewall rules manually to restrict networks from reaching each other.\n\nI imagine that CNI does have some way of doing this, given its origins in Kube, so that is something else worth researching."
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@baude @mheon @mccv1r0 Any further info on this?"
+        },
+        {
+            "user": "mheon",
+            "body": "Nope. We should investigate further, though, this sounds like something we should support."
+        },
+        {
+            "user": "mccv1r0",
+            "body": "> Is communication between rootful containers on separate networks allowed by design? \n\nThis is (should be) a function of what you set the `iptables` FORWARD chain to allow. \n   \n\n"
+        },
+        {
+            "user": "rhatdan",
+            "body": "@mccv1r0 @mheon Anyone ever work on this?"
+        },
+        {
+            "user": "mccv1r0",
+            "body": "No.  CNI has no way of knowing what you want the network you create to do/not do with respect to other \"networks\" (e.g. bridges) on the host system."
+        },
+        {
+            "user": "mheon",
+            "body": "@rhatdan I think we'll need another CNI plugin, similar to the dnsname plugin, to do this."
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@baude PTAL Seems like something for you."
+        },
+        {
+            "user": "baude",
+            "body": "@rhatdan i dont think this is something podman should tread into. i think users should have to add fw rules, unless there is something in cni we can flip a bit on."
+        },
+        {
+            "user": "rhatdan",
+            "body": "It would be nice if they were isolated by default.  But yes having CNI implement this would be best."
+        },
+        {
+            "user": "AkihiroSuda",
+            "body": "This sounds like a security issue. Can we document this in the man page?"
+        },
+        {
+            "user": "AkihiroSuda",
+            "body": "The following iptables commands seem to successfully isolate `cni-podman1` and `cni-podman2`:\n\n```bash\niptables -A INPUT -i cni-podman1 -j MARK --set-mark 1\niptables -A INPUT -i cni-podman2 -j MARK --set-mark 2\niptables -A FORWARD -o cni-podman1 -m mark --mark 0 -j ACCEPT\niptables -A FORWARD -o cni-podman1 -m mark ! --mark 1 -j REJECT\niptables -A FORWARD -o cni-podman2 -m mark --mark 0 -j ACCEPT\niptables -A FORWARD -o cni-podman2 -m mark ! --mark 2 -j REJECT\n```\n\nThe number of commands is O(N) where N is the number of the networks (not the number of the containers).\n\nI'm planning to implement this as a CNI plugin, but I'd like to get some design review before doing that. RFC."
+        },
+        {
+            "user": "mheon",
+            "body": "Can we make a separate chain in FORWARD for each network? We could have the separate chains default to REJECT which would only require a single ACCEPT rule for each new chain. Keeps the overall FORWARD chain smaller."
+        },
+        {
+            "user": "mheon",
+            "body": "Sorry, a separate chain which FORWARD would transfer to for each network"
+        },
+        {
+            "user": "mccv1r0",
+            "body": "\nIt looks like, to enforce isolation between docker networks, docker added two chans:\n\nChain DOCKER-ISOLATION-STAGE-1 \nChain DOCKER-ISOLATION-STAGE-2 \n\nStage 1 has a rule for each bridge sending to somewhere off bridge:\n\n```\n pkts   bytes   target    prot opt  in            out          source               destination     \n 1498 77256 DOCKER-ISOLATION-STAGE-2  all    --    docker0 !docker0  0.0.0.0/0            0.0.0.0/0   \n```\n\nStage 2 also has rules for all their bridges where the output is another docker created network:\n\n```\n pkts   bytes target     prot opt in     out         source               destination     \n    0     0       DROP     all    --  *      docker0  0.0.0.0/0            0.0.0.0/0           \n```\n\nThus anything from a docker network to another docker network is isolated. \n\nAs each network is created/removed, these chains are updated.\n\nIf there is a way for docker (or podman) to explicitly allow network x to talk to network y via run command option, I suspect that they explicitly add ACCEPT rules, probably to stage-2.  \n\n\n\n"
+        },
+        {
+            "user": "AkihiroSuda",
+            "body": "```\n\niptables -N CNI-ISOLATION-STAGE-1\niptables -N CNI-ISOLATION-STAGE-2\n# NOTE: \"-j CNI-ISOLATION-STAGE-1\" needs to be before \"CNI-FORWARD\" created by CNI firewall plugin. So we use -I here.\niptables -I FORWARD -j CNI-ISOLATION-STAGE-1\niptables -A CNI-ISOLATION-STAGE-1 -i cni-podman1 ! -o cni-podman1 -j CNI-ISOLATION-STAGE-2\niptables -A CNI-ISOLATION-STAGE-1 -i cni-podman2 ! -o cni-podman2 -j CNI-ISOLATION-STAGE-2\niptables -A CNI-ISOLATION-STAGE-1 -j RETURN\niptables -A CNI-ISOLATION-STAGE-2 -o cni-podman1 -j DROP\niptables -A CNI-ISOLATION-STAGE-2 -o cni-podman2 -j DROP\niptables -A CNI-ISOLATION-STAGE-2 -j RETURN\n```\n\nThis seems to work as well.\n"
+        },
+        {
+            "user": "AkihiroSuda",
+            "body": "Implemented as a CNI plugin (`/opt/cni/bin/isolation`): https://github.com/AkihiroSuda/cni-isolation\n\nI'm planning to propose this to CNI upstream (https://github.com/containernetworking/plugins)."
+        },
+        {
+            "user": "AkihiroSuda",
+            "body": "Submitted a proposal to CNI upstream: https://github.com/containernetworking/plugins/issues/573\n\n**EDIT** PR: https://github.com/containernetworking/plugins/pull/584"
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@Luap99 @baude @flouthoc @mheon This is something we should consider for the new Network Design."
+        },
+        {
+            "user": "mheon",
+            "body": "We can fix trivially with firewalld, where this will be the default behavior. I think it's a future feature for the iptables backend."
+        },
+        {
+            "user": "AkihiroSuda",
+            "body": "Still can’t get review for PR https://github.com/containernetworking/plugins/pull/584\n\nCan we just use https://github.com/AkihiroSuda/cni-isolation ?\n\nI’ve been already using this for nerdctl\nhttps://github.com/containerd/nerdctl/blob/v0.12.1/pkg/netutil/netutil.go#L77-L85"
+        },
+        {
+            "user": "mheon",
+            "body": "We're in the process of exploring an alternate network stack, but there could still be value in shipping that plugin in `podman-plugins` since CNI will still be supported."
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@AkihiroSuda Since this is no movement in the upstream project, I am not sure what we can do about this?"
+        },
+        {
+            "user": "AkihiroSuda",
+            "body": "> @AkihiroSuda Since this is no movement in the upstream project, I am not sure what we can do about this?\n\nIf we can't get review comments for containernetworking/plugins#584 in the next couple of weeks, I think we should just use  https://github.com/AkihiroSuda/cni-isolation .\n\n\n"
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@AkihiroSuda Any progress?"
+        },
+        {
+            "user": "cdoern",
+            "body": "@flouthoc I am looking to dive into some rust/netavark work. @rhatdan @Luap99 you think this would be a good thing to try as a first issue I got here from containers/netavark#154"
+        },
+        {
+            "user": "flouthoc",
+            "body": "@cdoern Sure, please feel free to take this one. I think this falls more into category of iptables/firewall stuff."
+        },
+        {
+            "user": "rhatdan",
+            "body": "Sure, if you think you can handle it, and @Luap99 and @flouthoc and @mheon don't have time to work on it."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@cdoern Are you working on this?"
+        },
+        {
+            "user": "cdoern",
+            "body": "yes @rhatdan containers/netavark#275 is the first step I am about to open a c/common PR for the option handling as well"
+        },
+        {
+            "user": "rhatdan",
+            "body": "Great"
+        },
+        {
+            "user": "cdoern",
+            "body": "@Luap99 do we need to modify podman to expose this option?"
+        },
+        {
+            "user": "Luap99",
+            "body": "No but we have to add the option to the network create man page"
+        },
+        {
+            "user": "umohnani8",
+            "body": "This has been fixed upstream.\n\n@cdoern can you please verify this? Please close if so."
+        },
+        {
+            "user": "cdoern",
+            "body": "yes, a new network option `--isolate` was added in netavark."
+        },
+        {
+            "user": "Luap99",
+            "body": "We still have to document that in the man page."
+        },
+        {
+            "user": "cdoern",
+            "body": "> We still have to document that in the man page.\n\nI will do that today, nice catch"
+        }
+    ]
+}

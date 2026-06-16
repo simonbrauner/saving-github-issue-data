@@ -1,0 +1,82 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 7583,
+    "title": "CI flake:   podman run with new:pod and static-ip: Error adding network: failed to set bridge addr",
+    "state": "closed",
+    "labels": [
+        "flakes",
+        "kind/bug",
+        "kind/test-flake",
+        "stale-issue",
+        "locked - please file new issue/PR"
+    ],
+    "user": "edsantiago",
+    "body": "The symptom is:\n```\n  podman run with new:pod and static-ip\n ...\nRunning: podman [options] network create --subnet 10.25.40.0/24 podmantestnetwork2\n/etc/cni/net.d/podmantestnetwork2.conflist\nRunning: podman [options] run -t -i --rm --pod new:testpod --net podmantestnetwork2 --ip 10.25.40.128 docker.io/library/alpine:latest ip addr\ntime=\"2020-09-03T15:37:25-05:00\" level=error msg=\"Error adding network: failed to set bridge addr: \\\"cni-podman1\\\" already has an IP address different from 10.25.40.1/24\"\ntime=\"2020-09-03T15:37:25-05:00\" level=error msg=\"Error while adding pod to CNI network \\\"podmantestnetwork2\\\": failed to set bridge addr: \\\"cni-podman1\\\" already has an IP address different from 10.25.40.1/24\"\ntime=\"2020-09-03T15:37:25-05:00\" level=error msg=\"error starting some container dependencies\"\ntime=\"2020-09-03T15:37:25-05:00\" level=error msg=\"\\\"error configuring network namespace for container 6091376fe654ca512bc885c89c0026c76549f8a47e174c37819e77f8c5678cfe: failed to set bridge addr: \\\\\\\"cni-podman1\\\\\\\" already has an IP address different from 10.25.40.1/24\\\"\"\nError: error starting some containers: internal libpod error\n```\nThese are all three-time failures, causing the entire CI job to fail, probably because the first failure leaves things in a bad state for the test reruns -- subsequent attempts fail with:\n```\nRunning: podman [options] network create --subnet 10.25.40.0/24 podmantestnetwork2\nError: network 10.25.40.0/24 is already being used by a cni configuration\n```\nSo, at a minimum, I would suggest fixing the test so as to clean up after itself.\n\nFlake history:\n\n* fedora-32 : test fedora-32\n  * PR #7408\n    * [08-21 22:29](https://storage.googleapis.com/cirrus-ci-6707778565701632-fcae48/artifacts/containers/podman/5483323134836736/html/integration_test.log.html#t--podman-run-with-new-pod-and-static-ip--1)\n    * [08-21 22:29](https://storage.googleapis.com/cirrus-ci-6707778565701632-fcae48/artifacts/containers/podman/5483323134836736/html/integration_test.log.html#t--podman-run-with-new-pod-and-static-ip--2)\n    * [08-21 22:29](https://storage.googleapis.com/cirrus-ci-6707778565701632-fcae48/artifacts/containers/podman/5483323134836736/html/integration_test.log.html#t--podman-run-with-new-pod-and-static-ip--3)\n* fedora-c5809900649447424 : test fedora\n  * PR #7538\n    * [09-03 16:53](https://storage.googleapis.com/cirrus-ci-6707778565701632-fcae48/artifacts/containers/podman/6127682897313792/html/integration_test.log.html#t--podman-run-with-new-pod-and-static-ip--1)\n    * [09-03 16:53](https://storage.googleapis.com/cirrus-ci-6707778565701632-fcae48/artifacts/containers/podman/6127682897313792/html/integration_test.log.html#t--podman-run-with-new-pod-and-static-ip--2)\n    * [09-03 16:53](https://storage.googleapis.com/cirrus-ci-6707778565701632-fcae48/artifacts/containers/podman/6127682897313792/html/integration_test.log.html#t--podman-run-with-new-pod-and-static-ip--3)\n* ubuntu-19 : test ubuntu-19\n  * PR #7335\n    * [08-25 08:56](https://storage.googleapis.com/cirrus-ci-6707778565701632-fcae48/artifacts/containers/podman/4504263864877056/html/integration_test.log.html#t--podman-run-with-new-pod-and-static-ip--1)\n    * [08-25 08:56](https://storage.googleapis.com/cirrus-ci-6707778565701632-fcae48/artifacts/containers/podman/4504263864877056/html/integration_test.log.html#t--podman-run-with-new-pod-and-static-ip--2)\n    * [08-25 08:56](https://storage.googleapis.com/cirrus-ci-6707778565701632-fcae48/artifacts/containers/podman/4504263864877056/html/integration_test.log.html#t--podman-run-with-new-pod-and-static-ip--3)",
+    "comments": [
+        {
+            "user": "Luap99",
+            "body": "I will take a look."
+        },
+        {
+            "user": "Luap99",
+            "body": "OK, I don't thing there is anything wrong with the \"new:pod and static-ip\" command itself. I ran this test for hours on a slow and fast computer without any problems.\n\nLooking at the error it seems that podman is trying to set a ip on an existing bridge interface (cni-podman1) which already has a different ip address.\n\nYou could force this error by doing something like this:\n```\n$ podman network create --subnet 10.25.10.0/24 testnet1\n/etc/cni/net.d/testnet1.conflist\n$ podman network inspect testnet1 | grep bridge\n        \"bridge\": \"cni-podman1\",\n        \"type\": \"bridge\"\n$ podman run --rm --name test1 --net testnet1 --ip 10.25.10.10 alpine ip addr \n...\n```\nDon't delete this network to force this error.\nCreate the second network:\n`conf=$(podman network create --subnet 10.25.20.0/24 testnet2)`\nEdit the config bridge name to the same as testnet1 (cni-podman1)\n`vi $conf`\nNow run this and you get the error:\n```\npodman run --rm --name test2 --net testnet2 --ip 10.25.20.10 alpine ip addr\nERRO[0000] Error adding network: failed to set bridge addr: \"cni-podman1\" already has an IP address different from 10.25.20.1/24 \nERRO[0000] Error while adding pod to CNI network \"testnet2\": failed to set bridge addr: \"cni-podman1\" already has an IP address different from 10.25.20.1/24 \nError: error configuring network namespace for container 9f39e72bbf437b2a3bf59da51f0d1d4ce7e350cb04a0d8013d8250bc3754b9f7: failed to set bridge addr: \"cni-podman1\" already has an IP address different from 10.25.20.1/24\n```\n\n\nSo the real problem could be that `podman network create` creates a config with an already used bridge interface name. I'm not sure if there is a relation to the previous test which also creates and removes a network."
+        },
+        {
+            "user": "PavelSosin-320",
+            "body": "Similar in my Podman running on WSL CentOS 8.1 when I try to run Theia container:\nfailed to set bridge addr: \"cni-podman0\" already has an IP address different from 10.88.2.1/24\nWhile podman network inspect podman | grep bridge\n                                \"bridge\": \"cni-podman0\",\n                                \"type\": \"bridge\"\nand IP -a shows:\n6: cni-podman0: <NO-CARRIER,BROADCAST,MULTICAST,UP> mtu 1500 qdisc noqueue state DOWN group default qlen 1000\n    link/ether 00:00:00:00:00:00 brd ff:ff:ff:ff:ff:ff\n    inet 10.88.0.1/16 brd 10.88.255.255 scope global cni-podman0\n       valid_lft forever preferred_lft forever\n    inet6 fe80::84db:ff:fe4e:2a72/64 scope link\n       valid_lft forever preferred_lft forever\nBut in my case  IP can be in use on the host via WSL2 Virtual switch or WSL's localhost. The IP -a says:\n_5: eth0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc mq state UP group default qlen 1000\n    link/ether 00:15:5d:b7:2f:ec brd ff:ff:ff:ff:ff:ff\n    inet 172.22.74.96/20 brd 172.22.79.255 scope global eth0\n       valid_lft forever preferred_lft forever\n    inet6 fe80::215:5dff:feb7:2fec/64 scope link\n       valid_lft forever preferred_lft forever\n6: cni-podman0: <NO-CARRIER,BROADCAST,MULTICAST,UP> mtu 1500 qdisc noqueue state DOWN group default qlen 1000\n    link/ether 00:00:00:00:00:00 brd ff:ff:ff:ff:ff:ff\n    inet 10.88.0.1/16 brd 10.88.255.255 scope global cni-podman0\n       valid_lft forever preferred_lft forever\n    inet6 fe80::84db:ff:fe4e:2a72/64 scope link\n       valid_lft forever preferred_lft forever_\n\nWhich IP the Podman bridge listens? - Must be 0.0.0.0 because WSL 2 V-switch implements NIC only."
+        },
+        {
+            "user": "Luap99",
+            "body": "@PavelSosin-320 What command are you using?"
+        },
+        {
+            "user": "PavelSosin-320",
+            "body": "I use \npodman run -P --pod new:cheWsServerNetLog --log-driver=\"json-file\" --net podman docker.io/theiaide/theia\n\non WSL2 Centos 8.1 image.\nBut it looks like a generic issue because I see the Podman bridge interface in ip -j -4 a show cni-podman0 output as exists in my VM\n[{\"ifindex\":6,\"ifname\":\"cni-podman0\" ....... \"addr_info\":[{\"family\":\"inet\",\"local\":\"10.88.0.1\",\"prefixlen\":16,\"broadcast\":\"10.88.255.255\",\"scope\":\"global\"\nI suppose that in WSL VM or other VM scenario with V-switch used only one bridge can exist. I expect [INFO] \"already exists message."
+        },
+        {
+            "user": "mheon",
+            "body": "@PavelSosin-320 I'm confused as to the question about what IP the CNI bridge listens on - bridges don't listen on any IP, because they're a layer 2 construct. There's an interface on the host in the bridge and another interface for each container to allow communications to the gateway, and then we configure iptables in masquerade mode to NAT the subnet in use on the bridge. It seems like we're not even getting that far, as it's complaining that it's unable to configure the bridge?"
+        },
+        {
+            "user": "PavelSosin-320",
+            "body": "Yes, it is true! I don't see how to configure the bridge. There is the long-lasting discussion about the bridge vs NIC in the WSL 2 VM.   The is neither a bridge nor even a fully-functional V-switch in the WSL2. The eth0 in the VM is created on-the-fly and IP address is generated every time when Windows LXSS service is started. The VM itself is a singleton and I see cni-podman0 interface from the CentOS7 distro running Docker side. And vise-verse, I see Docker0 bridge from the CentOS8.1 distro's side running Podman.\nThis is a very challenging WSL limitation :( from my point of view because it requires hard network separation between Docker and Podman. "
+        },
+        {
+            "user": "edsantiago",
+            "body": "Still happening: [log](https://storage.googleapis.com/cirrus-ci-6707778565701632-fcae48/artifacts/containers/podman/5964082543067136/html/int-podman-fedora-31-root-container.log.html#t--podman-run-with-new-pod-and-static-ip--1) (on #7926)"
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@edsantiago @Luap99 Any movement on this issue?"
+        },
+        {
+            "user": "edsantiago",
+            "body": "Still happening, although it looks like the cleanup has worked so it's not triple-failing any more (and hence not causing complete CI-run failures). Logs below are November and October only, I choose to skip the many late-September instances:\n\n* gce_instance:prior-fedora : int podman fedora-31 root host\n  * PR #8231\n    * [11-03 11:13](https://storage.googleapis.com/cirrus-ci-6707778565701632-fcae48/artifacts/containers/podman/4679684577296384/html/int-podman-fedora-31-root-host.log.html#t--podman-run-with-new-pod-and-static-ip--1)\n* gce_instance:prior-ubuntu : int podman ubuntu-19 root host\n  * PR #8209\n    * [10-31 23:13](https://storage.googleapis.com/cirrus-ci-6707778565701632-fcae48/artifacts/containers/podman/4755060825522176/html/int-podman-ubuntu-19-root-host.log.html#t--podman-run-with-new-pod-and-static-ip--1)\n  * PR #8188\n    * [10-30 10:00](https://storage.googleapis.com/cirrus-ci-6707778565701632-fcae48/artifacts/containers/podman/6457110596681728/html/int-podman-ubuntu-19-root-host.log.html#t--podman-run-with-new-pod-and-static-ip--1)\n* prior-fedora : int podman fedora-31 root container\n  * PR #7926\n    * [10-05 14:46](https://api.cirrus-ci.com/v1/task/5964082543067136/logs/main.log)\n    * [10-05 14:46](https://api.cirrus-ci.com/v1/task/5964082543067136/logs/main.log)\n    * [10-05 14:46](https://api.cirrus-ci.com/v1/task/5964082543067136/logs/main.log)\n* prior-fedora : int podman fedora-31 root host\n  * PR #8101\n    * [10-21 14:32](https://storage.googleapis.com/cirrus-ci-6707778565701632-fcae48/artifacts/containers/podman/6680568416960512/html/int-podman-fedora-31-root-host.log.html#t--podman-run-with-new-pod-and-static-ip--1)\n* prior-ubuntu : int podman ubuntu-19 root host\n  * PR #8111\n    * [10-22 14:17](https://storage.googleapis.com/cirrus-ci-6707778565701632-fcae48/artifacts/containers/podman/6084458229006336/html/int-podman-ubuntu-19-root-host.log.html#t--podman-run-with-new-pod-and-static-ip--1)\n  * PR #8096\n    * [10-22 03:23](https://storage.googleapis.com/cirrus-ci-6707778565701632-fcae48/artifacts/containers/podman/5247704378900480/html/int-podman-ubuntu-19-root-host.log.html#t--podman-run-with-new-pod-and-static-ip--1)\n* ubuntu : int podman ubuntu-20 root host\n  * PR #8078\n    * [10-22 10:14](https://storage.googleapis.com/cirrus-ci-6707778565701632-fcae48/artifacts/containers/podman/6255469398327296/html/int-podman-ubuntu-20-root-host.log.html#t--podman-run-with-new-pod-and-static-ip--1)\n"
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@edsantiago Does this still happen, or was this fixed by #7943 ?"
+        },
+        {
+            "user": "edsantiago",
+            "body": "Looks like #7943 merged on October 7. In addition to the October/November incidents mentioned in a comment above, we have the following since then:\n\n* gce_instance:prior-ubuntu : int podman ubuntu-19 root host\n  * PR #8688\n    * [12-11 06:50](https://storage.googleapis.com/cirrus-ci-6707778565701632-fcae48/artifacts/containers/podman/6105656014929920/html/int-podman-ubuntu-19-root-host.log.html#t--podman-run-with-new-pod-and-static-ip--1)\n  * PR #8410\n    * [11-20 11:53](https://storage.googleapis.com/cirrus-ci-6707778565701632-fcae48/artifacts/containers/podman/4568878044938240/html/int-podman-ubuntu-19-root-host.log.html#t--podman-run-with-new-pod-and-static-ip--1)\n    * [11-20 11:53](https://storage.googleapis.com/cirrus-ci-6707778565701632-fcae48/artifacts/containers/podman/4568878044938240/html/int-podman-ubuntu-19-root-host.log.html#t--podman-run-with-new-pod-and-static-ip--2)\n    * [11-20 11:53](https://storage.googleapis.com/cirrus-ci-6707778565701632-fcae48/artifacts/containers/podman/4568878044938240/html/int-podman-ubuntu-19-root-host.log.html#t--podman-run-with-new-pod-and-static-ip--3)\n\n* gce_instance:ubuntu : int podman ubuntu-20 root host\n  * PR #8523\n    * [11-30 17:40](https://storage.googleapis.com/cirrus-ci-6707778565701632-fcae48/artifacts/containers/podman/6580547948380160/html/int-podman-ubuntu-20-root-host.log.html#t--podman-run-with-new-pod-and-static-ip--1)\n"
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "edsantiago",
+            "body": "Only one instance in the last month, and it was a one-off (i.e. didn't cause a CI failure). Guess I'll close and hope for the best.\n\n* gce_instance:prior-ubuntu : int podman ubuntu-19 root host\n  * PR #8688\n    * [12-11 06:50](https://storage.googleapis.com/cirrus-ci-6707778565701632-fcae48/artifacts/containers/podman/6105656014929920/html/int-podman-ubuntu-19-root-host.log.html#t--podman-run-with-new-pod-and-static-ip--1)\n"
+        }
+    ]
+}

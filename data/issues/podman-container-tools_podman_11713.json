@@ -1,0 +1,122 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 11713,
+    "title": "pod can not be removed because of extra containers",
+    "state": "closed",
+    "labels": [
+        "locked - please file new issue/PR"
+    ],
+    "user": "abitrolly",
+    "body": "/kind bug\n\n**Description**\n\n`podman pod` creates an extra container from `k8s.gcr.io/pause:3.5` that applications are not aware of and can not clean up properly. This happens with `podman 3.3.1` and `podman-compose`.\n\n**Steps to reproduce the issue:**\n\n1.\n```\ngit clone https://github.com/pypa/warehouse\ncd warehouse\n```\n\n2.\n```\npodman-compose up\n```\n\n3.\n```\npodman-compose down\n```\n\n**Describe the results you received:**\n\n```\n...\npodman rm warehouse_notgithub_1\n3ddc81c992e5be790200e41f0e38c53e5a05f339e4a5882082eed5129c664bf6\n0\npodman pod rm warehouse\nError: pod c806ecbbc4787bd909aca45540bfaf356a9b308cd2f974ce2cca586333151c68 has containers that are not ready to be removed: cannot remove container e7615dca95cd50548f968dbca974bcdbe9e000e1a317a53b3d70ae7aa31911a5 as it is running - running or paused containers cannot be removed without force: container state improper\n125\n```\n```\n$ podman ps | grep  e7615dca\ne7615dca95cd  k8s.gcr.io/pause:3.5              4 days ago  Up 2 hours ago  0.0.0.0:1080->80/tcp, 0.0.0.0:4576->4576/tcp, 0.0.0.0:5433->5432/tcp, 0.0.0.0:8080->8000/tcp, 0.0.0.0:8964->8000/tcp, 0.0.0.0:8125->8125/udp, 0.0.0.0:8200->8200/tcp, 0.0.0.0:9000-9001->9000-9001/tcp  c806ecbbc478-infra\n```\n\n**Describe the results you expected:**\n\nNo errors when running `podman pod rm`.\n\n**Output of `podman version`:**\n\n```\nVersion:      3.3.1\nAPI Version:  3.3.1\nGo Version:   go1.16.6\nBuilt:        Mon Aug 30 23:46:36 2021\nOS/Arch:      linux/amd64\n```\n\n**Have you tested with the latest version of Podman and have you checked the Podman Troubleshooting Guide? (https://github.com/containers/podman/blob/master/troubleshooting.md)**\n\nYes",
+    "comments": [
+        {
+            "user": "Luap99",
+            "body": "You need to stop the infra container. Either use `podman pod stop ...` before or use `podman pod rm -f ...`"
+        },
+        {
+            "user": "abitrolly",
+            "body": "@Luap99 the question is why there are extra containers in the first place and why people need to care about these internal details?"
+        },
+        {
+            "user": "baude",
+            "body": "@abitrolly our pod implementation currently uses an infra container (as was standard in the kube world).  The infra container basically owns the network and other namespaces.  in the future, this is something we would like to eliminate but currently is not a priority."
+        },
+        {
+            "user": "abitrolly",
+            "body": "@baude does \"was\" means that kubernetes doesn't use any extra container anymore? And doesn't expose them to users, right?\n\nIf the pod is empty, why the `podman` do not stop its infra container itself?\n\n"
+        },
+        {
+            "user": "mheon",
+            "body": "Allowing removal of pods where 1 container is running (and it's the infra container) seems reasonable"
+        },
+        {
+            "user": "rhatdan",
+            "body": "I agree, we should automatically stop the infra container with a -t 0 field."
+        },
+        {
+            "user": "baude",
+            "body": "@abitrolly you asked why it was this way in podman, i answered.  it seems like are in agreement to fix the behavior."
+        },
+        {
+            "user": "abitrolly",
+            "body": "@baude yep. It would also be nice to keep this ticket open until it is fixed."
+        },
+        {
+            "user": "cdoern",
+            "body": "Is this only in conjunction with podman-compose? Or is this affected by the image infra is using? running a `podman pod create` `podman pod start` and then `podman pod rm` seems to work for me when running normally. If this is just a bug where infra needs to be stopped upon removal when not using the pause image, I can take this one."
+        },
+        {
+            "user": "cdoern",
+            "body": "another question @mheon, does this go through `libpod/runtime_pod_linux.go:171`? or is `podman-compose` a separate path? I was looking at the podman-compose repo, trying to decipher the python but just got down to [here](https://github.com/containers/podman-compose/blob/devel/podman_compose.py#L1398l) which I am unsure whether that just leads back to podman."
+        },
+        {
+            "user": "mheon",
+            "body": "It's directly invoking the CLI, so that's just a `podman pod rm` (no `--force`) command."
+        },
+        {
+            "user": "cdoern",
+            "body": "hmmm interesting because  `libpod/runtime_pod_linux.go:171` already has the code to retrieve and remove infra if it is the only container in the pod. I guess this could have something to do with removal of the previous container from the pod? If that isn't removed properly then numContainers > 1 still"
+        },
+        {
+            "user": "mheon",
+            "body": "Yeah, that sounds right - I imagine we must have been handling this already.\n\nI think at this point we need to try and reproduce with `podman-compose` - the actual removal of the pod may be typical, but it could be doing something unusual before the pod is removed that is confusing us."
+        },
+        {
+            "user": "cdoern",
+            "body": "update here so I can keep track of my though process: my only idea is that since the `podman-compose down` process stops all containers before removing the pod, we should try to get infra in the `compose.containers` entity so it is stopped before we even run into this issue. Not sure how to go about getting this though..."
+        },
+        {
+            "user": "abitrolly",
+            "body": "@cdoern that doesn't fix the root cause, so I don't think https://github.com/containers/podman-compose/pull/340 resolves this behavior,"
+        },
+        {
+            "user": "cdoern",
+            "body": "> @cdoern that doesn't fix the root cause, so I don't think https://github.com/containers/podman-compose/pull/340 resolves this behavior,\n\nWhat do you mean by root issue @abitrolly I am pretty sure a --force will get rid of infra if the pod stop didn't stop it. "
+        },
+        {
+            "user": "abitrolly",
+            "body": "The root issue is that `podman` produces extra container that users are not aware of. `--force` or removing it explicitly in `podman-compose` is a workaround. The proper fix is to remove the extra container in `podman` code when `pod rm` is issued and it is the only container there."
+        },
+        {
+            "user": "abitrolly",
+            "body": "This is the place where the failure happens.\n\nhttps://github.com/containers/podman/blob/1de96f2c4c390bae29c303e2390da9e87a993d3f/libpod/runtime_pod_linux.go#L211-L214"
+        },
+        {
+            "user": "abitrolly",
+            "body": "But the code that explicitly checks for this condition is above here.\n\nhttps://github.com/containers/podman/blob/1de96f2c4c390bae29c303e2390da9e87a993d3f/libpod/runtime_pod_linux.go#L183-L188\n\nMaybe there are some race conditions. Need a verbose mode to show."
+        },
+        {
+            "user": "abitrolly",
+            "body": "I used more [lightweight project](https://github.com/chubin/cheat.sh/blob/6d83c4d76c82a87cf6df436a5ab73e3b7c819e66/docker-compose.yml) to track the issue. So the error happens when `pod` contains exited containers from one time runs. That's probably why `numCtrs == 1` check fails.\n\n```\n     \"NumContainers\": 3,\n     \"Containers\": [\n          {\n               \"Id\": \"2bf16ddb526589eca084bf87925cf2c718591005c3d51bf9c302f129ad57fb0f\",\n               \"Name\": \"112c0a12dccb-infra\",\n               \"State\": \"running\"\n          },\n          {\n               \"Id\": \"66732414d5001adb19eb1bed40f190442af6ae888b1aee2f69989c2a8db8d795\",\n               \"Name\": \"cheatsh_app_tmp24211\",\n               \"State\": \"exited\"\n          },\n          {\n               \"Id\": \"9840deb080b3b93e22380b533c8613d017aa40f4498483a966e23c168fde3cfb\",\n               \"Name\": \"cheatsh_app_tmp52438\",\n               \"State\": \"exited\"\n          }\n     ]\n```\n\nI occasionally use `podman-compose run --entrypoint=bash app` to troubleshoot things in containers."
+        },
+        {
+            "user": "mheon",
+            "body": "OK, that makes more sense. I think that can be said to be working as designed; the pod is not empty, so we're refusing to remove without `--force`."
+        },
+        {
+            "user": "abitrolly",
+            "body": "If the pod is not empty, then the error should list all containers that are not empty, but it lists only internal container."
+        },
+        {
+            "user": "mheon",
+            "body": "Sure - looks like the error messages are out of order."
+        },
+        {
+            "user": "abitrolly",
+            "body": "Speaking of errors it would be more user friendly to report container names along with their hashes to understand what is going on."
+        },
+        {
+            "user": "cdoern",
+            "body": "The one shot containers are not removed first using container rm? Seems like that is the expected outcome, right? I say we should either print a better err msg and leave it as is, or make sure that infra actually gets removed via --force"
+        },
+        {
+            "user": "rhatdan",
+            "body": "Yes let's improve the error message, and ensure that the remove --force."
+        },
+        {
+            "user": "cdoern",
+            "body": "so my compose PR, fixes the `--force` aspect of this right? I just put together the new error message."
+        }
+    ]
+}

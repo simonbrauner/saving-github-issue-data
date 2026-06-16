@@ -1,0 +1,63 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 8649,
+    "title": "[APIv2]: container copy rewrite broke PUT /containers/{id}/archive endpoint",
+    "state": "closed",
+    "labels": [
+        "kind/bug",
+        "locked - please file new issue/PR"
+    ],
+    "user": "riyad",
+    "body": "<!--\n---------------------------------------------------\nBUG REPORT INFORMATION\n---------------------------------------------------\nUse the commands below to provide key information from your environment:\nYou do NOT have to include this information if this is a FEATURE REQUEST\n\n**NOTE** A large number of issues reported against Podman are often found to already be fixed\nin more current versions of the project.  Before reporting an issue, please verify the\nversion you are running with `podman version` and compare it to the latest release\ndocumented on the top of Podman's [README.md](../README.md).  If they differ, please\nupdate your version of Podman to the latest possible and retry your command before creating\nan issue.\n\nAlso, there is a running list of known issues in the [Podman Troubleshooting Guide](https://github.com/containers/podman/blob/master/troubleshooting.md),\nplease reference that page before opening a new issue.\n\nIf you are filing a bug against `podman build`, please instead file a bug\nagainst Buildah (https://github.com/containers/buildah/issues). Podman build\nexecutes Buildah to perform container builds, and as such the Buildah\nmaintainers are best equipped to handle these bugs.\n-->\n\n**Is this a BUG REPORT or FEATURE REQUEST? (leave only one on its own line)**\n\n/kind bug\n\n**Description**\n\nTrying to find regressions by exercising the APIv2 trough [docker-py](https://github.com/docker/docker-py)'s test suite (see #5386) I came across a regressions in the [`ArchiveTest.test_copy_directory_to_container`](https://github.com/docker/docker-py/blob/master/tests/integration/api_container_test.py#L691) test.\n\nIt specifically broke with commit 0f496e4b81aadbc6e38cc02af67ddc58f1f3ef79 .\n\n\n**Steps to reproduce the issue:**\n\nAssuming you have a tar archive for upload:\n\n```shell\ntouch test.txt\ntar cf test.tar test.txt\n```\n\n1. create a container \n```\ncurl -sS --unix-socket /var/run/user/1000/podman/podman.sock -XPOST 'http://localhost/v1.40/containers/create' -H 'Content-Type: application/json' -d '{\"Tty\": false, \"OpenStdin\": false, \"StdinOnce\": false, \"AttachStdin\": false, \"AttachStdout\": true, \"AttachStderr\": true, \"Cmd\": [\"ls\", \"-p\", \"/vol1\"], \"Image\": \"alpine:3.10\", \"Volumes\": {\"/vol1\": {}}, \"NetworkDisabled\": false}'\n```\n\n2. upload the created archive to it\n```\ncurl -sS --unix-socket /var/run/user/1000/podman/podman.sock -XPUT 'http://localhost/v1.40/containers/a8922857d1daf9bbcff5b3703c42e31101ef9d0ed7b956e9f2359acea2449d99/archive?path=/vol1' --data-binary '@test.tar' -H 'Content-Type:'\n```\n\n**Describe the results you received:**\n\nThe archive upload fails with:\n```\n200 {\"cause\":\"destination must be a directory or stream when copying from a stream\",\"message\":\"destination must be a directory or stream when copying from a stream\",\"response\":500}\n```\n**Note:** the `200` response code. :disappointed:\n\n**Describe the results you expected:**\n\nThe contents of the archive should be extracted into the directory given in the `path` parameter (here: `\"/vol1\"`).\n\n**Additional information you deem important (e.g. issue happens only occasionally):**\n\nThe 200 response code in case of an error is because of https://github.com/containers/podman/blob/0cccba834ff2939579f7ef4c340a9337dc9d7d2c/pkg/api/handlers/compat/containers_archive.go#L173 writing the `http.StatusOK` header out before the last fallible operation. \n\nThe copy error happens in:\nhttps://github.com/containers/podman/blob/0cccba834ff2939579f7ef4c340a9337dc9d7d2c/pkg/copy/copy.go#L120\ncalled by\nhttps://github.com/containers/podman/blob/0cccba834ff2939579f7ef4c340a9337dc9d7d2c/pkg/copy/copy.go#L32\ncalled by\nhttps://github.com/containers/podman/blob/0cccba834ff2939579f7ef4c340a9337dc9d7d2c/pkg/api/handlers/compat/containers_archive.go#L174\n... incidentally exactly after setting the `http.StatusOK` header.\n\nBut the actual cause is that `destination` is invalid in\nhttps://github.com/containers/podman/blob/0cccba834ff2939579f7ef4c340a9337dc9d7d2c/pkg/api/handlers/compat/containers_archive.go#L159\n\nBecause the `resolvedContainerPath` (something like: `\"/home/riyad/podman/storage/overlay/02a2eb10376916256ef680acfbdf9296b48f3b4941a41d08e478618c228d68a9/merged/vol1\"`) does not exist in\nhttps://github.com/containers/podman/blob/0cccba834ff2939579f7ef4c340a9337dc9d7d2c/pkg/copy/item.go#L237\nwe have `statError != nil` (specifically `\"file does not exist\"`).\nThis leads us to fall through the conditions in L241 and L254 and enter the last block of code where we make sure the \"parent\" directory for `resolvedContainerPath` exists (but not the directory itself?). :shrug: \n\nAll this worked before 0f496e4b81aadbc6e38cc02af67ddc58f1f3ef79.\n\n**Output of `podman version`:**\n\n```\nVersion:      3.0.0-dev\nAPI Version:  3.0.0\nGo Version:   go1.15.6\nGit Commit:   9b3a81a002e570b8a49e60c3dd3feb65d742f286-dirty\nBuilt:        Tue Dec  8 16:08:02 2020\nOS/Arch:      linux/amd64\n```\n\n",
+    "comments": [
+        {
+            "user": "vrothberg",
+            "body": "Thanks for opening the issues and providing all the details, @riyad. \n\n@jwhonce and I were just chatting about which things may need further massaging. We'll spin up a couple of PRs to fix it soon."
+        },
+        {
+            "user": "vrothberg",
+            "body": "Note that we're currently in process to get `podman-remote cp` to work.  That will enable a whole load of tests.  I expected the copy refactoring to have caused some bugs for /archive, so we made sure to not release it.  First release will be Podman 3.0 early next year."
+        },
+        {
+            "user": "vrothberg",
+            "body": "FWIW, the new error may not be a regression but actually pointing to another bug.\n\n> 200 {\"cause\":\"destination must be a directory or stream when copying from a stream\",\"message\":\"destination must be a directory or stream when copying from a stream\",\"response\":500}\n\n`/vol1` seems to be currently ignored. @jwhonce @mheon is the `Volumes` parameter supposed to create or use a volume on the server?  It's currently not processed so `/vol1` simply does not exist on the container.  Just creating the directory (as before) is a bug."
+        },
+        {
+            "user": "mheon",
+            "body": "Alright, that's... Confusing. There are already two fields for making\nvolumes in the request, Binds and Mounts, and now we have a third with no\ndirect CLI companion (and thus no docs).\n\nOn Wed, Dec 9, 2020, 06:15 Valentin Rothberg <notifications@github.com>\nwrote:\n\n> FWIW, the new error may not be a regression but actually pointing to\n> another bug.\n>\n> 200 {\"cause\":\"destination must be a directory or stream when copying from\n> a stream\",\"message\":\"destination must be a directory or stream when copying\n> from a stream\",\"response\":500}\n>\n> /vol1 seems to be currently ignored. @jwhonce <https://github.com/jwhonce>\n> @mheon <https://github.com/mheon> is the Volumes parameter supposed to\n> create or use a volume on the server? It's currently not processed so\n> /vol1 simply does not exist on the container. Just creating the directory\n> (as before) is a bug.\n>\n> —\n> You are receiving this because you were mentioned.\n> Reply to this email directly, view it on GitHub\n> <https://github.com/containers/podman/issues/8649#issuecomment-741705532>,\n> or unsubscribe\n> <https://github.com/notifications/unsubscribe-auth/AB3AOCFHKRMJNVMBC4I2EY3ST5L47ANCNFSM4USE5Z5Q>\n> .\n>\n"
+        },
+        {
+            "user": "riyad",
+            "body": "Indeed ... just checked against Docker: `PUT .../archive` checks for but doesn't create the destination.\n\n```\ncurl -sS --unix-socket /var/run/docker.sock -XPUT 'http://localhost/v1.40/containers/b4e1f854bc5df921134270e85ea774a895b2f1de490e613000a69fbdb333ea3e/archive?path=/does_not_exist' --data-binary '@test.tar' -H 'Content-Type:'\n{\"message\":\"Could not find the file /does_not_exist in container b4e1f854bc5df921134270e85ea774a895b2f1de490e613000a69fbdb333ea3e\"}\n```"
+        },
+        {
+            "user": "riyad",
+            "body": "Checking Docker's `POST /containers/create` behavior with `\"Volumes\"`set:\n\n```\n$ curl -sS --unix-socket /var/run/docker.sock -XPOST 'http://localhost/v1.40/containers/create' -H 'Content-Type: application/json' -d '{\"Tty\": false, \"OpenStdin\": false, \"StdinOnce\": false, \"AttachStdin\": false, \"AttachStdout\": true, \"AttachStderr\": true, \"Cmd\": [\"ls\", \"-p\", \"/vol1\"], \"Image\": \"alpine:3.10\", \"Volumes\": {\"/vol1\": {}}, \"NetworkDisabled\": false}'\n{\"Id\":\"d4b426a218052a59fd56463d199b9217b9dde3f5d27fae63bb49f688bb18b814\",\"Warnings\":[]}\n\n$ docker inspect d4b426a218052a59fd56463d199b9217b9dde3f5d27fae63bb49f688bb18b814\n[\n    {\n        [...]\n        \"Mounts\": [\n            {\n                \"Type\": \"volume\",\n                \"Name\": \"1bef89e5b270d68aa62c192122f764d00ca1c99c4c5db8ce4b0d5ee833ed1496\",\n                \"Source\": \"/var/lib/docker/volumes/1bef89e5b270d68aa62c192122f764d00ca1c99c4c5db8ce4b0d5ee833ed1496/_data\",\n                \"Destination\": \"/vol1\",\n                \"Driver\": \"local\",\n                \"Mode\": \"\",\n                \"RW\": true,\n                \"Propagation\": \"\"\n            }\n        ],\n        \"Config\": {\n            [...]\n            \"Volumes\": {\n                \"/vol1\": {}\n            },\n            [...]\n        },\n        [...]\n    }\n]\n\n$ docker volume ls\nDRIVER    VOLUME NAME\nlocal     1bef89e5b270d68aa62c192122f764d00ca1c99c4c5db8ce4b0d5ee833ed1496\n```\n[full docker-inspect output](https://github.com/containers/podman/files/5672418/docker-inspect.json.log)\n\nDocker's API docs say about the `\"Volumes\"` object:\n> An object mapping mount point paths inside the container to empty objects.\n\nIt looks like the `\"Volumes\"` crates an anonymous (i.e. randomly-named), empty volume, but goes back and uses `\"Mounts\"` to have it mounted."
+        },
+        {
+            "user": "vrothberg",
+            "body": "@mheon do you have cycles to tackle it?\n"
+        },
+        {
+            "user": "mheon",
+            "body": "Sure, I think I can get this done.\n\nTricky part: it looks like Docker adds *everything* to volumes - even things that are already in Binds and Mounts - so we need to deduplicate before we add the new anonymous volumes."
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@mheon did you make any progress on this?"
+        },
+        {
+            "user": "mheon",
+            "body": "Nope, not yet\n\nOn Sun, Jan 10, 2021 at 08:04 Daniel J Walsh <notifications@github.com>\nwrote:\n\n> @mheon <https://github.com/mheon> did you make any progress on this?\n>\n> —\n> You are receiving this because you were mentioned.\n>\n>\n> Reply to this email directly, view it on GitHub\n> <https://github.com/containers/podman/issues/8649#issuecomment-757473121>,\n> or unsubscribe\n> <https://github.com/notifications/unsubscribe-auth/AB3AOCHWKWCRD7K2O3RIJ73SZGQWNANCNFSM4USE5Z5Q>\n> .\n>\n"
+        },
+        {
+            "user": "mheon",
+            "body": "https://github.com/containers/podman/pull/9025 to fix"
+        }
+    ]
+}

@@ -1,0 +1,91 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 2379,
+    "title": "rootless `podman run` with :Z results into \"relabel failed\"",
+    "state": "closed",
+    "labels": [
+        "kind/bug",
+        "locked - please file new issue/PR"
+    ],
+    "user": "TomasTomecek",
+    "body": "**Is this a BUG REPORT or FEATURE REQUEST? (leave only one on its own line)**\n\n/kind bug\n\n**Description**\n\nI am mounting my cwd into rootless container using :Z and podman errors out with a message:\n```\nrelabel failed \"/home/tt/g/user-cont/packit\": operation not permitted\n```\n\nThe reason I am opening this issues is that it works fine for my colleague with the exactly same setup. Hence I am confused whether this is actually supposed to work or not. CC @jpopelka\n\n```\n$ ls -Z -d .\nsystem_u:object_r:container_file_t:s0:c240,c746 .\n\n$ podman run --rm -ti -v $PWD:/src:Z fedora:29 bash\nrelabel failed \"/home/tt/g/user-cont/packit\": operation not permitted\n\n$ podman run --rm -ti -v $PWD:/src fedora:29 bash\n[root@ea90caf155f2 /]# exit\n```\n\n**Output of `podman version`:**\n\n```\nVersion:       1.0.0\nGo Version:    go1.11.4\nGit Commit:    \"49780a1cf10d572edc4e1ea3b8a8429ce391d47d\"\nBuilt:         Mon Jan 14 21:38:17 2019\nOS/Arch:       linux/amd64\n```\n",
+    "comments": [
+        {
+            "user": "mheon",
+            "body": "@rhatdan Do we have permissions to do `:z` and `:Z` with rootless?"
+        },
+        {
+            "user": "giuseppe",
+            "body": "we have no way for setting that xattrs as rootless"
+        },
+        {
+            "user": "mheon",
+            "body": "Hm. We handle these inside libpod, so we can easily pop up a more helpful error on a relabel being requested."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@giuseppe Why not?  You should be able to relabel a directory from an SELinux point of view. \nIs this caused by fuse-overlay?"
+        },
+        {
+            "user": "rhatdan",
+            "body": "@TomasTomecek If you try in permissive mode, is it allowed?"
+        },
+        {
+            "user": "TomasTomecek",
+            "body": "sadly, not:\n```\n$ sudo setenforce 0\n$ podman run --rm -ti -v $PWD:/src:Z fedora:29 bash\nrelabel failed \"/home/tt/g/user-cont/packit\": operation not permitted  \n```"
+        },
+        {
+            "user": "rhatdan",
+            "body": "Well I would like to know what is blocking it.  If I just do a buildah unshare I am allowed to set the label.\n"
+        },
+        {
+            "user": "TomasTomecek",
+            "body": "I have no idea either. I was able to do `restorecon -FR` with my unprivileged user. When running podman with strace, it actually hanged and I didn't get any meaningful output."
+        },
+        {
+            "user": "giuseppe",
+            "body": "> @giuseppe Why not? You should be able to relabel a directory from an SELinux point of view.\n> Is this caused by fuse-overlay?\n\nit should not interfere with fuse-overlay as it is bind mounted on top of it."
+        },
+        {
+            "user": "rhatdan",
+            "body": "This worked for me\n```\n podman run -ti -v ~/test:/test:Z fedora sh\nTrying to pull docker.io/fedora:latest...Getting image source signatures\nSkipping blob 2ec1fbfd44b7 (already present): 85.73 MiB / 85.73 MiB [=======] 0s\nCopying config d7372e6c93c6: 1.99 KiB / 1.99 KiB [==========================] 0s\nWriting manifest to image destination\nStoring signatures\nsh-4.4# ls -lZ /test \n-rw-rw-r--. 1 root root system_u:object_r:container_file_t:s0:c194,c214 8 May 11  2010 /test\nsh-4.4# exit\nexit\n```\nrpm -q podman\npodman-1.0.0-1.git82e8011.fc29.x86_64\n"
+        },
+        {
+            "user": "rhatdan",
+            "body": "What file system were you sitting in when you ran?\n\npodman run --rm -ti -v $PWD:/src:Z fedora:29 bash\nrelabel failed \"/home/tt/g/user-cont/packit\": operation not permitted  \n\nIs this on an nfs share or some file system that does not support labeling?"
+        },
+        {
+            "user": "TomasTomecek",
+            "body": "It's standard XFS on top of luks filesystem:\n```\n$ mount | grep 'on / '\n/dev/mapper/luks-460d57c9-ef38-46d4-9bb1-f31b6c0feef5 on / type xfs (rw,relatime,seclabel,attr2,inode64,noquota)\n\n$ findmnt /\nTARGET SOURCE                                                FSTYPE OPTIONS\n/      /dev/mapper/luks-460d57c9-ef38-46d4-9bb1-f31b6c0feef5 xfs    rw,relatime,seclabel,attr2,inode64,noquota\n```\n\nI don't even have a separate `/home` partition.\n"
+        },
+        {
+            "user": "rhatdan",
+            "body": "Have you tried different directories?  Could you try chcon -t container_file_t -R SOURCE\noutside of the container and see if it fails?"
+        },
+        {
+            "user": "TomasTomecek",
+            "body": "Thanks, Dan! That command finally helped me to resolve it: the problem was that there were files/dirs owned by root down the road which I didn't notice originally, hence the operation denied message.\n\nSorry for the fuss."
+        },
+        {
+            "user": "rhatdan",
+            "body": "Interesting. Files owned outside the user namespace that were not allowed to be relabelled. "
+        },
+        {
+            "user": "abitrolly",
+            "body": "I've got root owned files in my local dir after I run `docker` and then tried the same command with `podman`."
+        },
+        {
+            "user": "mheon",
+            "body": "Root owned? That's unusual. We'd expect ownership by a high UID/GID if\nyou're using rootless.\n\nOn Mon, May 6, 2019, 07:20 Anatoli Babenia <notifications@github.com> wrote:\n\n> I've got root owned files in my local dir after I run docker and then\n> tried the same command with podman.\n>\n> —\n> You are receiving this because you commented.\n> Reply to this email directly, view it on GitHub\n> <https://github.com/containers/libpod/issues/2379#issuecomment-489586312>,\n> or mute the thread\n> <https://github.com/notifications/unsubscribe-auth/AB3AOCA2IKBDDLQPYM456XLPUAIA7ANCNFSM4GYUT5LQ>\n> .\n>\n"
+        },
+        {
+            "user": "abitrolly",
+            "body": "These are created by `docker run`,\n```\n✗ git clone https://github.com/yakshaveinc/linux\n✗ cd linux\n✗ docker run -v $PWD:/src:Z -w /src yakshaveinc/snapcraft:core18-edge snapcraft\n...\n✗ find . -group root\n./parts\n./parts/yakshaveinc\n./parts/yakshaveinc/state\n./parts/yakshaveinc/state/stage\n./parts/yakshaveinc/state/build\n./parts/yakshaveinc/state/prime\n./parts/yakshaveinc/state/pull\n./parts/yakshaveinc/install\n./parts/yakshaveinc/src\n./parts/yakshaveinc/build\n./parts/.snapcraft_global_state\n./stage\n./prime\n./prime/meta\n./prime/meta/snap.yaml\n```"
+        },
+        {
+            "user": "rhatdan",
+            "body": "Podman is running as your user UID, and would not be allowed to change files owned by root.  This is expected"
+        }
+    ]
+}

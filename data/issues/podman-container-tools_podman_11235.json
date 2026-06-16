@@ -1,0 +1,103 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 11235,
+    "title": "Docker APIv2 build endpoint bug with X-Registry-Config",
+    "state": "closed",
+    "labels": [
+        "kind/bug",
+        "locked - please file new issue/PR"
+    ],
+    "user": "matejvasek",
+    "body": "Compat build endpoint is not working if user config file `~/.docker/config` contains server key like `https://index.docker.io/v1/`.\\\nIt fails with message:\n```\nError response from daemon: failed to parse query parameter 'X-Registry-Config': \"n/a\": error storing credentials in temporary auth file (server: \"https://index.docker.io/v1/\", user: \"mvasek\"): key https://index.docker.io/v1/ contains http[s]:// prefix\n```\nThis bug was introduced in https://github.com/containers/podman/pull/11028.",
+    "comments": [
+        {
+            "user": "matejvasek",
+            "body": "/kind bug"
+        },
+        {
+            "user": "matejvasek",
+            "body": "/cc @vrothberg "
+        },
+        {
+            "user": "matejvasek",
+            "body": "to reproduce run\n```\ncurl -XPOST --unix-socket {YOUR SOCKET HERE} \"http://d/v1.40/build?buildargs=%7B%7D&cachefrom=%5B%5D&cgroupparent=&\\\ncpuperiod=0&cpuquota=0&cpusetcpus=&cpusetmems=&cpushares=0&dockerfile=Dockerfile\\\n&labels=%7B%7D&memory=0&memswap=0&networkmode=NetworkDefault&rm=1&shmsize=0&target=&ulimits=null&version=1\" \\\n -H \"Content-Type: application/x-tar\" \\\n -H \"X-Registry-Config: eyAiaHR0cHM6Ly9pbmRleC5kb2NrZXIuaW8vdjEvIjogeyAidXNlcm5hbWUiOiAibXZhc2VrIiwgInBhc3N3b3JkIjogImlkZHFkIiwgInNlcnZlcmFkZHJlc3MiOiAiaHR0cHM6Ly9pbmRleC5kb2NrZXIuaW8vdjEvIiB9IH0K\" \\\n --data-binary '@test.tar'\n ```\nWhere `test.tar` contains some simple `Dockerfile`.\n"
+        },
+        {
+            "user": "vrothberg",
+            "body": "@saschagrunert @mtrmac PTAL"
+        },
+        {
+            "user": "saschagrunert",
+            "body": "@matejvasek would it be possible to get the output of `debug.PrintStack()` if you put it there?\nhttps://github.com/containers/podman/blob/8c228bdbd031e5930e6319e8fe25b3ff340919f3/vendor/github.com/containers/image/v5/pkg/docker/config/config.go#L749"
+        },
+        {
+            "user": "mtrmac",
+            "body": "That’s almost certainly https://github.com/containers/podman/blob/edf9ec38e40bd2471c870c9bbf3b2685d5e45fa7/pkg/auth/auth.go#L265 .\n\nHum… Looking at that package, arguably https://github.com/containers/image/pull/588 (turning c/image/pkg/docker/config into a broad API exposing much of the parsers/formatters, independently from c/image uses) has a point, even if the price might be not something we have been ready to pay.\n\nAt a very quick glance, is it possible that `pkg/auth/auth` is working way too hard, when it could instead point `SystemContext` directly at some files? Probably not quite…\n\nBut it does seem to me, after a somewhat slower skim, that `authConfigToAuthFile` could start with the user-provided JSON, instead of manually parsing it, and only adjusting it in exceptional cases.\n\nCopy&pasting the key normalization into `pkg/auth/auth`, so that it always calls `SetAuthentication` with a valid key, should always be possible.\n\n---\n\n(I guess the first step should be to consciously decide whether those HTTP headers are expected to support the new repo-scoped credentials. Is this compatibility only, or used for new callers as well?)"
+        },
+        {
+            "user": "ssbarnea",
+            "body": "I am facing this problem with podman 3.3.0 (1629488174) on macos but not with the same version on fedora. Sounds like critical to me...\n\nI tried pulling from both docker.io and quay.io and I get the same kind of failure from both."
+        },
+        {
+            "user": "matejvasek",
+            "body": "@ssbarnea as a workaround you try changing `https://index.docker.io/v1/  ->  docker.io` in your configfile or keyring/credstore."
+        },
+        {
+            "user": "vrothberg",
+            "body": "@saschagrunert PTAL"
+        },
+        {
+            "user": "ssbarnea",
+            "body": "@matejvasek Can you please be a little bit more explicit? I checked and there is no registry configured inside `~/.config/containers/containers.conf` and I have no `container-registries.conf` file on disk. I suppose there is an implicit one but I was not able to find it on https://github.com/containers/image/blob/main/docs/containers-registries.conf.5.md "
+        },
+        {
+            "user": "matejvasek",
+            "body": "I think that auth.json is stored somewhere in `$XDG_RUNTIME_DIR`."
+        },
+        {
+            "user": "matejvasek",
+            "body": "@ssbarnea  Something like `/run/user/1000/containers/auth.json`"
+        },
+        {
+            "user": "ssbarnea",
+            "body": "On macos there is no $XDG_RUNTIME_DIR but on remote host (using the same user has podman remote connection use), I did:\n```\nls $XDG_RUNTIME_DIR/containers/\noverlay  overlay-containers  overlay-layers  overlay-locks\n```\n\nSo there is no `auth.json` either. I suppose that the auth.json file is created only when someone is doing a login. Out of curiosity I manually did an login and the file appeared after.\n\nI also did the same on my macos box and the file was created at ` ~/.config/containers/auth.json` with the same content. Still on macos even after that doing podman pull still fails.\n\nMy macos containers.conf file looks like:\n```\n[containers]\n  log_size_max = -1\n  pids_limit = 2048\n  userns_size = 65536\n\n[engine]\n  num_locks = 2048\n  active_service = \"leno\"\n  stop_timeout = 10\n  [engine.service_destinations]\n    [engine.service_destinations.leno]\n      uri = \"ssh://root@leno:22/run/podman/podman.sock\"\n\n[network]\n```\n"
+        },
+        {
+            "user": "matejvasek",
+            "body": "Mabybe it stores you credentials in some docker credentials helper (secure store) not plaintext in json file."
+        },
+        {
+            "user": "mheon",
+            "body": "`podman login --verbose` on 3.3.0 and up should print where we stored the credentials."
+        },
+        {
+            "user": "matejvasek",
+            "body": "@saschagrunert \n```\ngoroutine 24 [running]:\nruntime/debug.Stack(0x1, 0x1b188e0, 0x1)\n\t/usr/lib/golang/src/runtime/debug/stack.go:24 +0x9f\nruntime/debug.PrintStack()\n\t/usr/lib/golang/src/runtime/debug/stack.go:16 +0x25\ngithub.com/containers/image/v5/pkg/docker/config.validateKey(0xc0002ca5a0, 0x1b, 0x1c2d2fd, 0x31, 0xc00091dd38)\n\t/home/mvasek/go/src/github.com/containers/podman/vendor/github.com/containers/image/v5/pkg/docker/config/config.go:758 +0x3f\ngithub.com/containers/image/v5/pkg/docker/config.SetCredentials(0xc00091df20, 0xc0002ca5a0, 0x1b, 0xc000160da8, 0x6, 0xc0007ea4e0, 0x24, 0xc0002ca5c0, 0x1c, 0x0, ...)\n\t/home/mvasek/go/src/github.com/containers/podman/vendor/github.com/containers/image/v5/pkg/docker/config/config.go:64 +0x50\ngithub.com/containers/image/v5/pkg/docker/config.SetAuthentication(...)\n\t/home/mvasek/go/src/github.com/containers/podman/vendor/github.com/containers/image/v5/pkg/docker/config/config.go:121\ngithub.com/containers/podman/v3/pkg/auth.authConfigsToAuthFile(0xc00066c268, 0xc000630540, 0x1bc9814, 0x8, 0x29c3e60)\n\t/home/mvasek/go/src/github.com/containers/podman/pkg/auth/auth.go:265 +0x256\ngithub.com/containers/podman/v3/pkg/auth.getConfigCredentials(0xc0007c1900, 0xc0004c6cc0, 0x1bd88c3, 0x11, 0xc0006b8928, 0xc000656001)\n\t/home/mvasek/go/src/github.com/containers/podman/pkg/auth/auth.go:100 +0x4a6\ngithub.com/containers/podman/v3/pkg/auth.GetCredentials(0xc0007c1900, 0xc000630420, 0x1bc2cd4, 0x4, 0x29c3e60, 0x0, 0x0, 0x1)\n\t/home/mvasek/go/src/github.com/containers/podman/pkg/auth/auth.go:39 +0x14c\ngithub.com/containers/podman/v3/pkg/api/handlers/compat.BuildImage(0x1ea4070, 0xc0006140e0, 0xc0007c1900)\n\t/home/mvasek/go/src/github.com/containers/podman/pkg/api/handlers/compat/images_build.go:392 +0xe66\ngithub.com/containers/podman/v3/pkg/api/server.(*APIServer).APIHandler.func1.2(0x1ea4070, 0xc0006140e0, 0xc0007c1800)\n\t/home/mvasek/go/src/github.com/containers/podman/pkg/api/server/handler_api.go:72 +0x103a\ngithub.com/containers/podman/v3/pkg/api/server.(*APIServer).APIHandler.func1(0x1ea4070, 0xc0006140e0, 0xc0007c1800)\n\t/home/mvasek/go/src/github.com/containers/podman/pkg/api/server/handler_api.go:75 +0xa6\nnet/http.HandlerFunc.ServeHTTP(0xc000309dd0, 0x1ea4070, 0xc0006140e0, 0xc0007c1800)\n\t/usr/lib/golang/src/net/http/server.go:2049 +0x44\ngithub.com/gorilla/mux.(*Router).ServeHTTP(0xc0007f8000, 0x1ea4070, 0xc0006140e0, 0xc0007c0900)\n\t/home/mvasek/go/src/github.com/containers/podman/vendor/github.com/gorilla/mux/mux.go:210 +0xd3\nnet/http.serverHandler.ServeHTTP(0xc00011a000, 0x1ea4070, 0xc0006140e0, 0xc0007c0900)\n\t/usr/lib/golang/src/net/http/server.go:2867 +0xa3\nnet/http.(*conn).serve(0xc000612000, 0x1eac8a8, 0xc000050080)\n\t/usr/lib/golang/src/net/http/server.go:1932 +0x8cd\ncreated by net/http.(*Server).Serve\n\t/usr/lib/golang/src/net/http/server.go:2993 +0x39b\n\n```"
+        },
+        {
+            "user": "ssbarnea",
+            "body": "I managed to sort the problem locally by altering `~/.docker/config.json` file:\n```\n{\n  \"stackOrchestrator\" : \"swarm\",\n  \"experimental\" : \"enabled\",\n  \"credsStore\" : \"desktop\",\n  \"auths\" : {\n    \"trunk.registry.rdoproject.org\" : {\n    },\n    \"registry.redhat.io\" : {\n      \"auth\" : \"...\"\n    }\n  }\n}\n```\n\nWhat i had to do was to **remove all keys under auths that contained a full url**, something like `\"https://index.docker.io/v1/\": {}` would break podman, which docker has no problem with it.\n "
+        },
+        {
+            "user": "songford",
+            "body": "> I managed to sort the problem locally by altering `~/.docker/config.json` file:\n> \n> ```\n> {\n>   \"stackOrchestrator\" : \"swarm\",\n>   \"experimental\" : \"enabled\",\n>   \"credsStore\" : \"desktop\",\n>   \"auths\" : {\n>     \"trunk.registry.rdoproject.org\" : {\n>     },\n>     \"registry.redhat.io\" : {\n>       \"auth\" : \"...\"\n>     }\n>   }\n> }\n> ```\n> \n> What i had to do was to **remove all keys under auths that contained a full url**, something like `\"https://index.docker.io/v1/\": {}` would break podman, which docker has no problem with it.\n\nThanks. This is exactly it. \nMy Podman instance on Mac didn't complain about `X-Registry-Config`, but `X-Registry-Auth`. Otherwise, everything else is exactly the same and deleting entries in `auths` inside `~/.docker/config.json` fixes this issue. "
+        },
+        {
+            "user": "saschagrunert",
+            "body": "So, we should not call `validateKey()` for docker config files from my point of view to keep the backwards compatibility. Do we want to mitigate this in Podman or c/image? \n\nIf just the path via `authConfigsToAuthFile` is affected, then we may normalize the `server` there:\nhttps://github.com/containers/podman/blob/4207d959a68c1ee2b805b7113838580c14f4bbc6/pkg/auth/auth.go#L262-L267"
+        },
+        {
+            "user": "mtrmac",
+            "body": "c/image does allow URLs in _config files_; it rejects them in the `SetAuthentication` call (and it was never documented to be accepted, and it never worked for credential helpers as expected); so if `pkg/auth` turns config files into `SetAuthentication` calls, I think it’s up to `pkg/auth` to either transform the input to preserve semantics, or to change to use config files instead of `SetAuthentication`.\n\nI don’t think c/image should just relax the `SetAuthentication` validation, accepting the inputs the way it used to never worked quite correctly. _Some_ part of the fix should be in `pkg/auth`; it might turnout that c/image will need to be extended to support that well, I didn’t examine it that deeply."
+        },
+        {
+            "user": "saschagrunert",
+            "body": "/assign"
+        },
+        {
+            "user": "saschagrunert",
+            "body": "Started to experiment with a possible fix in https://github.com/containers/podman/pull/11430, let's see how that works."
+        }
+    ]
+}

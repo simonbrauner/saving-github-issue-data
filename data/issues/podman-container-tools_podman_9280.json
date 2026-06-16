@@ -1,0 +1,99 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 9280,
+    "title": "rootless service not work with systemd socket activation",
+    "state": "closed",
+    "labels": [
+        "kind/bug",
+        "locked - please file new issue/PR"
+    ],
+    "user": "pendulm",
+    "body": "/kind bug\n\n**Description**\n\npodman system service works broken in rootless mode, not get socket from systemd user session, and a lot of noise fill in the system log because system service restart continuously. \n\n**Steps to reproduce the issue:**\n\nRun command as a **non-root user**, so podman  run in rootless mode\n\n1.  $ systemctl --user start podman.socket\n\n2. $ nc -U /run/user/$UID/podman/podman.sock\n\n3. $ journalctl --user -f  watch the log\n\n**Describe the results you received:**\n`level=info msg=\"using API endpoint: 'unix:/run/user/1000/podman/podman.sock'\"` in the log, which mean socket activation not works, and systemd pull up podman service all the time\n\n**Describe the results you expected:**\nwe should see `level=info msg=\"using systemd socket activation to determine API endpoint\"` in the log\n\n**Additional information you deem important (e.g. issue happens only occasionally):**\nrun podman system service in root mode is OK, service get unix socket correctly from systemd\n\n**Output of `podman version`:**\n\n```\nVersion:      3.0.0-dev\nAPI Version:  3.0.0\nGo Version:   go1.16rc1\nBuilt:        Wed Feb  3 12:07:25 2021\nOS/Arch:      linux/amd64\n```\n\n**Package info (e.g. output of `rpm -q podman` or `apt list podman`):**\n\n```\npodman-3.0.0-0.204.dev.gita086f60.fc34.x86_64\n```\n\n**Have you tested with the latest version of Podman and have you checked the Podman Troubleshooting Guide?**\n\nYes\n\n**Additional environment details (AWS, VirtualBox, physical, etc.):**\nSystem: Fedora rawhide",
+    "comments": [
+        {
+            "user": "afbjorklund",
+            "body": "I think this is normal, since the podman service has a 5 second timeout by default.\n\n`podman system service --timeout 5000`\n\nEDIT: Never mind, you meant that it fails to hand over the socket _within_ that timeout ?"
+        },
+        {
+            "user": "pendulm",
+            "body": "I dig into this bug further, and I found the root in [pkg/systemd/activation.go](https://github.com/containers/podman/blob/19507d0ffe8cda0a69f056838556f471fd9e61fa/pkg/systemd/activation.go#L10)\n\nIn rootless mode, podman fork&exec a podman process in new user-namespace,  and systemd pass LISTEN_PID as pid of the parent, so this check breaks:\n```go\n\tif err != nil || p != os.Getpid() {\n\t\treturn false\n\t}\n```\n\nBut in root mode,  no subprocess be forked, so socket activation works"
+        },
+        {
+            "user": "pendulm",
+            "body": "> I think this is normal, since the podman service has a 5 second timeout by default.\n> \n> `podman system service --timeout 5000`\n> \n> EDIT: Never mind, you meant that it fails to hand over the socket _within_ that timeout ?\n\nyep. podman exit after timeout is normal as expect:\n  when traffic come in, systemd activate the service, and when idle time, the service shutdown.\n\nbut with the bug, thing go wrong:\n  1. when traffic come in,  systemd activate the service, but podman service fail to get the socket, so create the socket by it self\n  2. no traffic go in the new created socket, podman service shutdown after timeout\n  3. systemd found service is stopped and the original socket traffic has not been accepted, so start a new podman service again\n  4. podman service will not stopping restart unless stop podman socket mannually\n\n\n\n\n\n"
+        },
+        {
+            "user": "mheon",
+            "body": "@jwhonce PTAL"
+        },
+        {
+            "user": "rhatdan",
+            "body": "@giuseppe PTAL"
+        },
+        {
+            "user": "giuseppe",
+            "body": "can we just drop this check?\n\n```\n\tp, err := strconv.Atoi(pid)\n\tif err != nil || p != os.Getpid() {\n\t\treturn false\n\t}\n```\n\nDoes it break anything with root?"
+        },
+        {
+            "user": "afbjorklund",
+            "body": "systemd is quite vague about it.\n\n```C\n        e = getenv(\"LISTEN_PID\");\n        if (!e) {\n                r = 0;\n                goto finish;\n        }\n\n        r = parse_pid(e, &pid);\n        if (r < 0)\n                goto finish;\n\n        /* Is this for us? */\n        if (getpid_cached() != pid) {\n                r = 0;\n                goto finish;\n        }\n```\n\nFrom `sd-daemon.c`\n\nhttps://github.com/systemd/systemd/blob/v247/src/libsystemd/sd-daemon/sd-daemon.c#L46_L60"
+        },
+        {
+            "user": "pendulm",
+            "body": "just drop the check won't works, same as add a plus check like this:\n```go\n\tif err != nil || ! (p == os.Getpid() && p == os.Getppid()  {\n\t\treturn false\n\t}\n```\nbecause different module check this logic \n`pkg/systemd/activation.go` and `vendor/github.com/coreos/go-systemd/activation/files.go`, the later come from vendor.\n\n"
+        },
+        {
+            "user": "giuseppe",
+            "body": "it seems we have a check in rootless_linux to rewrite `LISTEN_PID` to the current pid.\n\nWould it be possible for you to check why it is failing?"
+        },
+        {
+            "user": "pendulm",
+            "body": "> it seems we have a check in rootless_linux to rewrite `LISTEN_PID` to the current pid.\n> \n> Would it be possible for you to check why it is failing?\n\nsure, I'll check it and make a PR when I have found the bug."
+        },
+        {
+            "user": "cmonty14",
+            "body": "On Debian I get a different error when starting podman.socket in user-mode.\n```\nlocadmin@pc4-pve:~$ systemctl --user status podman.socket \n● podman.socket\n   Loaded: masked (Reason: Unit podman.socket is masked.)\n   Active: inactive (dead)\n\nlocadmin@pc4-pve:~$ systemctl --user start podman.socket \nFailed to start podman.socket: Unit podman.socket is masked.\n\n```"
+        },
+        {
+            "user": "rhatdan",
+            "body": "@vrothberg @giuseppe Any thoughts?"
+        },
+        {
+            "user": "vrothberg",
+            "body": "Try `systemctl --user unmask`"
+        },
+        {
+            "user": "yan12125",
+            "body": "I noticed the issue happened only if there is already a podman process.\n\nSome tests:\n\n1. Kill all podman processes\n2. `systemctl --user start podman.socket`\n3. `curl -v --unix-socket $XDG_RUNTIME_DIR/podman/podman.sock http://localhost/version` works\n4. Wait for 5 seconds for the daemon to exit\n5. The same curl command as the one in 3. hangs\n\nI'm on Arch Linux with podman 3.0.1. From [the build script](https://github.com/archlinux/svntogit-community/blob/packages/podman/trunk/PKGBUILD), apparently `podman.socket` and `podman.service` are from upstream (this repo)."
+        },
+        {
+            "user": "Krejza9",
+            "body": "@pendulm \nany news ?"
+        },
+        {
+            "user": "yan12125",
+            "body": "I checked a little deeper. The issue seems to be PID mismatching between parent and child. I inserted a line before https://github.com/containers/podman/blob/master/pkg/systemd/activation.go#L17\n\n```go\nlogrus.Warnf(\"PID mismatch: %d %d\", p, os.Getpid())\n```\n\nAnd here are relevant systemd logs:\n```\n 3月 22 02:28:45 PC951 podman[981610]: time=\"2021-03-22T02:28:45+08:00\" level=warning msg=\"PID mismatch: 981598 981610\"\n```\n\nWhen that warning is issued, there are three podman processes:\n```\n 974206 yen        20   0 40376  1168  1008 S  0.0  0.0  0:00.00 │  ├─ /home/yen/tmp/podman-src/bin/podman\n 981598 yen        20   0 1453M 37808 29176 S  0.0  0.2  0:00.03 │  └─ /home/yen/tmp/podman-src/bin/podman --log-level=info system service\n 981610 yen        20   0 1597M 38156 29232 S  0.0  0.2  0:00.05 │     └─ /home/yen/tmp/podman-src/bin/podman --log-level=info system service\n```"
+        },
+        {
+            "user": "pendulm",
+            "body": "In this commit 3f60dc02e36a144473c494adebde781e5dec77fa, adjusted LISTEN_PID  to the child PID in `reexec_in_user_namespace`, but when a pause process leaves for namespace pinin(see link https://github.com/containers/podman/pull/7133) , the code path is `reexec_userns_join`, so we should  adjusted LISTEN_PID in that function.\n\n"
+        },
+        {
+            "user": "mheon",
+            "body": "Would you be willing to submit a patch?"
+        },
+        {
+            "user": "giuseppe",
+            "body": "I agree we should fix this.  There was another issue with socket activation, could you see if https://github.com/containers/podman/pull/9855 helps?"
+        },
+        {
+            "user": "pendulm",
+            "body": "#9855  not fix this.\n@giuseppe @mheon I'll take this, now I'm overwhelming by the complex code of rootless setup"
+        },
+        {
+            "user": "Krejza9",
+            "body": "> \n> \n> #9855 not fix this.\n> @giuseppe @mheon I'll take this, now I'm overwhelming by the complex code of rootless setup\n\nHello @pendulm  ,I tested your pull request and it is works like a charm. good job man."
+        }
+    ]
+}

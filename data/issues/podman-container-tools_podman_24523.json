@@ -1,0 +1,44 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 24523,
+    "title": "Predictable veth names",
+    "state": "closed",
+    "labels": [
+        "kind/feature",
+        "network",
+        "locked - please file new issue/PR"
+    ],
+    "user": "M1cha",
+    "body": "### Feature request description\n\nFor a container which joins a podman-managed bridge, a veth pair is created, one side is moved into the containers network namespace and the other side is connected to the podman-bridge.\n\nI disabled podmans firewall support and use my own, static nftables rules, so I can fully control which container can talk to which other container, which container can talk to the internet and which container can talk to which device on the host network. This is done using bridge chains(formerly ebtables).\n\nThere are two issues:\n1) The veth names are not configurable, so I don't know which port belongs to which container, preventing me from writing static rules.\n2) bridge chains don't have access to the name of the bridge, which complicates things on systems with multiple bridges (especially non-container bridges e.g. virbr0. Currently, they use vnet instead of veth prefixes, so that may be a bad example).\n\n### Suggest potential solution\n\nAllow setting the name of the veth so I can simply match on it using static nftables rules. With that, I wouldn't even have to care about the bridge name anymore, because I know which port(veth) belongs to which container, no matter which bridge they are on.\n\n### Have you considered any alternatives?\n\nThese are my current workarounds for these issues:\n1) Use hard-coded MAC addresses for every container, so I can match on MACs instead of port names. This has a big limitation though: This only works for containers without the NET_ADMIN capability, because these could simply change their MAC address to bypass the firewall.\n2) Use an OCI prestart hook to insert/remove jumps to bridge-specific chains: https://github.com/M1cha/homeserver/blob/fff0ca9953544534c98f1b56a2ebb5f0b736ff2b/config/usr/local/bin/update-bridge-rules#L31 While this works great when all bridges are managed by podman and thus run this hook, it introduces a race condition if using other software which creates veths:\n- podman creates veth1 and starts the container\n- podman stops the container which removes veth1\n- **some other software creates veth1, so the old firewall rules apply to the new port for a short time.**\n- podman updates the rules to remove the veth1 rule. (I didn't even implement that, yet. Currently I only have a prestart hook)\n\n### Additional context\n\nMy main motivation for doing manual firewalling, is that podmans implementation isn't expressive enough to be able to control exactly which packets a container can send and receive. And it doesn't have to be thanks to how powerful nftables are nowadays. But static nftables don't always have all the info they need.",
+    "comments": [
+        {
+            "user": "Luap99",
+            "body": "How would the UI look for this? Set the veth interface name for each network/container, i.e. similar to `--network mynet:interface_name=custom1` which would set the interface name inside the container to `custom1` for this network?\n\nOverall the nice thing about the current code in netavark is that we do not even set a name at all for the host side. This avoids the need of conflict detection and retries like it is done by CNI. Of course allowing a static name would not need retires, if it already in use we just fail so the code would be rather simple in netavark.\nThe thing that is we need to set such option and pass it to netavark. We currently use `PerNetworkOptions` struct but I don't think adding new fields there scales well. In particular such veth name option would only be relevant for the bridge driver. Mapping adding a generic `map[string]string` options field there works. I think we might need more options in the future so having something generic is best.\nhttps://github.com/containers/common/blob/2d713bd0b8e02d341fc20029ffbd1ffd9756077f/libnetwork/types/network.go#L256\n"
+        },
+        {
+            "user": "M1cha",
+            "body": "> How would the UI look for this? Set the veth interface name for each network/container, i.e. similar to `--network mynet:interface_name=custom1` which would set the interface name inside the container to `custom1` for this network?\n\nThat would be ideal, yes.\n\n> Of course allowing a static name would not need retires, if it already in use we just fail so the code would be rather simple in netavark.\n\nI agree with that. I don't see why netavark would need retries when using a static name.\n\n> The thing that is we need to set such option and pass it to netavark. We currently use `PerNetworkOptions` struct but I don't think adding new fields there scales well. In particular such veth name option would only be relevant for the bridge driver.\n\nOh I didn't know that they all use the same struct. The user-documentation makes it look like all options are network-specific. So maybe we should refactor the data structures to reflect that?\n\n> Mapping adding a generic `map[string]string` options field there works. I think we might need more options in the future so having something generic is best.\n\nThat should work, if my suggestion above is not an option or too complicated.\n\n"
+        },
+        {
+            "user": "Luap99",
+            "body": "\n\n> > The thing that is we need to set such option and pass it to netavark. We currently use `PerNetworkOptions` struct but I don't think adding new fields there scales well. In particular such veth name option would only be relevant for the bridge driver.\n> \n> Oh I didn't know that they all use the same struct. The user-documentation makes it look like all options are network-specific. So maybe we should refactor the data structures to reflect that?\n\nIt is network specific, i.e. if a container uses two networks we pass two of the structs to netavark one for each network.  What I meant is driver details. macvlan, ipvlan, custom drivers would all use the same struct but they clearly would have no use for a VethName field. However they might want different options in the future thus I recommend using a generic map. That way we do not need to modify the structure every time we add something new.\n\n> \n> > Mapping adding a generic `map[string]string` options field there works. I think we might need more options in the future so having something generic is best.\n> \n> That should work, if my suggestion above is not an option or too complicated.\n\n"
+        },
+        {
+            "user": "M1cha",
+            "body": "Thanks for the explanation. Adding `map[string]string` makes even more sense considering, that netavaark has a plugin API which allows implementing your own driver. I don't know, if netavaark itself can already accept arbitrary arguments from podmans `--network` and make them available to the plugin, but it probably should."
+        },
+        {
+            "user": "M1cha",
+            "body": "@Luap99 Do you plan to work on this? If not, I can give it a try."
+        },
+        {
+            "user": "Luap99",
+            "body": "No I don't have time to work on this. Contributions welcome, this needs changes in podman, common and netavark."
+        },
+        {
+            "user": "M1cha",
+            "body": "Fixed via:\n- https://github.com/containers/common/pull/2245\n- https://github.com/containers/podman/pull/24535\n- https://github.com/containers/netavark/pull/1125"
+        }
+    ]
+}

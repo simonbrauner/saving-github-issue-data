@@ -1,0 +1,43 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 23818,
+    "title": "Importing Go bindings calls XDG runtime checks, causing application to exit unexpectedly",
+    "state": "open",
+    "labels": [
+        "kind/bug",
+        "stale-issue"
+    ],
+    "user": "ventifus",
+    "body": "### Issue Description\n\nXDG runtime checks should not be performed when only the go bindings are used.\n\nAfter updating our podman go bindings from 4.9.4 to 5.0.3, our application began failing with the error\n```\ntime=\"2024-08-29T22:12:26Z\" level=error msg=\"stat /.config: no such file or directory\"\n```\n\nWe tracked this down to https://github.com/containers/storage/blob/main/pkg/homedir/homedir_unix.go#L120-L123, where the XDG runtime checks are verifying that `$HOME/.config` exists. Our application runs in a container with `$HOME` set to `/`, and there is no .config, and the runtime non-root user doesn't have permission to create it.\n\nInserting a `debug.PrintStack()` in `GetConfigHome()` shows this stack trace:\n```\ngoroutine 1 [running, locked to thread]:\nruntime/debug.Stack()\n/usr/lib/golang/src/runtime/debug/stack.go:24 +0x5e\nruntime/debug.PrintStack()\n/usr/lib/golang/src/runtime/debug/stack.go:16 +0x13\ngithub.com/containers/storage/pkg/homedir.GetConfigHome.func1()\n/app/vendor/github.com/containers/storage/pkg/homedir/homedir_unix.go:122 +0x176\nsync.(*Once).doSlow(0x3e9?, 0x0?)\n/usr/lib/golang/src/sync/once.go:74 +0xbf\nsync.(*Once).Do(...)\n/usr/lib/golang/src/sync/once.go:65\ngithub.com/containers/storage/pkg/homedir.GetConfigHome()\n/app/vendor/github.com/containers/storage/pkg/homedir/homedir_unix.go:111 +0x2c\ngithub.com/containers/common/pkg/config.defaultConfig()\n/app/vendor/github.com/containers/common/pkg/config/default.go:201 +0x7a\ngithub.com/containers/common/pkg/config.newLocked(0xc00035fd78)\n/app/vendor/github.com/containers/common/pkg/config/new.go:71 +0x2a\ngithub.com/containers/common/pkg/config.Default()\n/app/vendor/github.com/containers/common/pkg/config/new.go:63 +0xfe\ngithub.com/containers/podman/v5/pkg/util.init.0()\n/app/vendor/github.com/containers/podman/v5/pkg/util/utils.go:48 +0x13\n```\n\nAdditional context: https://redhat-internal.slack.com/archives/CBBJY9GSX/p1725040560356209\n\n### Steps to reproduce the issue\n\nSteps to reproduce the issue\n1. Create a go program that imports the podman bindings\n2. Run the go program as an unprivileged user with `$HOME=/` or other un-writable directory.\n3. Program exits unexpectedly\n\n\n### Describe the results you received\n\nProgram exits with the error \n```\ntime=\"2024-08-29T22:12:26Z\" level=error msg=\"stat /.config: no such file or directory\"\n```\n\n### Describe the results you expected\n\nProgram runs as expected\n\n### podman info output\n\n```yaml\nn/a, we are not actually running podman\n```\n\n\n### Podman in a container\n\nNo\n\n### Privileged Or Rootless\n\nNone\n\n### Upstream Latest Release\n\nYes\n\n### Additional environment details\n\n_No response_\n\n### Additional information\n\nAdditional information like issue happens only occasionally or issue happens with a particular architecture or on a particular setting",
+    "comments": [
+        {
+            "user": "Luap99",
+            "body": "ENOENT should not be an error to begin with IMO as this is only a config dir and AFAIK all other tools work fine without a config file in the home dir.\n\nSecond the bindings should not really import any of this code I think, at least not `github.com/containers/common/pkg/config`\n"
+        },
+        {
+            "user": "mtrmac",
+            "body": "> Second the bindings should not really import any of this code I think, at least not `github.com/containers/common/pkg/config`\n\nThis part is the Podman bug, and should be fixed. (IIRC it’s `c/podman/pkg/util` importing this — `util` packages are always an anti pattern.)\n\n---\n\n> ENOENT should not be an error to begin with IMO as this is only a config dir and AFAIK all other tools work fine without a config file in the home dir.\n\nAt least `podman machine` is creating files in $XDG_CONFIG_HOME (and/or the fallback). So for `podman machine`, we do need the ability to have, or create, a reasonable `…ConfigHome` directory.\n\nThe situation is a non-root user with a home directory, but not allowed to write into such a home directory. I generally suggest that this is an unreasonable setup to run (the full feature set of) Podman in, and not really worth adding special cases for."
+        },
+        {
+            "user": "Luap99",
+            "body": "> > ENOENT should not be an error to begin with IMO as this is only a config dir and AFAIK all other tools work fine without a config file in the home dir.\n> \n> At least `podman machine` is creating files in $XDG_CONFIG_HOME (and/or the fallback). So for `podman machine`, we do need the ability to have, or create, a reasonable `…ConfigHome` directory.\n\nThere are two types of callers readers and writers, readers just use this to read a config file so they just join the result to its path and try to open the file which then either fails or not so they have to handle ENOENT errors if these files are optional so stating the dir before is just a waste of a syscall. Writers on the other side have to create a further directories, AFAICT none of other tools would write into .config but rather .config/containers so they must mkdir containers anyway. Now that can fail if they just call Mkdir vs MkdirAll but looking at it it seems they are already use MkdirAll\n\nA function name like GetConfigHome() should just return the path regadless if it does exists or not, it should especially not create the path IMO because this means a command like podman ps creates the dir for no reason whatsoever. "
+        },
+        {
+            "user": "rhatdan",
+            "body": "How about we deprecate GetConfigHome() and add ConfigHome() to do what you want, then we move all callers to ConfigHome()?"
+        },
+        {
+            "user": "mtrmac",
+            "body": "> There are two types of callers readers and writers …\n\nI think that’s all a fair analysis.\n\nThe one thing I do care about is that the permission special case remains: if we inherit `$XDG_CONFIG_HOME` belonging to a different user account (not owned by us), we must fail, _at the very least_ for writers (because `root` writing to other users’ directory can do damage), and I’d prefer that for for readers as well.\n\n---\n\n> How about we deprecate GetConfigHome() and add ConfigHome() to do what you want, then we move all callers to ConfigHome()?\n\n👍  Sounds like a good way to make this change and ensure all aspects are reviewed."
+        },
+        {
+            "user": "Luap99",
+            "body": "> How about we deprecate GetConfigHome() and add ConfigHome() to do what you want, then we move all callers to ConfigHome()?\n\nI would be fine with that as well."
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        }
+    ]
+}

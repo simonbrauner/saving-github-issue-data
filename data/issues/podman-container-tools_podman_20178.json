@@ -1,0 +1,111 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 20178,
+    "title": "File ownership inside container differs for users using additionalimagestores",
+    "state": "closed",
+    "labels": [
+        "kind/bug",
+        "locked - please file new issue/PR"
+    ],
+    "user": "kdickerson",
+    "body": "### Issue Description\n\nI'm working on an image that will be shared by several users using `additionalimagestores`.  I've been successfully following @rhatdan's guide here: https://www.redhat.com/sysadmin/image-stores-podman.\n\nWhen I run my container as the user who originally put it into the shared store the file ownership is what I expect to see, but when I run it as another user all the files are owned by `nobody` (uid=65534).\n\nThis is an issue because I have a startup script in the container which allows the user starting it to pick which nginx configuration to use (which it does by creating a symlink in `/etc/nginx/conf.d` to the desired config).  For the original user this works fine, but for other users it fails with permission denied.\n\nI'm building off the `nginx-unprivileged` image so inside the container we're operating as the `nginx` user instead of `root`.\n\n### Steps to reproduce the issue\n\nA boiled down example:\n\n**nginx-example.containerfile**\n```dockerfile\n# syntax=docker/dockerfile:1\n\nFROM registry.hub.docker.com/nginxinc/nginx-unprivileged:1.24.0\n\nUSER root\n\nRUN rm /etc/nginx/conf.d/default.conf &&\\\n    mkdir -p /etc/nginx/available-sites /var/www &&\\\n    echo 'server {listen 8080; server_name _; location / {root /var/www;}}' > /etc/nginx/available-sites/example.conf &&\\\n    echo '<!DOCTYPE html><html><head><meta charset=\"UTF-8\"><title>Hello</title></head><body>Hello World</body></html>' > /var/www/index.html &&\\\n    ln -s /etc/nginx/available-sites/example.conf /etc/nginx/conf.d/example.conf\n\nEXPOSE 8080\nUSER nginx\nCMD [\"nginx\", \"-g\", \"daemon off;\"]\n```\n\nNote that I'm excluding the custom startup script for simplicity since the root issue is the file-ownership differences which can be shown without it.\n\n1. Build the Image: `podman build -t nginx-example -f \"images/nginx-example.containerfile\"`\n2. Save the image: `podman save --output nginx-example.tar nginx-example:latest`\n3. Transfer to target machine\nNow following Dan's guide (on target machine)\n4. User1: Load the image into shared location: `podman --root /var/shared_podman_images load --input nginx-example.tar`\n5. User1: Configure `additionalimagestores` in `~/.config/containers/storage.conf` per Dan's guide:\n    ```\n    [storage]\n    driver = \"overlay\"\n\n    [storage.options]\n    additionalimagestores = [ \"/var/shared_podman_images\",]\n\n    [storage.options.overlay]\n    mount_program = \"/usr/bin/fuse-overlayfs\"\n    ```\n6. User1: Run a shell in a container for the image to inspect filesystem:\n    ```\n    [user1@localhost ~]$ podman container run --interactive --tty --entrypoint=/bin/bash nginx-example\n    nginx@56f91d7cc418:/$ whoami\n    nginx\n    nginx@56f91d7cc418:/$ id -u\n    101\n    nginx@56f91d7cc418:/$ ls -la /etc/nginx/conf.d\n    total 0\n    drwxrwxr-x. 2 nginx nogroup 46 Sep 27 19:51 .\n    drwxrwxr-x. 4 nginx nogroup 43 Sep 27 19:51 ..\n    lrwxrwxrwx. 1 root  nogroup 39 Sep 27 19:51 example.conf -> /etc/nginx/available-sites/example.conf\n    nginx@56f91d7cc418:/$ ls -lan /etc/nginx/conf.d\n    total 0\n    drwxrwxr-x. 2 101 65534 46 Sep 27 19:51 .\n    drwxrwxr-x. 4 101 65534 43 Sep 27 19:51 ..\n    lrwxrwxrwx. 1   0 65534 39 Sep 27 19:51 example.conf -> /etc/nginx/available-sites/example.conf\n    nginx@56f91d7cc418:/$ touch /etc/nginx/conf.d/new.conf\n    nginx@56f91d7cc418:/$ ls -lan /etc/nginx/conf.d\n    total 0\n    drwxrwxr-x. 2 101 65534 22 Sep 27 20:49 .\n    drwxrwxr-x. 4 101 65534 43 Sep 27 19:51 ..\n    lrwxrwxrwx. 1   0 65534 39 Sep 27 19:51 example.conf -> /etc/nginx/available-sites/example.conf\n    -rw-r--r--. 1 101   101  0 Sep 27 20:49 new.conf\n    ```\n7. User1: Change permissions on shared location: `sudo chmod -R g+rX /var/shared_podman_images`\n8. User2: Configure `additionalimagestores` in `~/.config/containers/storage.conf` same as above.\n9. User2: Run a shell in a container for the image to inspect filesystem:\n    ```\n    [user2@localhost ~]$ podman container run --interactive --tty --entrypoint=/bin/bash nginx-example\n    nginx@2b28a98c56d9:/$ whoami\n    nginx\n    nginx@2b28a98c56d9:/$ id -u\n    101\n    nginx@2b28a98c56d9:/$ ls -la /etc/nginx/conf.d\n    total 0\n    drwxrwxr-x. 2 nobody nogroup 46 Sep 27 19:51 .\n    drwxrwxr-x. 4 nobody nogroup 43 Sep 27 19:51 ..\n    lrwxrwxrwx. 1 nobody nogroup 39 Sep 27 19:51 example.conf -> /etc/nginx/available-sites/example.conf\n    nginx@2b28a98c56d9:/$ ls -lan /etc/nginx/conf.d\n    total 0\n    drwxrwxr-x. 2 65534 65534 46 Sep 27 19:51 .\n    drwxrwxr-x. 4 65534 65534 43 Sep 27 19:51 ..\n    lrwxrwxrwx. 1 65534 65534 39 Sep 27 19:51 example.conf -> /etc/nginx/available-sites/example.conf\n    nginx@2b28a98c56d9:/$ touch /etc/nginx/conf.d/new.conf\n    touch: cannot touch '/etc/nginx/conf.d/new.conf': Permission denied\n    ```\n\n### Describe the results you received\n\nFor User1 all the files are owned by either `root`, or `nginx`.  But for User2 they're all owned by `nobody`. and User2 cannot modify the configuration directory (which in my real use case is done by a custom entrypoint script based on passed configuration during container startup).\n\n### Describe the results you expected\n\nExpected file ownership inside the container to be the same regardless of which user runs the container.\n\n### podman info output\n\n```yaml\nhost:\n  arch: amd64\n  buildahVersion: 1.29.0\n  cgroupControllers: []\n  cgroupManager: cgroupfs\n  cgroupVersion: v1\n  conmon:\n    package: conmon-2.1.6-1.module+el8.8.0+1265+fa25dd7a.x86_64\n    path: /usr/bin/conmon\n    version: 'conmon version 2.1.6, commit: a88a21e8953a6243d5f369f61a342bcaf0630aa1'\n  cpuUtilization:\n    idlePercent: 96.53\n    systemPercent: 1.01\n    userPercent: 2.46\n  cpus: 2\n  distribution:\n    distribution: '\"rocky\"'\n    version: \"8.8\"\n  eventLogger: file\n  hostname: localhost.localdomain\n  idMappings:\n    gidmap:\n    - container_id: 0\n      host_id: 1002\n      size: 1\n    - container_id: 1\n      host_id: 165536\n      size: 65536\n    uidmap:\n    - container_id: 0\n      host_id: 1001\n      size: 1\n    - container_id: 1\n      host_id: 165536\n      size: 65536\n  kernel: 4.18.0-477.27.1.el8_8.x86_64\n  linkmode: dynamic\n  logDriver: k8s-file\n  memFree: 2913218560\n  memTotal: 5881090048\n  networkBackend: cni\n  ociRuntime:\n    name: runc\n    package: runc-1.1.4-1.module+el8.8.0+1265+fa25dd7a.x86_64\n    path: /usr/bin/runc\n    version: |-\n      runc version 1.1.4\n      spec: 1.0.2-dev\n      go: go1.19.4\n      libseccomp: 2.5.2\n  os: linux\n  remoteSocket:\n    path: /tmp/podman-run-1001/podman/podman.sock\n  security:\n    apparmorEnabled: false\n    capabilities: CAP_SYS_CHROOT,CAP_NET_RAW,CAP_CHOWN,CAP_DAC_OVERRIDE,CAP_FOWNER,CAP_FSETID,CAP_KILL,CAP_NET_BIND_SERVICE,CAP_SETFCAP,CAP_SETGID,CAP_SETPCAP,CAP_SETUID\n    rootless: true\n    seccompEnabled: true\n    seccompProfilePath: /usr/share/containers/seccomp.json\n    selinuxEnabled: true\n  serviceIsRemote: false\n  slirp4netns:\n    executable: /usr/bin/slirp4netns\n    package: slirp4netns-1.2.0-2.module+el8.8.0+1265+fa25dd7a.x86_64\n    version: |-\n      slirp4netns version 1.2.0\n      commit: 656041d45cfca7a4176f6b7eed9e4fe6c11e8383\n      libslirp: 4.4.0\n      SLIRP_CONFIG_VERSION_MAX: 3\n      libseccomp: 2.5.2\n  swapFree: 4294963200\n  swapTotal: 4294963200\n  uptime: 1h 10m 23.00s (Approximately 0.04 days)\nplugins:\n  authorization: null\n  log:\n  - k8s-file\n  - none\n  - passthrough\n  - journald\n  network:\n  - bridge\n  - macvlan\n  - ipvlan\n  volume:\n  - local\nregistries:\n  search:\n  - registry.access.redhat.com\n  - registry.redhat.io\n  - docker.io\nstore:\n  configFile: /home/user2/.config/containers/storage.conf\n  containerStore:\n    number: 2\n    paused: 0\n    running: 0\n    stopped: 2\n  graphDriverName: overlay\n  graphOptions:\n    overlay.imagestore: /var/shared_podman_images\n    overlay.mount_program:\n      Executable: /usr/bin/fuse-overlayfs\n      Package: fuse-overlayfs-1.11-1.module+el8.8.0+1265+fa25dd7a.x86_64\n      Version: |-\n        fusermount3 version: 3.3.0\n        fuse-overlayfs: version 1.11\n        FUSE library version 3.3.0\n        using FUSE kernel interface version 7.26\n  graphRoot: /home/user2/.local/share/containers/storage\n  graphRootAllocated: 37558423552\n  graphRootUsed: 8998699008\n  graphStatus:\n    Backing Filesystem: xfs\n    Native Overlay Diff: \"false\"\n    Supports d_type: \"true\"\n    Using metacopy: \"false\"\n  imageCopyTmpDir: /var/tmp\n  imageStore:\n    number: 3\n  runRoot: /tmp/containers-user-1001/containers\n  transientStore: false\n  volumePath: /home/user2/.local/share/containers/storage/volumes\nversion:\n  APIVersion: 4.4.1\n  Built: 1695425060\n  BuiltTime: Fri Sep 22 16:24:20 2023\n  GitCommit: \"\"\n  GoVersion: go1.19.10\n  Os: linux\n  OsArch: linux/amd64\n  Version: 4.4.1\n```\n\n\n### Podman in a container\n\nNo\n\n### Privileged Or Rootless\n\nRootless\n\n### Upstream Latest Release\n\nYes\n\n### Additional environment details\n\nContainer host is a Rocky 8 VM in VirtualBox on a Windows 10 host.\n\n### Additional information\n\nSpun off another VM to build podman from source to test the latest version with the same results.  Had some issues getting it to compile, but got around it eventually.  It reports `podman version 4.8.0-dev`.  Kept the `podman info` output on this ticket from the latest version officially available in Rocky 8 since I may have done something incorrect while compiling the newer version.",
+    "comments": [
+        {
+            "user": "flouthoc",
+            "body": "Checking this."
+        },
+        {
+            "user": "giuseppe",
+            "body": "have you used `force_mask = \"shared\"` when pulling the images in the additional store?\n"
+        },
+        {
+            "user": "giuseppe",
+            "body": "that will force the containers/storage library to store the \"real\" ownership of the files inside an extended attribute, that later fuse-overlayfs will read and use instead of the original owner and mode for the inode"
+        },
+        {
+            "user": "kdickerson",
+            "body": "That didn't seem to change anything, but perhaps I did something incorrectly.\n\n1. User1: Get a clean state `podman system reset && sudo rm -rf /var/shared_podman_images/*`\n3. User1: Modify `~/.config/containers/storage.conf` and add `force_mask = \"shared\"` under `[storage.options.overlay]`\n4. User1: Load the image (as above): `podman --root /var/shared_podman_images load --input nginx-example.tar`\n5. User1: Update permissions (I left out the chgrp in my original description, both users are in the group): `sudo chmod -R g+rX /var/shared_podman_images && sudo chgrp -R podman-images /var/shared_podman_images`\n6. User1: Runs image, still sees files owned by `nginx`/`root`.\n7. User2: Get a clean state `podman system reset`\n8. User2: Runs image, still sees files owned by `nobody`.\n\nThis was on my VM with the self-compiled podman `4.8.0-dev`.\n\nI wasn't sure if User2 needed `force_mask` configured as well (the description suggests to me it only affects pulling/loading the image).  Doing so didn't change anything.\n\nI also tried using `pull` on the original `nginx-unprivileged` image in case there was an issue using `load`, but no change there either."
+        },
+        {
+            "user": "giuseppe",
+            "body": "can you check if the files under `/var/shared_podman_images` have the correct xattr set?\n\ne.g. you can read the xattrs for a file with:\n\n```\n# getfattr  -d -m'.*' /var/lib/containers/storage/overlay/5eb2e729c16708697e84f3cf2648d1ff3f2ce56f2f1eceb0289b226bc96b061a/diff/usr/bin/ls \ngetfattr: Removing leading '/' from absolute path names\n# file: var/lib/containers/storage/overlay/5eb2e729c16708697e84f3cf2648d1ff3f2ce56f2f1eceb0289b226bc96b061a/diff/usr/bin/ls\nsecurity.selinux=\"unconfined_u:object_r:container_ro_file_t:s0\"\n```\n\njust make sure to use a file that is part of the image and it is under your store.\n\nThen we will understand if it is failing at writing these xattrs or they are not honored by user 2.\n\nAlso make sure user2 is using fuse-overlayfs."
+        },
+        {
+            "user": "kdickerson",
+            "body": "I have no experience working with extended attributes, so I don't know what I'm looking for.  I identified the appropriate overlay directory to look at by looking at the output of `podman inspect` and finding the `GraphDriver.Data.UpperDir` value.  Here's the output for the nginx config directory I care about in particular (but I checked several arbitrarily chosen files and they all had the same output):\n\n```\n[user1@localhost ~]$ getfattr -d -m'.*' /var/shared_podman_images/overlay/c6df3a9eb27557d924dbea6dbd2421cba5b55690d25a7cbfe1c5ec9985d9769b/diff/etc/nginx/conf.d\ngetfattr: Removing leading '/' from absolute path names\n# file: var/shared_podman_images/overlay/c6df3a9eb27557d924dbea6dbd2421cba5b55690d25a7cbfe1c5ec9985d9769b/diff/etc/nginx/conf.d\nsecurity.selinux=\"unconfined_u:object_r:var_t:s0\"\n```\n\nUser2 is using the `storage.conf` shown in the original post--using fuse-overlayfs."
+        },
+        {
+            "user": "rhatdan",
+            "body": "From an SELinux point of view, it looks like these files are mislabled.   \n\nDid you do the \n```\n# semange fcontext -a -e /var/lib/containers/storage /var/shared_podman_images\n# restorecon -R -v /var/shared_podman_images\n```"
+        },
+        {
+            "user": "kdickerson",
+            "body": "Is that something that should be in the \"Exploring additional image stores in Podman\" article?  I haven't run across it before now.\n\nI ran those commands (typo: `semange` -> `semanage`). No change to the file ownership when running the image.  I reset both users to a clean state and did it all again with no change either.\n\n```\n[user1@localhost ~]$ getfattr -d -m'.*' /var/shared_podman_images/overlay/c6df3a9eb27557d924dbea6dbd2421cba5b55690d25a7cbfe1c5ec9985d9769b/diff/etc/nginx/conf.d\ngetfattr: Removing leading '/' from absolute path names\n# file: var/shared_podman_images/overlay/c6df3a9eb27557d924dbea6dbd2421cba5b55690d25a7cbfe1c5ec9985d9769b/diff/etc/nginx/conf.d\nsecurity.selinux=\"unconfined_u:object_r:container_ro_file_t:s0\"\n```"
+        },
+        {
+            "user": "rhatdan",
+            "body": "Have you verified that this is an SELinux issue versus a permissions issue?\n\nCheck for AVC messages, and see if setting `setenfore 0` works?"
+        },
+        {
+            "user": "kdickerson",
+            "body": "I have very little experience with SELinux (I'm a software developer that only dabbles in sysadmin-ing), but I was unable to find any denial messages in the audit log. (`# grep -i prevent /var/log/audit/audit.log` and `# grep -i denied /var/log/audit/audit.log`).  If I should be looking for something else, please let me know.  I scanned the log entries over the time frame when I loaded and then ran the image, but didn't see anything that stood out to me.\n\nI put my 2 users back into a clean state and then put SELinux into permissive mode and ran through it all again with no change in result."
+        },
+        {
+            "user": "rhatdan",
+            "body": "grep -i avc /var/log/audit/audit.log"
+        },
+        {
+            "user": "rhatdan",
+            "body": "Since setenforce 0, did not fix the problem, the problem is with User Namespace."
+        },
+        {
+            "user": "giuseppe",
+            "body": "> I have no experience working with extended attributes, so I don't know what I'm looking for. I identified the appropriate overlay directory to look at by looking at the output of `podman inspect` and finding the `GraphDriver.Data.UpperDir` value. Here's the output for the nginx config directory I care about in particular (but I checked several arbitrarily chosen files and they all had the same output):\n> \n> ```\n> [user1@localhost ~]$ getfattr -d -m'.*' /var/shared_podman_images/overlay/c6df3a9eb27557d924dbea6dbd2421cba5b55690d25a7cbfe1c5ec9985d9769b/diff/etc/nginx/conf.d\n> getfattr: Removing leading '/' from absolute path names\n> # file: var/shared_podman_images/overlay/c6df3a9eb27557d924dbea6dbd2421cba5b55690d25a7cbfe1c5ec9985d9769b/diff/etc/nginx/conf.d\n> security.selinux=\"unconfined_u:object_r:var_t:s0\"\n> ```\n> \n> User2 is using the `storage.conf` shown in the original post--using fuse-overlayfs.\n\nfrom the output above, it seems the files in the additional storage do not have the correct xattr set.  Please make sure you set up a mount program as well as `force_mask=\"shared\"`.\n\n```\n[storage]\ndriver = \"overlay\"\n\n[storage.options]\nadditionalimagestores = [ \"/var/shared_podman_images\",]\n\n[storage.options.overlay]\nmount_program = \"/usr/bin/fuse-overlayfs\"\nforce_mask = \"shared\"\n```\n\nCould you try with the configuration above (you need to remove and re-pull your image in the additional storage)?"
+        },
+        {
+            "user": "kdickerson",
+            "body": "That is the configuration I've been using."
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@kdickerson still having this issue?"
+        },
+        {
+            "user": "kdickerson",
+            "body": "> @kdickerson still having this issue?\n\nCorrect, this has not yet been resolved."
+        },
+        {
+            "user": "martinfg2",
+            "body": "I'm also experiencing this issue.  Just like the original poster, I had my storage.conf configured per Giuseppe's Oct 12 post for User1 and User2, then User1 did a \"podman --root=<sharedstore> pull ...\" of a custom container image.  User 1 runs a container from that image, things look nominal.  User2 runs a container from it, almost every file appears to be owned by \"nobody:nobody\".\n\nIn addition, if any files in this container image are not owned by root, then their uid/gid are not mapped properly for User2.  If the container image is configured to utilize non-root users, this is a problem, especially if using a containerized application that insists on a restrictive permission mask like 0400."
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@martinfg2 Could you give @giuseppe the output he asked for?"
+        },
+        {
+            "user": "kasualkeef",
+            "body": "FWIW, I had this issue when using the root user to pull images into the image store. If I use another rootless user, the in-container permissions seem to work properly."
+        },
+        {
+            "user": "giuseppe",
+            "body": "you need to force fuse-overlayfs also with the root user"
+        },
+        {
+            "user": "giuseppe",
+            "body": "I am closing the issue since there was no feedback"
+        },
+        {
+            "user": "kdickerson",
+            "body": "I believe I provided all feedback and additional information that was asked of me.  It is still unresolved."
+        }
+    ]
+}

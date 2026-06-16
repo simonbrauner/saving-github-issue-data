@@ -1,0 +1,59 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 23789,
+    "title": "race? Failed to retrieve cgroup stats: open .../user.slice/sha.scope/memory.stats and pids.current: ENOENT",
+    "state": "closed",
+    "labels": [
+        "flakes",
+        "locked - please file new issue/PR"
+    ],
+    "user": "edsantiago",
+    "body": "New one-off (so far) in [rawhide rootless parallel](https://api.cirrus-ci.com/v1/artifact/task/5252627401801728/html/sys-podman-rawhide-rootless-host-sqlite.log.html#t--00371p):\n```\n<+026ms> # $ podman container stats --no-stream --format {{\"\\n\"}}\n<+163ms> # time=\"2024-08-27T22:13:08-05:00\" level=warning msg=\"Failed to retrieve cgroup stats: open /sys/fs/cgroup/user.slice/user-4839.slice/user@4839.service/user.slice/libpod-7328f381a1cde439c6e20df0aa54dfe87e731daf1716f97279072fe7786b7480.scope/memory.stat: no such file or directory\"\n         # time=\"2024-08-27T22:13:08-05:00\" level=warning msg=\"Failed to retrieve cgroup stats: open /sys/fs/cgroup/user.slice/user-4839.slice/user@4839.service/user.slice/libpod-7328f381a1cde439c6e20df0aa54dfe87e731daf1716f97279072fe7786b7480.scope/pids.current: no such file or directory\"\n         # #/vvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv\n         # #| FAIL: Command succeeded, but issued unexpected warnings\n         # #\\^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n```",
+    "comments": [
+        {
+            "user": "Luap99",
+            "body": "On quick look, we are locked during the stats call so this should prevent another podman process from stopping/removing the container in parallel. We also only query the cgroup of the ctr state is running or paused. I am not to familiar with how the cgroups setup works, but the container process itself can exit at any time during or calls but AFAIK the cgroup isn't deleted when the process exits but rather needs an explicit removal via podman/oci runtime which also needs to hold a lock so it is not clear to me where the race would be. "
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "edsantiago",
+            "body": "Seen last week in [rawhide rootless](https://api.cirrus-ci.com/v1/artifact/task/4676745176023040/html/sys-podman-rawhide-rootless-host-sqlite.log.html#t--00390p), slightly different symptom:\n```\n<+026ms> # $ podman stats --no-stream --format {{\"\\n\"}}\n<+219ms> # Error: unable to obtain cgroup stats: read /sys/fs/cgroup/user.slice/user-3860.slice/user@3860.service/user.slice/libpod-c472c9ad2475d01451cced72412f6221b819b050026324f5c7768c7ed66f6840.scope/memory.max: no such device\n```\n(`read` instead of `open`, and `memory.max`)"
+        },
+        {
+            "user": "Luap99",
+            "body": "@giuseppe PTAL\nIs it expected that reading the cgroup files is racy? We do seem to hold the container locks correctly so there should be not removal happening at the same time I think, https://github.com/containers/podman/issues/23789#issuecomment-2315320296"
+        },
+        {
+            "user": "giuseppe",
+            "body": "one reason for seeing `ENODEV` is that the cgroup is deleted after the open, but before the read syscall: https://github.com/containers/crun/issues/537\n\nTrying to reproduce locally"
+        },
+        {
+            "user": "giuseppe",
+            "body": "I was able to reproduce quite easily with:\n\n```diff\ndiff --git a/vendor/github.com/containers/common/pkg/cgroups/cgroups_linux.go b/vendor/github.com/containers/common/pkg/cgroups/cgroups_linux.go\nindex d2c610fb1..7e49c7ed3 100644\n--- a/vendor/github.com/containers/common/pkg/cgroups/cgroups_linux.go\n+++ b/vendor/github.com/containers/common/pkg/cgroups/cgroups_linux.go\n@@ -8,6 +8,7 @@ import (\n        \"context\"\n        \"errors\"\n        \"fmt\"\n+       \"io\"\n        \"math\"\n        \"os\"\n        \"path/filepath\"\n@@ -258,10 +259,19 @@ func (c *CgroupControl) initialize() (err error) {\n }\n\n func readFileAsUint64(path string) (uint64, error) {\n-       data, err := os.ReadFile(path)\n+       file, err := os.Open(path)\n        if err != nil {\n                return 0, err\n        }\n+       defer file.Close()\n+\n+       time.Sleep(time.Second / 5)\n+\n+       data, err := io.ReadAll(file)\n+       if err != nil {\n+               return 0, err\n+       }\n+\n```\n\nrunning `while true; do podman stats --no-trunc --no-stream --no-reset --format '\\n'; done` in a loop while in another terminal I create containers with `podman run -d ...`.\n\nNot sure about the fix here, should we ignore any kind of error if the cgroup is gone?\n\nOr should the test just stat a known container that it has control over instead of being affected by other runs?"
+        },
+        {
+            "user": "Luap99",
+            "body": "> Or should the test just stat a known container that it has control over instead of being affected by other runs?\n\nThat is not really possible and the point of these tests is to catch bugs like this.\n\n\n> Not sure about the fix here, should we ignore any kind of error if the cgroup is gone?\n\nBut what deletes the cgroup? AFAIK we hold the container lock so we should not call crun kill/delete or any other runtime command at the same time.\nI mean making the listing robust against such races make sense to me but only if that race is to be expected."
+        },
+        {
+            "user": "giuseppe",
+            "body": "> But what deletes the cgroup? AFAIK we hold the container lock so we should not call crun kill/delete or any other runtime command at the same time.\n\nsystemd deletes the cgroup when it detects there are no more processes running there"
+        },
+        {
+            "user": "giuseppe",
+            "body": "> > Or should the test just stat a known container that it has control over instead of being affected by other runs?\n> \n> That is not really possible and the point of these tests is to catch bugs like this.\n\nif we want to support this case, we need to define when these errors can be ignored.  One way could be for `podman stats -a` to validate if the container/cgroup is still running/existing on each error.  If the container exited, then it should be ignored"
+        },
+        {
+            "user": "Luap99",
+            "body": "yes I think we should catch ENOENT and ENODEV then we could simply check if the container pid is still alive with kill(pid,0) and if not we ignore this error and continue with the next container."
+        },
+        {
+            "user": "giuseppe",
+            "body": "opened a PR: https://github.com/containers/podman/pull/24400"
+        }
+    ]
+}

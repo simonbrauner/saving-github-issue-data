@@ -1,0 +1,78 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 1588,
+    "title": "podman does not start container with CMD or ENTRYPOINT",
+    "state": "closed",
+    "labels": [
+        "locked - please file new issue/PR"
+    ],
+    "user": "elijahsgh",
+    "body": "<!--\n---------------------------------------------------\nBUG REPORT INFORMATION\n---------------------------------------------------\nUse the commands below to provide key information from your environment:\nYou do NOT have to include this information if this is a FEATURE REQUEST\n\n**NOTE** A large number of issues reported against Podman are often found to already be fixed\nin more current versions of the project.  Before reporting an issue, please verify the\nversion you are running with `podman version` and compare it to the latest release\ndocumented on the top of Podman's [README.md](../README.md).  If they differ, please\nupdate your version of Podman to the latest possible and retry your command before creating\nan issue.\n\nIf you are filing a bug against `podman build`, please instead file a bug\nagainst Buildah (https://github.com/containers/buildah/issues). Podman build\nexecutes Buildah to perform container builds, and as such the Buildah\nmaintainers are best equipped to handle these bugs.\n-->\n\n**Is this a BUG REPORT or FEATURE REQUEST?**:\n\n[//]: # Uncomment only one, leave it on its own line:\n\n**kind bug**\n\n[//]: # **kind feature**\n\n**Description**\n\n`podman run` responds with `No command specified on command line or as CMD or ENTRYPOINT in this image` in an image built from a Dockerfile that includes `ENTRYPOINT [\"/opt/unitd/unitd\", \"--no-daemon\", \"--log\", \"/dev/stdout\"]`\n\n```\n$ podman inspect localhost/nginx-unit:1.1 | jq .[0].ContainerConfig.Entrypoint\n[\n  \"/opt/unitd/unitd\",\n  \"--no-daemon\",\n  \"--log\",\n  \"/dev/stdout\"\n]\n```\n\nIs podman ignoring the Entrypoint? This also happens if I use CMD.\n\n**Steps to reproduce the issue:**\n\n1. Build container from Dockerfile with ENTRYPOINT or CMD specified\n\n2. Try to `podman run` the image\n\n**Describe the results you received:**\n\n`ENTRYPOINT [\"/opt/unitd/unitd\", \"--no-daemon\", \"--log\", \"/dev/stdout\"]`\n\n**Describe the results you expected:**\n\nThe container should start.\n\n**Additional information you deem important (e.g. issue happens only occasionally):**\n\n**Output of `podman version`:**\n\n```\n$ podman version\nVersion:       0.9.1\nGo Version:    go1.10.4\nOS/Arch:       linux/amd64\n\n```\n\n**Output of `podman info`:**\n\n```\nhost:\n  Conmon:\n    package: podman-0.9.1-3.gitaba58d1.fc28.x86_64\n    path: /usr/libexec/podman/conmon\n    version: 'conmon version 1.12.0-dev, commit: 1d75f1d54e9e123a97e7f505e38df7ab7192cfa7-dirty'\n  MemFree: 1234755584\n  MemTotal: 16811745280\n  OCIRuntime:\n    package: runc-1.0.0-51.dev.gitfdd8055.fc28.x86_64\n    path: /usr/bin/runc\n    version: 'runc version spec: 1.0.0'\n  SwapFree: 8392011776\n  SwapTotal: 8476684288\n  arch: amd64\n  cpus: 16\n  hostname: desktop\n  kernel: 4.18.10-200.fc28.x86_64\n  os: linux\n  uptime: 46h 4m 27.56s (Approximately 1.92 days)\ninsecure registries:\n  registries: []\nregistries:\n  registries:\n  - docker.io\n  - registry.fedoraproject.org\n  - quay.io\n  - registry.access.redhat.com\n  - registry.centos.org\nstore:\n  ContainerStore:\n    number: 16\n  GraphDriverName: vfs\n  GraphOptions: []\n  GraphRoot: /home/.local/share/containers/storage\n  GraphStatus: {}\n  ImageStore:\n    number: 20\n  RunRoot: /run/user/1000/run\n```\n\n**Additional environment details (AWS, VirtualBox, physical, etc.):**\nPhysical, Fedora 28\n",
+    "comments": [
+        {
+            "user": "mheon",
+            "body": "I'm going to bet this is a result of the array entrypoint - most images use a single element. Will confirm tomorrow."
+        },
+        {
+            "user": "elijahsgh",
+            "body": "Using the `CMD \"command -to -run\"` format didn't solve it.\n\n```\nCMD \"/opt/unitd/unitd --no-daemon --log /dev/stdout\"\n```\n\n```\n$ podman inspect 38d264acc067 | jq .[0].ContainerConfig.Cmd\n[\n  \"/bin/sh\",\n  \"-c\",\n  \"\\\"/opt/unitd/unitd --no-daemon --log /dev/stdout\\\"\"\n]\n```\n\nBut I still get:\n```\n$ podman run -it 38d264acc067\nNo command specified on command line or as CMD or ENTRYPOINT in this image\n```"
+        },
+        {
+            "user": "mheon",
+            "body": "Hm. The logic for generation looks right (override entrypoint with CLI --entrypoint flag if present, then append user-specified command (or CMD if no user command specified). This should work for any entrypoint format, array or not."
+        },
+        {
+            "user": "mheon",
+            "body": "Trying to reproduce now"
+        },
+        {
+            "user": "mheon",
+            "body": "@tamarintech I'm having trouble reproducing locally - I can't reproduce with a Dockerfile or manually setting via --entrypoint. Can you provide a dockerfile that causes the error for you?"
+        },
+        {
+            "user": "elijahsgh",
+            "body": "```\nFROM alpine:3.8 AS unitdbuild\nRUN apk update\nRUN apk add --no-cache \\\n        ca-certificates \\\n        build-base \\\n        gcc make \\\n        python3 \\\n        python3-dev \\\n        git\nRUN git clone https://github.com/nginx/unit /unitd\nWORKDIR /unitd\nRUN ./configure\nRUN ./configure python --config=python3-config\nRUN make all\nRUN stat build/unitd\nRUN stat build/python3.unit.so\n\nFROM alpine:3.8\nWORKDIR /opt/unitd\nRUN apk --no-cache add ca-certificates python3\nRUN mkdir /opt/unitd/modules /opt/unitd/state\nCOPY --from=unitdbuild /unitd/build/unitd /opt/unitd/\nCOPY --from=unitdbuild /unitd/build/python3.unit.so /opt/unitd/modules/\nCMD /opt/unitd/unitd --no-daemon --log /dev/stdout\n```"
+        },
+        {
+            "user": "mheon",
+            "body": "Thanks, I'll try with that"
+        },
+        {
+            "user": "mheon",
+            "body": "Hm. Works for me on master - let me try the 0.9.1 tag"
+        },
+        {
+            "user": "mheon",
+            "body": "Works there too - but I was using the image build by master. Maybe it's the older Buildah version in 0.9.1 triggering it?"
+        },
+        {
+            "user": "elijahsgh",
+            "body": "Interesting, but in a :( way. Both are from Fedora 28.\n\n```\n$ buildah version\nVersion:         1.3\nGo Version:      go1.10.3\nImage Spec:      1.0.0\nRuntime Spec:    1.0.0\nCNI Spec:        0.3.1\nlibcni Version:  v0.6.0\nGit Commit:      4888163\nBuilt:           Sun Aug  5 06:31:55 2018\nOS/Arch:         linux/amd64\n```\n"
+        },
+        {
+            "user": "mheon",
+            "body": "0.9.1 seems old for F28 - there should be a 0.9.3 or so out. Could you try upgrading to that and rebuilding the image?"
+        },
+        {
+            "user": "elijahsgh",
+            "body": "That's the latest.\n\nSounds like it works fine in 0.9.3, though?"
+        },
+        {
+            "user": "mheon",
+            "body": "Wow, you're right... We definitely built 0.9.3.1 for F28, it must not have made it into the main repos.\n\nLet me poke some people tomorrow and see about getting it out the door."
+        },
+        {
+            "user": "mheon",
+            "body": "@tamarintech 0.9.3.1 should have just been pushed to stable, though it could take a few hours for it to show up in the repos"
+        },
+        {
+            "user": "rhatdan",
+            "body": "@tamarintech try\nyum -y update --enaberepo=updates-testing podman"
+        },
+        {
+            "user": "elijahsgh",
+            "body": "podman 0.9.3.1 showed up for me this morning.\nThe build now works great.\nThanks!"
+        }
+    ]
+}

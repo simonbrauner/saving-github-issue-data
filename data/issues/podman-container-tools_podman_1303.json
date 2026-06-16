@@ -1,0 +1,86 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 1303,
+    "title": "latest podman injects `nodev` for / by default, breaking e.g. mock",
+    "state": "closed",
+    "labels": [
+        "locked - please file new issue/PR"
+    ],
+    "user": "cgwalters",
+    "body": "```\n# rpm-ostree status -b\nState: idle\nAutomaticUpdates: ex-stage; rpm-ostreed-automatic.timer: last run 19h ago\nDeployments:\n● ostree://fedora-atomic:fedora/28/x86_64/workstation\n                   Version: 28.20180818.0 (2018-08-19 00:37:14)\n                BaseCommit: 779dfb76fbec73853917d4259ada8f9657a9cb8ab5642880cc7386e5ca4b0d87\n           LayeredPackages: emacs ffmpeg-libs fuse-sshfs git-evtag keepassx krb5-workstation libvirt-client mozilla-openh264 oci-kvm-hook opensc origin-clients pcsc-lite-ccid strace stratisd tmux virt-manager\n                            xsel ykclient ykpers\n# rpm -q podman\npodman-0.8.2.1-1.gitf38eb4f.fc28.x86_64\n# podman run --rm -ti registry.fedoraproject.org/fedora:28 /bin/sh -c 'mknod mynull c 1 3; echo foo > mynull'\n/bin/sh: mynull: Permission denied\n# rpm -q docker\ndocker-1.13.1-61.git9cb56fd.fc28.x86_64\n# docker run --rm -ti registry.fedoraproject.org/fedora:28 /bin/sh -c 'mknod mynull c 1 3; echo foo > mynull'\n# \n```\n\n(In a quick test I failed to downgrade to https://koji.fedoraproject.org/koji/buildinfo?buildID=1133743 due to conmon, but trying the latest version in FAH28...)\n\n```\n# rpm -q podman\npodman-0.7.2-2.git4ca4c5f.fc28.x86_64\n```\n\nThe above works fine.\n\nThis specifically breaks running `mock` inside podman.",
+    "comments": [
+        {
+            "user": "mheon",
+            "body": "Can you add `--cgroup-manager=cgroupfs` to the 0.8.2.1 command line and see if it works with that?"
+        },
+        {
+            "user": "mheon",
+            "body": "This is probably a result of our swap to systemd cgroup management in 0.8.2.1. Will need to look into why this is prohibiting this."
+        },
+        {
+            "user": "mheon",
+            "body": "While attempting to reproduce, I caused `conmon` to dump core. So that's also not good."
+        },
+        {
+            "user": "mheon",
+            "body": "conmon coredump is just on one VM, so that's probably just my environment. Can repro locally on my laptop."
+        },
+        {
+            "user": "mheon",
+            "body": "It's not cgroupfs, it's not SELinux. Hm."
+        },
+        {
+            "user": "mheon",
+            "body": "Has to be the devices cgroup. We don't deliberately set anything related to said CGroup, though."
+        },
+        {
+            "user": "cgwalters",
+            "body": "The mystery deepens.  To avoid mutating my desktop too much I've been doing some testing in a FAH28 VM, and `20180804.0` works, but `20180820.0` fails.\n\n```\n[root@localhost ~]# rpm-ostree status\nState: idle; auto updates disabled\nDeployments:\n● ostree://fedora-atomic:fedora/28/x86_64/atomic-host\n                   Version: 28.20180804.0 (2018-08-04 19:52:51)\n                    Commit: 5633f5b369b166d104720a4da31da1ac6b5e3c0de5c5bae70cb40a850dede502\n              GPGSignature: Valid signature by 128CF232A9371991C8A65695E08E7E629DB62FB1\n\n  ostree://fedora-atomic:fedora/28/x86_64/updates/atomic-host\n                   Version: 28.20180820.0 (2018-08-20 15:01:12)\n                    Commit: df00137bba689acca6240667475eab9e6fbf539ccfa03ad55022faaf10e71433\n              GPGSignature: Valid signature by 128CF232A9371991C8A65695E08E7E629DB62FB1\n```\n\nNow here's the thing...if I `ostree admin unlock` starting from `04` and then install `rpm -Uvh podman-0.8.2.1-1.gitf38eb4f.fc28.x86_64.rpm` - it works.\n\nOther notable changes:\n\n```\n  runc 2:1.0.0-36.gitad0f525.fc28 -> 2:1.0.0-46.dev.gitb4e2ecb.fc28\n  kernel 4.17.11-200.fc28 -> 4.17.14-202.fc28\n  kernel-core 4.17.11-200.fc28 -> 4.17.14-202.fc28\n  kernel-modules 4.17.11-200.fc28 -> 4.17.14-202.fc28\n```\n\nI just tried updating `runc` and it works too.  I wonder if it's actually the kernel...testing that theory now."
+        },
+        {
+            "user": "cgwalters",
+            "body": "Ah hah :mag:.\n\n```\n[root@localhost ~]# rpm -q podman\npodman-0.7.4-4.git80612fb.fc28.x86_64\n[root@localhost ~]# podman run --rm -ti registry.fedoraproject.org/fedora:28 findmnt -o OPTIONS /\nOPTIONS\nrw,relatime,context=\"system_u:object_r:container_file_t:s0:c588,c594\",lowerdir=/var/lib/containers/storage/overlay/l/QLZYS6RMMTBNCA5MKINHFG5ZU2,upperdir=/var/lib/containers/storage/overlay/2534e74abbc639850f02b7\n[root@localhost ~]# \n\n...\n\n[root@localhost ~]# rpm -q podman\npodman-0.8.2.1-1.gitf38eb4f.fc28.x86_64\n[root@localhost ~]# podman run --rm -ti registry.fedoraproject.org/fedora:28 findmnt -o OPTIONS /\nOPTIONS\nrw,nodev,relatime,context=\"system_u:object_r:container_file_t:s0:c120,c503\",lowerdir=/var/lib/containers/storage/overlay/l/QLZYS6RMMTBNCA5MKINHFG5ZU2,upperdir=/var/lib/containers/storage/overlay/b873c28ab4a7d1e8\n```"
+        },
+        {
+            "user": "cgwalters",
+            "body": "Note the `nodev`."
+        },
+        {
+            "user": "mheon",
+            "body": "...But why are we allowed to `mknod` then? I would expect that `mknod` would be the command to break, not subsequent accesses to said node. I suppose that's a kernel semantics problem, though."
+        },
+        {
+            "user": "mheon",
+            "body": "This looks like https://github.com/containers/storage/blob/956a1971694f18fd602b1203c0a2d192e2cc88a1/storage.conf#L35-L36 - added by @rhatdan a month ago.\n\n@cgwalters Can you change storage.conf to remove the `nodev` and see if that fixes matters?\n\n@rhatdan Can we make this toggle-able per-container?"
+        },
+        {
+            "user": "cgwalters",
+            "body": "I briefly tried to find out which git commit in podman started injecting `nodev` but I don't know the code well enough.\n\nHowever, now that I know the root cause, since today practically speaking [recursive containers need --privileged](https://github.com/projectatomic/bubblewrap/issues/284), it's a simple matter of `mount -o remount,dev /` in my dev container."
+        },
+        {
+            "user": "cgwalters",
+            "body": "I think probably the storage conf shouldn't have default mount flags.  Rather, podman could inject `nodev` if the container isn't `--privileged`?"
+        },
+        {
+            "user": "cgwalters",
+            "body": "https://github.com/containers/storage/pull/208"
+        },
+        {
+            "user": "cgwalters",
+            "body": "Also a side note, now that I understand the root cause, my failure to bisect it comes down to not noticing that `containers-common` changed, and that's the thing that has the storage config."
+        },
+        {
+            "user": "jlebon",
+            "body": "Somehow only hit this now myself and took me some time to figure it out. I would definitely expect `podman --privileged` to not have this restriction here."
+        },
+        {
+            "user": "rhatdan",
+            "body": "Slowly working my way back to this.  We really need to be able to disable some options for containers/storage at container create time.  I have been distracted by other tasks though."
+        },
+        {
+            "user": "rhatdan",
+            "body": "This should be fixed in latest podman."
+        }
+    ]
+}

@@ -1,0 +1,51 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 14222,
+    "title": "Shell completion: date fields: long list of unusable subfields",
+    "state": "closed",
+    "labels": [
+        "kind/bug",
+        "locked - please file new issue/PR"
+    ],
+    "user": "edsantiago",
+    "body": "This seems to be a longstanding issue, unrelated to recent fixes in completion code:\n```console\n$ bin/podman __completeNoDesc ps --format '{{.Created.' \n{{.Created.wall}}\n{{.Created.ext}}\n{{.Created.loc.\n{{.Created.Add}}\n{{.Created.AddDate}}\n{{.Created.After}}\n{{.Created.AppendFormat}}\n{{.Created.Before}}\n{{.Created.Clock}}\n{{.Created.Date}}\n{{.Created.Day}}\n{{.Created.Equal}}\n{{.Created.Format}}\n{{.Created.GobEncode}}\n{{.Created.Hour}}\n{{.Created.ISOWeek}}\n{{.Created.In}}\n{{.Created.IsZero}}\n{{.Created.Local}}\n{{.Created.Location}}\n{{.Created.MarshalBinary}}\n{{.Created.MarshalJSON}}\n{{.Created.MarshalText}}\n{{.Created.Minute}}\n{{.Created.Month}}\n{{.Created.Nanosecond}}\n{{.Created.Round}}\n{{.Created.Second}}\n{{.Created.String}}\n{{.Created.Sub}}\n{{.Created.Truncate}}\n{{.Created.UTC}}\n{{.Created.Unix}}\n{{.Created.UnixNano}}\n{{.Created.Weekday}}\n{{.Created.Year}}\n{{.Created.YearDay}}\n{{.Created.Zone}}\n```\n(same with `secret ls/inspect`, `volume ls/inspect`, `image`, `events`, and others)\n\nIn `ps`, some of those actually work, and others fail with reasonable messages:\n```console\n$ bin/podman ps --format '{{.Created.UTC}}'\n2022-05-11 16:33:53.341353432 +0000 UTC\n$ bin/podman ps --format '{{.Created.Minute}}'\n33\n$ bin/podman ps --format '{{.Created.Zone}}'\nError: template: ps:1:21: executing \"ps\" at <.Created.Zone>: can't call method/function \"Zone\" with 2 results\n$ bin/podman ps --format '{{.Created.wall}}'\nError: template: ps:1:21: executing \"ps\" at <.Created.wall>: wall is an unexported field of struct type time.Time\n$ bin/podman ps --format '{{.Created.Truncate}}'\nError: template: ps:1:21: executing \"ps\" at <.Created.Truncate>: wrong number of args for Truncate: want 1 got 0\n```\nI don't know if it's possible to (programmatically) exclude the nonworking fields. If it's possible, it would make things user-friendlier.\n\nIn other podman subcommands, none of the subfields are usable at all:\n```console\n$ bin/podman secret ls --format '{{.UpdatedAt.Year}}'  (or whatever)\nError: template: list:1:23: executing \"list\" at <.UpdatedAt.Year>: can't evaluate field Year in type string\n```\nMy uneducated guess is that these could (and should?) easily be fixed to handle date fields more like `ps` by just making a library call or two. But I'm just guessing.",
+    "comments": [
+        {
+            "user": "Luap99",
+            "body": "The reason this happens is because the builtin time.Time struct has all these methods. The fact that it also show unexported fields (lowecase) such as `.wall` or `.ext` is new to me. AFAIK reflect cannot access the unexported fields but it looks like there are some special cases where this works?!\n\nOther listed functions accept either arguments which makes then more difficult to use in templates.\nIf a function returns more than one argument it cannot be used in a template, so in this case it should not be shown. (I just need to figure out how to get this information)\n\nThis works for example because Truncate needs one argument:\n```\npodman ps --format \"{{.Created.Truncate 1000000}}\" -a\n```"
+        },
+        {
+            "user": "edsantiago",
+            "body": "Ah, thanks for the argument-passing explanation. I had tried parentheses, that failed.\n\nThis is probably ultra-low priority."
+        },
+        {
+            "user": "edsantiago",
+            "body": ">If a function returns more than one argument it cannot be used in a template, so in this case it should not be shown. (I just need to figure out how to get this information)\n\nThis might not be possible, since some of those multi-value returns can be filtered by other `.Foo` subfields and the completer has no way of knowing. Again, low priority."
+        },
+        {
+            "user": "Luap99",
+            "body": "If you want to read the official docs for the template syntax: https://pkg.go.dev/text/template"
+        },
+        {
+            "user": "Luap99",
+            "body": "> > If a function returns more than one argument it cannot be used in a template, so in this case it should not be shown. (I just need to figure out how to get this information)\n> \n> This might not be possible, since some of those multi-value returns can be filtered by other `.Foo` subfields and the completer has no way of knowing. Again, low priority.\n\nWell I definitely can get this, I know this is a function so reflect should be able to tell me the signature. I could then look a) this function needs at least one argument -> do not add `}}` automatically and b) this function returns more than one, or no argument -> do not show it in the completions.\n\nAlso next week is for pet projects, so this is definitely something I am very interested in. "
+        },
+        {
+            "user": "edsantiago",
+            "body": "I'm going to assume that this is the same issue:\n```console\n$ bin/podman __completeNoDesc ps --format '{{.Size.'\n{{.Size.RootFsSize}}\n{{.Size.RwSize}}\n$ bin/podman ps --size --format '{{.Size.RootFsSize}}'\nError: template: ps:1:18: executing \"ps\" at <.Size.RootFsSize>: can't evaluate field RootFsSize in type string\n```"
+        },
+        {
+            "user": "Luap99",
+            "body": "> I'm going to assume that this is the same issue:\n> \n> ```\n> $ bin/podman __completeNoDesc ps --format '{{.Size.'\n> {{.Size.RootFsSize}}\n> {{.Size.RwSize}}\n> $ bin/podman ps --size --format '{{.Size.RootFsSize}}'\n> Error: template: ps:1:18: executing \"ps\" at <.Size.RootFsSize>: can't evaluate field RootFsSize in type string\n> ```\n\nNo this is different, basically we have a `Size()` function which returns a string and a `Size` struct filed which is a struct with the `RootFsSize` and `RwSize` fields. Since the template logic uses the same syntax for methods it cannot differ between these two and use the method instead. Note that you cannot normally define this in go code, this only happens with the embedded structs. I think it will always prefer the not embedded version, in this case the method`\n\nThis would be the correct way to get the struct:\n```\n$ bin/podman ps --size --format {{.ListContainer.Size.RootFsSize}} -a\n```\n\n"
+        },
+        {
+            "user": "edsantiago",
+            "body": ">This would be the correct way to get the struct:\n\nOkay... but as a very dumb end user, I'm only going by what command-completion suggests. I do not see `.ListContainer` as a suggestion (although once I type it, I get suggestions). It's OK if this is one of those corner cases that can't be fixed, I'm just reporting usability problems that someone may find surprising."
+        },
+        {
+            "user": "Luap99",
+            "body": "I am not saying you are wrong. The most import rule for me is that the shell completion should never suggest anything that will not work. I can enable `ListContainer` easily but this is also kinda confusing because all fields are already present because it is embedded unless the fields share the name in which case it will conflict.\n\nBut since it works in the template it makes sense to show it so I will enable it."
+        }
+    ]
+}

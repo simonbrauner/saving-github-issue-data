@@ -1,0 +1,79 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 8737,
+    "title": "Error: opening file `io.bfq.weight` for writing: Permission denied",
+    "state": "closed",
+    "labels": [
+        "kind/bug",
+        "locked - please file new issue/PR"
+    ],
+    "user": "cevich",
+    "body": "/kind bug\n\n**Description**\n\nOn Ubuntu 20.10 w/ CgroupsV2 & crun (see #8312) the `podman run blkio-weight test` fails.\n\n**Steps to reproduce the issue:**\n\n1. Boot Ubuntu 20.10 host with kernel option `systemd.unified_cgroup_hierarchy=1`\n\n2. Run `make localintegration`\n\n**Describe the results you received:**\n\n[(Typical failure example)](https://cirrus-ci.com/task/5305362544852992?command=main#L5666)\n\n```\n[+0498s] Podman run \n[+0498s]   podman run blkio-weight test\n[+0498s]   /var/tmp/go/src/github.com/containers/podman/test/e2e/run_test.go:481\n[+0498s] \n[+0498s] [BeforeEach] Podman run\n[+0498s]   /var/tmp/go/src/github.com/containers/podman/test/e2e/run_test.go:28\n[+0498s] [It] podman run blkio-weight test\n[+0498s]   /var/tmp/go/src/github.com/containers/podman/test/e2e/run_test.go:481\n[+0498s] Running: podman ... --blkio-weight=15 ...\n[+0498s] Error: opening file `io.bfq.weight` for writing: Permission denied: OCI permission denied\n```\n\n**Describe the results you expected:**\n\nThis test should skip on hosts with kernels lacking the BFQ scheduler (like Ubuntu <= 20.10)",
+    "comments": [
+        {
+            "user": "giuseppe",
+            "body": "is the `io` controller available?  What is the output for `cat /sys/fs/cgroup/cgroup.controllers`?\n\nIf it is not available, it might be necessary to add something like `cgroup_enable=io` on the kernel cmdline"
+        },
+        {
+            "user": "cevich",
+            "body": "Possibly not available, cgroups2 is _not_ the default on Ubuntu, I'm enabling it with a kernel command line.  It's easily possible other elements also default to \"off\".  Here's what I get:\n\n```\nroot@cevich-ubuntu-c6524344056676352:/# cat /sys/fs/cgroup/cgroup.controllers\ncpuset cpu io memory hugetlb pids rdma\nroot@cevich-ubuntu-c6524344056676352:/# cat /etc/default/grub\n...cut...\nGRUB_CMDLINE_LINUX=\" cgroup_enable=memory swapaccount=1 systemd.unified_cgroup_hierarchy=1\"\n...cut...\nroot@cevich-ubuntu-c6524344056676352:/# cat /proc/cmdline\nBOOT_IMAGE=/boot/vmlinuz-5.8.0-1008-gcp root=PARTUUID=506f6274-5923-4632-96d5-b96445cc673c ro cgroup_enable=memory swapaccount=1 systemd.unified_cgroup_hierarchy=1 console=ttyS0 panic=-1\n```"
+        },
+        {
+            "user": "cevich",
+            "body": "Poking around on the web, there seems to be a `blkio` controller, maybe is that different from `io`?"
+        },
+        {
+            "user": "cevich",
+            "body": "Oh, nvm, CGV2 is `io` and v1 is `blkio`.  Hmm."
+        },
+        {
+            "user": "dqminh",
+            "body": "@giuseppe @cevich i've also seen this today. This is most likely because bfq is compiled as a modules af (ubuntu does this), hence is not loaded at the time.\n\nIf you do `modprobe bfq`, the file should appear."
+        },
+        {
+            "user": "cevich",
+            "body": "> If you do modprobe bfq, the file should appear.\n\nI'm not an Ubuntu expert.  Is there a way to force that to happen automatically at boot time?"
+        },
+        {
+            "user": "rhatdan",
+            "body": "I would figure there is something like /etc/modules-load.d\n"
+        },
+        {
+            "user": "rhatdan",
+            "body": "https://www.cyberciti.biz/faq/linux-how-to-load-a-kernel-module-automatically-at-boot-time/\nindicates I am correct\n\n\"\nPlease note that if you are using Debian Linux or Ubuntu Linux use the file /etc/modules file instead of /etc/modules.conf (which works on on an older version of Red Hat/Fedora/CentOS Linux. These days it is better to use the directory /etc/modules-load.d/ on all Linux distros.\n\""
+        },
+        {
+            "user": "cevich",
+            "body": "Huh, really?  Okay, I would have bet money it wouldn't be *that* easy...nope, of course it's not.  Double-bad-news:\n\n```\nroot@cevich-ubuntu-c6524344056676352:~# modprobe bfq\nmodprobe: FATAL: Module bfq not found in directory /lib/modules/5.8.0-1008-gcp\nroot@cevich-ubuntu-c6524344056676352:~#\n```\n\nI searched all through that directory, up, down, and sideways.  There are no elevator modules of any kind, anywhere, not even `deadline`.  What we get is compiled in :cry: \n\nWorse, it seems this is a google-customized kernel, so we can't jam  a module in or update from of a package somewhere.  We would need to wholesale revert the VM back to a standard distro. kernel.  Then, who-knows what would break (obviously, google thought they needed a custom kernel for some important reason) :sob: \n\nOn the \"plus\" side...I wonder if this custom Ubuntu kernel is responsible for the ~10% testing slowness myself, @baude and @edsantiago have been head-scratching over for years :disappointed: "
+        },
+        {
+            "user": "edsantiago",
+            "body": "\"Ten percent\"? /me wishes it was ten percent. Typical recent result:\n\n| type | distro     | user     |    local |   remote | container |\n| ---- | ------     | ----     |    ----: |   -----: | --------: |\n| int | fedora-32   | root     |    29:17 |    43:15 |     30:19 |\n| int | fedora-33   | root     |    29:32 |    41:01 |     30:19 |\n| int | ubuntu-2004 | root     |    38:58 | 01:04:58 |\n| int | ubuntu-2010 | root     |    35:50 |    48:54 |\n| int | fedora-32   | rootless |    30:35 |          |\n| int | fedora-33   | rootless |    32:25 |          |\n| sys | fedora-32   | root     |    14:22 |    16:23 |\n| sys | fedora-33   | root     |    14:41 |    09:33 |\n| sys | ubuntu-2004 | root     |    17:23 |    25:24 |\n| sys | ubuntu-2010 | root     |    17:23 |    14:47 |\n| sys | fedora-32   | rootless |    13:55 |          |\n| sys | fedora-33   | rootless |    14:42 |          |\n"
+        },
+        {
+            "user": "cevich",
+            "body": "Oof!  Well it _was_ only 10%...must be that y'all added a few more tests into the mix :wink: \n\nOMG, WTF ubuntu-2004 remote, geeze!\n\nMaybe I should try bringing in an upstream Ubuntu cloud image (if there is one) instead of trying to use the GCP \"optimized\" image.  It's possible if there some kind of GCP \"enhancement\" getting in the way...that would eliminate it and other side-effects, like a missing BFQ elevator."
+        },
+        {
+            "user": "cevich",
+            "body": "Note/Clarification: Rejigging our Ubuntu image build workflow is ***not*** going to be a fast solution to any issue.  For this BFQ/permission denied thing...a more test-local fix/workaround will be much faster (if maybe less desirable)."
+        },
+        {
+            "user": "cevich",
+            "body": "Ugh...what a complex spiderweb of a problem :confused: \n\n@dqminh FWIW, podman CI has also been on the butt-end (twice) of an ugly (load-triggered) BFQ kernel-panic, so we now use 'deadline' everywhere.  Perhaps the `io.weight` conversion (mentioned in [runc pr](https://github.com/opencontainers/runc/pull/2786)) would help avoid similar bugs (if they exist) in userspace?"
+        },
+        {
+            "user": "rhatdan",
+            "body": "Since runc and crun have patches for this, I am going to close."
+        },
+        {
+            "user": "cevich",
+            "body": "***N/B:*** The `podman run blkio-weight test` [is currently disabled on Ubuntu because of this issue](https://github.com/containers/podman/blob/master/test/e2e/run_test.go#L521-L523).  Maybe we should keep this issue open until runc/crun updates are available so we can confirm, and remember to remove the `Skip()`?"
+        },
+        {
+            "user": "rhatdan",
+            "body": "Lets just open a PR to remove the skip."
+        }
+    ]
+}

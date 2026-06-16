@@ -1,0 +1,72 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 7942,
+    "title": "podman run -t issues CRLF, making for confusing 'podman logs' output",
+    "state": "closed",
+    "labels": [
+        "kind/bug",
+        "stale-issue",
+        "locked - please file new issue/PR"
+    ],
+    "user": "edsantiago",
+    "body": "In window 1 (needed to differentiate podman-remote from podman, in logs):\n```console\n$ bin/podman system service --timeout=0\n```\nIn window 2:\n```console\n$ ./bin/podman run --name foo -t alpine sh -c 'echo 1;echo 2'\n1\n2\n$ ./bin/podman logs foo|cat -vT\n1^M       <--- CR\n2^M\n$ ./bin/podman-remote logs foo|cat -vT\n1         <--- podman-remote emits those as LF; two lines for the price of one\n\n2\n\n$ for i in \"\" \"-remote\";do ./bin/podman$i logs foo|wc -l;done                                                                                         -\n2\n4\n```\nmaster @ defb754945b3f99c1d786dac95d9b17b24f55e59, but seems to be in v2.1 and possibly older as well. Root as well as rootless.\n\nThis is, I believe, causing [flakes in a podman logs test](https://storage.googleapis.com/cirrus-ci-6707778565701632-fcae48/artifacts/containers/podman/5425581623869440/html/int-remote-ubuntu-19-root-host.log.html#t--tail-800-lines--1)",
+    "comments": [
+        {
+            "user": "zhangguanzhang",
+            "body": "same with https://github.com/containers/podman/issues/7196#issuecomment-669092535 https://github.com/containers/conmon/issues/195#issuecomment-669225956"
+        },
+        {
+            "user": "edsantiago",
+            "body": "Indeed - thank you. This was a very hard problem to search for!"
+        },
+        {
+            "user": "eiffel-fl",
+            "body": "If this issue can be a good first one then I can try to investigate on this issue but can someone give me more information (if someone has some)?\nIndeed, I did not understand if this problem was fixed by #7660 and where exactly this problem occurs (`podman-remote` or `conmon`)."
+        },
+        {
+            "user": "zhangguanzhang",
+            "body": "> If this issue can be a good first one then I can try to investigate on this issue but can someone give me more information (if someone has some)?\n> Indeed, I did not understand if this problem was fixed by #7660 and where exactly this problem occurs (`podman-remote` or `conmon`).\n\nThe root cause is this\n```\n[psakar@localhost podman]$ podman run --rm --tty busybox echo 1 | cat -A\n1^M$\n    [psakar@localhost podman]$ podman run --rm --tty busybox echo 1 ; echo 2 | cat -A\n1\n2$\n[psakar@localhost podman]$ \n```\n`-t` will trigger it"
+        },
+        {
+            "user": "eiffel-fl",
+            "body": "Thank you, I do not promise to come back with a PR but I will investigate on this to try to narrow the root cause."
+        },
+        {
+            "user": "eiffel-fl",
+            "body": "Unfortunately, I do not come with a solution and maybe more problems...\n\nFirst, I printed `buf` in `redirectResponseToOutputStreams` after it was read with `conn.Read(buf)`, for this example `./bin/podman --log-level debug run --rm --tty debian sh -c 'echo 1; echo 2' | cat -A` I got the following from debug log:\n```\n...\nbuffer is [2 49 13 10 50 13 10]\n...\n```\nWhere 2 is the pipe where to write, 49 is ASCII code of '1', 13 that of \\r and 10 that of \\n.\nOf course, running the above command without `--tty` remove the \\r from `buf`.\n\nSo, I search what writes `conn`.\nI looked into `conmon` code and after call to `read` into `read_stdio` I printed `buf`which gives (for the same command):\n```\n...\nRead 1#015#0122#015#012 from read_stdio (10)\n...\n``` \nHere 1 is 1, 015 is 13 so \\r and 012 is 10 so \\n.\nOf course, without `--tty` it removes 015 from this output.\n\nMy understanding of interactions between `podman`, `conmon` and `crun` is still limited.\nIf I understand well, `podman` is just the command line or the thing the user interacts with.\n`conmon` can act as a daemon and comes after `podman`.\nFinally, `crun` receives order from something and create `cgroup` by playing with the `sysfs`.\n\nSo, in this case, what is writing `mainfd_stdout`? Is it `crun` (I searched slightly and found nothing about this in `crun` code)? Or is it the `process` inside the container?"
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@haircommander @giuseppe PTAL\nCould you answer @eiffel-fl questions?\n\n@eiffel-fl the problem is in both the cases of `podman-remote` and `podman` conmon/crun/PID1 are working the same way.  The problem being reported here is that when podman-remote logs reports back, it seems to be confused."
+        },
+        {
+            "user": "rhatdan",
+            "body": "Going back to @edsantiago original tests, I run \n\n```\n# podman run --tty --rm busybox echo 1; echo 2 | cat -vT\n# podman-remote run --name foo2 -t alpine sh -c 'echo 1;echo 2'\n```\nAnd then look at the log files on disk and they are identical\n```\n# cat $(podman inspect --format '{{ .LogPath }}' foo1)\n2020-11-08T07:08:05.549884452-05:00 stdout F 1\n2020-11-08T07:08:05.549884452-05:00 stdout F 2\n# cat $(podman inspect --format '{{ .LogPath }}' foo2)\n2020-11-08T07:08:13.673393569-05:00 stdout F 1\n2020-11-08T07:08:13.673393569-05:00 stdout F 2\n```\nSo this is not an issue with running the containers, but viewing the container logs.\n\n```\n# podman logs foo1\n1\n2\n# podman-remote logs foo1\n1\n\n2\n```\n\n@eiffel-fl I think you are exposing a different bug where the final character printed via podman run is different then podman-remote run.  But that should be opened as a different issue.\n\nBottom line @edsantiago is reporting a bug in `podman-remote logs`\n"
+        },
+        {
+            "user": "rhatdan",
+            "body": "```\n# cat -A $(podman inspect --format '{{ .LogPath }}' foo1)\n2020-11-08T07:08:05.549884452-05:00 stdout F 1^M$\n2020-11-08T07:08:05.549884452-05:00 stdout F 2^M$\n# cat -A $(podman inspect --format '{{ .LogPath }}' foo2)\n2020-11-08T07:08:13.673393569-05:00 stdout F 1^M$\n2020-11-08T07:08:13.673393569-05:00 stdout F 2^M$\n```"
+        },
+        {
+            "user": "eiffel-fl",
+            "body": "Hi @rhatdan.\n\nI quickly read your messages, I will investigate more on the CRLF bug next week, unfortunately I am bit busy now...\nBy the way, it is good that you fixed the bug in `podman log`!\nMoreover, with your precisions I will be able to search more precisely for the bug, thank you!\n\nBest regards."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@eiffel-fl I think @jwhonce might have fixed your issue in podman-remote overlay.  It definitely fixed this issue."
+        },
+        {
+            "user": "eiffel-fl",
+            "body": "If this issue is fixed it is perfect! `podman` can advance and this is the important!"
+        },
+        {
+            "user": "rhatdan",
+            "body": "Awesome."
+        }
+    ]
+}

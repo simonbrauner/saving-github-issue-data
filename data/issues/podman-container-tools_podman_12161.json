@@ -1,0 +1,163 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 12161,
+    "title": "podman machine start cannot find gvproxy when brew is not installed in the standard directory",
+    "state": "closed",
+    "labels": [
+        "kind/bug",
+        "locked - please file new issue/PR"
+    ],
+    "user": "carlos-algms",
+    "body": "<!--\n---------------------------------------------------\nBUG REPORT INFORMATION\n---------------------------------------------------\nUse the commands below to provide key information from your environment:\nYou do NOT have to include this information if this is a FEATURE REQUEST\n\n**NOTE** A large number of issues reported against Podman are often found to already be fixed\nin more current versions of the project.  Before reporting an issue, please verify the\nversion you are running with `podman version` and compare it to the latest release\ndocumented on the top of Podman's [README.md](../README.md).  If they differ, please\nupdate your version of Podman to the latest possible and retry your command before creating\nan issue.\n\nAlso, there is a running list of known issues in the [Podman Troubleshooting Guide](https://github.com/containers/podman/blob/master/troubleshooting.md),\nplease reference that page before opening a new issue.\n\nIf you are filing a bug against `podman build`, please instead file a bug\nagainst Buildah (https://github.com/containers/buildah/issues). Podman build\nexecutes Buildah to perform container builds, and as such the Buildah\nmaintainers are best equipped to handle these bugs.\n-->\n\n**Is this a BUG REPORT or FEATURE REQUEST? (leave only one on its own line)**\n\n/kind bug\n\n**Description**\n\nIt is not possible to run `podman machine start` when brew is not installed in the default location. \n\n**Steps to reproduce the issue:**\n\n1. Install `brew` on your user directory, as described in the [official docs](https://docs.brew.sh/Installation#untar-anywhere):\n ```mkdir ~/homebrew && curl -L https://github.com/Homebrew/brew/tarball/master | tar xz --strip 1 -C ~/homebrew```\n\n2. Install `podman`\n``` \nbrew install podman\npodman machine init\npodman machine start \n```\n\n\n**Describe the results you received:**\n\n`podman machine start` returns: \n```\nError: unable to start host networking: \n\"could not find \\\"gvproxy\\\" in one of \n[\n  /usr/local/opt/podman/libexec \n  /opt/homebrew/bin /opt/homebrew/opt/podman/libexec \n  /usr/local/bin /usr/local/libexec/podman \n  /usr/local/lib/podman \n  /usr/libexec/podman \n  /usr/lib/podman\n]\"\n```\n\n\n**Describe the results you expected:**\nPodman should be able to find its install location and pick up the `gvproxy` bin inside its `libexec` folder. \n\nI can confirm that `gvproxy` IS inside `~/homebrew/Cellar/podman/3.4.1/libexec/` folder.\n\n**Output of `podman version`:**\n\n```\nCannot connect to Podman ....\n```\n\n**Have you tested with the latest version of Podman and have you checked the Podman Troubleshooting Guide? (https://github.com/containers/podman/blob/master/troubleshooting.md)**\n\nYes\n\n**Additional environment details (AWS, VirtualBox, physical, etc.):**\nMacOS Big Sur 11.3.1\n\n",
+    "comments": [
+        {
+            "user": "Luap99",
+            "body": "see https://github.com/containers/podman/issues/11960\nI think this should be reported against homebrew, there is no way that podman can know about custom install locations.\n@ashley-cui PTAL"
+        },
+        {
+            "user": "carlos-algms",
+            "body": "I reported it here because I thought it was podman installing and executing `gvproxy` as a dependency under the `libexec` folder. \n\nAs it is only located inside podman's installation folder: `~/homebrew/Cellar/podman/3.4.1/libexec/` \n"
+        },
+        {
+            "user": "ashley-cui",
+            "body": "gvproxy is installed by homebrew as a dependency in the podman libexec folder. homebrew does not recommend installing in another directory, and in the docs there is a warning that things may break when homebrew is installed in another place. "
+        },
+        {
+            "user": "carlos-algms",
+            "body": "I know, but `gvproxy` is the only missing part, if I link it to one of the paths podman listed that it is looking for it, everything works as expected. \n\nCan it then be a new feature?\nWhere podman just reads its `realpath` and look for `gvproxy` in one more folder? \nIts own **libexec** folder? \n\nIt would be great for people that do not have `root` access, as it is blocked by the Enterprise restrictions, so installing in other places is the only alternative. \n\nThanks.\n"
+        },
+        {
+            "user": "afbjorklund",
+            "body": "Normally you wouldn't link directly to the Cellar, but to the prefix: `~/homebrew/libexec`\n\nBut the default configuration still has to be patched, since it only has hardcoded locations:\n\nhttps://github.com/containers/common/blob/main/pkg/config/config_darwin.go\n\nSee https://docs.brew.sh/Formula-Cookbook, there is a $HOMEBREW_PREFIX to use"
+        },
+        {
+            "user": "ashley-cui",
+            "body": "@afbjorklund for most places, it would link to `$HOMEBREW_PREFIX/bin` or `$HOMEBREW_PREFIX/lib`, but libexec is special in Homebrew, it doesn't get linked to the homebrew prefix "
+        },
+        {
+            "user": "afbjorklund",
+            "body": "> but libexec is special in Homebrew, it doesn't get linked to the homebrew prefix\n\nright, because users are supposed to only call the stuff that is available in bin\n\nThe cookbook actually _said_ to use `#{prefix}/libexec`, just didn't read it through :-)\n\nhttps://docs.brew.sh/Formula-Cookbook#variables-for-directory-locations\n\n---\n\nAnyhow, this is supposed to be fixed by the packaging - relocating to current prefix.\n\nFor podman.rb, I think this translates to either patching (or prepopulating the config).\n\n```ruby\n    inreplace \"vendor/github.com/containers/common/pkg/config/config_darwin.go\", \"/usr/local/libexec\", libexec\n    inreplace \"vendor/github.com/containers/common/pkg/config/config_linux.go\", \"/usr/local/libexec\", libexec\n```"
+        },
+        {
+            "user": "afbjorklund",
+            "body": "Unfortunately, it looks like [the formula](https://github.com/guillaumerose/homebrew-core/blob/master/Formula/podman.rb) is broken.\n\n```ruby\n    resource(\"gvproxy\").stage do\n      system \"make\", \"gvproxy\"\n      libexec.install \"bin/gvproxy\"\n    end\n```\n\nIt installs under `#{prefix}/libexec/gvproxy`\n\nIt was supposed to be in a \"podman\" subdirectory ?\n\nSo those hardcoded paths are all wrong:\n\n```\n\t// Homebrew install paths\n\t\"/usr/local/opt/podman/libexec\",\n\t\"/opt/homebrew/bin\",\n\t\"/opt/homebrew/opt/podman/libexec\",\n\t\"/usr/local/bin\",\n```\n\nOr at least different to the normal ones:\n\n```\n\t\"/usr/local/libexec/podman\",\n\t\"/usr/local/lib/podman\",\n\t\"/usr/libexec/podman\",\n\t\"/usr/lib/podman\",\n```\n\nMaybe other binaries go straight into libexec...\n\n---\n\nThen again, upstream is even worse:\n\n```\nmake: *** No rule to make target 'install'.  Stop.\n```\n\nSo I guess it needs to be \"translated\":\n\n```diff\n--- a/Formula/podman.rb\n+++ b/Formula/podman.rb\n@@ -37,6 +37,9 @@ class Podman < Formula\n   def install\n     os = OS.kernel_name.downcase\n \n+    inreplace \"vendor/github.com/containers/common/pkg/config/config_linux.go\", \"/usr/local/libexec/podman\", libexec\n+    inreplace \"vendor/github.com/containers/common/pkg/config/config_darwin.go\", \"/usr/local/libexec/podman\", libexec\n+\n     system \"make\", \"podman-remote-#{os}\"\n     if OS.mac?\n       bin.install \"bin/#{os}/podman\" => \"podman-remote\"\n```\n\nThen the hardcoded paths aren't needed.\n```diff\n@@ -17,12 +17,6 @@\n }\n \n var defaultHelperBinariesDir = []string{\n-       // Homebrew install paths\n-       \"/usr/local/opt/podman/libexec\",\n-       \"/opt/homebrew/bin\",\n-       \"/opt/homebrew/opt/podman/libexec\",\n-       \"/usr/local/bin\",\n-       // default paths\n        \"/usr/local/libexec/podman\",\n        \"/usr/local/lib/podman\",\n        \"/usr/libexec/podman\",\n\n```"
+        },
+        {
+            "user": "ashley-cui",
+            "body": "`#{prefix}` is `/usr/local/Cellar/foo/0.1/`. `$HOMEBREW_PREFIX` is different, it's `/usr/local`. \nevery formula in cellar is also symlinked into `$HOMEBREW_PREFIX/opt/foo`. The docs are pretty confusing on this, but I just verified this on my machine."
+        },
+        {
+            "user": "afbjorklund",
+            "body": "Right, here they translate to:\n\nHOMEBREW_PREFIX: /home/linuxbrew/.linuxbrew\n\nprefix: /home/linuxbrew/.linuxbrew/Cellar/podman/3.4.1\n\nAnd have to use `podman-remote`\n\n----\n\nIt installs as a special user (with sudo), just to share precompiled binaries.\n\nI _could_ have installed it under /home/anders, and compiled everything...\n\nhttps://docs.brew.sh/Homebrew-on-Linux\n\n> The installation script installs Homebrew to `/home/linuxbrew/.linuxbrew`\n> using sudo if possible and in your home directory at `~/.linuxbrew` otherwise.\n\n```\nbrew install --build-from-source podman\n```"
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "rhatdan",
+            "body": "Where do we stand on this issue?  Is it still a problem?\n@ashley-cui @afbjorklund @carlos-algms WDYT?"
+        },
+        {
+            "user": "ashley-cui",
+            "body": "I don't think this is an issue that should be fixed on our end, its more of a homebrew install issue, and homebrew specifically states that some packages may break if not installed in their default location"
+        },
+        {
+            "user": "afbjorklund",
+            "body": "They forgot to patch the default config, with the current path to use.\n\nCould try a PR (for brew), to replace the hardcoded values ?\n\nhttps://github.com/containers/podman/issues/12161#issuecomment-958088615\n\nI guess any Linux distribution **not** using `/usr` prefix has same issue ?\n\n----\n\n* https://github.com/Homebrew/homebrew-core/pull/90379"
+        },
+        {
+            "user": "afbjorklund",
+            "body": "> I don't think this is an issue that should be fixed on our end\n\nBack in the day we used `./configure`. Not sure what the new variant would be?\n\nThere are lots of other places with the same issue, like \"/etc\" and \"/opt\""
+        },
+        {
+            "user": "carlos-algms",
+            "body": "I would say it is good for the community in general to have this fixed. \nAs it was pointed out, the paths are hardcoded and It would be great to have a dynamic check on the installation folder before giving up looking for executables.\n\nI raised this ticket because if your computer is blocked by the company you work for, and you don't have admin/sudo rights, installing on a custom directory is the only option. \n\n\n"
+        },
+        {
+            "user": "afbjorklund",
+            "body": "You can provide your custom directory in configuration, if Homebrew and Podman doesn't want to fix their packaging "
+        },
+        {
+            "user": "afbjorklund",
+            "body": "I patched out all the hardcoded paths, but it seems like they were vendored from containers-common ?\n\n`vendor/github.com/containers/common/pkg/config/config_darwin.go`"
+        },
+        {
+            "user": "afbjorklund",
+            "body": "Homebrew prefers to have their packages unpatched, so left all the unused paths in there.\n\n~~/usr/local/opt/podman/libexec~~\n~~/opt/homebrew/bin~~\n~~/opt/homebrew/opt/podman/libexec~~\n~~/usr/local/bin~~\n**/usr/local/libexec/podman** -> `#{HOMEBREW_PREFIX}/Cellar/#{name}/#{version}/libexec`\n/usr/local/lib/podman\n/usr/libexec/podman\n/usr/lib/podman\n"
+        },
+        {
+            "user": "carlocab",
+            "body": "> I don't think this is an issue that should be fixed on our end, its more of a homebrew install issue\n\nIt seems weird to call this a Homebrew install issue when this is also causing problems for users who aren't even using Homebrew. See #11960 (also referenced above)."
+        },
+        {
+            "user": "afbjorklund",
+            "body": "Technically it is a problem for all \"weird\" installations that don't use the \"usual\" `/usr` (or `/usr/local`).\n\nBut there really isn't any good substitute for `./configure --prefix=$PREFIX` either, so needs patching*...\n\n\\* note: you can use `sed`, if not allowing `patch`\n\nAnyway, the path locations _needs_ to be updated:\n\n* gvproxy (`/usr/libexec/podman/gvproxy`)\n* catatonit (`/usr/libexec/podman/catatonit`)\n* conmon (`/usr/libexec/podman/conmon`)"
+        },
+        {
+            "user": "bowbahdoe",
+            "body": "This is an issue for nix installs"
+        },
+        {
+            "user": "maximsmol",
+            "body": "as a workaround, add this to `~/.config/containers/containers.conf`:\n```toml\n[engine]\nhelper_binaries_dir = [\n  \"{PATH_TO_GPROXY_BIN}\",\n  \"/usr/local/libexec/podman\",\n  \"/usr/local/lib/podman\",\n  \"/usr/libexec/podman\",\n  \"/usr/lib/podman\",\n]\n```\n\non my Mac system using Nix the path is `/nix/store/k92v259vn6bv0shsifxhjvavbj436906-gvproxy-0.3.0/bin`\nyou could probably generate this via home-manager but there are other settings that get in the way\n\nI'll work on a PR for nixpkgs soon"
+        },
+        {
+            "user": "afbjorklund",
+            "body": "It could be a problem to set one \"helper\" dir, if you spread the podman helpers into different packages.\n\nOn some system they have relocated them into the podman libexec, while others use a global libexec.\n\nhttps://packages.debian.org/sid/catatonit\n/usr/libexec/podman/catatonit ->\n/usr/bin/catatonit\n\nhttps://github.com/macports/macports-ports/blob/master/net/gvisor-tap-vsock/Portfile\n/opt/local/libexec/gvproxy\nhttps://github.com/macports/macports-ports/blob/master/sysutils/podman/files/patch-defaultHelperBinariesDir-for-MacPorts.diff\n\n----\n\nPossibly one could use symlinks, or something...\n\nUse one podman libexec prefix, linking to the others ?"
+        },
+        {
+            "user": "carlocab",
+            "body": "@ashley-cui I think at this stage it's fairly clear that this issue isn't specific to Homebrew.\n\nPerhaps you'd reconsider implementing a solution in this project? It seems really inefficient for your various downstream distributors to have to carry around duplicate pieces of code to work around this issue."
+        },
+        {
+            "user": "ashley-cui",
+            "body": "@carlocab I'll bring it up with the team and see what the consensus is. I think we've gone back and forth a lot on where this gvproxy binary should live, but I can bring it up again."
+        },
+        {
+            "user": "carlocab",
+            "body": "I don't think it's really a matter of where it should live: I think the above thread shows that that's something difficult to control.\n\nTo me, it's a matter of providing a mechanism for telling `podman` where `gvproxy` will live and documenting this. Whether this mechanism is only invoked at build-time or is also available at run-time is up to you."
+        },
+        {
+            "user": "bowbahdoe",
+            "body": "@carlocab I will add that there is no way i have found to resolve this when installing podman via nix. Even manually telling it where gvproxy is via editing the config does not let things work"
+        },
+        {
+            "user": "carlocab",
+            "body": "@bowbahdoe something that works for us currently is to replace these lines:\n\nhttps://github.com/containers/podman/blob/0cfb5d7e75507783e463e0df645e873e5a77bbfa/vendor/github.com/containers/common/pkg/config/config_darwin.go#L26\n\nhttps://github.com/containers/podman/blob/0cfb5d7e75507783e463e0df645e873e5a77bbfa/vendor/github.com/containers/common/pkg/config/config_linux.go#L40\n\nwith the absolute path to directory we expect to contain `gvproxy`. You can see this [here](https://github.com/Homebrew/homebrew-core/blob/c5a89f1a8c111a1309deecb46f97b5b02fe38ebe/Formula/podman.rb#L42-L44). That may or may not be something you can also do in nix, depending on when and on what the hashes used to determine the install path is computed. (I don't use nix, so I don't actually know.)"
+        },
+        {
+            "user": "maximsmol",
+            "body": "@bowbahdoe I'm guessing you tried adding my example path? If your nixpkgs is at all different you will get a different derivation and output path. You can get yours by running `nix repl '<nixpkgs>'` and taking the value of `pkgs.gvproxy.outPath`. If that's not it, would be great to see what error you are getting so we can figure out whether this is really blocking in some cases on nix\n\nExample:\n```\n$ nix repl '<nixpkgs>'\nWelcome to Nix 2.6.0. Type :? for help.\n\nLoading '<nixpkgs>'...\nAdded 15937 variables.\n\nnix-repl> pkgs.gvproxy.outPath\n\"/nix/store/k92v259vn6bv0shsifxhjvavbj436906-gvproxy-0.3.0\"\n```"
+        },
+        {
+            "user": "ashley-cui",
+            "body": "Alright, we'll look into a solution where a location can be set during compile-time using our makefile. "
+        },
+        {
+            "user": "afbjorklund",
+            "body": "I don't understand how Nix can work, without some PATH directory to put the symlinks in (like brew) ?\n\n`bin/podman-remote -> ../Cellar/podman/3.4.4/bin/podman-remote`\n\nSurely you don't add the installation directory for each and every little package, to the global variable ?\n\nEDIT: Right, it was called a \"user environment\" (the symlink forest)\n\n----\n\nBut the main hack is to make sure that gvisor-tap-proxy is part of the **podman** package, not separate.\n\n`./Cellar/podman/3.4.4/libexec/gvproxy`\n\n(brew and port decided to drop the \"podman\" dir)\n\nHad it been a _real_ program, it would already have been in the PATH and easy to find at runtime.\n\nHere it is in the podman spec: https://src.fedoraproject.org/rpms/podman/blob/rawhide/f/podman.spec\n\n`%package gvproxy`"
+        },
+        {
+            "user": "afbjorklund",
+            "body": "@ashley-cui : afaik, you already set `config._installPrefix` from the Makefile ?\n\n```Makefile\nPREFIX ?= /usr/local\nBINDIR ?= ${PREFIX}/bin\nLIBEXECDIR ?= ${PREFIX}/libexec\nLIBEXECPODMAN ?= ${LIBEXECDIR}/podman\nMANDIR ?= ${PREFIX}/share/man\nSHAREDIR_CONTAINERS ?= ${PREFIX}/share/containers\nETCDIR ?= ${PREFIX}/etc\n```\n```Makefile\n\t-X $(LIBPOD)/config._installPrefix=$(PREFIX) \\\n\t-X $(LIBPOD)/config._etcDir=$(ETCDIR) \\\n```\n\nSo need to do something similar for the helpers (`$(LIBEXECPODMAN)`), perhaps."
+        },
+        {
+            "user": "ashley-cui",
+            "body": "Closed via: #13372\n\nExample usage: `make podman-remote HELPER_BINARIES_DIR=/my/location/prefix`"
+        },
+        {
+            "user": "deadpyxel",
+            "body": "I'm facing the same issue on MacOs 11.6.4, attempting to get the latest version of podman up and running. I see this has been fixed but is there any special step I need to do before `podman machine start`?\n\nI have installed the latest `qemu` but it does not have any `gvproxy` binary anywhere, neither can a find that binary in my system.\n\nEverything was done using `homebrew`."
+        },
+        {
+            "user": "maximsmol",
+            "body": "@deadpyxel there is always this workaround: https://github.com/containers/podman/issues/12161#issuecomment-1047218163\n\nbut you should really open an issue on the homebrew formula, it's in the hands of the package maintainers now"
+        },
+        {
+            "user": "deadpyxel",
+            "body": "I'll check that. It seems `homebrew` is installing the latest version, but maybe it is something with the package as you say.\n\nProblem is that I can't apply the patch proposed since there's no `gvproxy` binary available."
+        }
+    ]
+}

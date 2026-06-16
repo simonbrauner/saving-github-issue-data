@@ -1,0 +1,30 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 20868,
+    "title": "additionalimagestores: Set ownership at create time, rather than chmod'ing after",
+    "state": "open",
+    "labels": [
+        "kind/feature"
+    ],
+    "user": "ckastner",
+    "body": "### Feature request description\n\nUse case: a CI environment for a large number of users that all use the same handful of images. The images get updated daily. It would be greatly inefficient for each individual user to have local copies of these images, so a privileged process exists that pulls these images with the intention of them being shared by everyone.\n\nThis use case is addressed by the `additionalimagestores` approach of #6430 and accompanying [blog post](https://www.redhat.com/sysadmin/image-stores-podman): the privileged process pulls an image, then `chmod`s everything to be world-readable, and other users can use it.\n\nHowever, the `additionalimagestores` approach has some issues:\n- It has a strong failure mode: during an update, **any** `podman` use on behalf of **any** user *merely referencing* that store will fail with permission errors. Incidentally, this was recently reported as #20826.\n- `chmod -R a+rx` could leak information from images that are not pulled from public sources.\n- In a running container of a CI test, `chmod -R a+rx` can break test cases involving permissions.\n\n### Suggest potential solution\n\nWhen a privileged process loads or pulls an image to be shared with others using `additionalimagestores`, there should be an option to have user and/or group ownership to be set at create time (rather than `chmod`ing after).\n\nSpecifically, so that a `podman --root=/var/foo --chown-group=ci-users pull <image>` results in something that every member of group `ci-users` with `additionalimagestores=[\"/var/foo\"]` can use at **all** times.\n\nThis would also be needed for `load` and `import`, I think.\n\n### Have you considered any alternatives?\n\nInstead `additionalimagestores`, I also tried to change `rootless_storage_path` of a user to point to a direcotry which the privileged process used as `-root`, and then instead of `chmod`ing, I tried to `chown` to that user.\n\nThat didn't work because apparently, `runroot` get's stored somehow with the image? After the `chown`, when the user does a `podman image list` generates the following warning and error for the user:\n\n```\nWARN[0000] RunRoot is pointing to a path (/run/containers/storage) which is not writable. Most likely podman will fail.: permission denied \nError: mkdir /run/containers/storage: permission denied\n```\n\nHowever, that would only work for one user anyway, rather than a group of users. I think `additionalimagestores` is the right path.\n\n### Additional context\n\nAdd any other context or screenshots about the feature request here.",
+    "comments": [
+        {
+            "user": "giuseppe",
+            "body": "the image files can have the mode you specify with `force_mask`.  Doesn't that work?"
+        },
+        {
+            "user": "ckastner",
+            "body": "I re-checked, and it seems I initially misunderstood `force_mask`. I believe that this would indeed resolve the first (failure mode during update) and third (permissions in container) issues mentioned above, but it would still leave the second issue open (contents exposed globally).\n\nSo, in effect, it seems what I'm looking for is something like a new option `force_mask=group=<name>`, where the files are group-owned by `<name>`, and mode is set to `0750`.\n\nHowever, for my particular use case, addressing the first and third bullet should be enough. I'll verify that this works, and then report back."
+        },
+        {
+            "user": "ckastner",
+            "body": "I didn't get this to run -- any advice where I might be going wrong?\n\nThis was with root on a test box. I first tried passing the storage options as arguments (see below), and then by modifying `/etc/containers/storage.conf`; in both cases, permissions ended up as below.\n\nPassing only `overlay.force_mask` led to a complaint about `mount_program`, which is why I added that one, too.\n\n```\nroot# rm -rf /var/tmp/shared && mkdir /var/tmp/shared\nroot# podman --root /var/tmp/shared \\\n        --storage-opt=overlay.force_mask=shared \\\n        --storage-opt=overlay.mount_program=/usr/bin/fuse-overlayfs \\\n        pull debian\nroot# ls -l /var/tmp/shared\ntotal 36\n-rw-r--r-- 1 root root    8 Dez  1 18:03 defaultNetworkBackend\ndrwx------ 2 root root 4096 Dez  1 18:03 libpod\ndrwx------ 2 root root 4096 Dez  1 18:03 mounts\ndrwxr-xr-x 4 root root 4096 Dez  1 18:03 overlay\ndrwx------ 2 root root 4096 Dez  1 18:03 overlay-containers\ndrwx------ 3 root root 4096 Dez  1 18:03 overlay-images\ndrwx------ 2 root root 4096 Dez  1 18:03 overlay-layers\n-rw-r--r-- 1 root root   64 Dez  1 18:03 storage.lock\ndrwx------ 2 root root 4096 Dez  1 18:03 tmp\n-rw-r--r-- 1 root root    0 Dez  1 18:03 userns.lock\n```"
+        },
+        {
+            "user": "ckastner",
+            "body": "I've also tried this with a non-privileged user, with the appropriate settings in `$HOME/.config/containers/storage.conf`, to no avail -- the files all get created without global read permissions."
+        }
+    ]
+}

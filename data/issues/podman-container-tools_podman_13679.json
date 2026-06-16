@@ -1,0 +1,35 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 13679,
+    "title": "upgrade from v3.1.2: cni plugin bridge failed: failed to allocate",
+    "state": "closed",
+    "labels": [
+        "flakes",
+        "locked - please file new issue/PR"
+    ],
+    "user": "edsantiago",
+    "body": "This one isn't new -- the first instance I see is from January -- but it's starting to happen daily\n```\n[+0033s] [not ok 10 network - restart]()\n         # (from function `die' in file test/upgrade/../system/[helpers.bash, line 500](https://github.com/containers/podman/blob/640c2d53a88f46e997d4e5a594cfc85a57e74d36/test/system/helpers.bash#L500),\n         #  from function `run_podman' in file test/upgrade/../system/[helpers.bash, line 219](https://github.com/containers/podman/blob/640c2d53a88f46e997d4e5a594cfc85a57e74d36/test/system/helpers.bash#L219),\n         #  in test file test/upgrade/[test-upgrade.bats, line 254](https://github.com/containers/podman/blob/640c2d53a88f46e997d4e5a594cfc85a57e74d36/test/system/test-upgrade.bats#L254))\n         #   `run_podman start myrunningcontainer' failed with status 125\n         # # podman stop -t0 myrunningcontainer\n         # myrunningcontainer\n         # # podman start myrunningcontainer\n         # Error: unable to start container \"c1e9132d70f2879283fe46d4e9aa5e4a0740766c3c2d38c3b61f38a2db7c13a6\": plugin type=\"bridge\" failed (add): cni plugin bridge failed: failed to allocate for range 0: 10.89.0.2 has been allocated to c1e9132d70f2879283fe46d4e9aa5e4a0740766c3c2d38c3b61f38a2db7c13a6, duplicate allocation is not allowed\n         # [ rc=125 (** EXPECTED 0 **) ]\n```\n### [Upgrade] 12 exec\n* fedora-35 : Upgrade test: from v3.1.2\n  * PR #13662\n    * [03-25 12:16](https://storage.googleapis.com/cirrus-ci-6707778565701632-fcae48/artifacts/containers/podman/5122246594265088/html/upgrade_test-podman-fedora-35-root-host.log.html#t--00012)\n  * PR #13637\n    * [03-24 08:27](https://storage.googleapis.com/cirrus-ci-6707778565701632-fcae48/artifacts/containers/podman/5245350993723392/html/upgrade_test-podman-fedora-35-root-host.log.html#t--00012)\n  * PR #13574\n    * [03-21 08:42](https://storage.googleapis.com/cirrus-ci-6707778565701632-fcae48/artifacts/containers/podman/4733612988825600/html/upgrade_test-podman-fedora-35-root-host.log.html#t--00012)\n  * PR #13562\n    * [03-18 19:55](https://storage.googleapis.com/cirrus-ci-6707778565701632-fcae48/artifacts/containers/podman/4807560178958336/html/upgrade_test-podman-fedora-35-root-host.log.html#t--00012)\n  * PR #13518\n    * [03-22 11:02](https://storage.googleapis.com/cirrus-ci-6707778565701632-fcae48/artifacts/containers/podman/5486111391744000/html/upgrade_test-podman-fedora-35-root-host.log.html#t--00012)\n  * PR #13480\n    * [03-10 19:53](https://storage.googleapis.com/cirrus-ci-6707778565701632-fcae48/artifacts/containers/podman/6221847745265664/html/upgrade_test-podman-fedora-35-root-host.log.html#t--00012)\n  * PR #13091\n    * [01-31 13:08](https://storage.googleapis.com/cirrus-ci-6707778565701632-fcae48/artifacts/containers/podman/6282881017315328/html/upgrade_test-podman-fedora-35-root-host.log.html#t--00012)\n  * PR #12993\n    * [01-24 18:24](https://storage.googleapis.com/cirrus-ci-6707778565701632-fcae48/artifacts/containers/podman/6273142380298240/html/upgrade_test-podman-fedora-35-root-host.log.html#t--00012)",
+    "comments": [
+        {
+            "user": "Luap99",
+            "body": "Yeah I think there was a reason why I added podman start && podman stop instead of restart.\nI will take a look."
+        },
+        {
+            "user": "Luap99",
+            "body": "Good news, I can reproduce. Bad news, it looks like the upgrade test is terribly broken (it is hanging) when your host uses netavark because the old podman will still use cni obviously."
+        },
+        {
+            "user": "Luap99",
+            "body": "I think I understand the root cause now.\n\nPodman4 uses a new db structure for networks. Podman3 cannot read this any more.\nTo understand how it flakes, we need to look at how podman container cleanup works. Running `podman stop` will always cause a race between the `podman container cleanup` and `podman stop`, both processes will try to cleanup the mounts/networks but only one can do it (locked operation). This is not a problem normally since both processes use the same version. However in this particular test setup, the cleanup process will be spawned with the old podman version.\nOn a slow system such as in CI usually the stop process wins and thus network cleanup will work. However on a fast system with many cores the cleanup process wins and thus it fails 100% of the time for me locally.\n\nOne fix is to remove the network connect/disconnect test before the stop/start since it causes a v4 network db migration but I do not want this since it should test connect/disconnect. This would also explain why upgrade test from 2.X are not flaking because we skip network connect/disconnect there since it was only added in 3.0.\n\n@mheon Any ideas if we could influence the behaviour between stop and cleanup so that stop would win always?\n\nIf not possible we can manually doing a network teardown with network disconnect before stopping, this should also work."
+        },
+        {
+            "user": "mheon",
+            "body": "*Usually* `podman stop` will always win because it has a higher priority (assuming it is run keyboard-interactive). However, if run from a script, we lose that.\n\nMaybe we can deliberately nice our `podman cleanup` processes, to try and guarantee other Podman processes get CPU time first? It's not a guarantee but it's better than nothing."
+        },
+        {
+            "user": "Luap99",
+            "body": "> _Usually_ `podman stop` will always win because it has a higher priority (assuming it is run keyboard-interactive). However, if run from a script, we lose that.\n\nI cannot confirm this on my laptop, if I run `podman --log-level debug stop` interactively it always shows `Network is already cleaned up, skipping... `\n\nAnyway I fixed it in the test, I don't think this is a real world problem."
+        }
+    ]
+}

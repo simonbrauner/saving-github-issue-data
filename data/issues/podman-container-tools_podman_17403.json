@@ -1,0 +1,204 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 17403,
+    "title": "[Bug]: Podman machine fails to start with exit status 255 on Mac",
+    "state": "closed",
+    "labels": [
+        "kind/bug",
+        "podman-desktop",
+        "locked - please file new issue/PR"
+    ],
+    "user": "smakinen",
+    "body": "### Issue Description\n\nThere seems to be an issue when trying to start Podman with `podman machine start` when using macOS and QEMU. I created a Podman machine about two months ago but now the machine fails to start. Somehow, starting the machine got gradually worse after a time before completely failing in startup.\n\nHere is what happens when I try to start the machine.\n\n```\npodman machine start \nStarting machine \"podman-machine-default\"\nWaiting for VM ...\nMounting volume... /Users/me:/Users/me\nError: exit status 255\n```\n\nFrom the `podman machine start --log-level debug` output, I can see the last statement that is executed is the SSH command related to creating the mount point directories (maybe line 669 in qemu/machine.go), which fails. Previous issues have considered this to be a sign of e.g. invalid SSH configuration (e.g. [https://github.com/containers/podman/issues/14237](https://github.com/containers/podman/issues/14237)) but maybe there is something more to it. When running with `log-level debug` and the QEMU window open, the exit status 255 error shows before all the Fedora services have started.\n\nCould this be a race condition issue so that SSH related services have not yet started when the SSH mount commands are executed? I found one closed and apparently fixed issue where the race condition was suggested (https://github.com/containers/podman/issues/11532).\n\nI tried connecting to the QEMU QMP monitor socket with `nc -U qmp_podman-machine-default.sock` and running the following queries just after QEMU has started and before all the services are running.\n\n```json\n{\"QMP\": {\"version\": {\"qemu\": {\"micro\": 0, \"minor\": 2, \"major\": 7}, \"package\": \"\"}, \"capabilities\": [\"oob\"]}}\n{ \"execute\": \"qmp_capabilities\"} \n{\"return\": {}}\n{ \"execute\": \"query-status\" }\n{\"return\": {\"status\": \"running\", \"singlestep\": false, \"running\": true}}\n```\nSo the VM is in an running state and also the gvproxy port (50810 here) is in a listening state early on.\n\n```\nnetstat -ap tcp | grep -i listen\ntcp4       0      0  localhost.50810        *.*                    LISTEN\n```\nIs it possible that condition in qemu/machine.go (line 645) `for state != machine.Running || !listening { ` cannot hold back the execution of the SSH statement before the machine is fully initialized?\n\n### Steps to reproduce the issue\n\nSteps to reproduce the issue (happens on an existing Podman machine)  \n1. `podman machine start`  \n\n\n### Describe the results you received\n\n```\npodman machine start \nStarting machine \"podman-machine-default\"\nWaiting for VM ...\nMounting volume... /Users/me:/Users/me\nError: exit status 255\n```\n\n### Describe the results you expected\n\nPodman machine should be able to start. Thinking more broadly, maybe there should additional guarantees that SSH on the QEMU machine is up and running before issuing commands to the machine. Perhaps the SSH connection should be polled for a couple of times with sensible timeout or then other events from QEMU used for the purpose? For instance, the QMP monitor emits a NIC_RX_FILTER_CHANGED event towards the end of the initialization (not sure of its purpose, though).\n\n```json\n{\"timestamp\": {\"seconds\": 1675763180, \"microseconds\": 921089}, \"event\": \"NIC_RX_FILTER_CHANGED\", \"data\": {\"path\": \"/machine/peripheral-anon/device[0]/virtio-backend\"}}\n```\n\n### podman info output\n\nThe machine (or gvproxy) is not up and running so cannot get info.\n\n```\npodman info   \nError: failed to connect: dial tcp [::1]:50810: connect: connection refused\n```\n\nSome supplemental environment details to `podman info` .\n\n```yaml\nPodman (brew): stable 4.4.0 (bottled), HEAD\nOS: macOS Ventura 13.2\nArchitecture (QEMU): aarch64\nChip: Apple M1 Pro\n```\n\n\n### Podman in a container\n\nNo\n\n### Privileged Or Rootless\n\nRootless\n\n### Upstream Latest Release\n\nYes\n\n### Additional environment details\n\nHere are the results of `podman machine inspect`.\n\n```json\n[\n  {\n    \"ConfigPath\": {\n      \"Path\": \"/Users/me/.config/containers/podman/machine/qemu/podman-machine-default.json\"\n    },\n    \"ConnectionInfo\": {\n      \"PodmanSocket\": {\n        \"Path\": \"/Users/me/.local/share/containers/podman/machine/podman-machine-default/podman.sock\"\n      }\n    },\n    \"Created\": \"2022-12-12T12:34:18.127475+02:00\",\n    \"Image\": {\n      \"IgnitionFilePath\": {\n        \"Path\": \"/Users/me/.config/containers/podman/machine/qemu/podman-machine-default.ign\"\n      },\n      \"ImageStream\": \"testing\",\n      \"ImagePath\": {\n        \"Path\": \"/Users/me/.local/share/containers/podman/machine/qemu/podman-machine-default_fedora-coreos-37.20221127.2.0-qemu.aarch64.qcow2\"\n      }\n    },\n    \"LastUp\": \"2023-01-31T16:41:24.124649+02:00\",\n    \"Name\": \"podman-machine-default\",\n    \"Resources\": {\n      \"CPUs\": 1,\n      \"DiskSize\": 100,\n      \"Memory\": 3072\n    },\n    \"SSHConfig\": {\n      \"IdentityPath\": \"/Users/me/.ssh/podman-machine-default\",\n      \"Port\": 50810,\n      \"RemoteUsername\": \"core\"\n    },\n    \"State\": \"\"\n  }\n]\n```\n\n\n### Additional information\n\nIt appears that the problem affects Podman machines that have been in use for some time (i.e. a few months). Why fresh  Podman machines straight out-of-the-box work and what cause the slow decay remain a mystery. ",
+    "comments": [
+        {
+            "user": "smakinen",
+            "body": "Here is what I have tried so far without success:\n\n- upgraded QEMU from version 7.1.0 to 7.2.0 (brew)\n- upgraded Podman from version 4.3.1 to 4.4.0 (brew)\n- upgraded macOS from Monterey to Ventura 13.2\n- in QEMU configuration podman-machine-default.json, verified parameters -cpu host and -M virt ([https://github.com/containers/podman/issues/14303](https://github.com/containers/podman/issues/14303), [https://github.com/containers/podman/pull/14563](https://github.com/containers/podman/pull/14563))  \n- in QEMU configuration podman-machine-default.json, increased VM memory to 3072 MB\n- in SSH configuration, added `IdentitiesOnly yes` to localhost ([https://github.com/containers/podman/issues/14237](https://github.com/containers/podman/issues/14237)).\n\nIs recreating the machine the only way forward at this point? I guess there is no way to recover containers from the VM if the machine cannot be connected?"
+        },
+        {
+            "user": "jamesmikesell",
+            "body": "I see this error quite frequently too.\n\nNot sure if this is related, but feel like i started seeing this error more frequently after starting to use Podman for [dev containers](https://containers.dev/), with named volumes that might have more IO opperations than other containers, and additionally needing to add swap space to the `podman machine`.\n\nI also always seem to see this error after podman has (inexplicably) crashed.  No idea why podman has crashed, the only symptom is that my containers stop responding.  Killing `podman machine` and trying to re-run `podman machine start` occasionally results success, however other times the only solution is to completely destroy the existing machine by running `podman machine rm` and then re-initializing a new machine."
+        },
+        {
+            "user": "jamesmikesell",
+            "body": "@smakinen I think you are correct about this being a race condition, and some bug internal to Podman\n\nI'm able to get podman to start a machine that was previously failing using the following shell script, which manually pauses the `podman` and `gvproxy` process (no idea what that second command does), and waits until the user verifies that the Qemu VM has finished booting before unpausing those processes.\n\n\n```shell\n#!/bin/bash\n\npkill podman\npkill qemu\n\npodman machine start --log-level debug &\nPID=$!\nsleep 2\n\npkill -STOP podman\npkill -STOP gvproxy\n\necho \"^^^^\"\necho \"^^^^\"\necho \"^^^^\"\necho \"If the above says the VM already running or started\"\necho \"then edit the json file located at ~/.config/containers/podman/machine/qemu/\"\necho \"and change the line\"\necho \"\\\"Starting\\\": true\"\necho \"to be\"\necho \"\\\"Starting\\\": false\"\necho \"\"\necho \"dont forget to save, and rerun this script.\"\necho \"\"\necho \"Else, continue with instructions below\"\necho \"\"\necho \"Qemu will open in another window (likely in the background)\"\necho \"wait until you see a login prompt on that window\"\nread -p \"then return to THIS terminal and hit enter\"\n\npkill -CONT podman\npkill -CONT gvproxy\n```\n\n\nUnfortunately, this is only a bandaid.  We need something to address whatever the underlying root problem is."
+        },
+        {
+            "user": "tonyseek",
+            "body": "It happened on an Intel MacBook (MacBookPro16,1) too, not just the M1. @jamesmikesell's script works for me, as a workaround."
+        },
+        {
+            "user": "berndlosert",
+            "body": "I just started having this problem after restarting my M1 Mac. Running with --log-level debug shows that it dies after trying to ssh into the VM.\n\nFor the record, I am using:\n- macOS Monterey 12.6.3\n- podman version 4.3.1 (installed with brew)"
+        },
+        {
+            "user": "berndlosert",
+            "body": "Removing the vm and recreating it fixed it for me."
+        },
+        {
+            "user": "smakinen",
+            "body": "A brilliant idea and move @jamesmikesell! I'm happy to say that with your script, I can see my containers again :). So halting the podman and gvproxy processes until QEMU has time to finish initialization works. I actually previously tried to renice the QEMU and Podman processes to make the QEMU process run faster but I could not figure out how to halt the other process altogether. Thanks a lot.\n\nTo @berndlosert: also good to hear that recreating the VM works but I did not want lose my VM since I had a bunch of containers in the VM used for development. So I was not keen to remove the existing VM (and the problem could also reappear after a while).\n\nFor Podman and the QEMU machine initialization code, I think there should a function such as _isSSHRunning_ which would be used to check the SSH status before using SSH (in the 'Waiting for VM...' phase). It's a good question what is the best way to check the availability of SSH in the guest OS if the machine state and the listening-state of gvproxy cannot be relied on.\n\n"
+        },
+        {
+            "user": "laurent-martin",
+            "body": "I observed the same: podman vm starting successfully only once every 4 times.\nbut pausing podman until qemu is stable solves the situation.\nthanks @jamesmikesell\n\nSee the script I use [podmac.sh start](https://github.com/laurent-martin/podman_x86_64_on_apple_aach64).\n\nExample:\n\n```bash\n$ ./podmac.sh start intel_64\n\nStarting machine \"intel_64\"\nWaiting for VM ...\nPausing podman\nWaiting for SSH\nSSH-2.0-OpenSSH_8.8\nResuming podman\n...\nMachine \"intel_64\" started successfully\n```\n"
+        },
+        {
+            "user": "benoitf",
+            "body": "I reproduce it time to time as well with the latest version\n```\n$ podman machine start new\nStarting machine \"new\"\nWaiting for VM ...\nMounting volume... /Users:/Users\nError: exit status 255\n```"
+        },
+        {
+            "user": "barloff-st",
+            "body": "Hitting same issue with the following:\n\n- A1990 (2019 Intel)\n- podman 4.3.1 and 4.4.4 (upgrade did not help)\n\nWorkarounds mentioned here did not resolve the issue (removing VM and recreating, and script).  Running into same failure location as what **berndlosert** is seeing."
+        },
+        {
+            "user": "itsthejoker",
+            "body": "I just ran into this issue as well with podman 4.4.4 on a 2020 MBP. `podman machine stop / start` a few times let it finish, but I'm seeing the same results as @benoitf."
+        },
+        {
+            "user": "smakinen",
+            "body": "For me, James' script has worked well so far. Waiting until QEMU is prepared for SSH logins helps. I'm certain that the waiting approach could be forged into a PR for Podman but perhaps it won't work in all cases. I'm a bit curious, what do you @itsthejoker and others see in the **QEMU window** when you run `podman machine start --log-level debug` and wait until no more messages are printed to the QEMU screen? Is there some kind of other error message perhaps related to SSH?"
+        },
+        {
+            "user": "chevdor",
+            "body": "This Error 255 seems to be a catch-all so users may have various issues under the hood.\n\nIt is also a tricky one since `podman-desktop` will simply ignore it and tell you the machine is running.\nWhat is does NOT tell you is that, if the ssh connection fails, all your mounts will have been skipped, so mounting volumes will fail all over the place for no apparent reasons...\n\nIn my case, I spotted the issue using:\n```\npodman start --log-level debug\n```\n\nThe SSH connection failed for some reasons.\n\n```\npodman system connection ls\n```\nshows where the ssh key is located. A simple `ll ~/.ssh | grep podman` also works and if fine if you see only 2 lines.\n\nI then deleted keys and machine. Then recreated the machine and everything was back in track:\n```\npodman machine stop; podman machine rm\nrm ~/.ssh/podman*\npodman machine init\npodman machine start\n```\n\nMy 2 cents if you have this error 255 issue, would be to first try to get things to work with a **default** podman machine (ie no custom memory, cpu, volumes, etc...) and then see if the  fancy options keep working once the core problem is solved. I would also advise **not** using podman-desktop (for the duration of the test) as it give a false sense of success.\n\n"
+        },
+        {
+            "user": "chevdor",
+            "body": "I kept on having issue and I am seeing some success thanks to [this comment](https://github.com/containers/podman/issues/14237#issuecomment-1298270596) in [this issue](https://github.com/containers/podman/issues/14237). I think the topic of this issue could be edited and the M1 part removed, I don't think the issues discussed here are M1 specific. I run into the same on an Intel Mac. The issue is however likely related to the fact that users here use a Mac.\n\nThe podman troubleshooting guide mentions some extra cleanup so the following may help some:\n```\npodman machine stop\npodman machine rm -f\nrm -rf ~/.local/share/containers/podman\nrm -rf ~/.config/containers/\n```\n\nthen your regular:\n```\npodman machine init\npodman machine start\n```\n\nAFAIK, the fix for me was to add the following:\n```\n# to fix podman issues\n# see https://github.com/containers/podman/issues/14237\nHost localhost\n  IdentitiesOnly yes\n```\nto my `~/.ssh/config`.\n\nI was consistently getting this `255` error even from a clean rebooted system and when using a default podman machine.\n\nWith the fix above of the ssh config and yet-another cleanup, I was able to finally get things back in order.\n\n\n\n"
+        },
+        {
+            "user": "samuel-phan",
+            "body": "For me, the issue was my SSH agent with a lot of keys already.\n\nMy fix:\n\n```bash\nssh-add -D  # clear the SSH keys from my SSH agent\n\npodman machine stop\npodman machine start\n```"
+        },
+        {
+            "user": "noyez",
+            "body": "> For me, the issue was my SSH agent with a lot of keys already.\n\nSame here, i just ran into this issue. I just temporarily unset SSH_AUTH_SOCK. \n\n@samuel-phan didn't know about `ssh-add -D`, thx!"
+        },
+        {
+            "user": "paulftw",
+            "body": "> see the script I use [start.sh](https://github.com/laurent-martin/podman_x86_64_on_apple_aach64/blob/main/start.sh)\n\nHad the same issue and the start script fixed it. I also had to change \"Starting\" to false in json (as @jamesmikesell mentioned). Without it any attempt to start a machine was returning \"VM already running or starting\"."
+        },
+        {
+            "user": "laurent-martin",
+            "body": "> I also had to change \"Starting\" to false in json\n\nI have updated the script here: https://github.com/laurent-martin/podman_x86_64_on_apple_aach64\nSo that it automatically fixes this dondition as well now:\n\n```text\n./podmac.sh start intel_64\nChecking jq...OK, jq found\nChecking podman...OK, podman found\nChecking curl...OK, curl found\nResetting stale starting state.         <--------------------\nStarting machine \"intel_64\"\nWaiting for VM ...\nPausing podman\nSSH available: Resuming podman.\nMounting volume... /Users/laurent:/Users/laurent\n\nThis machine is currently configured in rootless mode. If your containers\nrequire root permissions (e.g. ports < 1024), or if you run into compatibility\nissues with non-podman clients, you can switch using the following command:\n\n\tpodman machine set --rootful intel_64\n\nAPI forwarding listening on: /var/run/docker.sock\nDocker API clients default to this address. You do not need to set DOCKER_HOST.\n\nMachine \"intel_64\" started successfully\n```"
+        },
+        {
+            "user": "vrothberg",
+            "body": "@ashley-cui @baude PTAL"
+        },
+        {
+            "user": "osalbahr",
+            "body": "This happens to me sometimes too, even though the machine starts anyways. I don't know if this is related.\n```\n~$ podman machine start\nStarting machine \"podman-machine-default\"\nWaiting for VM ...\nMounting volume... /Users:/Users\nError: exit status 255\n~$ podman run -it debian\nResolved \"debian\" as an alias (/etc/containers/registries.conf.d/000-shortnames.conf)\nTrying to pull docker.io/library/debian:latest...\nGetting image source signatures\nCopying blob sha256:918547b9432687b1e1d238e82dc1e0ea0b736aafbf3c402eea98c6db81a9cb65\nCopying config sha256:34b4fa67dc04381e908b662ed69b3dbe8015fa723a746c66cc870a5330520981\nWriting manifest to image destination\nStoring signatures\nroot@1c153be897f5:/# uname -a\nLinux 1c153be897f5 6.2.9-300.fc38.x86_64 #1 SMP PREEMPT_DYNAMIC Thu Mar 30 22:32:58 UTC 2023 x86_64 GNU/Linux\nroot@1c153be897f5:/# exit\nexit\n~$ \n```"
+        },
+        {
+            "user": "laurent-martin",
+            "body": "> Mounting volume... /Users:/Users\n> Error: exit status 255\n> ~$ podman run -it debian\n\nYes, the VM may be started, but the mount failed. The test is rather (/Users represents the mounted volume in VM):\n\n```bash\n$ podman run -it -v /Users:/Users debian\nroot@a1f31cce35f5:/# ls /Users\n```\n\nIt should show the contents of /Users on macos... when the mount did not fail."
+        },
+        {
+            "user": "osalbahr",
+            "body": "> > Mounting volume... /Users:/Users\n> > Error: exit status 255\n> > ~$ podman run -it debian\n> \n> Yes, the VM may be started, but the mount failed. The test is rather (/Users represents the mounted volume in VM):\n> \n> ```shell\n> $ podman run -it -v /Users:/Users debian\n> root@a1f31cce35f5:/# ls /Users\n> ```\n> \n> It should show the contents of /Users on macos... when the mount did not fail.\n\nI am aware that the mount didn’t fail unlike with OP. I was just reporting on the error message in case it might be related to this issue, since it is part of the same message."
+        },
+        {
+            "user": "jamesmikesell",
+            "body": "I've come up with a slightly improved version of my script (read hack) above, which waits for the VM to finish booting before letting podman mount directories.\n\nThe above script ran podman/qemu in debug mode, which slowed down performance of the running containers.\n\nThis improved version of the script runs podman/qemu in normal mode, and relies on the user waiting for the CPU utilization of the `qemu` process to lower and stabilize (something that happens once the VM is done loading) before hitting `enter` and thus allowing podman to mount shared directories.\n\n```shell\n#!/bin/bash\n\npkill podman\npkill qemu\n\npodman machine start &\nPID=$!\nsleep 2\n\npkill -STOP podman\npkill -STOP gvproxy\n\necho \"^^^^\"\necho \"^^^^\"\necho \"^^^^\"\necho \"If the above says the VM already running or started\"\necho \"then edit the json file located at ~/.config/containers/podman/machine/qemu/\"\necho \"and change the line\"\necho \"\\\"Starting\\\": true\"\necho \"to be\"\necho \"\\\"Starting\\\": false\"\necho \"\"\necho \"don't forget to save, and rerun this script.\"\necho \"\"\necho \"Else, continue with instructions below\"\necho \"\"\necho \"Wait until the displayed CPU utilization lowers and stabilizes to 1% or less\"\necho \"Then hit enter\"\n\n\nPID_QEMU=$(pgrep qemu)\n\nwhile true; do\n  CPU=$(ps -p $PID_QEMU -o %cpu | awk 'NR>1 {print $1}')\n  printf \"\\rCPU utilization: %s%%             \" $CPU\n\n  read -s -t 1\n  if [ $? -eq 0 ]; then\n    break\n  fi\ndone\n\n\npkill -CONT podman\npkill -CONT gvproxy\n```"
+        },
+        {
+            "user": "Bluebugs",
+            "body": "@jamesmikesell thanks for your script. I have the same problem and using it reliably work."
+        },
+        {
+            "user": "ashley-cui",
+            "body": "Took a look at this and I'm still struggling to find a correct solution - This error code definitely comes from a [failed SSH call](https://github.com/containers/podman/blob/03578810759b35e9f15e4452a29d8667f1fcced1/pkg/machine/qemu/machine.go#L688) during the while mounting directories into the VM during the start.  The solutions above indicate that it's a race condition, however, we do [check](https://github.com/containers/podman/blob/03578810759b35e9f15e4452a29d8667f1fcced1/pkg/machine/qemu/machine.go#LL663C3-L663C3) that the SSH socket is up before doing the call, and in my testing, the failure happens even if the socket ping succeeds, which shouldn't be the case, as the successful ping tells us that the SSH daemon is listening on the socket. \n\nI've tried adding a 1 second sleep, and also putting the SSH portion into a for loop to re-try on failure, but the sleep doesn't seem to help, as error still persists, and putting the SSH call to re-try on failure seems to run into another problem: sometimes after a failed mount, QEMU hangs and isn't able to be properly stopped using Podman. I haven't looked properly into this yet, but this seems to only happen on linux? But this 255 error is super hard to trigger on my M1 so I haven't been able to look properly into this either. \n\nI'm not entirely sure what else to check here, but I'm leaving my findings here if anyone wants to take this up, as I'm out for the next week. Side note: this takes forever to trigger as its a flake and also podman machine start is a slower command\n\n\ncc @mheon @baude "
+        },
+        {
+            "user": "laurent-martin",
+            "body": "> I've tried adding a 1 second sleep, and also putting the SSH portion into a for loop to re-try on failure\n\nHi,\ndid you try this script:\nhttps://github.com/laurent-martin/podman_x86_64_on_apple_aach64\n\nIt is similar to @jamesmikesell script, but it automatically detect SSH availability in the VM.\n"
+        },
+        {
+            "user": "smakinen",
+            "body": "> The solutions above indicate that it's a race condition, however, we do [check](https://github.com/containers/podman/blob/03578810759b35e9f15e4452a29d8667f1fcced1/pkg/machine/qemu/machine.go#LL663C3-L663C3) that the SSH socket is up before doing the call, and in my testing, the failure happens even if the socket ping succeeds, which shouldn't be the case, as the successful ping tells us that the SSH daemon is listening on the socket.\n\nThanks @ashley-cui for checking out the problem. I think the current method of pinging the SSH port might indeed be the problem. If Go's net.DialTimeout just checks the listening state of the local SSH gvproxy port, it might not mean that the SSH daemon on the Fedora guest OS is also running. So possibly isListening() != 'Fedora SSH services up and running'. That's what makes the problem tricky. \n\nThe known solutions provided in this thread work around the issue in different ways. The script of @jamesmikesell uses an indirect metric of CPU utilization of the qemu process and waits for user input. In the solution provided by @laurent-martin, the availability of SSH is checked by listening to the SSH daemon's opening statement (grepping the SSH string which is something like _SSH-2.0-OpenSSH_8.8_). To see how late in the process SSH is actually ready, you can use the nc command found in Laurent's solution on the Mac host (enter the command some time after starting the QEMU process) and wait for some time.\n\n`nc localhost <localhost_gvproxy_port>`\n\nHaving said this, I hope that the suggested and linked PR works but it might also not if it still relies on the old isListening code as such.\n\n"
+        },
+        {
+            "user": "baude",
+            "body": "@smakinen when you observe this failure, can you also verify if gvproxy is running or not?  I've picked up this issue and I am currently honing in on a fix.  Like @ashley-cui , I very much struggle to replicate this issue so I have had to depend on others to get answers and give me access to their machine.\n\nRight now, I believe that all of these reports are really the combination of more than one bug ... one of which seems to always be this timing issue.\n\nFor the timing issue, I have been experimenting with altering the \"ready\" service in the machine to trigger later (like after NM).  I may also make it trigger even later, like sometime around when zincati fires which is a pretty good indicator we are actually up and running."
+        },
+        {
+            "user": "smakinen",
+            "body": "> @smakinen when you observe this failure, can you also verify if gvproxy is running or not? I've picked up this issue and I am currently honing in on a fix. Like @ashley-cui , I very much struggle to replicate this issue so I have had to depend on others to get answers and give me access to their machine.\n\nYeah, I can imagine it's not so easy to find a machine where Podman does not start. If it's any consolation, the reproduction rate is pretty high if you do happen to come by a machine in this state. Answering @baude to your question, yeah, gvproxy is running in the background early on. Gvproxy is up and the port is in a listening state almost instantly after executing `podman machine start` and seeing the text 'Waiting for VM ...' on the screen. Of course, the gvproxy process dies at the same time when podman exists with the error code.     \n"
+        },
+        {
+            "user": "benoitf",
+            "body": "reopening as I just tried with the binary from main branch with the related PR that has been merged:\n\n```\n./bin/darwin/podman machine start                                                                                                                                                                                                        \nStarting machine \"podman-machine-default\"\nWaiting for VM ...\nMounting volume... /Users:/Users\nError: exit status 255\n```\n\nproblem is not solved"
+        },
+        {
+            "user": "xRomZak",
+            "body": "As a workaround in such cases I manually kill qemu `(ps -ef | grep qemu)`, and right after podman starts correctly."
+        },
+        {
+            "user": "hsoong",
+            "body": "Hope to fix this BIG BUG as soon as possible."
+        },
+        {
+            "user": "vrothberg",
+            "body": "After https://github.com/containers/podman/pull/19060, I see this issue much less frequently.  In fact, today I did not manage reproducing it all."
+        },
+        {
+            "user": "vrothberg",
+            "body": "One more observation: `machine ssh` does not suffer from the flake.  I can run that in a tight loop for 20 minutes with no flake."
+        },
+        {
+            "user": "cgwalters",
+            "body": "I think almost every tool out there doing ssh ends up doing retries, FWIW.\n\nOnly skimming this I do agree with Dusty it's likely `systemd-user-sessions.service` being asynchronous with ssh.  One reason for this is I think is to support logging in as `root` for recovery scenarios, as distinct from \"users\".\n\nFor FCOS we certainly promote `core@` as the admin user though.\n\nIn the end I think podman-machine could inject Ignition that added a drop-in for `After=systemd-user-sessions.service` for `sshd.service` to close the race.\n\nFor others, it might be more of a feature though."
+        },
+        {
+            "user": "vrothberg",
+            "body": "Thanks for confirming, @cgwalters!\n\nI agree and opened https://github.com/containers/podman/pull/19210."
+        },
+        {
+            "user": "romanrev",
+            "body": "I am still experiencing this issue - on `podman` 4.5.1 - using the `podmac.sh`, removing all of my ssh identities etc - have to start/stop machine for around 20 times before it actually mounts the directories correctly\n```\n➤ podmac.sh start podman-machine-default\nChecking jq...OK, jq found\nChecking podman...OK, podman found\nChecking curl...OK, curl found\nStarting machine \"podman-machine-default\"\nWaiting for VM ...\nPausing podman\nWaiting for SSH /...Mounting volume... /Users:/Users\nError: exit status 255\nERROR: podman exited prematurely\nroman@Romans-MacBook-Pro:~/K/A/m/d/c/application|main⚡*\n➤ podman machine stop\nWaiting for VM to exit...\nMachine \"podman-machine-default\" stopped successfully\n# above in a loop\n# until finally\n\n➤ podmac.sh start podman-machine-default\nChecking jq...OK, jq found\nChecking podman...OK, podman found\nChecking curl...OK, curl found\nStarting machine \"podman-machine-default\"\nWaiting for VM ...\nPausing podman\nWaiting for SSH /...Mounting volume... /Users:/Users\nSSH available: Resuming podman.\nMounting volume... /private:/private\nMounting volume... /var/folders:/var/folders\nAPI forwarding listening on: /var/run/docker.sock\nDocker API clients default to this address. You do not need to set DOCKER_HOST.\n```"
+        },
+        {
+            "user": "Stausssi",
+            "body": "The bug is not fixed in 4.5.1, but will be part of the 4.6.0 release (see changelog)"
+        },
+        {
+            "user": "vrothberg",
+            "body": "Yes, that's it.  The fixes will ship with the upcoming 4.6 release.  The plan is to release 4.6 by the end of this week, so I the fix will reach you soon."
+        },
+        {
+            "user": "itsthejoker",
+            "body": "Awesome, thank you!!"
+        },
+        {
+            "user": "sneko",
+            "body": "Can someone confirm v4.6 solves the issue? In my case I upgraded 1 week ago, had the issue multiple times despite a full reboot of my MacOS...\n\nhttps://github.com/containers/podman/issues/17403#issuecomment-1536636874 is still my only viable solution 😢 "
+        },
+        {
+            "user": "benoitf",
+            "body": "@sneko did you recreate your podman machine ? Ignition script has been changed so you'll need to recreate the machine"
+        },
+        {
+            "user": "romanrev",
+            "body": "> Can someone confirm v4.6 solves the issue? In my case I upgraded 1 week ago, had the issue multiple times despite a full reboot of my MacOS...\n> \n> [#17403 (comment)](https://github.com/containers/podman/issues/17403#issuecomment-1536636874) is still my only viable solution 😢\n\nI seem to have stopped experiencing the issue after I upgraded, even without recreating the machine"
+        },
+        {
+            "user": "smakinen",
+            "body": "Thanks for the changes to the Ignition script and for shipping the fix. For a previously created Podman machine that was failing in machine startup, I still got the exit status 255 error with Podman 4.6.0. As Florent mentioned, taking advantage of the changed Ignition script won't happen without recreating the machine.\n\n``% podman --version    \npodman version 4.6.0\n% podman machine start\nStarting machine \"podman-machine-default\"\nWaiting for VM ...\nError: machine did not transition into running state: ssh error: exit status 255``\n\nI think the situation is fairly good now. If all future machines start ok and at least some of the currently failing legacy machines can be started with the delayed startup scripts found here, Podman should be good to go in most scenarios 😊. Thank you all and have a nice autumn (at least in the northern hemisphere) everyone 🍁.\n"
+        },
+        {
+            "user": "laurent-martin",
+            "body": "Starting a x86 VM on M1 macbook works now with 4.6.0 : \n\n```console\n% podman --version\npodman version 4.6.0\n\n% podman machine start intel_64\nStarting machine \"intel_64\"\nWaiting for VM ...\nMounting volume... /Users/laurent:/Users/laurent\n\nThis machine is currently configured in rootless mode. If your containers\nrequire root permissions (e.g. ports < 1024), or if you run into compatibility\nissues with non-podman clients, you can switch using the following command:\n\n\tpodman machine set --rootful intel_64\n\nAPI forwarding listening on: /var/run/docker.sock\nDocker API clients default to this address. You do not need to set DOCKER_HOST.\n\nMachine \"intel_64\" started successfully\n```\n"
+        },
+        {
+            "user": "shrishs",
+            "body": "I am still facing the same issue on Mac Ventura.\npodman version\nClient:       Podman Engine\nVersion:      4.6.1\n\n\nbash-3.2$ podman machine start podman-machine-default --log-level debug\nINFO[0000] podman filtering at log level debug          \nDEBU[0000] Using Podman machine with `qemu` virtualization provider \nStarting machine \"podman-machine-default\"\n[/usr/local/opt/podman/libexec/podman/gvproxy -listen-qemu unix:///var/folders/ft/1tqtxfq54v38g9kbzvby4hkm0000gn/T/podman/qmp_podman-machine-default.sock -pid-file /var/folders/ft/1tqtxfq54v38g9kbzvby4hkm0000gn/T/podman/podman-machine-default_proxy.pid -ssh-port 53958 -forward-sock /Users/shrishsrivastava/.local/share/containers/podman/machine/qemu/podman.sock -forward-dest /run/user/501/podman/podman.sock -forward-user core -forward-identity /Users/xxxx/.ssh/podman-machine-default --debug]\nDEBU[0000] qemu cmd: [/usr/local/bin/qemu-system-x86_64 -m 2048 -smp 1 -fw_cfg name=opt/com.coreos/config,file=/Users/xxxx/.config/containers/podman/machine/qemu/podman-machine-default.ign -qmp unix:/var/folders/ft/1tqtxfq54v38g9kbzvby4hkm0000gn/T/podman/qmp_podman-machine-default.sock,server=on,wait=off -netdev socket,id=vlan,fd=3 -device virtio-net-pci,netdev=vlan,mac=5a:94:ef:e4:0c:ee -device virtio-serial -chardev socket,path=/var/folders/ft/1tqtxfq54v38g9kbzvby4hkm0000gn/T/podman/podman-machine-default_ready.sock,server=on,wait=off,id=apodman-machine-default_ready -device virtserialport,chardev=apodman-machine-default_ready,name=org.fedoraproject.port.0 -pidfile /var/folders/ft/1tqtxfq54v38g9kbzvby4hkm0000gn/T/podman/podman-machine-default_vm.pid -machine q35,accel=hvf:tcg -cpu host -virtfs local,path=/Users,mount_tag=vol0,security_model=none -virtfs local,path=/private,mount_tag=vol1,security_model=none -virtfs local,path=/var/folders,mount_tag=vol2,security_model=none -drive if=virtio,file=/Users/xxxx/.local/share/containers/podman/machine/qemu/podman-machine-default_fedora-coreos-38.20230806.2.0-qemu.x86_64.qcow2] \nWaiting for VM ...\nError: machine did not transition into running state\n\n"
+        },
+        {
+            "user": "vrothberg",
+            "body": "@shrishs thanks for reporting.  I don´t think it's the same issue but another issue.  Feel free to create a new issue on GitHub."
+        }
+    ]
+}

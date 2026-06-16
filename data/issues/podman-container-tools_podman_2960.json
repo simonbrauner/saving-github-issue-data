@@ -1,0 +1,110 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 2960,
+    "title": "podman-remote run --uidmap: makes storage/overlay go+x",
+    "state": "closed",
+    "labels": [
+        "locked - please file new issue/PR"
+    ],
+    "user": "edsantiago",
+    "body": "In window 1:\n```\n# podman varlink --timeout=0 unix:/run/podman/io.podman\n```\nIn window 2:\n```\n# ls -ld /var/lib/containers/storage/overlay\ndrwx------. 13 root root 4096 Apr 17 09:50 /var/lib/containers/storage/overlay\n\n# podman-remote run --uidmap 0:10000:10000 alpine true\n# ls -ld /var/lib/containers/storage/overlay\ndrwx--x--x. 14 root root 4096 Apr 17 09:50 /var/lib/containers/storage/overlay\n      ^  ^\n      |  |\n```\nmaster @ a87cf6fef8f84ded410d547aa772b8f942c5f273",
+    "comments": [
+        {
+            "user": "edsantiago",
+            "body": "@giuseppe phew! This seems to be the cause of the problem I've been seeing all week.\n\n@baude PTAL"
+        },
+        {
+            "user": "edsantiago",
+            "body": "To follow up on the IRC discussion: this does not happen with plain (non-remote, non-varlink) podman."
+        },
+        {
+            "user": "baude",
+            "body": "confirmed as well.  "
+        },
+        {
+            "user": "edsantiago",
+            "body": "~~UPDATE: I am now seeing this with plain podman on master:~~\n```\n# ls -ld /var/lib/containers{,/storage}                            \ndrwx------.  5 root root 4096 Apr 17 09:43 /var/lib/containers                 \ndrwx------. 11 root root 4096 Apr 17 10:25 /var/lib/containers/storage\n# podman run --uidmap 0:10000:10000 alpine true\n# !ls\ndrwx--x--x.  5 root root 4096 Apr 17 09:43 /var/lib/containers                 \ndrwx--x--x. 11 root root 4096 Apr 17 10:25 /var/lib/containers/storage         \n```\n~~I don't know if this is new behavior, or (more likely) screwing up something on my end when I tried this sequence two weeks ago. If anyone else can reproduce, please update title accordingly to remove the podman-remote red herring.~~\n\nUPDATE: never mind. It's /var/lib/containers/storage/**overlay** that podman-remote is clobbering. All behavior is exactly as described in the initial comment. I apologize for muddying things up."
+        },
+        {
+            "user": "rhatdan",
+            "body": "I think @giuseppe Made some changes to make these directories searchable, so that we would not need to go into two mount namespaces."
+        },
+        {
+            "user": "rhatdan",
+            "body": "I think the intended permissions of these dirs is 711."
+        },
+        {
+            "user": "edsantiago",
+            "body": "Then the [400-unprivileged-access.bats test](https://github.com/containers/libpod/blob/master/test/system/400-unprivileged-access.bats) needs to be updated, because \"files accessible by other users\" is exactly what it is trying to prevent. I suppose we'll have to wait for @giuseppe "
+        },
+        {
+            "user": "rhatdan",
+            "body": "That script is succeeding and you expected it to fail?"
+        },
+        {
+            "user": "edsantiago",
+            "body": "Script is failing, but now I see that my 12:44MDT comment was mistaken. The problem is /var/lib/containers/storage/**overlay** -- that's what podman-remote (and only podman-remote) is clobbering. I will update my comment. Sorry for the confusion."
+        },
+        {
+            "user": "rhatdan",
+            "body": "podman-remote should not even know about container-storage..."
+        },
+        {
+            "user": "edsantiago",
+            "body": "My fault again: I'm conflating podman-remote with the varlink server."
+        },
+        {
+            "user": "rhatdan",
+            "body": "So whey you run podman varlink the mode of this file changes?"
+        },
+        {
+            "user": "edsantiago",
+            "body": "See initial post (at top). I would imagine it's `podman varlink` that's doing the chmod, not actually `podman-remote`. Maybe I should refer to it as \"the podman-remote ecosystem\"?"
+        },
+        {
+            "user": "rhatdan",
+            "body": "Does this only happen when running a podman-remote with a --uidmap? \nAnd it does not happen if you just do a podman run --uidmap?"
+        },
+        {
+            "user": "edsantiago",
+            "body": ">Does this only happen when running a podman-remote with a --uidmap?\n>And it does not happen if you just do a podman run --uidmap?\n\nCorrect and correct.\n\nIn case it helps, I took podman-remote slightly out of the equation:\n```\n# ls -ld /var/lib/containers/storage/overlay\ndrwx------. 9 root root 4096 Apr 30 15:03 /var/lib/containers/storage/overlay\n# podman-remote create --uidmap 0:10000:10000 alpine true\nERRO[1153] unable to find flag trace                    \nERRO[1153] unable to find flag syslog                   \n2e468cd63dd97e42f473b3df8e2713ee9ea6ac4ccf1a5491a1346ffff37a01b1\n# !ls\ndrwx------. 10 root root 4096 Apr 30 15:04 /var/lib/containers/storage/overlay\n```\nThat is, `podman-remote create` does not harm anything. Then, running varlink directly without podman-remote:\n```\n# varlink call unix:/run/podman/io.podman/io.podman.StartContainer '{\"name\":\"2e468cd\"}'\n{\n  \"container\": \"2e468cd63dd97e42f473b3df8e2713ee9ea6ac4ccf1a5491a1346ffff37a01b1\"\n}\n# !ls\ndrwx--x--x. 10 root root 4096 Apr 30 15:05 /var/lib/containers/storage/overlay\n```\ni.e. the `start`, run by the varlink server, is what did it.\nHope that helps narrow it down."
+        },
+        {
+            "user": "giuseppe",
+            "body": "having 711 on `/var/lib/containers/storage/overlay` is expected when using uidmap/gidmap, as we rely on the ownership in the subdirectories.\nWhat we have to check for is if an unprivileged user (that it is not mapped to root inside the container) can access any file/directory inside of container.  How does `ls -l /var/lib/containers/storage/overlay` look like? "
+        },
+        {
+            "user": "edsantiago",
+            "body": "EPERM, of course. However, if a nonprivileged user can guess or learn the SHA of a container storage directory:\n```\nesm$ touch /var/lib/containers/storage/overlay/064500df30a3ead9dca8f03a16bf2beda66eb53564d978e9d565dbedcb1bf1d7/merged/tmp/bar\nesm$ ll /var/lib/containers/storage/overlay/064500df30a3ead9dca8f03a16bf2beda66eb53564d978e9d565dbedcb1bf1d7/merged/tmp\ntotal 0\n-rw-rw-r--. 1 esm  esm  0 May  1 06:32 bar\n-rw-r--r--. 1 root root 0 May  1 06:32 foo\n```"
+        },
+        {
+            "user": "edsantiago",
+            "body": "And of course the question that started it all: why does plain podman not change permissions? Why is it only varlink / podman-remote?"
+        },
+        {
+            "user": "giuseppe",
+            "body": "It happens when uidmap/gidmap is used, to allow other users not root to access these directories.  local/remote podman should not matter"
+        },
+        {
+            "user": "giuseppe",
+            "body": "That is strange /var/lib/containers/storage/overlay/064500df30a3ead9dca8f03a16bf2beda66eb53564d978e9d565dbedcb1bf1d7 should have 0700.  I will have to verify it"
+        },
+        {
+            "user": "giuseppe",
+            "body": "interestingly it seems to happen only with varlink?  @baude do we do anything different that can cause the directories in the storage to be created with a different permissions mask?"
+        },
+        {
+            "user": "edsantiago",
+            "body": "Oh, this is interesting: plain podman is chowning, not chmoding:\n```\n# ls -ld /var/lib/containers/storage/overlay\ndrwx------. 6 root root 4096 May  1 08:47 /var/lib/containers/storage/overlay\n# podman run --uidmap 0:10000:10000 alpine true\n# !ls\ndrwx------. 7 10000 10000 4096 May  1 08:47 /var/lib/containers/storage/overlay\n              ^^^^^ ^^^^^\n```\nRunning plain podman fixes it again:\n```\n# podman run alpine true\n# !ls\ndrwx------. 9 root root 4096 May  1 08:51 /var/lib/containers/storage/overlay\n```"
+        },
+        {
+            "user": "giuseppe",
+            "body": "so the problem seems to be in not correctly creating the layer directory with the correct ownership:\n\nhttps://github.com/containers/storage/pull/334\n\nthis seems to solve the issue for me"
+        },
+        {
+            "user": "edsantiago",
+            "body": "Shouldn't this stay open until it gets vendored in?"
+        }
+    ]
+}

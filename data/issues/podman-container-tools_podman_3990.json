@@ -1,0 +1,184 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 3990,
+    "title": "Volume for container with custom user is not writeable",
+    "state": "closed",
+    "labels": [
+        "kind/bug",
+        "stale-issue",
+        "locked - please file new issue/PR"
+    ],
+    "user": "abitrolly",
+    "body": "/kind bug\n\n**Description**\n\nWhen running a container with explicitly set user, such as \nhttps://github.com/schemaspy/schemaspy/blob/a28c9fc932cc6f85c7780050a678b3a3d7f595e9/Dockerfile#L44 the volume mounted by `podman` is not writeable.\n\n**Steps to reproduce the issue:**\n\n1. Get some PostreSQL host (192.168.4.1) and port (5432)\n\n2. Create dir to mount as a volume\n```\n$ mkdir html\n```\n\n3. Run `podman`\n```\n$ podman run -it -v \"$PWD\"/html:/output:Z schemaspy/schemaspy:snapshot -u postgres -t pgsql11 -host 192.168.4.1 -port 5432 -db anitya\n...\nINFO  - Starting Main v6.1.0-SNAPSHOT on 9090a61652af with PID 1 (/schemaspy-6.1.0-SNAPSHOT.jar started by java in /)\nINFO  - The following profiles are active: default\nINFO  - Started Main in 2.594 seconds (JVM running for 3.598)\nINFO  - Starting schema analysis\nERROR - IOException\nUnable to create directory /output/tables\nINFO  - StackTraces have been omitted, use `-debug` when executing SchemaSpy to see them\n```\n\n**Describe the results you received:**\n\nContainer is unable to write to `/output`, most likely because it is running with `java` user.\n\n**Describe the results you expected:**\n\nVolumes work `rw` regardless of user settings inside of conainer.\n\n**Output of `podman version`:**\n\n```\n✗ podman version\nVersion:            1.5.1\nRemoteAPI Version:  1\nGo Version:         go1.12.7\nOS/Arch:            linux/amd64\n```",
+    "comments": [
+        {
+            "user": "mheon",
+            "body": "I assume the `-u postgres` in here means that your app in the container isn't running as root?\n\nAs such, it's running as a non-0 user in the container, which is mapped to a user on the host through `/etc/subuid` (root in a rootless container is the user that started the container, all higher UIDs and GIDs are mapped to a block on the host given by `/etc/subuid` and `/etc/subgid`). The volume looks like it's somewhere that's owned by the user starting the container - but you're running the app in the container as a different user, which means you run into permissions errors.\n\nYou may want to just remove `-u postgres` and run as root if you need to access volumes owned by your user. Running as root in a rootless container is already very secure (the container has no added privileges that your user does not), so the only security benefit to swapping to another user in the container is preventing the container from accessing files owned by your user - which, in this case, you need (to talk to the volume)."
+        },
+        {
+            "user": "abitrolly",
+            "body": "@mheon `-u` is a parameter for `schemaspy`, the container itself defines `USER java`, and `podman` is run unprivileged without `sudo`. I'd expect `podman` to handle mount volumes transparently without leaking low level details about uid and filesystem mappings. Otherwise all scripts will need to contain `-u root`, which doesn't looks very secure. )"
+        },
+        {
+            "user": "mheon",
+            "body": "We really can't handle this ourselves - these are separate users from the perspective of the kernel, and normal filesystem permissions apply."
+        },
+        {
+            "user": "abitrolly",
+            "body": "It is possible to configure filesytem layer to ignore host permissions? If a container is already isolated through filesystem path, why impose additional `uid` restrictions?\n\nMaybe it is possible to implement two layer writes? The first layer enforces permissions, so that container won't escape the defined path, but final writes to disk are ignoring the permissions. If container needs a separate user with volume mapping, maybe `podman` could switch to the double layer concept automatically."
+        },
+        {
+            "user": "rhatdan",
+            "body": "You can change the ownership on the volume with the `podman unshare chown UID PATH`"
+        },
+        {
+            "user": "abitrolly",
+            "body": "@rhatdan `PATH` is path in my directory, not `/var/...`, right? How do I know UID? What will happen to filesystem permissions after I quit this `modified user namespace`?\n\nI also checked `man podman-unshare` and the description sounds too low level. Maybe it is possible to modify it for people who are not familiar with `cgroups` yet.\n```\npodman-unshare - Run a command inside of a modified user namespace.\n```"
+        },
+        {
+            "user": "abitrolly",
+            "body": "I've got a thought overnight.\n\n> (root in a rootless container is the user that started the container, all higher UIDs and GIDs are mapped to a block on the host given by /etc/subuid and /etc/subgid)\n\nWhen I run container with custom USER as non-privileged, then there is no `root` inside anymore - is that right? If it is so, then why not to map that custom USER instead of `root` to my UIDs and GIDs instead?"
+        },
+        {
+            "user": "rhatdan",
+            "body": "By default podman as non root, runs as root within the container.  This means the processes in the container have full Namespaced Capabilities.  This also means that if the container process escaped the container, it would have full access to files in your homedir (Based on UID, SELinux would still block it, but I have heard that some people disable SELinux).  If you run the processes within the container as a different non root UID, then those processes will run as that UID and if they escape they would only have world access to content in your homedir."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@abitrolly I am writing a blog based on these issues.  Send me your email and I can expose an early copy to you. dwalsh@redhat.com\n\nJust needs to be reviewed and then I can get it published."
+        },
+        {
+            "user": "abitrolly",
+            "body": "@rhatdan people disable SELinux, because not all builds scripts add `:Z` suffix to volume mounts, without which volumes on SELinux do not work, and `podman` doesn't add this suffix automatically.\n\nMy email is anatoli@rainforce.org. I sent email titled \"Early copy\" from this address.\n\nGiven that even with `podman` unprivileged model escaped container can steal my private SSH keys, I don't think that `podman` is more secure than `docker` anymore. Private keys are more valuable than root level access to OS (which main risk is again - stealing private keys from more boxes). Now I think that double level filesystem access control is a must have feature for any non-priviliged process containers."
+        },
+        {
+            "user": "rhatdan",
+            "body": "People running with containers not separated by SELinux are taking a big risk, since it is the main tool to protect their file system from containers.\n\nEscape for Docker allows access to all keys,  rootless podman only to the users uid.\nRunning rootless containers in a different User Namespace would give you more protections.\n\n"
+        },
+        {
+            "user": "rhatdan",
+            "body": " @abitrolly But bottom line, I tell people to always run their containers as non-root, even in the rootless container.\nOne thing we could consider would be to add a :U to volumes which would chown the directory to match the primary user of the container.  For podman\nMight be something to consider."
+        },
+        {
+            "user": "thatchristoph",
+            "body": "Not sure if this is a \"true\" solution or more of a workaround, but would not `--userns` handle at least some of the situations desired to mount with non-root user permissions?\n\nFor example: \n\n`podman run --rm --userns=keepid -v /home/hostUserName/tmp:/home/containerUserName/tmp:Z -it image_name /bin/bash`\n\nThis mounts tmp inside the container at `/home/containerUserName/tmp` with the same UID:GID inside the container as it possesses on the host.\n\nPerhaps `--userns=ns:my_namespace` could be used to mount a volume with the UID:GID corresponding to the user named `my_namespace`?\n\nNote: you cannot use `--user myUserName` and `--userns=...` in the same `podman run .... ` command, as I understand it."
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "This issue had no activity for 30 days. In the absence of activity or the \"do-not-close\" label, the issue will be automatically closed within 7 days."
+        },
+        {
+            "user": "vrothberg",
+            "body": "> One thing we could consider would be to add a :U to volumes which would chown the directory to match the primary user of the container.\n\n@rhatdan, what's your take on this issue. Shall we pursue your upper proposal?"
+        },
+        {
+            "user": "rhatdan",
+            "body": "I don't think so, I am hesitant to make this more complicated.  I think it is up to the user to set up the permissions correctly on the volume."
+        },
+        {
+            "user": "abitrolly",
+            "body": "I still don't understand what `unshare` does. How is that different from `su <user>`? How does `unshare` know the UID to run inside?\n\nWhat is the proposed solution? Is the following correct?\n1. Try to figure you what will be UID of rootless container (how? ) - let's call it RLUID\n2. Run `podman unshare chown -R RLUID /host/path`\n3. Run container with `podman run -v /host/path:/guest/path` - `/guest/path` is now writable\n4. Exit container and run `chown -R UID` to get permissions back\n\nIs that right?\n"
+        },
+        {
+            "user": "ChristianCiach",
+            "body": "Wow, this stuff is way too complicated. I've the same issue as @abitrolly (running podman as non-root, having a user inside the container that is not \"root\" and I cannot write to the mounted directory). I've read every comment here and I still don't have an idea how to make this work."
+        },
+        {
+            "user": "ChristianCiach",
+            "body": "So, it seems like I can make it \"work\" be \"chown\"ing (on the host) the shared directory to the user-id that the non-root-container-user (in my case called \"jenkins\", because I'm using the jenkins:jenkins image from Docker hub) is mapped to on the host system. In my case, this jenkins-user from inside the container has the UID 559751 on the host system. (Btw, what is the easiest way to find this out?). So, doing `sudo chown 559751 builds` on the host makes the directory writable to the user inside the container. But this has two big issues:\n\n* This requires root privileges on the host.\n* The UID 559751 is surely specific to my local system configuration, so it's not portable.\n\nI need to share this image with my coworkers (who don't have root privileges), so both of these points are unacceptable.\n "
+        },
+        {
+            "user": "ChristianCiach",
+            "body": "> I don't think so, I am hesitant to make this more complicated. I think it is up to the user to set up the permissions correctly on the volume.\n\nOkay,  but how?"
+        },
+        {
+            "user": "mheon",
+            "body": "Root should not be necessary - `podman unshare` sticks you into the same user namespace that the rootless container uses, which gives you access to every UID/GID that the container does. Within a `podman unshare` shell you should be able to chown folders/files owned by your user to the UID/GID used by Jenkins. You will need to know what IDs are in use inside the container, because `podman unshare` is a shell on the host (though you can mount the container with `podman mount` and inspect its `/etc/passwd` to get those). This can also potentially allow you to identify the user we're mapped to on the host (`su` to the right UID in the `podman unshare` shell and touch a file in your `/home` - the UID there should be the one in use).\n\nFor the second issue... That is definitely a concern, and one I don't think we have an easy solution to as yes. There is talk of adding UID/GID mappings to LDAP for use across multiple systems, but they will still be unique to the user running the container for security reasons, so not portable between users\n\nRunning rootless containers as non-root and mounting in volumes is proving to be quite complicated. I think a review of how things are right now and a discussion of how we can improve (maybe a blog?) is definitely warranted here."
+        },
+        {
+            "user": "ChristianCiach",
+            "body": "@mheon Thank you very much for your detailed comment!\n\n> Root should not be necessary\n\nI definitely needed \"sudo\" to execute `sudo chown 559751 builds` on the host. This may be because the user accounts are centrally managed and there may be something wrong with my `/etc/subuid`..? I remember that it was necessary for me to create this file manually some months ago. But this may be because my workstation is old and my Fedora installation has been upgraded many times over the last six years or so.\n\n> . Within a `podman unshare` shell you should be able to chown folders/files owned by your user to the UID/GID used by Jenkins. \n\nWell, this seems _portable_ in the sense that I should be able to write a simple shellscript to automate this process for my coworkers every time they want to use my image. \n\n`unshare` seems to be a strange name for this subcommand, but I probably just do not understand the deeper meaning of this. When browsing the podman-subcommands in an attempt to fix my issue I would've disregarded this subcommand immediately just because of its name. (\"How does _unsharing_ something helps me with those permission issues?\")\n\nI will tinker around with this some more tomorrow. \n"
+        },
+        {
+            "user": "mheon",
+            "body": "I agree that `unshare` is a terrible name; we named it after an existing utility that enters user namespaces (doing something very similar to what we do, but not doing many of the things we do to make sure that it matches what other `podman` commands are doing."
+        },
+        {
+            "user": "abitrolly",
+            "body": "@ChristianCiach have you been able to come up with tutorial for your colleagues?"
+        },
+        {
+            "user": "ChristianCiach",
+            "body": "@abitrolly Sorry for the late reply. Yes, creating a simple wrapper that calls \"podman unshare\" before calling \"podman run\" works as expected. This is good enough for my use case."
+        },
+        {
+            "user": "zakkak",
+            "body": "Now how do you chown the directory back to the host user though?\n\n```\n$ mkdir tmp \n$ podman unshare chown 1001:1001 tmp \n$ ls -la tmp \ntotal 0\ndrwxrwxr-x.  2 101000 101000   40 Jul 30 17:20 ./\ndrwxrwxrwt. 54 root   root   2000 Jul 30 17:20 ../\n/tmp\n$ chown $(id -u):$(id -g) tmp    \nchown: changing ownership of 'tmp': Operation not permitted\n```"
+        },
+        {
+            "user": "zakkak",
+            "body": "It might not work in all use cases but another work around is to run the command in the container with the host's user ID and GUID by using `--userns=keep-id --user=$(id -ur):$(id -gr)`, e.g.:\n\n```\n$ mkdir project \n$ podman run -it --rm -v $PWD/project:/project:z --userns=keep-id --user=$(id -ur):$(id -gr) --entrypoint=/bin/bash quay.io/quarkus/ubi-quarkus-mandrel:20.1.0.1.Alpha2-java11 -c 'id; touch /project/lala'\n\nuid=1000(1000) gid=1000 groups=1000\n```\n\nwhile without it it fails:\n```\n$ mkdir project \n$ podman run -it --rm -v $PWD/project:/project:z --entrypoint=/bin/bash quay.io/quarkus/ubi-quarkus-mandrel:20.1.0.1.Alpha2-java11 -c 'id; touch /project/lala'\n\nuid=1001(quarkus) gid=1001(quarkus) groups=1001(quarkus)\ntouch: cannot touch '/project/lala': Permission denied\n```"
+        },
+        {
+            "user": "abitrolly",
+            "body": "I wonder if giving the container host user ID and GUID makes the contaner unprivileged?"
+        },
+        {
+            "user": "rhatdan",
+            "body": "Containers by default are unprivileged. (Depending on your definition of unprivileged)\nRunning with --keep-id just changes the way the User Namespace is setup,  It does not change the security controls on the container. \nThe only difference is instead of the users UID being Root inside of the container, the User UID is the Users UID inside of the container, and the first UID listed for the user in the /etc/subuid files user mappings is UID=0 inside of the container."
+        },
+        {
+            "user": "anishp55",
+            "body": "i'm battling this same thing.  i am using a bitnami image of postgresql from docker hub.  it has a baked in user id of 1001.  on my arch linux system my uid is 1000.  I would like to make a directory in my home directory for postgres to persist its data to, and be able to poke around in that directory without having to chown it all the time when i want to.\n@rhatdan what is your suggestion for people using vendor provided images that already have a uid baked in?"
+        },
+        {
+            "user": "rhatdan",
+            "body": "Well for now you can do \n\n$ podman unshare chown 1001:1001 PATHTODIR\n\nWe could add something to the volume command to do this, but I am not sure how ugly the syntax would be.\n"
+        },
+        {
+            "user": "kushaldas",
+            "body": "> Well for now you can do\n> \n> $ podman unshare chown 1001:1001 PATHTODIR\n> \n> We could add something to the volume command to do this, but I am not sure how ugly the syntax would be.\n\nI would love to have this feature, even if it looks ugly :)"
+        },
+        {
+            "user": "danielwsmithee",
+            "body": "Thanks for writing this up, it really helped me to understand what is going on here.  \n\nUnfortunately the container I am using and want to deploy and regularly update has 43 different user, and their associated group relationships.  So If I understand the situation I would need to parse out all 43 entries from /etc/passwd using podman mount, then create a wrapper script that calls podman unshare with each of those.  Then when the container gets updated to add a new user, I'm then broken and need to go update the script. \n\nI know it would be complex from an implementation perspective, but it would be great if podman could inspect /etc/passwd itself from within the image and pull out the appropriate non-root users all within the --volume command option without a need for further user options."
+        },
+        {
+            "user": "rhatdan",
+            "body": "Why not mount /home into the container then?"
+        },
+        {
+            "user": "abitrolly",
+            "body": "I would appreciate if `podman` could just use network for mounting local volumes without all the complexity of multilevel filesystem->OS->SELInux->container->OS->filesystem permissions."
+        },
+        {
+            "user": "dzintars",
+            "body": "How hard it could be to write a nice blog post series for the simple users which follows the Podman mantra of not running root-full containers, but wants just to mount some volumes. For the most common use-cases.\nLike:\n1) I, as a simple user want to run rootless PHP container and to keep working on my PHP code\n2) I, as a simple user want to share volume between separate Nginx and PHP containers and want to keep working on the codebase.\n3) I, as a simple user  want to spin up some MariaDB instance with database being persisted on filesystem.\n4) Etc, etc...\n\nIMO there is not so much different flavors of the setups which are used by the mainstream users.\nNot everyone works on Go/Rust single binaries which most often does not require volumes. Not everybody is working in the CI/CD environment which constantly does full baking. Not everyone wants to run `podman build/run` on every single line added to the code.\n\nThis volumes question is like Top 1 asked question and yet, in Podman (which \"coined\" the root-less idioms) website can't be found any article for \"simple users\". Every article i saw is like - \"Guys, in order to run your quick container idea in rootless, please first learn whole SELinux labeling and type enforcement, then learn Linux namespacing and then feel free to read this article and to run your container in rootless.\"\n\nI understand that this is fairly complex topic. And the tooling is tailored to match pretty low level requirements and thus it is kinda flexible and complex at the same time. \nSo... there is no need for high level user friendly API implementations which could take ages to implement.\nAll it takes, just to write canonical blog series about the most common setups.\nI am not expert, to write 100% accurate articles, but there are people who are. And those people are wasting their valuable time in answering the individual issues in the GitHub instead of writing single canonical user reference which could be updated as API changes."
+        },
+        {
+            "user": "pohlt",
+            "body": "Thanks @rhatdan for the excellent article series where you explain things like `podman unshare` (https://www.redhat.com/sysadmin/rootless-podman-makes-sense).\n\nThis works fine for a single container trying to access a host folder, but how about _two_ containers which potentially use two different users both trying to access the same host folder (e.g. one writing, the other reading files)?"
+        },
+        {
+            "user": "rhatdan",
+            "body": "Well they should be in the same group or one have root ownership and the other group read access.  Using --group-add keep-groups."
+        },
+        {
+            "user": "tjb36",
+            "body": "I am having a similar problem that is described here, but the solutions proposed do not work for my use case, because I am running two rootless containers in a pod. I hope I am not doing something silly, but this is the minimum example to reproduce the problem I see:\n\nNote:\nBoth containers are run by non-root user `tom` on the host (UID=1005). \nContainer 1 (influxdb) runs its process in the container by default as `root `(UID=0).\nContainer 2 (telegraf) runs its process in the container by default as non-root user `telegraf` (UID=999).\n\n1) Create a named volume:\n`podman volume create influxdb_volume`\n2) Create a new pod:\n`podman pod create --name monitoring_pod --publish 8086:8086`\n3) Create a container in the pod and mount in the named volume:\n```\npodman run -d --rm \\\n--name influxdb_container \\\n--pod monitoring_pod \\\n--mount type=volume,source=influxdb_volume,destination=/var/lib/influxdb \\\ninfluxdb:1.8\n```\n4) On the host, I can see that a directory in the volume is owned by the non-root host user:\n```\nls -ltr /home/tom/.local/share/containers/storage/volumes/influxdb_volume/_data/data/\ndrwx------ 4 tom tom 36 Sep 13 12:14 _internal\n```\n5) Create the second container, and bind mount in one of the volume's directories:\n```\npodman run -d --rm \\\n--name telegraf_container \\\n--pod monitoring_pod \\\n--mount type=bind,src=/home/tom/telegraf.conf,dst=/etc/telegraf/telegraf.conf \\\n--mount type=bind,src=/home/tom/.local/share/containers/storage/volumes/influxdb_volume/_data/data,dst=/home/influxdb_data \\\ntelegraf\n```\n6) I can now see that the bind-mounted directory inside the container is owned by root (because the owner non-root host user is mapped to root inside the container):\n```\npodman exec --user telegraf telegraf_container ls -ltr /home/influxdb_data\ndrwx------ 4 root root 36 Sep 13 11:14 _internal \n```\n7) Trying to access the directory from inside the container fails, because container runs as non-root user (telegraf, UID=999), and directory owned by container root:\n```\npodman exec --user telegraf telegraf_container du -s /home/influxdb_data\ndu: cannot read directory '/home/influxdb_data/_internal': Permission denied\n```\n\nWhat would be a good way to solve this? \n\nI cannot use `unshare `to change the owner on the host, because this would mess up the influxdb container (who performs some actions as a different user `influxdb` sometimes, not always root).\n\nI also cannot use `--userns=keep-id` at the container level (it gives an error \"--userns and --pod cannot be set together\"), and setting it at the pod level messes up the behaviour of the first container."
+        },
+        {
+            "user": "rhatdan",
+            "body": "Does --userns=keep-id when creating the pod work?\n\n`podman pod create --userns=keep-id  --name monitoring_pod --publish 8086:8086`\n"
+        },
+        {
+            "user": "tjb36",
+            "body": "@rhatdan No unfortunately not. If I pass the keep-id flag into the pod creation at step 2 like you suggested, then in step 3 the container fails to initialize, giving the following error:\n\n`run: open server: open tsdb store: mkdir /var/lib/influxdb/data/telegraf/_series: permission denied`\n\nLike I said before, setting it at the pod level messes up the behaviour of the first container."
+        },
+        {
+            "user": "rhatdan",
+            "body": "Please open a new issue for this and we can get others to comment, we are trying to prevent people from discussing issues on older issues."
+        }
+    ]
+}

@@ -1,0 +1,63 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 6724,
+    "title": "[ubuntu 20.04] Error: AppArmor profile \"container-default\" specified but not loaded",
+    "state": "closed",
+    "labels": [
+        "kind/bug",
+        "locked - please file new issue/PR"
+    ],
+    "user": "shaicoleman",
+    "body": "/kind bug\n\n**Description**\n\n```\n$ sudo podman run -it hello-world\nError: AppArmor profile \"container-default\" specified but not loaded\n```\n\n**Steps to reproduce the issue:**\n\n1. Clean install of Ubuntu Desktop 20.04 on VirtualBox, minimal installation\n\n2. Install podman 2.0 via the Kubic project packages\n\n3. Run `sudo podman run -it hello-world`\n\n**Output of `podman version`:**\n\n```\nVersion:      2.0.0\nAPI Version:  1\nGo Version:   go1.13.8\nBuilt:        Thu Jan  1 01:00:00 1970\nOS/Arch:      linux/amd64\n```\n\n**Output of `podman info --debug`:**\n\n```\nhost:\n  arch: amd64\n  buildahVersion: 1.15.0\n  cgroupVersion: v1\n  conmon:\n    package: 'conmon: /usr/libexec/podman/conmon'\n    path: /usr/libexec/podman/conmon\n    version: 'conmon version 2.0.18, commit: '\n  cpus: 4\n  distribution:\n    distribution: ubuntu\n    version: \"20.04\"\n  eventLogger: file\n  hostname: shai-VirtualBox\n  idMappings:\n    gidmap: null\n    uidmap: null\n  kernel: 5.4.0-37-generic\n  linkmode: dynamic\n  memFree: 1991516160\n  memTotal: 4126953472\n  ociRuntime:\n    name: runc\n    package: 'runc: /usr/sbin/runc'\n    path: /usr/sbin/runc\n    version: 'runc version spec: 1.0.1-dev'\n  os: linux\n  remoteSocket:\n    path: /run/podman/podman.sock\n  rootless: false\n  slirp4netns:\n    executable: \"\"\n    package: \"\"\n    version: \"\"\n  swapFree: 968105984\n  swapTotal: 968105984\n  uptime: 9m 35.21s\nregistries:\n  search:\n  - docker.io\n  - quay.io\nstore:\n  configFile: /etc/containers/storage.conf\n  containerStore:\n    number: 1\n    paused: 0\n    running: 0\n    stopped: 1\n  graphDriverName: overlay\n  graphOptions: {}\n  graphRoot: /var/lib/containers/storage\n  graphStatus:\n    Backing Filesystem: extfs\n    Native Overlay Diff: \"true\"\n    Supports d_type: \"true\"\n    Using metacopy: \"false\"\n  imageStore:\n    number: 1\n  runRoot: /var/run/containers/storage\n  volumePath: /var/lib/containers/storage/volumes\nversion:\n  APIVersion: 1\n  Built: 0\n  BuiltTime: Thu Jan  1 01:00:00 1970\n  GitCommit: \"\"\n  GoVersion: go1.13.8\n  OsArch: linux/amd64\n  Version: 2.0.0\n```\n\n**Package info (e.g. output of `rpm -q podman` or `apt list podman`):**\n```\npodman/unknown,now 2.0.0~1 amd64 [installed]\n```\n\n**Additional environment details (AWS, VirtualBox, physical, etc.):**\nReproduced on a fresh Ubuntu 20.04 VirtualBox machine and a physical machine as well",
+    "comments": [
+        {
+            "user": "rhatdan",
+            "body": "@saschagrunert PTAL\nMy knowledge of AppArmor is very limited, Prefer SELinux :^)"
+        },
+        {
+            "user": "saschagrunert",
+            "body": "It looks like the default profile name has changed by switching to `github.com/containers/common/pkg/apparmor`, I’ll dig into it. "
+        },
+        {
+            "user": "vrothberg",
+            "body": "I hoped we would have regressed on that in the CI. @lsm5 could it be the containers.conf in the Ubuntu packages?"
+        },
+        {
+            "user": "saschagrunert",
+            "body": "So it looks like we stopped suffixing the version (was `container-default-1.9.3`, now just `container-default`). Was this change intended?\n\nEdit: This can be fixed in multiple ways. I suggest that I just re-add the version suffix to the default profile."
+        },
+        {
+            "user": "vrothberg",
+            "body": "Thanks for tracking it down @saschagrunert!\n\nI agree with readding the suffix. This will allow for installing a new (potentially updated) profile after an update while keeping the lazy loads."
+        },
+        {
+            "user": "saschagrunert",
+            "body": "Alright I think we have a mismatch in the usage of containers/common:\n\n- The default profile name is set by the default config (which is `containers-default`)\n- The logic in containers/common which prevents the default profile to be loaded is there: https://github.com/containers/common/blob/e505f9348f51b6af02ab6be5c12d768feaea1b41/pkg/apparmor/apparmor_linux.go#L258-L269\n  This means that the profile either has to be empty or prefixed by `apparmor_profile` to be treated as a default profile.\n\nA possible fix would be now to change or add another valid profile prefix which is `containers-default-`. WDYT?\n\nSo 2 fixes: \n- readd the version suffix in libpod\n- allow `containers-default` as default profile prefix in containers/common"
+        },
+        {
+            "user": "vrothberg",
+            "body": "@cevich are we testing on the Ubuntu VMs with AppArmor? This regression worries me a bit."
+        },
+        {
+            "user": "vrothberg",
+            "body": "> So 2 fixes:\n> \n>     * readd the version suffix in libpod\n> \n>     * allow `containers-default` as default profile prefix in containers/common\n\nI think we need to resolve that in containers/common only. We shouldn't embed `libpod` in the name any more, such that multiple consumers share the same default profile.\n\nBefore we regressed (see https://github.com/containers/libpod/blob/v1.6/pkg/apparmor/apparmor.go#L10) we used the `version` package in libpod to embed the version into the profile name.\n\nI suggest doing the same in containers/common (as we do in c/image already) and introduce `containers/common/version`. After that, we can do:\n```golang\n\t// DefaultProfilePrefix is used for version-independent presence checks.\n\tDefaultProfilePrefix = \"containers-default\" + \"-\"\n\t// DefaultProfile is the name of default AppArmor profile.\n\tDefaultProfile = DefaultProfilePrefix + version.Version\n```"
+        },
+        {
+            "user": "rhatdan",
+            "body": "Please open a PR into containers/common and then we can roll this forward."
+        },
+        {
+            "user": "saschagrunert",
+            "body": "> Please open a PR into containers/common and then we can roll this forward.\n\nYep, that’s the one: https://github.com/containers/common/pull/185"
+        },
+        {
+            "user": "saschagrunert",
+            "body": "Hey, @mheon can we mention in the release notes that this has been fixed, too? Right now it’s implicitly hidden in the containers/common bump. "
+        },
+        {
+            "user": "mheon",
+            "body": "Sure"
+        }
+    ]
+}

@@ -1,0 +1,67 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 10057,
+    "title": "Print a specific and helpful message when an image doesn't exist",
+    "state": "closed",
+    "labels": [
+        "In Progress",
+        "locked - please file new issue/PR"
+    ],
+    "user": "lukash",
+    "body": "Dockerfile:\n```\nFROM foobar\n```\nObserved behavior:\n```\n$ podman build -f Dockerfile\nSTEP 1: FROM foobar\n✔ registry.fedoraproject.org/foobar:latest # (pick a registry)\nError: error creating build container: Error initializing source docker://registry.fedoraproject.org/foobar:latest: Error reading manifest latest in registry.fedoraproject.org/foobar: manifest unknown: manifest unknown\n```\n\nExpected behavior:\n```\n$ podman build -f Dockerfile\nSTEP 1: FROM foobar\n✔ registry.fedoraproject.org/foobar:latest # (pick a registry)\nError: image \"foobar:latest\" in registry \"docker://registry.fedoraproject.org/\" does not exist.\n```\n\nThis is a trivial case. You could argue there's nothing wrong here, but there is. Not being an experienced podman user, I have no idea what the error message means. I go to google and find multiple different cases and old bug reports with this error message. This isn't the first situation with cryptic and inaccurate error message I've run into with podman and things can get much more involved. Providing specific and helpful error messages should be adopted as a principle.\n\nThe provided expected error message is an example. I apologize for any inaccuracies in the wording, the message should obviously be as precise as possible.",
+    "comments": [
+        {
+            "user": "afbjorklund",
+            "body": "For reference, _What Would Docker Do_:\n```\n$ docker build .\nSending build context to Docker daemon  2.048kB\nStep 1/1 : FROM foobar\npull access denied for foobar, repository does not exist or may require 'docker login': denied: requested access to the resource is denied\n```"
+        },
+        {
+            "user": "rhatdan",
+            "body": "Yup the errors out of containers/image kind of stink.  We have another issue similar to this somewhere.\n@vrothberg While you are working on libimage I think we should fix this.\n\nBasically if pull returns an error.Cause(err).Error() == \"manifest unknown: manifest unknown\", then we should report this back as \n\n\npull access denied for $IMAGE, repository does not exist or may require 'os.Args[0] login': denied: requested access to the resource is denied"
+        },
+        {
+            "user": "rhatdan",
+            "body": "I looked at attempting to fix this in containers/image and have found it just about impossible without a rewrite of major sections of error handling of docker/distribution."
+        },
+        {
+            "user": "mheon",
+            "body": "I'd be OK with just reporting good error causes out of libimage, and then having Podman/Buildah craft error messages on the frontend out of them. As long as `errors.Cause(err) == image.ErrNoSuchManifest` or similar works, we can beautify the errors on the frontend (and preserve the full errors for printing with `--log-level=debug`)"
+        },
+        {
+            "user": "rhatdan",
+            "body": "This is the problem.  This does not work. errors.Cause(err) == image.ErrNoSuchManifest\nThe problem is containers/image is using some code out of Docker distribution that ends up generating a string \n\"manifest unknown: manifest unknown\" and formating this as an Error.  It is not a constant.  I am suggesting that either libimage or containers/image check for this string and return a constant error that podman and buildah could check.  But I don't know why we would want different errors comeing out of podman and buildah for the same basic error.  Either the image does not exists, or the user does not have access to it via login.\n"
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@vrothberg Now that we have libimage, should we attempt to translate the error returned from Docker into something more Human understable?"
+        },
+        {
+            "user": "vrothberg",
+            "body": "> @vrothberg Now that we have libimage, should we attempt to translate the error returned from Docker into something more Human understable?\n\nYes, it think that's something libimage _can_ take care of"
+        },
+        {
+            "user": "vrothberg",
+            "body": "To nail down the scope a bit further.  It depends which image we're attempting to pull from which registry.\n\n**Docker**\n```\nroot@ubuntu:/home/vrothberg# docker pull registry.fedoraproject.org/foobar\nUsing default tag: latest\nError response from daemon: manifest for registry.fedoraproject.org/foobar:latest not found: manifest unknown: manifest unknown\nroot@ubuntu:/home/vrothberg# docker pull docker.io/library/foobar\nUsing default tag: latest\nError response from daemon: pull access denied for foobar, repository does not exist or may require 'docker login': denied: requested access to the resource is denied\n```\n\n**Podman**\n```\n~ $ podman pull registry.fedoraproject.org/foobar\nTrying to pull registry.fedoraproject.org/foobar:latest...\n  manifest unknown: manifest unknown\nError: Error initializing source docker://registry.fedoraproject.org/foobar:latest: Error reading manifest latest in registry.fedoraproject.org/foobar: manifest unknown: manifest unknown\n~ $ podman pull docker.io/library/foobar\nTrying to pull docker.io/library/foobar:latest...\n  denied: requested access to the resource is denied\nError: Error initializing source docker://foobar:latest: Error reading manifest latest in docker.io/library/foobar: errors:\ndenied: requested access to the resource is denied\nunauthorized: authentication required\n\n```\n\nWhile the \"manifest unknown: manifest unknown\" error is the same, the error reporting in Podman stutters a bit with the reference of the image being printed twice. I think we should remove the stuttering (must be done in c/image).\n\nThe authorized error is not yet entirely clear to me.  Podman gets a `401` (unauthorized), while Docker seems to get a `403` (forbidden) (see https://github.com/moby/moby/blob/master/distribution/errors.go#L61).\n\nI am not versed enough in the distribution parts to explain this difference. @mtrmac do you know?"
+        },
+        {
+            "user": "vrothberg",
+            "body": "Closing this issue in favor of https://github.com/containers/podman/issues/9619."
+        },
+        {
+            "user": "mtrmac",
+            "body": "> ```\n> ~ $ podman pull registry.fedoraproject.org/foobar\n> Trying to pull registry.fedoraproject.org/foobar:latest...\n>   manifest unknown: manifest unknown\n> Error: Error initializing source docker://registry.fedoraproject.org/foobar:latest: Error reading manifest latest in registry.fedoraproject.org/foobar: manifest unknown: manifest unknown\n> ~ $ podman pull docker.io/library/foobar\n> Trying to pull docker.io/library/foobar:latest...\n>   denied: requested access to the resource is denied\n> Error: Error initializing source docker://foobar:latest: Error reading manifest latest in docker.io/library/foobar: errors:\n> denied: requested access to the resource is denied\n> unauthorized: authentication required\n> ```\n> \n> While the \"manifest unknown: manifest unknown\" error is the same, the error reporting in Podman stutters a bit with the reference of the image being printed twice. I think we should remove the stuttering (must be done in c/image).\n\nThat sounds unlikely; AFAIK c/image’s copy never writes errors to any output, only progress information. This is almost certainly https://github.com/containers/podman/blob/5b2585f5e91ca148f068cefa647c23f8b1ade622/libpod/image/pull.go#L351 (note the two-space prefix added by `cleanErrorMessage`).\n\nIt seems that’s already been removed in libimage.\n\n--\n\n> The authorized error is not yet entirely clear to me. Podman gets a `401` (unauthorized), while Docker seems to get a `403` (forbidden) (see https://github.com/moby/moby/blob/master/distribution/errors.go#L61).\n\nCompare https://github.com/containers/image/issues/1293#issuecomment-875791392 : docker/distribution returns a multi-error, and Docker only shows the first value. Maybe that’s something c/image could do, let’s discuss in that issue."
+        },
+        {
+            "user": "MuchHustle",
+            "body": "I have the same issue but everywhere I search for answer is the same snide brush off as above. It is broke I tried as I tried all 4 options for the image and all returned:\nError: initializing source docker://registry.fedoraproject.org/kali:latest: reading manifest latest in registry.fedoraproject.org/kali: manifest unknown\n"
+        },
+        {
+            "user": "vrothberg",
+            "body": "@MuchHustle, this issue here has been closed in favor of https://github.com/containers/podman/issues/9619.  Let's continue the conversation over there."
+        }
+    ]
+}

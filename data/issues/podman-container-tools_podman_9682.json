@@ -1,0 +1,98 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 9682,
+    "title": "Containers fails to start if SELinux policy is not defining the correct types",
+    "state": "closed",
+    "labels": [
+        "locked - please file new issue/PR"
+    ],
+    "user": "bigon",
+    "body": "Hello,\n\nOn debian unstable (podman 3.0.1), with SELinux enabled and running the refpolicy (I disabled the `virt` module for some reasons) in permissive mode, podman is not able to start a container. If I reboot and disabled SELinux, everything works fine.\n\npodman just fails (as root or non-root user) with:\n\n`Error: failed to mount shm tmpfs \"/home/bigon/.local/share/containers/storage/overlay-containers/99d002d974978230de6e6214d41c4f9b24f4d054f7d58b7b7cc6729adddcc7ec/userdata/shm\": invalid argument`\n\nIf SELinux is in permissive podman should probably just ignore that and continue. In any case, it should log it instead of displaying a cryptic error\n\n[log.txt](https://github.com/containers/podman/files/6110922/log.txt)\n",
+    "comments": [
+        {
+            "user": "bigon",
+            "body": "Using strace, I see that `/etc/selinux/refpolicy/contexts/lxc_contexts` is being read, but of course the types defined in there are not available as they are defined in the `virt` module that is disabled"
+        },
+        {
+            "user": "rhatdan",
+            "body": "Then you need to enable the virt module, is container-selinux installed?  This is the package that is needed to make podman work with SELinux.\n\nThis is not a Podman issue, but a configuration issue.  We can continue the conversation here, but I am going to close the issue."
+        },
+        {
+            "user": "bigon",
+            "body": "Well the fact that podman fails when SELinux is not in enforcing mode seems to be a podman issue to me. The fact that types are not defined in that case should not matters it that case IMVHO\n\n> is container-selinux installed?\n\nNo it's not because it's sadly not upstreamed in the refpolicy and it cannot be built against it"
+        },
+        {
+            "user": "rhatdan",
+            "body": "The fact remains you are trying to run podman in an SELinux system that is not setup correctly.  Podman can not be configured to figure out whether SELinux is configured correctly.  Refpolicy should probbaly not ship the lxc_paths if virt-policy is not installed, but selinux-policy package does not work that way. I am not sure what podman would do if this file did not exists. it would probably fail.\n\nDoes running with --security-opt label:disable work?"
+        },
+        {
+            "user": "bigon",
+            "body": ">  Podman can not be configured to figure out whether SELinux is configured correctly.\n\nWell, yes podman can. [crond](https://salsa.debian.org/debian/cron/-/blob/master/debian/patches/features/SELinux-support.patch#L121) is doing so for example by just ignoring the error if the type is not existing, other object managers (like dbus-daemon) are doing so I think. X is not, but X is 20years old..\n\nA module can still be disabled by the user at runtime.\n\n> Does running with --security-opt label:disable work?\n\nUnfortunately it is not helping"
+        },
+        {
+            "user": "rhatdan",
+            "body": "That would be a bug, what does it do if label is disabled?"
+        },
+        {
+            "user": "bigon",
+            "body": "> That would be a bug, what does it do if label is disabled?\n\nI get the same error.\n\nThe fact that the message is not clear is also a bug IMVHO"
+        },
+        {
+            "user": "rhatdan",
+            "body": "That is the command returned from the kernel indicating the SELinux has rejected the mount options context=\"system_u:system_r:container_file_t:s0\".  No way for Podman to know why this happened.\nIf you modify the lxc_context file to remove these types, what does Podman do then?"
+        },
+        {
+            "user": "bigon",
+            "body": "Well podman could validate that the context (and categories) are reachable before trying to use them by trying to compute them, no?\n\nEmptying or removing `lxc_contexts` allows podman to work again"
+        },
+        {
+            "user": "rhatdan",
+            "body": "Sure but what would be the default to do if I write the types to the kernel to test if they are valid, Does POdman throw an earlier error?"
+        },
+        {
+            "user": "rhatdan",
+            "body": "Oops wrong issue."
+        },
+        {
+            "user": "bigon",
+            "body": "> Does POdman throw an earlier error?\n\nNot that I see, no"
+        },
+        {
+            "user": "bigon",
+            "body": "OK, so again, there is an issue here with the fact that SELinux types are not known in the policy\n\n> ERRO[0000] [graphdriver] prior storage driver overlay failed: kernel does not support overlay fs: 'overlay' is not supported over extfs at \"/var/lib/containers/storage/overlay\": backing file system is unsupported for this graph driver\nError: kernel does not support overlay fs: 'overlay' is not supported over extfs at \"/var/lib/containers/storage/overlay\": backing file system is unsupported for this graph driver\n\nForcing the overlay driver in the configuration is solving the issue, so the problem is in the part of the code where podman probes the driver(?)\n\nUsing strace again, the problem seems to occurs because the `container_t`(?) type not being define\n\nThere are multiple problems here:\n\n1. I really think that the reachability/existence of the types/contexts must be tested\n2. podman really requires bits of a SELinux policy that is currently not upstreamed in the refpolicy (there is some discusion [here](https://github.com/containers/container-selinux/issues/113) apparently)\n3. For what I can see, there is no documentation (except the implementation) of the needed SELinux type\n4. The error handling is not showing what's wrong (that probably linked to point 1.)"
+        },
+        {
+            "user": "rhatdan",
+            "body": "container_t should not be hard coded anywhere in podman, and I do find it anywhere. The type comes from either:\n/usr/share/containers/selinux/contexts, which is defined in the container-selinux package, which should define conainer_t.\n\n```\n$ cat /usr/share/containers/selinux/contexts \nprocess = \"system_u:system_r:container_t:s0\"\nfile = \"system_u:object_r:container_file_t:s0\"\nro_file=\"system_u:object_r:container_ro_file_t:s0\"\nkvm_process = \"system_u:system_r:container_kvm_t:s0\"\ninit_process = \"system_u:system_r:container_init_t:s0\"\nengine_process = \"system_u:system_r:container_engine_t:s0\"\n$ rpm -qf /usr/share/containers/selinux/contexts \ncontainer-selinux-2.160.0-1.fc34.noarch\n```\nOr it is coming from /etc/selinux/targeted/contexts/lxc_contexts \n\n```\n cat /etc/selinux/targeted/contexts/lxc_contexts \nprocess = \"system_u:system_r:container_t:s0\"\ncontent = \"system_u:object_r:virt_var_lib_t:s0\"\nfile = \"system_u:object_r:container_file_t:s0\"\nro_file=\"system_u:object_r:container_ro_file_t:s0\"\ncontainer_kvm_process = \"system_u:system_r:container_kvm_t:s0\"\nsandbox_lxc_process = \"system_u:system_r:container_t:s0\"\n\nWhich is part of selinux-policy-targeted package.\n```\n\nWhere are you getting it from?\n"
+        },
+        {
+            "user": "rhatdan",
+            "body": "BTW If you want to add a patch to test the type returned, I am fine with this.  But should be in opencontainers/selinux package."
+        },
+        {
+            "user": "bigon",
+            "body": "Sorry, it's actually `container_file_t` not `container_t`:\n\n```\n[pid  3326] mount(\"overlay\", \"/var/lib/containers/storage/overlay/compat277515814/merged\", \"overlay\", 0, \"lowerdir=/var/lib/containers/storage/overlay/compat277515814/lower1:/var/lib/containers/storage/overlay/compat277515814/lower2,upperdir=/var/lib/containers/storage/overlay/compat277515814/upper,workdir=/var/lib/containers/storage/overlay/compat277515814/work,context=\\\"system_u:object_r:container_file_t:s0\\\"\" <unfinished ...>\n```\n\n```\n$ cat /etc/selinux/refpolicy/contexts/lxc_contexts\nprocess = \"system_u:system_r:svirt_lxc_net_t:s0\"\ncontent = \"system_u:object_r:virt_var_lib_t:s0\"\nfile = \"system_u:object_r:svirt_lxc_file_t:s0\"\n```\n\nAnd `/usr/share/containers/selinux/contexts` is not existing here"
+        },
+        {
+            "user": "rhatdan",
+            "body": "Weird "
+        },
+        {
+            "user": "bigon",
+            "body": "This is apparently hardcoded in containers-storage:\n ```\n$ grep -r selinuxLabelTest *\ndrivers/overlay/overlay.go:\tselinuxLabelTest = \"system_u:object_r:container_file_t:s0\"\ndrivers/overlay/overlay.go:\t\t\tflags = label.FormatMountLabel(flags, selinuxLabelTest)\ndrivers/overlay/overlay.go:\t\t\tflags = label.FormatMountLabel(flags, selinuxLabelTest)\n```\n"
+        },
+        {
+            "user": "bigon",
+            "body": "I can confirm that with a podman built with `golang-github-containers-storage` 1.24.8 it's OK, with 1.28.1 not"
+        },
+        {
+            "user": "rhatdan",
+            "body": "@bigon Could you try with the appach above to see if it solves your issue?"
+        },
+        {
+            "user": "bigon",
+            "body": "> @bigon Could you try with the appach above to see if it solves your issue?\n\npodman build with \"golang-github-containers-storage (= 1.31.3+ds1-1)\" in debian experimental works, so I think for the `container_file_t` part it's fine"
+        }
+    ]
+}

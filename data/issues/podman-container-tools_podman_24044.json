@@ -1,0 +1,75 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 24044,
+    "title": "CI: system tests: netns leak",
+    "state": "closed",
+    "labels": [
+        "flakes",
+        "locked - please file new issue/PR"
+    ],
+    "user": "edsantiago",
+    "body": "Placeholder for a known flake wherein network namespaces are being leaked at the end of a system test run, even when all tests pass:\n```\n         # +netns-UUID\n         # \n         # ^^^^^ Leaks found in /run/netns ^^^^^\n```\nAll `podman network create` commands use safename, AFAICT, so this is a difficult one to track down.\n\n* debian-13 : sys podman debian-13 root host sqlite\n  * PR #24041\n    * [09-23 10:26](https://api.cirrus-ci.com/v1/artifact/task/6470503882293248/html/sys-podman-debian-13-root-host-sqlite.log.html#t--00333) in [sys] teardown_suite\n  * PR #23275\n    * [09-18 16:19](https://api.cirrus-ci.com/v1/artifact/task/6180671972966400/html/sys-podman-debian-13-root-host-sqlite.log.html#t--00279) in [sys] teardown_suite\n* fedora-40 : sys podman fedora-40 rootless host boltdb\n  * PR #24007\n    * [09-18 14:54](https://api.cirrus-ci.com/v1/artifact/task/5097768144863232/html/sys-podman-fedora-40-rootless-host-boltdb.log.html#t--00349) in [sys] teardown_suite\n* fedora-40-aarch64 : sys podman fedora-40-aarch64 root host sqlite\n  * PR #24019\n    * [09-19 17:46](https://api.cirrus-ci.com/v1/artifact/task/5401513768517632/html/sys-podman-fedora-40-aarch64-root-host-sqlite.log.html#t--00332) in [sys] teardown_suite\n\n| x | x | x | x | x | x |\n| ---: | ---: | ---: | ---: | ---: | ---: |\n| sys(4) | podman(4) | debian-13(2) | root(3) | host(4) | sqlite(3) |\n|  |  | fedora-40-aarch64(1) | rootless(1) |  | boltdb(1) |\n|  |  | fedora-40(1) |  |  |  |\n",
+    "comments": [
+        {
+            "user": "Luap99",
+            "body": "I saw the flake on https://github.com/containers/podman/pull/24024 which means my netns leak fixes from c/common did not fix it. The good news I see runs before that PR so they did not cause it as well which it is likely a preexisting issue we just discovered with the new leak check.\n\nI think I really need https://github.com/containers/podman/pull/23487 to get a clue here to at least know which container/test leaked it. It kinda sucks that we use a random id and not the container id for the netns files and I am not sure if we can just change it like that."
+        },
+        {
+            "user": "edsantiago",
+            "body": "The flake reproduces pretty regularly (one out of ten CI runs, maybe). Can you suggest a way to instrument #23275 ?"
+        },
+        {
+            "user": "Luap99",
+            "body": "\n> The flake reproduces pretty regularly (one out of ten CI runs, maybe). Can you suggest a way to instrument #23275 ?\n\nIt would be good to get my ebpf PR merged or at leat picked into your PR but this will not help to much until I further instrument the ebpf code to trace the netns umount paths I guess.\n\nThe easiest way would be to log `ls $NETNS_DIR` in each tests teardown then we can at least see where it started, the leak seems to be in the non parallel part so it should be very easy to tell which test leaked it and if it is always the same or something else each time."
+        },
+        {
+            "user": "Luap99",
+            "body": "Well this is convenient, it failed on https://github.com/containers/podman/pull/23487.\n\nhttps://api.cirrus-ci.com/v1/artifact/task/6670456856510464/cleanup_tracer/podman-cleanup-tracer.log\n\n```\nexec   11:06:14.739093 50652    50626    podman       /usr/libexec/podman/netavark --config /run/containers/networks --rootless=false --aardvark-binary=/usr/libexec/podman/aardvark-dns setup /run/netns/netns-d55feec4-37ee-8cb5-a7a6-66ab134a40b4\n```\n\nSo we do setup the netns but there is never a corresponding teardown call which means podman is not failing to remove/unmount the netns it is never calling the netns teardown to begin with which sounds like a rather bad problem."
+        },
+        {
+            "user": "Luap99",
+            "body": "And following the parent pid:\n```\nexec   11:06:14.688240 50626    1        (podman)     /var/tmp/go/src/github.com/containers/podman/bin/podman run --cidfile=/run/container-c_image_iSoxzQW1Mc.service.ctr-id --cgroups=no-conmon --rm --sdnotify=conmon -d --replace --name c_image_iSoxzQW1Mc --label io.containers.autoupdate=image quay.io/libpod/alpine:latest top -d 120\n```\n\nWhich clearly shows this is a container started by systemd (parent pid 1) and it uses `top -d 120` which seems to be only used in test/system/255-auto-update.bats so that seems to narrow it down at least. "
+        },
+        {
+            "user": "Luap99",
+            "body": "```\nexec   11:06:14.739093 50652    50626    podman       /usr/libexec/podman/netavark --config /run/containers/networks --rootless=false --aardvark-binary=/usr/libexec/podman/aardvark-dns setup /run/netns/netns-d55feec4-37ee-8cb5-a7a6-66ab134a40b4\ncmd    11:06:14.739274 50652    50626    /usr/libexec/podman/netavark --config /run/containers/networks --rootless=false --aardvark-binary=/usr/libexec/podman/aardvark-dns setup /run/netns/netns-d55feec4-37ee-8cb5-a7a6-66ab134a40b4 \nexit   11:06:14.745073 50602    1        podman       0 0\nexit   11:06:14.749597 50626    1        podman       0 0\nexit   11:06:14.750965 50652    50626    netavark     0 15\n```\n\nnetavark setup got killed by sigterm but the podman parent somehow still exited 0? Something really strange is going on."
+        },
+        {
+            "user": "edsantiago",
+            "body": "I added `ls netns` to `teardown` for debugging. It just triggered... in `255-auto-update` as you predicted... but in the [validate input](https://api.cirrus-ci.com/v1/artifact/task/5964415101566976/html/sys-podman-fedora-40-aarch64-root-host-sqlite.log.html#t--00185) test??? ??? ??"
+        },
+        {
+            "user": "Luap99",
+            "body": "> I added `ls netns` to `teardown` for debugging. It just triggered... in `255-auto-update` as you predicted... but in the [validate input](https://api.cirrus-ci.com/v1/artifact/task/5964415101566976/html/sys-podman-fedora-40-aarch64-root-host-sqlite.log.html#t--00185) test??? ??? ??\n\nI am pretty sure it prints the teardown output before the test name `podman auto-update - label io.containers.autoupdate=image`, i.e. just look at the last test and this is what I remeber from doing things like that is the past.\nAnd `validate input` doesn't run a single container so there is no way we leak a netns there "
+        },
+        {
+            "user": "Luap99",
+            "body": "So I am super confused by ebpf logs here as the podman exited 0, yet netavark setup was killed by SIGTERM. That alone should cause the podman network setup to error out. And I run a patched netavark that does a 10s sleep and if I kill it with SIGTERM podman reports the error properly.\n\nWhat I noticed though is that in the log case podman exited before netavark. This should not happen.\n```\nexit   11:06:14.749597 50626    1        podman       0 0\nexit   11:06:14.750965 50652    50626    netavark     0 15\n```\n\nI do see that it is possible for podman to exit 0 on sigterm (for likely not very good reasons) and I think this is what happens here. I can only reproduce with run -d, with a attached run it doesn't seem to work.\n\n"
+        },
+        {
+            "user": "edsantiago",
+            "body": "Was seeing this often in my pet-PR runs. Like, half my runs. Made a small change. Haven't seen it yet, in about five runs.\n```diff\ncommit 5eb9a63f112c75bac928a90a8e9f29f22262c8f7\nAuthor: Ed Santiago <santiago@redhat.com>\nDate:   2024-09-25 07:54:25 -0600\n\n    fixme-temporary-skip\n    \n    Signed-off-by: Ed Santiago <santiago@redhat.com>\n\ndiff --git a/test/system/255-auto-update.bats b/test/system/255-auto-update.bats\nindex 359ac5ff32..6bd1025fbc 100644\n--- a/test/system/255-auto-update.bats\n+++ b/test/system/255-auto-update.bats\n@@ -175,2 +175,3 @@ function _confirm_update() {\n @test \"podman auto-update - label io.containers.autoupdate=image\" {\n+    skip \"FIXME TEMPORARY, just to see if other tests leak netns\"\n     since=$(date --iso-8601=seconds)\n```\nThis doesn't prove that it's a bug in the test itself, but it raises an eyebrow. Unfortunately the test is rather hard to understand."
+        },
+        {
+            "user": "edsantiago",
+            "body": "I have a pretty reliable reproducer on my laptop but I can't pretend to understand it. Something is happening asynchronously. Overview:\n```diff\ndiff --git a/test/system/255-auto-update.bats b/test/system/255-auto-update.bats\nindex 8bde211055..3d64a2d1fe 100644\n--- a/test/system/255-auto-update.bats\n+++ b/test/system/255-auto-update.bats\n@@ -18,6 +18,7 @@ function setup() {\n }\n \n function teardown() {\n+    ls -l /run/netns | sed -e \"s/^/# teardown /\" >&3\n     if [[ -e $SNAME_FILE ]]; then\n         while read line; do\n             if [[ \"$line\" =~ \"podman-auto-update\" ]]; then\n@@ -25,7 +26,9 @@ function teardown() {\n                 systemctl stop $line.timer\n                 systemctl disable $line.timer\n             else\n+                ls -l /run/netns | sed -e \"s/^/# before stop $line /\" >&3\n                 systemctl stop $line\n+                ls -l /run/netns | sed -e \"s/^/# after stop $line /\" >&3\n             fi\n             rm -f $UNIT_DIR/$line.{service,timer}\n         done < $SNAME_FILE\n@@ -66,12 +69,12 @@ function generate_service() {\n \n     # Unless specified, set a default command.\n     if [[ -z \"$command\" ]]; then\n-        command=\"top -d 120\"\n+        command=\"top -d $((100 + BATS_SUITE_TEST_NUMBER))\"\n     fi\n \n     # Container name. Include the autoupdate type, to make debugging easier.\n     # IMPORTANT: variable 'cname' is passed (out of scope) up to caller!\n-    cname=c_${autoupdate//\\'/}_$(random_string)\n+    cname=\"c-$(safename)-${autoupdate//\\'/}-$(random_string)\"\n     target_img=\"quay.io/libpod/$target_img_basename:latest\"\n     if [[ -n \"$7\" ]]; then\n         target_img=\"$7\"\n@@ -172,7 +175,7 @@ function _confirm_update() {\n \n # This test can fail in dev. environment because of SELinux.\n # quick fix: chcon -t container_runtime_exec_t ./bin/podman\n-@test \"podman auto-update - label io.containers.autoupdate=image\" {\n+@test \"podman auto-update - label io.containers.autoupdate=imagexxxxxxx\" {\n     since=$(date --iso-8601=seconds)\n     run_podman auto-update\n     is \"$output\" \"\"\n@@ -214,6 +217,11 @@ function _confirm_update() {\n     run_podman container inspect --format \"{{.ID}}\" $ctr_child\n     run_podman container inspect --format \"{{.State.Status}}\" $ctr_child\n     is \"$output\" \"running\" \"child container is in running state\"\n+\n+    ls -l /run/netns | sed -e 's/^/# before container rm /' >&3\n+    run_podman container rm -f -t0 $ctr_child\n+    run_podman container rm -f -t0 $ctr_parent\n+    ls -l /run/netns | sed -e 's/^/# after container rm /' >&3\n }\n \n @test \"podman auto-update - label io.containers.autoupdate=image with rollback\" {\n```\n(Not all diffs are relevant for this exercise. And I'm really tired, banking hours for my long lunch tomorrow, so I may be making stupid mistakes in my copy-paste-edits. I think the key is the `container rm` commands at the end of the test. They have to be IN THAT ORDER. If they're in reverse order, I can't get a test failure.)\n\nAnyhow then\n```console\n$ while :;do time hack/bats --root -T 255:xxxxx || break;done\n```\n(the `xxxxx` is to make it easy to run just that test)\n\nHTH"
+        },
+        {
+            "user": "Luap99",
+            "body": "thanks I am able to reproduce with that. At least in my ebpf log it didn't seem to have to do anything with container rm. It rather looks like start is exiting without actually doing anything"
+        },
+        {
+            "user": "Luap99",
+            "body": "```diff\ndiff --git a/libpod/container_internal_linux.go b/libpod/container_internal_linux.go\nindex aaeb75d3cc..38119a604c 100644\n--- a/libpod/container_internal_linux.go\n+++ b/libpod/container_internal_linux.go\n@@ -19,6 +19,7 @@ import (\n        \"github.com/containers/common/pkg/cgroups\"\n        \"github.com/containers/common/pkg/config\"\n        \"github.com/containers/podman/v5/libpod/define\"\n+       \"github.com/containers/podman/v5/libpod/shutdown\"\n        \"github.com/containers/podman/v5/pkg/rootless\"\n        spec \"github.com/opencontainers/runtime-spec/specs-go\"\n        \"github.com/opencontainers/runtime-tools/generate\"\n@@ -67,6 +68,9 @@ func (c *Container) prepare() error {\n                tmpStateLock                    sync.Mutex\n        )\n \n+       shutdown.Inhibit()\n+       defer shutdown.Uninhibit()\n+\n        wg.Add(2)\n \n        go func() {\n```\n\n@edsantiago can you give this is try on your system? It seems to be working for me with your reproducer and without it it failed rather quickly and I am now at 10mins so I think it is working"
+        },
+        {
+            "user": "edsantiago",
+            "body": "Well, it flaked after a long time, but in a new way:\n```\n   [07:58:52.466637149] # bin/podman auto-update --rollback=false --format {{.Unit}},{{.Image}},{{.Updated}},{{.Policy}}\n   [07:58:58.765753277] Trying to pull quay.io/libpod/alpine:latest...\n   Getting image source signatures\n   Copying blob sha256:9d16cba9fb961d1aafec9542f2bf7cb64acfc55245f9e4eb5abecd4cdc38d749\n   Copying config sha256:961769676411f082461f9ef46626dd7a2d1e2b2a38e6a44364bcbecf51e66dd4\n   Writing manifest to image destination\n   container-c-t1-q1rvsuze-image-4lHp5xtQ7n.service,quay.io/libpod/alpine:latest,true,registry\n   container-c-t1-q1rvsuze-image-I84N1vODlK.service,quay.io/libpod/alpine:latest,true,registry\n   \n   [07:58:58.784068338] # bin/podman events --filter type=system --since 2024-09-26T07:58:52-06:00 --stream=false\n   [07:58:58.868541192] 2024-09-26 07:58:52.535489083 -0600 MDT system auto-update\n   \n   [07:58:58.883055986] # bin/podman inspect --format {{.Image}} c-t1-q1rvsuze-image-I84N1vODlK\n   [07:58:58.945232405] 961769676411f082461f9ef46626dd7a2d1e2b2a38e6a44364bcbecf51e66dd4\n   \n   [07:58:58.952689377] # bin/podman container inspect --format {{.ID}} c-t1-q1rvsuze-image-4lHp5xtQ7n\n   [07:58:59.024484419] Error: no such container c-t1-q1rvsuze-image-4lHp5xtQ7n\n```"
+        },
+        {
+            "user": "Luap99",
+            "body": "Well I do not understand the flow of the test exactly to see if this is a problem in the test or podman, regardless I would call the netns thing fixed, opened https://github.com/containers/podman/pull/24082 which some other cleanup "
+        }
+    ]
+}

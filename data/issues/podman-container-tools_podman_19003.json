@@ -1,0 +1,69 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 19003,
+    "title": "Add support for `VolumeName` and `NetworkName` options in Quadlet",
+    "state": "closed",
+    "labels": [
+        "Good First Issue",
+        "kind/feature",
+        "quadlet",
+        "locked - please file new issue/PR"
+    ],
+    "user": "deuill",
+    "body": "### Feature request description\n\nCurrently, Podman volumes and networks created by Quadlet/`podman-systemd` units are automatically named based on the unit name, with a `systemd-$NAME` convention, similar to container units. However, unlike container units (which allow for overriding this name via the `ContainerName` directive), volume and network units do not allow for this sort of name override.\n\nHaving such directives (e.g. `VolumeName` and `NetworkName` for `.volume` and `.network` units, respectively) would help with transitioning existing systems to Quadlet without wrangling with naming conventions, an especially tricky issue with volumes (which cannot be used and migrated between simultaneously in any reasonable manner).\n\n### Suggest potential solution\n\nQuadlet should be extended with support for `VolumeName` directives for `.volume` units. and `NetworkName` for `.network` units, which will set the `name` parameter for the underlying `podman volume/network create ...` (or internal API equivalent) calls.\n\n### Have you considered any alternatives?\n\nThe only reasonable alternative is preparing production environments for migrating between volumes and networks with different names, which may not be feasible in larger deployments, and impedes clean migration to Quadlet.\n\n### Additional context\n\n_No response_",
+    "comments": [
+        {
+            "user": "rhatdan",
+            "body": "Interested in opening a PR to make the change?"
+        },
+        {
+            "user": "deuill",
+            "body": "> Interested in opening a PR to make the change?\n\nSure thing, I've tried my hand at closing this in #19006 "
+        },
+        {
+            "user": "ygalblum",
+            "body": "I've also written in the PR:\nThis is very problematic. The reason is that Quadlet relies on these names in order to create the dependency between the units created for the `.container` or `.kube` files and ones created for the `.network` or `.volume` files\n"
+        },
+        {
+            "user": "deuill",
+            "body": "I'll have to dig into the implementation here, but I assume you mean how Quadlet will add `Wants=` dependencies for `Volume=foo.volume:/mnt` directives? My impression was that these would target the unit name, not the (implied) volume/network name, though I understand this would require filesystem traversal rather than a simple `volume/network exists` call.\n\nAssuming the feature request itself is desirable, is there a direction you'd like to see me go here? Alternatively, I can dig in and see what sort of implementation might work -- including perhaps parsing `.network` and `.volume` dependencies in order to find possible `NetworkName`/`VolumeName` directives before using the implied names."
+        },
+        {
+            "user": "ygalblum",
+            "body": "I'll explain for `.volume`, but the same applies for `.network`.\n\nFirst, sorry, my comment was incorrect. I referred to the systemd dependency (which is not really affected) when in fact the actual issue is with the translation between the value of the `Volume` key and real name of the volume.\n\nIn the current implementation, for a `$NAME.volume` file, Quadlet creates a systemd unit file called `$NAME-volume.service` which creates a podman volume named `systemd-$NAME`.\n\nIn order to use said volume, the `.container` file should state `Volume=$NAME.volume`. Quadlet will then replace the name of the volume passed to the `podman run` command to `systemd-$NAME` and add a systemd dependency with `Requires=$NAME-volume.service` and `After=$NAME-volume.service`.\n\nYou can see the implementation here: https://github.com/containers/podman/blob/main/pkg/systemd/quadlet/quadlet.go#L1206.\n\nYou change breaks this consistency. \n\nIn order to indicate to Quadlet that the volume is in fact a Quadlet based volume, the user will still need to pass `$NAME.volume` as the source. Quadlet will then need to look for this `$NAME.volume` and parse it to see if its name was set. Currently, each file is processes separately. Your suggestion will require transferring knowledge between units.\n\nI'm not sure I understand the use case of the problem you are solving here. Can you please provide an example?"
+        },
+        {
+            "user": "deuill",
+            "body": "> I'll explain for `.volume`, but the same applies for `.network`.\n> \n> First, sorry, my comment was incorrect. I referred to the systemd dependency (which is not really affected) when in fact the actual issue is with the translation between the value of the `Volume` key and real name of the volume.\n> \n> In the current implementation, for a `$NAME.volume` file, Quadlet creates a systemd unit file called `$NAME-volume.service` which creates a podman volume named `systemd-$NAME`.\n> \n> In order to use said volume, the `.container` file should state `Volume=$NAME.volume`. Quadlet will then replace the name of the volume passed to the `podman run` command to `systemd-$NAME` and add a systemd dependency with `Requires=$NAME-volume.service` and `After=$NAME-volume.service`.\n> \n> You can see the implementation here: https://github.com/containers/podman/blob/main/pkg/systemd/quadlet/quadlet.go#L1206.\n> \n> You change breaks this consistency.\n> \n> In order to indicate to Quadlet that the volume is in fact a Quadlet based volume, the user will still need to pass `$NAME.volume` as the source. Quadlet will then need to look for this `$NAME.volume` and parse it to see if its name was set. Currently, each file is processes separately. Your suggestion will require transferring knowledge between units.\n\nIndeed, yeah, though this doesn't seem an insurmountable hurdle -- not sure if there's any precedent though. Indeed, it does seem that `handleStorageSource` and `addNetwork` functions accept the full unit files, so it should just be a matter of looking up  `VolumeName` and `NetworkName` keys from within there.\n\n> I'm not sure I understand the use case of the problem you are solving here. Can you please provide an example?\n\nSimply enough, I want to move to managing existing volumes and networks in Quadlet rather than with a [home-grown](https://github.com/deuill/coreos-home-server/blob/trunk/host/base/systemd/container-volume%40.service) [kludge](https://github.com/deuill/coreos-home-server/blob/trunk/host/base/systemd/container-network%40.service), but doing so requires that I:\n\n  1. Have all relevant containers join both existing and new (Quadlet-based) networks, via duplicate `Network=example` and `Network=example.network` definitions in the `Container` unit, then probably phase out the existing uses.\n  2. Somehow migrate data between existing and new volumes, and move `Container` units to `Volume=example.volume` definitions rather than `Volume=example` definitions.\n\nAFAICT there's no reason that Quadlet networks and volumes can't be used to manage existing resources, assuming options used aren't incompatible. This would then allow for capturing and improvements to these units, as well as the obvious benefits of automatic dependency chains."
+        },
+        {
+            "user": "ygalblum",
+            "body": "If I understand correctly, the resources already exist in the system, right?\n\nI'm asking because, the `.volume` and `.network` units only handle the creation of the volume/network. You can see that they only have `ExexStart`, but no `ExecStop`. In addition, they act as noops as of the second run. So, they won't change an existing resource.\n\nSo, if these resources already exist in the system, why would you need Quadlet units for them?"
+        },
+        {
+            "user": "deuill",
+            "body": "The resources (volumes and networks) that I'm looking to cover do already exist in the host system, correct -- however, they would not exist on new host systems that utilize the same common `coreos-home-server`configuration, which would force me to either leave these resources out of configuration due‎ to \"legacy\" considerations, or to somehow migrate existing systems over to Quadlet, an issue that is harder to solve in the absence of consistent naming.\n\nIn addition, automatic dependency definitions between container and volume/network units ‎is an incredibly useful feature, and only possible via Quadlet-managed resources."
+        },
+        {
+            "user": "ygalblum",
+            "body": "OK. So, let's think what we need to do in order to support this change. \n\nIn the [process method](https://github.com/containers/podman/blob/main/cmd/quadlet/main.go#L317), Quadlet first gets the entire list of units from all of its input directories and then processes each file separately according  to whichever order the list got filled.\n \nBut, in order to support non-calculated names for Networks and Volumes, Quadlet will have to first process the corresponding files (`.volume` and `.network`) and maintain a map between each file and the name of the resource it created (given or calculated).\nOnce done with these files, it will process the `.container` and `.kube` files. This time when processing the source volume or network, instead of assuming the name was calculated, the process will look for the name in the map created in the step before.\n\nOne question is how to handle a case in which the file was not found in the map. Should Quadlet fail or assume auto-calculation? On one hand failing sounds reasonable because the service will be pointing to an non-existing service and resource. But, this will be a behavior change.\n\nWDYT?"
+        },
+        {
+            "user": "deuill",
+            "body": "Hi, apologies for the late reply here. The approach looks feasible, yeah, I just need to clarify a few details before I dive in: \n\n  - At which point do we want to try to determine the `NetworkName`/`VolumeName` values? I suppose this might happen in `process()`, after `loadUnitsFromDir()` is found to have completed successfully, but before the units themselves are parsed.\n  - How do we want to pass state down to `ConvertContainer()` and `ConvertKube()` (and then `addNetworks()` and `handleStorageSource()`? I suppose the only reasonable way is adding a parameter in each function for a `map[string]string` or similar, or perhaps extending the `parser.UnitFile` with some additional field.\n\nThe implementation here might be slightly more idiomatic if the various `Convert` functions were placed under a common type representing the Quadlet parser state, say:\n\n```go\npackage quadlet\n\ntype Quadlet struct {\n    Units map[string]*parser.UnitFile\n}\n```\n\nAnd then at least avoid the pain of passing state around explicitly, though I suppose this might be too much refactor?"
+        },
+        {
+            "user": "ygalblum",
+            "body": "Not sure how you'd use your suggested type. If you pass the entire map of units, you will need to also pass the name of the unit the `convert` method should target.\nAlso, currently, a `parser.UnitFile` object represents a systemd unit file without additional fields. I'm not sure that adding fields that are not meant to be part of a systemd unit file will make it more readable.\nHaving said that, I agree that passing around another map is not that pretty either.\n\nMy suggestion is:\n\n- Maintain the unit name to resource name in `process`\n- Add a return field to `ConvertVolume` and `ConvertNetwork` which is the name of the resource and update the map accordingly.\n- Pass the map to `ConvertContainer` and `ConvertKube`. \n- These methods can pass the map along to `addNetworks` and `handleStorageSource`\n- Since the unit names are unique (due to their extension), you can maintain a single map\n\nWDYT?"
+        },
+        {
+            "user": "deuill",
+            "body": "Sounds good -- the idea behind having state in a receiver would be that we could, having the target volume/network unit name, derive the `VolumeName`/`NetworkName` values (if any) by direct calls to `Lookup()`, though I agree that we'd still need to then either have `addNetworks` and `handleStorageSource` be under the receiver, or pass the concrete name down somehow.\n\nThat said, your approach is better -- I'll go with that. Thanks for the considerate feedback!"
+        },
+        {
+            "user": "deuill",
+            "body": "Just force-pushed some changes -- I'm having trouble running E2E tests on local so I'm hoping I've caught everything, but might need to push some additional changes depending on test results:\n\nhttps://github.com/containers/podman/compare/14d89f4d1a10de89906b4e84f685ef9fdee360e2..cbe51ef20d43cb50d840839dbab6970acd5fd878\n\nSome of the function signatures are getting a bit unwieldy, but I guess this might all get swooped under some future refactor (as always happens). Feel free to drop in your comments!"
+        }
+    ]
+}

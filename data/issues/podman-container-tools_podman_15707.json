@@ -1,0 +1,55 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 15707,
+    "title": "CreateExitCommandArgs's podmanPath can be invalid",
+    "state": "closed",
+    "labels": [
+        "kind/bug",
+        "locked - please file new issue/PR"
+    ],
+    "user": "KenMacD",
+    "body": "/kind bug\n\n**Description**\n\nThe exit command created by `CreateExitCommandArgs` uses `os.Executable()`. Unfortunately this misses the context in which `podman` was originally called.\n\nIn NixOS the `podman` executable is actually named `podman-unwrapped`, and a wrapper exists named `podman` that sets paths to dependencies like `crun`. The end result is that the exit-command call doesn't actually work and the container takes 10 seconds to shutdown.",
+    "comments": [
+        {
+            "user": "vrothberg",
+            "body": "Thanks for reaching out, @KenMacD.\n\nCan you elaborate on what the `podman` wrapper does in detail?  Is it setting env variables or global flags?\n\nCc: @mheon"
+        },
+        {
+            "user": "KenMacD",
+            "body": "Thanks @vrothberg. I'll try to summarize how NixOS works.\n\nNix doesn't keep binaries in the normal '/bin' layout. Instead they're all in `/nix/store/<package-hash>/...`. One benefit to this is different programs can have the same dependency, but can easily use different versions. Another is that there's never a time when a program could pick up an upgraded dependency.\n\nFor shared library dependencies, binaries pass through a `patchelf` step that writes the paths needed. For example an `ldd` on the podman binary shows:\n\n```\nlibc.so.6 => /nix/store/fz54faknl123dimzz6jsppw193lx2mip-glibc-2.35-163/lib/libc.so.6\n```\n\nFor other dependencies typically a 'wrapper' is used. It sets up the context for the program to run, which typically means setting the `PATH` for any other programs the binary calls. An abridged version of the `podman` wrapper that's was created on my system is:\n\n```bash\n#! /nix/store/1b9p07z77phvv2hf6gm9f28syp39f1ag-bash-5.1-p16/bin/bash -e\nexport CONTAINERS_HELPER_BINARY_DIR='/nix/store/aiydxb3j9ayzfv4yj5jsmrkwdalrvfwm-podman-helper-binary-wrapper-4.2.0/bin'\nPATH=${PATH/':''/nix/store/lnq67x7q82x439lmwkj7y0h0b69v9f0k-iproute2-5.19.0/bin'':'/':'}\nPATH=${PATH/':''/nix/store/18lj588mk9p4l88wp5rk34wm2vvdvh0p-iptables-1.8.8/bin'':'/':'}\nPATH=${PATH/':''/nix/store/viw5nqs57yhj82667d7d51p5jvw8n66r-util-linux-2.38-bin/bin'':'/':'}\nPATH=${PATH/':''/nix/store/b2zd9l6cdry5bj9hrrx564fvrivk9c6y-fuse-overlayfs-1.9/bin'':'/':'}\nPATH=${PATH/':''/nix/store/lripm03yiij7x5r0fdxqigbgfi8yypkw-slirp4netns-1.2.0/bin'':'/':'}\nPATH=${PATH/':''/nix/store/kilk1wxzlv9cc6cn4iymxxnaln1zgram-conmon-2.1.4/bin'':'/':'}\nPATH=${PATH/':''/nix/store/kybs0p0bng7afkykx42vg1k8xgjr88j7-crun-1.5/bin'':'/':'}\nPATH=${PATH/':''/nix/store/v3dbzlp7bj1qx9qns7zs8kw4h3fp3s79-runc-1.1.4/bin'':'/':'}\nexport PATH\nexec \"/nix/store/9d10spvn805r02693v3n56a9haafnz2j-podman-4.2.0/bin/podman\"  \"$@\"\n```\n\nSo as you can see, I could have many versions of any of these other programs, but the version used by this build of `podman` will always be these pinned dependencies.\n\n-----\n\nSo back to the issue. It happens because there's an execute path of: `podman-wrapper -> conmon -> podman -> crun`. Conmon calls the podman binary rather than the wrapper, so podman can't find crun and fails.\n\nI'm not sure what the best solution to this kind of issue is. As a workaround it's probably possible that the podman-wrapper could be removed with some patches in the packaging. To fix the larger 'context' issue maybe podman should have an option to specify what podman path to call? Or maybe conmon needs to take in `--exit-command-env` to go with the `--exit-command-arg` options (so $PATH could be provided)? Or maybe you can think of something even better.\n\nThanks, and if I can provide any further information please just let me know."
+        },
+        {
+            "user": "vrothberg",
+            "body": "Thanks for elaborating, @KenMacD, that was quite helpful.\n\nUltimately, we are a bit in between a rock and a hard place.  If we would execute only the `podman` in $PATH, we'd break backwards compatibility.  The only way I see (at the moment) is to inject $PATH into conmon."
+        },
+        {
+            "user": "mheon",
+            "body": "Executing the Podman in `$PATH` also breaks in cases where you have two separate Podman versions installed; we need to use the exact binary we were invoked with to make sure the environment we use for cleanup is as close as possible to the environment we used for setting up the container in the first place."
+        },
+        {
+            "user": "mheon",
+            "body": "Adding environment variables to the exit command would seem to be the safest option, but that will require Conmon changes."
+        },
+        {
+            "user": "Luap99",
+            "body": "Can't we just keep the environment variables for conmon? Is there any reason to unset them specifically? Not using $PATH seems already problematic on \"normal\" distros considering that the cleanup process calls network cleanup which will invoke iptables for example."
+        },
+        {
+            "user": "rhatdan",
+            "body": "Isn't conmon executing `podman-unwrapped cleanup ...`"
+        },
+        {
+            "user": "KenMacD",
+            "body": "@rhatdan sorry, I don't fully understand your question. Yes conmon is running `podman-unwrapped ...`, but then `podman-unwrapped` is unable to find the runtime because it doesn't have the same `$PATH`.\n\nAs a test I added the following patch to `v4.2.0` to pass the PATH to conmon, and it seems to work. Not sure of the implications though.\n\n```diff\n--- a/libpod/oci_conmon_linux.go\n+++ b/libpod/oci_conmon_linux.go\n@@ -1297,6 +1297,7 @@ func (r *ConmonOCIRuntime) configureConmonEnv(runtimeDir string) []string {\n \tif ok {\n \t\tenv = append(env, fmt.Sprintf(\"CONTAINERS_CONF=%s\", conf))\n \t}\n+\tenv = append(env, fmt.Sprintf(\"PATH=%s\", os.Getenv(\"PATH\")))\n \tenv = append(env, fmt.Sprintf(\"XDG_RUNTIME_DIR=%s\", runtimeDir))\n \tenv = append(env, fmt.Sprintf(\"_CONTAINERS_USERNS_CONFIGURED=%s\", os.Getenv(\"_CONTAINERS_USERNS_CONFIGURED\")))\n \tenv = append(env, fmt.Sprintf(\"_CONTAINERS_ROOTLESS_UID=%s\", os.Getenv(\"_CONTAINERS_ROOTLESS_UID\")))\n```"
+        },
+        {
+            "user": "mheon",
+            "body": "That seems like a perfectly reasonable patch. I thought we'd need actual Conmon changes, but it does make sense that it already passes along the environment variables it knows about."
+        },
+        {
+            "user": "rhatdan",
+            "body": "Please open a PR?"
+        }
+    ]
+}

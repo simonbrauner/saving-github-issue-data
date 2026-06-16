@@ -1,0 +1,76 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 18111,
+    "title": "Podman relies in config on specific qemu version to start a machine",
+    "state": "closed",
+    "labels": [
+        "kind/bug",
+        "machine",
+        "locked - please file new issue/PR"
+    ],
+    "user": "hmt",
+    "body": "### Issue Description\n\nThe config that is set up has this line:\n\n    \"file=/opt/homebrew/Cellar/qemu/7.2.0/share/qemu/edk2-aarch64-code.fd,if=pflash,format=raw,readonly=on\",\n\nHowever, my quemu has been updated to 7.2.1 and is therefore not available anymore. I manually updated the path, otherwise I wouldn't be able to start the machine.\n\n### Steps to reproduce the issue\n\nSteps to reproduce the issue\n1. install podman and init a new machine\n2. update quemu to a different version\n3. be unable to start machine because of different quemu versions\n\n\n### Describe the results you received\n\nCan't start machine\n\n### Describe the results you expected\n\nmachine starts\n\n### podman info output\n\n```yaml\n~ podman machine start\nStarting machine \"podman-machine-default\"\nWaiting for VM ...\nError: qemu exited unexpectedly with exit code 1, stderr: qemu-system-aarch64: -drive file=/opt/homebrew/Cellar/qemu/7.2.0/share/qemu/edk2-aarch64-code.fd,if=pflash,format=raw,readonly=on: Could not open '/opt/homebrew/Cellar/qemu/7.2.0/share/qemu/edk2-aarch64-code.fd': No such file or directory\n```\n```\n\n\n### Podman in a container\n\nNo\n\n### Privileged Or Rootless\n\nNone\n\n### Upstream Latest Release\n\nYes\n\n### Additional environment details\n\nM2 MacBook Air\n\n### Additional information\n\n_No response_",
+    "comments": [
+        {
+            "user": "septemhill",
+            "body": "M1 Macbook Pro has the same issue. \n\nedit:\n```\nStarting machine \"podman-machine-default\"\nWaiting for VM ...\nError: qemu exited unexpectedly with exit code 1, stderr: qemu-system-aarch64: -drive file=/opt/homebrew/Cellar/qemu/7.2.0/share/qemu/edk2-aarch64-code.fd,if=pflash,format=raw,readonly=on: Could not open '/opt/homebrew/Cellar/qemu/7.2.0/share/qemu/edk2-aarch64-code.fd': No such file or directory\n```"
+        },
+        {
+            "user": "Luap99",
+            "body": "What podman version is this?\nMaybe caused by: https://github.com/containers/podman/pull/17027"
+        },
+        {
+            "user": "paganellif",
+            "body": "Same problem with MacBook Pro M1 running Podman version 4.4.4 after updating qemu to version 7.2.1.\n\nI was only able to start a Podman Machine by deleting the old one and creating a new one."
+        },
+        {
+            "user": "snejokeee",
+            "body": "Same problem with MacBook M1 Air.\nsymlink works for me as a crutch `ln -s /opt/homebrew/Cellar/qemu/7.2.1 /opt/homebrew/Cellar/qemu/7.2.0`"
+        },
+        {
+            "user": "tmoschou",
+            "body": "I'm on latest version 4.5.0 (Though can't be sure what version created the config file)\n\nIf a fully qualified path is required, can Podman just use this path, without fully resolving all symlinks along the path - it will point to the current version of qemu installed\n\n```\n$ echo \"$(brew --prefix qemu)/share/qemu/edk2-aarch64-code.fd\"\n/opt/homebrew/opt/qemu/share/qemu/edk2-aarch64-code.fd\n```"
+        },
+        {
+            "user": "acidghost",
+            "body": "As a workaround you __don't have to delete te VM__. You can just update the machine configuration file.\n\nThe file can be found by `podman machine inspect | jq -r '.[].ConfigPath.Path'`.\nThen just replace `/opt/homebrew/Cellar/qemu/<version>` with `/opt/homebrew/qemu`."
+        },
+        {
+            "user": "baude",
+            "body": "oh my, thats no good ... lets fix this up ok @ashley-cui ?"
+        },
+        {
+            "user": "Luap99",
+            "body": "@baude I think #17027 caused this, I suggest we just revert that?\ncc @n8henrie "
+        },
+        {
+            "user": "n8henrie",
+            "body": "Thanks for the cc and sorry for the trouble.  I can probably test later today, but it would make sense for my PR to cause this change -- in one case (nix users) not resolving the symlink was the cause of the trouble, in another case (homebrew users) resolving it probably is. Homebrew users likely much more plentiful than nix users so reasonable to optimize for that case, though it sure would be nice to solve for both. "
+        },
+        {
+            "user": "n8henrie",
+            "body": "Installed qemu from homebrew and using this as  a little test script:\n\n```bash\n#!/usr/bin/env bash\n\nset -Eeuf -o pipefail\nshopt -s inherit_errexit\nset -x\n\nmain() {\n  (\n    podman machine stop\n    podman machine rm -f\n    rm -r ~/.config/containers/\n    make clean\n  ) || true\n  make podman-remote\n  mv bin/darwin/podman bin/podman\n  export CONTAINERS_HELPER_BINARY_DIR=$(dirname \"$(type -p gvproxy)\")\n  bin/podman machine init\n  bin/podman machine start\n  grep edk2-aarch64-code.fd ~/.config/containers/podman/machine/qemu/podman-machine-default.json\n}\nmain \"$@\"\n```\n\nCurrent `main` I get:\n```\n\"file=/opt/homebrew/Cellar/qemu/8.0.0/share/qemu/edk2-aarch64-code.fd,if=pflash,format=raw,readonly=on\"\n```\nafter `git revert --no-commit  6b6458916eaa51f0dbbcfeccd740706697697ad3`, I get:\n\n```\n\"file=/opt/homebrew/share/qemu/edk2-aarch64-code.fd,if=pflash,format=raw,readonly=on\",\n```\n\nSo as suspected reverting that commit should fix this issue.\n\nI suspect it may re-break:\n\n- https://github.com/containers/podman/issues/12379\n- https://github.com/containers/podman/issues/13394\n- https://github.com/NixOS/nixpkgs/issues/169118\n- https://github.com/NixOS/nixpkgs/pull/163015\n- https://github.com/containers/podman/issues/12379\n\nCould we revert https://github.com/containers/podman/pull/17027, re-open https://github.com/containers/podman/issues/17026, and I'll try to look for a solution there?"
+        },
+        {
+            "user": "ashley-cui",
+            "body": "Thanks for looking into it, @n8henrie! Feel free to open a PR to revert https://github.com/containers/podman/pull/17027, and I'll re-open https://github.com/containers/podman/issues/17026"
+        },
+        {
+            "user": "Advantechnica",
+            "body": "I had this same error and managed to resolve by performing the following:\n\n1. podman machine list\n2. podman machine rm podman-machine-default\n3. podman init\n\nNow my issue is resolved."
+        },
+        {
+            "user": "sroecker",
+            "body": "> 3\\. podman init\n\n> podman machine init"
+        },
+        {
+            "user": "DrunkenBeetle",
+            "body": "Do we still need to drop and re-create the podman machine? I'm on version 4.6.1 and the qemu path in the config file for my default machine still points to a versioned path `8.0.0`, but when removing and re-creating the machine the qemu path now points to the proper symlink `/opt/homebrew/share/qemu/edk2-aarch64-code.fd`"
+        },
+        {
+            "user": "tmoschou",
+            "body": "> Do we still need to drop and re-create the podman machine?\n\nIf you have updated qemu via brew to a newer version, you will either need to drop and re-create the machine or edit the config file. You can check the installed version with\n```\n$ readlink -f $(brew --prefix qemu)\n/opt/homebrew/Cellar/qemu/8.0.4\n```\n\nI've been using the following command to patch the config file without having to drop and recreate the machine.\n```sh\n/usr/bin/sed -E -i \".$(date +'%F@%T')~\" 's,/Cellar/qemu/[^/]+,/opt/qemu,' \\\n  \"$(podman machine inspect --format '{{ .ConfigPath.Path }}')\"\n```"
+        }
+    ]
+}

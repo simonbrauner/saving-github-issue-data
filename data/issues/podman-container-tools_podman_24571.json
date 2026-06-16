@@ -1,0 +1,38 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 24571,
+    "title": "pod checkpoint/restore - incomplete restore?",
+    "state": "open",
+    "labels": [
+        "flakes"
+    ],
+    "user": "edsantiago",
+    "body": "new e2e test flake:\n```\n           [It] podman checkpoint and restore container out of and into pod (net,uts,pid)\n...\n           # podman [options] pod create --name test_pod --share net,uts,pid\n           2d3a6acebc57859090f43a10ada336d7112ab1370e9b58d0147e8b31e5bafc1b\n           # podman [options] container restore --pod 2d3a6acebc57859090f43a10ada336d7112ab1370e9b58d0147e8b31e5bafc1b -i /tmp/CI_q0NH/podman-e2e-162141281/subtest-687432410/checkpoint-e0242610380e2cacb60e6b5b344a4762ddc945a6eb0f968bb9cfbb2b31dec9ec.tar.gz\n           e0242610380e2cacb60e6b5b344a4762ddc945a6eb0f968bb9cfbb2b31dec9ec\n           # podman [options] ps -q\n           5a3fadf99b88\n...\n   FAILS - expected two lines of output\n```\nSeen twice in the last few days. It could easily be a bug in the test itself: please note that **pod checkpoint/restore is new** as of crun-1.18. This is a test that has been skipped for years, except for runc.\n\n\n* fedora-41 : int podman fedora-41 root host sqlite\n  * PR #24560\n    * [11-14 06:57](https://api.cirrus-ci.com/v1/artifact/task/5232547683106816/html/int-podman-fedora-41-root-host-sqlite.log.html#t--Podman-checkpoint-podman-checkpoint-and-restore-container-out-of-and-into-pod--net-uts-pid---1) in Podman checkpoint podman checkpoint and restore container out of and into pod (net,uts,pid)\n  * PR #24534\n    * [11-11 17:09](https://api.cirrus-ci.com/v1/artifact/task/4547648340885504/html/int-podman-fedora-41-root-host-sqlite.log.html#t--Podman-checkpoint-podman-checkpoint-and-restore-container-out-of-and-into-pod--net-uts-pid---1) in Podman checkpoint podman checkpoint and restore container out of and into pod (net,uts,pid)\n\n| x | x | x | x | x | x |\n| ---: | ---: | ---: | ---: | ---: | ---: |\n| int(2) | podman(2) | fedora-41(2) | root(2) | host(2) | sqlite(2) |\n",
+    "comments": [
+        {
+            "user": "edsantiago",
+            "body": "This actually reproduces reliably on my f40 laptop with `crun-1.18.2-1` from updates-testing. I think this is only working in CI by some miracle of slow-CI-VM timing. 100% reliable reproducer:\n```bash\n#!/bin/bash\n\nset -e\n\n# Clean slate\nbin/podman rm -f -a -t0\nbin/podman pod rm -a\n\nbin/podman pod create --name foo --share net,uts,pid\nbin/podman run -d --pod foo --name c_foo quay.io/libpod/testimage:20241011 top\nbin/podman container checkpoint -e /tmp/foo.tar.gz c_foo\n\n# Create a new pod\nbin/podman pod rm foo\nbin/podman pod create --name foo --share net,uts,pid\nbin/podman container restore --pod foo -i /tmp/foo.tar.gz\n\n# There should be two containers running: infra and top.\necho\nbin/podman ps -a\n```\nInvocation:\n```console\n$ sudo ./foo.sh\n775e8b2b618eec71b4be130605b5a854ab6c6493c1e7b7c082a75b88bb7ae991\n799179c00f1283c30e0620dddcf5baeca4a3ee7fbeaa624fbe57c5293f16fc0f\ne905309a80bd8bb6fe4a8f8d528e4e664a12a57bc787e02d895e26b8ed33f04e\nc_foo\n799179c00f1283c30e0620dddcf5baeca4a3ee7fbeaa624fbe57c5293f16fc0f\n40ec4511d1d451704b86ce4d8daa85c358913c6f7e718a9bb5edf1a34888d848\ne905309a80bd8bb6fe4a8f8d528e4e664a12a57bc787e02d895e26b8ed33f04e\n\nCONTAINER ID  IMAGE                                        COMMAND     CREATED                 STATUS                             PORTS       NAMES\nf831fcc8620c  localhost/podman-pause:5.4.0-dev-1731614350              Less than a second ago  Up Less than a second                          40ec4511d1d4-infra\ne905309a80bd  quay.io/libpod/testimage:20241011            top         Less than a second ago  Exited (1) Less than a second ago              c_foo\n```\n...and then what I think might be a hint:\n```console\n$ sudo bin/podman logs e905\ntop: can't open '/proc': Permission denied\n```\n@rst0git PTAL"
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "rst0git",
+            "body": "I was able to replicate this error locally and it looks like `crun` doesn't use the correct SELinux mount context when creating mounts such as `/proc` for the restored container.\n\nI will try to open a pull request with a fix for this problem soon.\n\ncc: @giuseppe "
+        },
+        {
+            "user": "rst0git",
+            "body": "@edsantiago The same error occurs with both `runc` and `crun`.\n\nIt looks like Podman (incorrectly) restores the SELinux labels from the checkpoint, instead of specifying the SELinux labels of the new Pod for the restored container."
+        },
+        {
+            "user": "Luap99",
+            "body": "This is still happening quite often in CI.\nhttps://api.cirrus-ci.com/v1/artifact/task/5498409928359936/html/int-podman-rawhide-root-host-sqlite.log.html#t--Podman-checkpoint-podman-checkpoint-and-restore-container-out-of-and-into-pod--net-uts-pid---1\n\n\n@rst0git Do you ever worked on patch for this? sounds like you already found the root cause."
+        },
+        {
+            "user": "Luap99",
+            "body": "Test is skipped with https://github.com/containers/podman/pull/25856/commits/0849cbcf83c355e8d36399e823e178f073750c70 as it is flaking to much, if someone fixes the bug please make sure to remove the skip again."
+        }
+    ]
+}

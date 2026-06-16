@@ -1,0 +1,95 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 2744,
+    "title": "Optionally skip the built-in bind mounts (eg., /etc/resolv.conf)",
+    "state": "closed",
+    "labels": [
+        "kind/feature",
+        "locked - please file new issue/PR"
+    ],
+    "user": "debarshiray",
+    "body": "/kind feature\n\n**Description**\n\nCurrently `podman start` bind mounts a built-in list of standard files from the host into the container. While those are definitely good defaults, it's sometimes desirable to skip some of them. For example, `/etc/resolv.conf` can change on the host due to changes in the network - moving from one wireless access point to another, etc.. When that happens, and the host OS updates its `/etc/resolv.conf` via an atomic rename, the changes aren't propagated into the container's bind mounted copy because the original is now a separate file with a different inode.\n\nThis is an important use-case for the Silverblue [toolbox](https://github.com/debarshiray/toolbox).\n\nFlatpak containers solve this by having `/etc/resolv.conf` be a symbolic link to `/run/host/monitor/resolv.conf`, where `/run/host/monitor` is a bind mount from the host that contains updated copies of `/etc/resolv.conf` and friends. The host usually has the copies in `$XDG_RUNTIME_DIR/.flatpak-helper/monitor` and they are kept updated by a small D-Bus session service using `inotify` watches.\n\nThe toolbox can use the same mechanism by waking up the D-Bus session service [1], and setting up the necessary bind mounts and symbolic links.\n\nHowever, currently, the built-in bind mount gets in the way. One has to `podman exec` into the started container and undo the mounts. This works but seems racy or needlessly repetitive to me. In theory `toolbox enter` can be invoked in parallel from two interactive shells, and `podman start` exits with the same code regardless of whether the container was already running or was actually started. So every `toolbox enter` invocation will end up doing this again and again.\n\nInstead, if `podman start` could be told to skip some of the built-in mounts, then the symbolic links could be created in the image during `toolbox create` and the toolbox start-up could remain simple.\n\nIt appears simple to implement this by wiring an option of some sort from `podman start` to `makeBindMounts`. However, I don't know how it should look. It could be useful if the option could be easily extended to skip any of the other mounts too. So maybe something like `--skip-bind-mount=<path>` that can be specified multiple times?\n\n[1] `gdbus call --session --dest org.freedesktop.Flatpak --object-path /org/freedesktop/Flatpak/SessionHelper --method org.freedesktop.Flatpak.SessionHelper.RequestSession`",
+    "comments": [
+        {
+            "user": "mheon",
+            "body": "Would it be sufficient to bind-mount the symlinks in at container creation time? The mounts will be automatically superseded if you specify something else to mount in its place."
+        },
+        {
+            "user": "rhatdan",
+            "body": "Yes we will not use the builtins if there is a bind mount from the host.  I think it will be fine as long as the INODES from the host stay the same.  IE The file content gets modified as opposed to mv the file asside and replace it with a new file."
+        },
+        {
+            "user": "mheon",
+            "body": "To confirm here, it looks like we do traverse the links before bind-mounting in, so a rename/remove would probably break this - we'd always point to the old file."
+        },
+        {
+            "user": "debarshiray",
+            "body": "Umm... I don't understand.\n\nFirst, I am trying to mess with the image to set up `/etc/resolv.conf` as a symbolic link:\n```\n[rishi@kolache ~]$ buildah from --name foo-working-container registry.fedoraproject.org/f28/fedora-toolbox:28\nfoo-working-container\n[rishi@kolache ~]$ buildah run --tty foo-working-container /bin/bash\n[root@kolache /]# rm -f /etc/resolv.conf \nrm: cannot remove '/etc/resolv.conf': Device or resource busy\n[root@kolache /]# umount /etc/resolv.conf \numount: /etc/resolv.conf: must be superuser to unmount.\n[root@kolache /]#\n```\n\nBut that doesn't work. I don't know why.\n\nIf that had worked, I'd have set `/etc/resolv.conf` to point somewhere inside `/run`, and then ensured the necessary bind mount inside `/run` in `podman create`."
+        },
+        {
+            "user": "rhatdan",
+            "body": "We are talking about\npodman run -v /etc/resolv.conf:/etc/resolv.conf ...\n"
+        },
+        {
+            "user": "mheon",
+            "body": "I would expect `umount` to not work, but `rm` sounds like it ought to work.\n\nAside - I suspect you run into the exact same problems I was describing if you mount another resolv.conf into `/run` - you get the original copy, but if it is deleted/recreated, we won't follow that. You could simply modify the file instead of deleting/recreating, which would resolv the issue"
+        },
+        {
+            "user": "mheon",
+            "body": "Confirmed on root, too - we can't delete, rename, etc `/etc/resolv.conf` in the container, given it's a bind mount. Wonder if there's an easy way around that."
+        },
+        {
+            "user": "debarshiray",
+            "body": "> We are talking about\n> podman run -v /etc/resolv.conf:/etc/resolv.conf ...\n\nUmm... but isn't that roughly what `podman start` is doing via `makeBindMounts`? The problem is that if the host's `/etc/resolv.conf` gets updated via an atomic rename (say by NetworkManager), then the binding will break and the container won't see the change."
+        },
+        {
+            "user": "debarshiray",
+            "body": "> Confirmed on root, too - we can't delete, rename, etc `/etc/resolv.conf`\n> in the container, given it's a bind mount. Wonder if there's an easy way\n> around that.\n\nDoes that mean that we also need to stop Buildah from creating the bind mount for it's working containers?"
+        },
+        {
+            "user": "owtaylor",
+            "body": "I think we'd like to maintain the symlink-to-mounted directory setup if possible, rather than putting constraints on how things are updated. Either with an option to skip, or an option to \"mount\" a symlink within the container filesystem.\n \nAllowing this also allows a simple version:\n\n --volume /etc:/run/host/etc \\\n --make-symlink /run/host/etc/localtime:/etc/localtime\n\n(leaks more host information to the container then the flatpak watcher approach, but might be useful depending on the use case.)"
+        },
+        {
+            "user": "rhatdan",
+            "body": "Podman by default copies the resolv.conf into the container private data and then allows the container to manage it.\nIf you volume mount in to the same path as the builtin path then that file will be visible in the container. If it is modified on the host, then the content will be seen in the container.  If the container is not privileged, it would not be allowed to modify the file.\n"
+        },
+        {
+            "user": "rhatdan",
+            "body": "@owtaylor we could do that but we would then need the flag to say no builtin network mounts?"
+        },
+        {
+            "user": "owtaylor",
+            "body": "If there was a flag to make a symlink that overrode the builtin mounts, then there wouldn't need to be a separate flag to skip the builtin mounts.\n"
+        },
+        {
+            "user": "mheon",
+            "body": "@owtaylor I see `--make-symlink` as something you'd do when making the image, but from your use case, I can see why you'd want to disable mounting `/etc/resolv.conf`. How would adding a sigil to `--dns` work (`--dns=none` to disable)?\n\nAny other files you were looking at here? `/etc/hosts` would also be very easy. We could do `/etc/hostname` as well, but I look at that and wonder if we ever want to not make that."
+        },
+        {
+            "user": "rhatdan",
+            "body": "I actually like --dns=none.\nThen you could make a generate container tool or something.  That would create a layer on the fly. Linking /etc/resolv.conf to /hosts/etc/resolv.conf"
+        },
+        {
+            "user": "rhatdan",
+            "body": "May be a quick meeting to discuss requirements for this."
+        },
+        {
+            "user": "owtaylor",
+            "body": "To be clear, this isn't just convenience - you can't make the symlink in the image currently because the builtin default mounts overwrite it. \n\nThe complete set of files we are looking at at the moment is:\n\n /etc/localtime\n /etc/timezone\n /etc/resolv.conf\n /etc/host.conf\n /etc/hosts\n"
+        },
+        {
+            "user": "debarshiray",
+            "body": "Yes, `--make-symlink` or `--dns=none` during `podman create`, instead of first messing with the image to create the symlinks and then asking `podman create` to skip the built-in mount seems better to me, because then I can offload more work to `podman` instead of cobbling things together in shell. :)"
+        },
+        {
+            "user": "mheon",
+            "body": "@owtaylor Of those, we only manage `/etc/resolv.conf` and `/etc/hosts` - the rest are just from the image."
+        },
+        {
+            "user": "rhatdan",
+            "body": "We have merged in --dns=none for this issue."
+        }
+    ]
+}

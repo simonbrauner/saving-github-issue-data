@@ -1,0 +1,55 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 9644,
+    "title": "Converting docker-compose.yaml to Podman Pod -- Nonfunctional in Several Ways",
+    "state": "closed",
+    "labels": [
+        "kind/bug",
+        "locked - please file new issue/PR"
+    ],
+    "user": "quantum77",
+    "body": "# cat /usr/bin/docker \n  #!/bin/sh\n  [ -f /etc/containers/nodocker ] || \\\n  echo \"Emulate Docker CLI using podman. Create /etc/containers/nodocker to quiet msg.\" >&2\n  exec /usr/bin/podman \"$@\"\n\nThe first issue is that creation of the /run symlink in the podman-docker package...  is backwards.\n  # cat /etc/tmpfiles.d/podman-docker.conf \n  #L+     /run/docker.sock - - - - /run/podman/podman.sock\n  L+ /run/podman/podman.sock - - - - /run/docker.sock\n\nBut the corrected directive does in fact put the proper symlink in /run/podman/ .\n\nThat is, until the systemd service podman.socket is started.  This steps on the symlink, replacing it with the podman.sock socket again, as I explained on IRC before I was banned by bbaude. \n\nEach of the above, mean that the process of converting a docker-compose.yaml to a podman pod could never have worked. No, it has never worked and could not have.\n\nBut there's a worse problem.  Even while podman.socket is running, if you delete /run/podman/podman.sock and put in the symlink to /run/docker.sock named podman.sock...  podman still can not see the running docker containers.  # systemd status confirms that it is listening on /run/docker.sock.  Docker sees them just fine and has full control over them, but podman is blind to them.\n\nI even copied podman.socket to /etc/systemd/system/ and modified these lines thus:\n  ListenStream=%t/docker.sock\n  #SocketMode=0660\n... nevertheless podman remains blind to the docker containers.\n\nSince podman is blind to the docker containers, there can be no conversion from docker-compose.yaml to a podman pod, rootless or otherwise.  podman generate does not and can not work.\n\nI explained this as clearly and politely as I could, but was banned.  The problem is with podman.  Not me.\n\nGiven the way I've been treated thusfar I expect this issue will not be addressed, so I will just move on and make my own containers and pods rather than trying to use anything Docker-premade.  At least I tried.\n\n/kind bug\n",
+    "comments": [
+        {
+            "user": "mheon",
+            "body": "Can you clarify what exactly you're trying to do here?\n\nIt sounds as though you're attempting to point a Podman client at a Docker server. That has never been a supported configuration, and is not something we intend to support - Podman uses the new Libpod APIs, not the compatible Docker APIs. A Podman client can only work against a Podman server - so there's no way to run `podman generate systemd` against a Docker container. I don't think they store the metadata we need to reconstruct the original run command, so it's likely not possible even if one were to attempt to re-implement using the Docker API. The intent of our compatibility promise with Docker is to allow easy migration to Podman, not direct interoperation between Docker and Podman."
+        },
+        {
+            "user": "quantum77",
+            "body": "As I say, I am trying to convert a docker-compose.yaml...  -into-  a podman pod.  I want a podman pod, to run these services which the docker-compose.yaml was built to run, but you can not use a docker-compose.yaml directly in podman so it has to be converted.  \n\nOr more accurately the docker structure is stood up, then podman generate reads from that its characteristics...  and makes its own pod yaml.\n\n\nI am trying to convert docker hub mailu/postfix into a podman pod yaml. \n\n\nThe first file you see above is part of the official podman-docker package, as noted, which I was told by bbaude is mandatory for this sort of conversion, and I am sure comes from him.  /usr/bin/docker is actually a script which substitutes podman for docker.  \n\nThe second file above, /etc/tmpfiles.d/podman-docker.conf, is also part of the official podman-docker package, as noted, and inserts into /run/podman/ a symlink -- except it doesn't because the arguments are backwards first of all.  And the second problem is then when podman.service is invoked by podman.socket, it steps on this symlink so it is no more.  This will happen every time the podman.service is invoked, so a symlink created on boot is no match for a running service.  I got banned from the IRC for politely raising this issue.  Somebody's emotional.  \n\nAnd all of these issues have never been caught because this process has never. been. done. before, and couldn't have been.  These three issues prove it.  I assiduously used the instructions here:  https://www.redhat.com/sysadmin/compose-kubernetes-podman\n\nBut finally, even with podman.socket calling podman.service to listen in on /run/docker.sock -- so it can garner its characteristics to build a podman generate pod -- it doesn't as podman can not see the docker containers or images.  \n\nI say again:  podman...  can. not. see. the docker containers or images.\n\nIf it's still not clear I just don't know how to say it any simpler.  I am trying to convert a docker-compose.yaml...  into a podman pod.  No one has never done this before, because everything is busted.\n\nTalk down to me and ban me, but the above are just facts, however powerful the devs may be.  I tried to tell you but was banned for it."
+        },
+        {
+            "user": "mheon",
+            "body": "I'm still extremely confused over here. The blog you're linking is about *directly running Docker Compose against Podman* - there is no converting occurring in it. The tmpfiles.d directive also looks correct from my (admittedly limited) understanding of the syntax - create a link from `/run/docker.sock` to the Podman API socket at `/run/podman/podman.sock`, to enable Docker applications to access Docker as if it were Podman. There are no issues with symlinks being stomped by Podman in this case, either, because `/run/podman.sock` is the link target, not the link itself.\n\nI'm also confused by your comment that \"Podman cannot see the Docker containers or images\" - what do you mean by this? Do you mean the containers/images managed by Compose?"
+        },
+        {
+            "user": "mheon",
+            "body": "Sorry, wording correction: should have said \"to enable Docker applications to access Podman as if it were Docker\". What I get for writing this late at night."
+        },
+        {
+            "user": "quantum77",
+            "body": "All I can say it Try It.  Use the article to try and convert mailu/postfix, or Hell any docker image with multiple interacting containers.  Just follow the instructions and see what happens.  I don't know what else to say.\n"
+        },
+        {
+            "user": "rhatdan",
+            "body": "The goal is to eliminate the need of the Docker daemon from the system.  The podman service can be setup to listen on /run/docker.sock or in the case of the podman-docker package, it creates a link from /run/docker.sock-> /run/podman/podman.sock.  This then allows you to run the docker-compose tool and have it create podman containers.\n\nIf you want to convert to pods from compose, then you could first run compose and then use podman generate kube to take the compose containers and build kubernetes based yaml files to support it.\n\nAs described here:\n\nhttps://www.redhat.com/sysadmin/compose-kubernetes-podman\n\nThis will be further described in containersplumbing.org this week.\n\nI don't see this as an issue, I am closing."
+        },
+        {
+            "user": "quantum77",
+            "body": "> If you want to convert to pods from compose, then you could first run compose \n> and then use podman generate kube to take the compose containers and build \n> kubernetes based yaml files to support it.\n> https://www.redhat.com/sysadmin/compose-kubernetes-podman\n\nYou haven't understood my posts.  This is what I -did- do and these are the instructions I -did- follow.  No one has actually bothered to -try- this process though obviously, including bbaude.  And evidently no one can understand what I'm talking about.\n\nI don't care, go ahead and close.  Leave it non-functional for others to deal with.  I've gone another direction.  I tried to tell you.\n"
+        },
+        {
+            "user": "rhatdan",
+            "body": "Well I really have no idea what you are talking about.  Could you try explaining it again.  "
+        },
+        {
+            "user": "Semo",
+            "body": "My personal guess is and correct me if I'm wrong, that @quantum77 was simply trying to find a automated way to translate a `docker-compose.yml `file into something that `podman` can understand and use the YAML file's contents to specify \"how to run\" a pod/container. \n3rd post:\n> As I say, I am trying to convert a docker-compose.yaml... -into- a podman pod. I want a podman pod, to run these services which the docker-compose.yaml was built to run, but you can not use a docker-compose.yaml directly in podman so it has to be converted.\n\nBut it seems he/she lacks a bit on focussing and clarification. He/she references some chat on an IRC nobody knows of."
+        },
+        {
+            "user": "quantum77",
+            "body": "This is indeed what I was trying to do, however the podman procedure simply can not cope with docker containers which have more advanced features.  Further, documentation on the mechanics of this process is non-existent, so I gave up.\n\nNow I am happily creating my own images with buildah, the way **I** want them.  Documentation on this complete procedure is also non-existent but I've figured it out.\n\nIt'll be a long time before this is taken up in general unless somebody with actual communications skills makes howto's.  I am a busy real estate developer and simply do not have the time.  Not inclined to either after the treatment I got from bbaude."
+        }
+    ]
+}

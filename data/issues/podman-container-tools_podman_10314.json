@@ -1,0 +1,134 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 10314,
+    "title": "Using podman rootful, but mapping the container to a user and keeping groups ",
+    "state": "closed",
+    "labels": [
+        "locked - please file new issue/PR"
+    ],
+    "user": "KCSesh",
+    "body": "**Description**\nI am trying to understand starting podman as a rootful user (to get overlay2 access) but still trying to start containers as a specific unprivileged host user, which inside the container is root. \n\nAdditionally, this `user` belongs to a common group that I also want in the container so if the common group has read/write permissions on a host file, it can read/write to it from the container. \n\nHow can this be done? \n\n<!--\nBriefly describe the problem you are having in a few paragraphs.\n-->\n\n**Steps to reproduce the issue:**\n\nFirst My user1 setup:  \n\n```\nuser1 uid = 1002\nuser1 gid = 1004\nuserCommon gid = 1002\n```\n\n1. \n```\nsudo podman --runtime /usr/local/bin/crun run --uidmap 0:1002:1 --uidmap 1:100000:65536 --gidmap 0:1004:1 --gidmap 1:100000:1001 --gidmap 1002:1002:1 --gidmap 1003:101003:65536  -v /tmp:/tmp --rm -it <image>\n```\n\nThis should be mapping user1:user1 as `root` into the container. \nUser namespace filling for 1:100000:65536 for UID. \nUser namespace filling for 1:100000:1001 for GID. \nMap the common group `userCommon` directly into the container at 1002. \nThen user namespace filling for 1003:101003:65536. \n\n2. \n```\n# cat /tmp/groupCommonRead.txt\ncat: /tmp/groupCommonRead.txt: Permission denied\n```\n\n**Describe the results you received:**\nPermission denied when attempting to read a file that is control by a common group permission. \n\n**Describe the results you expected:**\nI should be able to read from the file as my user that is running container belongs in the common group, and I have mapped the common group directly into the container. \n\n\nNow I imagine this is related because the group inside the container has no information about the users in the commonGroup? Is that right? \nIs there any way I can properly map this group into the container such that the common group can be read from inside the container, and remain read by other users on the host? \n\n\n**A version I did get to work**, was using: `--group-add keep-groups` \n\n```\nsudo podman --runtime /usr/local/bin/crun run --uidmap 0:1002:1 --uidmap 1:100000:65536 --gidmap 0:1004:1 --gidmap 1:100000:65536 --group-add keep-groups  -v /tmp:/tmp --rm -it <image>\n```\n\nBut this required me to add my host `root` to the `userCommon ` group because that is the user that is running podman. \n\nIs this the only approach that would work?\n\n\n",
+    "comments": [
+        {
+            "user": "giuseppe",
+            "body": "since you run as root, my suggestion is to add the `userCommon` group to the user namespace:\n\n`sudo podman --runtime /usr/local/bin/crun run --uidmap 0:1002:1 --uidmap 1:100000:65536 --gidmap 0:1004:1 --gidmap 1:100000:65536 --gidmap 100000:$userCommonGID:1  -v /tmp:/tmp --rm -it` and if you run with `CAP_DAC_OVERRIDE` as your command does, you won't even need to set the group or additional groups"
+        },
+        {
+            "user": "KCSesh",
+            "body": "@giuseppe Unfortunately your suggestion seems not to have worked either: \n\n```\nnewuser@tegra-ubuntu:~$sudo podman --runtime /usr/local/bin/crun run --uidmap 0:1002:1 --uidmap 1:100000:65536 --gidmap 0:1004:1 --gidmap 1:100000:65536 --gidmap 100000:1002:1 -v /tmp:/tmp --rm -it <image>\nroot@f3ea5d275add:/# cat /tmp/group.txt\ncat: /tmp/group.txt: Permission denied\nroot@f3ea5d275add:/# ls -la /tmp/group.txt\n-rw-r----- 1 nobody  100000 5 May 11 22:27 /tmp/group.txt\nroot@f3ea5d275add:/# exit\n```\n\n```\nnewuser@tegra-ubuntu:~$ id\nuid=1002(newuser) gid=1004(newuser) groups=1004(newuser),27(sudo),44(video),1002(userCommon)\nnewuser@tegra-ubuntu:~$ cat /tmp/group.txt\ntest\n```\n\n"
+        },
+        {
+            "user": "giuseppe",
+            "body": "```\n# ls -la /tmp/group.txt\n-rw-r----- 1 nobody  100000 5 May 11 22:27 /tmp/group.txt\n```\n\nthis should not happen, it should be owned by a group that is mapped into the user namespace.\n\nCan you show me the output for this command on the host (not in a container):\n\n```\n# ls -ln /tmp/group.txt\n```\n\nand make sure that group is mapped inside the user namespace"
+        },
+        {
+            "user": "KCSesh",
+            "body": "```\nnewuser@tegra-ubuntu:~$ ls -ln /tmp/group.txt\n-rw-r----- 1 1001 1002 5 May 11 22:27 /tmp/group.txt\n```"
+        },
+        {
+            "user": "giuseppe",
+            "body": "ok so `DAC_OVERRIDE` still fails when the uid is not mapped in the user namespace.\n\nIn this case I think you can fix it by adding `--group-add 1002` to the `podman run` options"
+        },
+        {
+            "user": "KCSesh",
+            "body": "Could you provide more details? @giuseppe \n\nIf I keep your suggestion the same and do this:\n\n```\nnewuser@tegra-ubuntu:~$ sudo podman --runtime /usr/local/bin/crun run --uidmap 0:1002:1 --uidmap 1:100000:65536 --gidmap 0:1004:1 --gidmap 1:100000:65536 --gidmap 100000:1002:1 --group-add 1002 -v /tmp:/tmp --rm -it <image>\ngroups: cannot find name for group ID 1002\nroot@4f71e387835f:/# cat /tmp/group.txt\ncat: /tmp/group.txt: Permission denied\n```\nI get the warning: `groups: cannot find name for group ID 1002`\nAnd Permission denied.\n\n\nIf I drop the --gidmap and do this:\n\n```\nsudo podman --runtime /usr/local/bin/crun run --uidmap 0:1002:1 --uidmap 1:100000:65536 --gidmap 0:1004:1 --gidmap 1:100000:65536 --group-add 1002 -v /tmp:/tmp --rm -it <image>\ngroups: cannot find name for group ID 1002\nroot@ed2458c54850:/# cat /tmp/group.txt\ncat: /tmp/group.txt: Permission denied\n```\nI get the warning: `groups: cannot find name for group ID 1002`\nAnd Permission denied.\n\n\nAnd lastly, if I try what I did in my ticket opening:\n\n```\nsudo podman --runtime /usr/local/bin/crun run --uidmap 0:1002:1 --uidmap 1:100000:65536 --gidmap 0:1004:1 --gidmap 1:100000:1001 --group-add 1002 --gidmap 1003:101003:65536  -v /tmp:/tmp --rm -it  <image>\nError: OCI runtime error: setgroups: Invalid argument\n```\n`\nError: OCI runtime error: setgroups: Invalid argument\n`\n"
+        },
+        {
+            "user": "KCSesh",
+            "body": "I was able to get it to work if I also mapped in the `user` like you suggested. \n\n```\nnewuser@tegra-ubuntu:~$ sudo podman --runtime /usr/local/bin/crun run --uidmap 0:1002:1 --uidmap 1:100000:65536 --uidmap 100000:1001:1 --gidmap 0:1004:1 --gidmap 1:100000:65536 --gidmap 100000:1002:1 -v /tmp:/tmp --rm -it <image>\nroot@5768bc089b0d:/# cat /tmp/group.txt\ntest\n```\n\nHowever, I was hoping not to have to do this."
+        },
+        {
+            "user": "giuseppe",
+            "body": "sorry, try:\n\n`sudo podman --runtime /usr/local/bin/crun run --uidmap 0:1002:1 --uidmap 1:100000:65536 --gidmap 0:1004:1 --gidmap 1:100000:65536 --gidmap 100000:1002:1 --group-add 100000 -v /tmp:/tmp --rm -it <image>`"
+        },
+        {
+            "user": "KCSesh",
+            "body": "Thanks @giuseppe. \n\nLooks like it worked!  But I am confused! \n\n```\nsudo podman --runtime /usr/local/bin/crun run --uidmap 0:1002:1 --uidmap 1:100000:65536 --gidmap 0:1004:1 --gidmap 1:100000:65536 --gidmap 100000:1002:1 --group-add 100000 -v /tmp:/tmp --rm -it <image>\ngroups: cannot find name for group ID 100000\nroot@7983c0f2103f:/# cat /tmp/group.txt\ntest\n```\n\nI still get what seems to be a warning of: `groups: cannot find name for group ID 100000` \n\nBut If I remove the ` --group-add 100000`\n\n```\nsudo podman --runtime /usr/local/bin/crun run --uidmap 0:1002:1 --uidmap 1:100000:65536 --gidmap 0:1004:1 --gidmap 1:100000:65536 --gidmap 100000:1002:1 -v /tmp:/tmp --rm -it <image>\nroot@ce6be019a8a0:/# cat /tmp/group.txt\ncat: /tmp/group.txt: Permission denied\n```\nBut no warning, haha.  \n\nWhy does this fix it? Is it because group 100000 exists in the namespace? \nBut the warning is from checking the host namespace? \n"
+        },
+        {
+            "user": "KCSesh",
+            "body": "Also @giuseppe \n\nJust for my understanding, this is essentially equivalent to the docker re map user mode, right? https://docs.docker.com/engine/security/userns-remap/ \n\nDo you know of any other way to do this in podman then what I am doing? \nI just want to verify my approach is correct, since there are many uid/gid flags in podman. \n\n"
+        },
+        {
+            "user": "giuseppe",
+            "body": "> I still get what seems to be a warning of: `groups: cannot find name for group ID 100000`\n\nIf you run groups, then it cannot find the ID 100000 in `/etc/group`.  This is an expected error.\n\n\n\n> Just for my understanding, this is essentially equivalent to the docker re map user mode, right? https://docs.docker.com/engine/security/userns-remap/\n\nright.\n\n> Do you know of any other way to do this in podman then what I am doing?\n> I just want to verify my approach is correct, since there are many uid/gid flags in podman.\n\nI think the way you are doing it in the last command is the correct one.  With root you can map any ID so it makes sense to map exactly the group you need into the container"
+        },
+        {
+            "user": "giuseppe",
+            "body": "since it seems to be solved, I am closing the issue.  Please feel free to keep commenting"
+        },
+        {
+            "user": "KCSesh",
+            "body": "@giuseppe I have noticed that starting containers like this, seems to take the container extra long to start for an image of size ~600mb. \n\n**With** the `uid/gid mappings` it takes about: **2 minutes and 44 seconds**\n\n\n**Without** the `uid/gid mappings` it takes about: **Less than 5 seconds.** \n\nCould you elaborate why this might be happening? \n\nI see that with it **with** the `uid/gid mappings` I see 2 new Filesystems created in my output of \n\n\n```\ndf -h\n/dev/mapper/enc_mmcblk0p1   7.9G  6.8G  635M  92% /\n/dev/mapper/enc_mmcblk0p21  7.6G  6.1G  1.1G  86% /data\nnone                         16G     0   16G   0% /dev\ntmpfs                        16G  312K   16G   1% /dev/shm\nshm                          63M     0   63M   0% /data/podman/users/newuser/podman-root/overlay-containers/bd83b4183449ef29f1902865e327521df7dae35d9189f90a526823fd72ba7b03/userdata/shm\noverlay                     7.6G  6.1G  1.1G  86% /data/podman/users/newuser/podman-root/overlay/31b7e78da8ca10c2c274386913bb99321cf619a7b7e314ee681e0919f31f89aa/merged\n````\n\nThe `shm` and `overlay` are new and go away when I close the container. \n\n\nThose filesystem do not appear when I start the container without the mappings. \n\n\n"
+        },
+        {
+            "user": "giuseppe",
+            "body": "> @giuseppe I have noticed that starting containers like this, seems to take the container extra long to start for an image of size ~600mb.\n> \n> **With** the `uid/gid mappings` it takes about: **2 minutes and 44 seconds**\n> \n> **Without** the `uid/gid mappings` it takes about: **Less than 5 seconds.**\n> \n> Could you elaborate why this might be happening?\n\nwhen a mapping is specified, containers/storage needs to create a clone of the image with the IDs shifted to what must be used in the user namespace.  Once idmapped mounts will support overlay we won't need this anymore"
+        },
+        {
+            "user": "rhatdan",
+            "body": "Using the image again with the same mapping, should be instantaneous.\nDid you use metacopy?\n```\ngrep metacopy /etc/containers/storage.conf\nmountopt = \"nodev,metacopy=on\"\n```\n"
+        },
+        {
+            "user": "KCSesh",
+            "body": "Hey @gabibeyer, @rhatdan Thanks for the continued help, I really appreciate it! \n\nLets see a few questions. \n\nI added the CLI: \n```\n--storage-opt=mountopt=nodev,metacopy=on\n```\n\nBut when I do a podman info, I still see the status showing false:\n\n\n```\n  graphOptions:\n    overlay.imagestore: /data/cloud/assets/yguysdfiudyf8yww3ebjhwei93hlowie\n    overlay.mountopt: nodev,metacopy=on\n  graphRoot: /data/podman/users/newuser/podman-root\n  graphStatus:\n    Backing Filesystem: extfs\n    Native Overlay Diff: \"false\"\n    Supports d_type: \"true\"\n    Using metacopy: \"false\"\n```\n\n1. Not sure if I am missing a step? \nRealistically my kernel could be too old for that feature (maybe I am wrong).\nI am on **4.9** and that won't be changing, that is why I am trying this `sudo` with `uid/gid mapping approach` \n\n\nI do have another follow up question @giuseppe and @rhatdan.\n\n2. If my plan is to only run the image one time, as a single user.\n\nCan I pull the image down as the user that I am planning to run so that no \"clone of the image with the IDs shifted to what must be used in the user namespace\" happens? \nMaybe if I pulled the image without root, could that speed this up? \nThe challenge is I need to still the pull the image with `root` because I need to use `overlay2`. \nI would be fine to manually change the permission of the files if that would work. \n\n3. Is there anywhere I can read more about: mountopt = \"nodev,metacopy=on\" ? \n\n\n\n\n"
+        },
+        {
+            "user": "giuseppe",
+            "body": "> ```\n> \n> ```\n\nyes that could be the reason, that kernel is quite old.\n\n\n\n>     1. If my plan is to only run the image one time, as a single user.\n> \n> \n> Can I pull the image down as the user that I am planning to run so that no \"clone of the image with the IDs shifted to what must be used in the user namespace\" happens?\n> Maybe if I pulled the image without root, could that speed this up?\n> The challenge is I need to still the pull the image with `root` because I need to use `overlay2`.\n> I would be fine to manually change the permission of the files if that would work.\n\ndoes it work if you let the run command pull the image instead of pulling it beforehand?  Please make sure to pass the mapping you want to use.\n\n>     1. Is there anywhere I can read more about: mountopt = \"nodev,metacopy=on\" ?\n\nyou can find more info here: https://www.kernel.org/doc/html/latest/filesystems/overlayfs.html?highlight=overlayfs"
+        },
+        {
+            "user": "KCSesh",
+            "body": ">does it work if you let the run command pull the image instead of pulling it beforehand? Please make sure to pass the mapping you want to use.\n\nIt seems to be a quicker, yes. But it still takes about: 40 seconds after `Storing signatures` log line:\n\n\n```\nTrying to pull image.....\nCopying blob c4f4e0f882d3 done\nCopying blob a199cb2dd71e done\nCopying blob 3e956de9ea4b done\nCopying blob e26b78d1aaed done\nCopying blob ac42496d0bc2 done\nCopying blob 7db2983f5802 done\nCopying config 10faffedd5 done\nWriting manifest to image destination\nStoring signatures\nroot@73a9a799a038:/#\n```\n\n\nHowever, I would be looking for a solution that allows me to pull the image and run separately for my use case. \nDo you think if I change the permissions manually of the images/layers there is a path forward? "
+        },
+        {
+            "user": "KCSesh",
+            "body": "I just tested it! \n\nIf I manually change all the permissions of the image files/directories to my user, it works quite quickly! This is great! :D \n\n```\nsudo chown -R 1002:1004 <path-to-image>\n```\n\nIt still makes the filesystems:\n\n```\ndf -h\nFilesystem                  Size  Used Avail Use% Mounted on\n/dev/mapper/enc_mmcblk0p1   7.9G  6.8G  639M  92% /\n/dev/mapper/enc_mmcblk0p21  7.6G  5.0G  2.2G  70% /data\nshm                          63M     0   63M   0% /data/podman/users/newuser/podman-root/overlay-containers/1b96af876c72e5efbad09e62930de42bfdf95b9d95a8ffd4c60cac8ea751ec84/userdata/shm\noverlay                     7.6G  5.0G  2.2G  70% /data/podman/users/newuser/podman-root/overlay/e821272ef3fd490da907f3813978213bd82352b0ade2f105e69e350800969287/merged\n```\n\nBut only takes ~5 seconds! "
+        },
+        {
+            "user": "KCSesh",
+            "body": "@giuseppe does it make sense that if I chown the image files permissions to the user it happens instantaneous? \nI am surprised it still doesn't need to do the cloning? \n\nAlso,\n\n> Once idmapped mounts will support overlay we won't need this anymore\n\nIs there a tracking issue for this? "
+        },
+        {
+            "user": "giuseppe",
+            "body": "\n> > Once idmapped mounts will support overlay we won't need this anymore\n> \n> Is there a tracking issue for this?\n\nno that must happen in the kernel first\n\n> If I manually change all the permissions of the image files/directories to my user, it works quite quickly! This is great! :D\n> \n> ```\n> sudo chown -R 1002:1004 <path-to-image>\n> ```\n\nwhat is `/path/to/image`?\n"
+        },
+        {
+            "user": "KCSesh",
+            "body": " `<path-to-image>` is my `--root` option on the cli. @giuseppe \n \n \n So if I pull an `ubuntu` image with `--root` in location: `/data/podman-read-only` \n\n`sudo podman --root /data/podman-read-only pull ubuntu`\n \n Then I do: \n \n `sudo chown -R 1002:1004 /data/podman-read-only`\n \n I can then do: \n \n `sudo podman --root /data/podman/some-path --storage-opt=additionalimagestore=/data/podman-read-only run --uidmap 0:1002:1 --uidmap 1:100000:65536 --gidmap 0:1004:1 --gidmap 1:100000:65536 --gidmap 100000:1002:1 -v /tmp:/tmp --rm -it ubuntu`\n \n And it will start immediately because the mapping is already correct. \n \n But if I leave the  `/data/podman-read-only` as `root` it takes 2+ mins to start. \n \n "
+        },
+        {
+            "user": "KCSesh",
+            "body": "@giuseppe\n> when a mapping is specified, containers/storage needs to create a clone of the image with the IDs shifted to what must be used in the user namespace. \n\nIs there a way I can view the cloned image files that exist in the username space? "
+        },
+        {
+            "user": "giuseppe",
+            "body": "`/data/podman-read-only`\n\nwhere is this path stored?  Network file system?\n\n\n\n\n\n> Is there a way I can view the cloned image files that exist in the username space?\n\nUnfortunately I think we don't expose this information, but it is available only in the local storage DB"
+        },
+        {
+            "user": "KCSesh",
+            "body": "> /data/podman-read-only\nwhere is this path stored? Network file system?\n\nIt is saved on my host, just a different disk, and it is using overlay with podman\n\n>but it is available only in the local storage DB\n\nThis is the bolt_state.db ? \n"
+        },
+        {
+            "user": "KCSesh",
+            "body": "@giuseppe @rhatdan \nIf I start a 2nd container with the same mappings, is that safe to do so? \n\nContainer 1:\n```\nsudo podman --root /data/podman/some-path --storage-opt=additionalimagestore=/data/podman-read-only run --uidmap 0:1002:1 --uidmap 1:100000:65536 --gidmap 0:1004:1 --gidmap 1:100000:65536 --gidmap 100000:1002:1 -v /tmp:/tmp --rm -it ubuntu\n```\n\nContainer 2:\n```\nsudo podman --root /data/podman/some-path --storage-opt=additionalimagestore=/data/podman-read-only run --uidmap 0:2003:1 --uidmap 1:100000:65536 --gidmap 0:2004:1 --gidmap 1:100000:65536 --gidmap 100000:1002:1 -v /tmp:/tmp --rm -it ubuntu\n```\n\n(All that changed between 1 and 2 is the \"root\" user in the container). \n\nOr do I need to make sure container 2 changes the mapping for me as well? \n\n```\nsudo podman --root /data/podman/some-path --storage-opt=additionalimagestore=/data/podman-read-only run --uidmap 0:2003:1 --uidmap 1:165536:65536 --gidmap 0:2004:1 --gidmap 1:165536:65536 --gidmap 165536:1002:1 -v /tmp:/tmp --rm -it ubuntu\n```\n\nLike this where I use: `--uidmap 1:165536:65536 ` and ` --gidmap 1:165536:65536 --gidmap 165536:1002:1 `\n\nIf the answer is \"yes, you need to update the mappings for each container otherwise you will have user conflicts\", \nI just want to know to verify if my approach of starting containers as non-root users with running podman as root seems correct. \n\nDoes `--userns=auto` make more sense for what I am trying? \nIf I do use `--userns=auto` with gidmapping/uidmapping, how do you reccomend I do the above? \n\nBecause I want to map a specific user and group to container root, which is simple enough because container ID should be 0. But what about for additional groups I may want mapped in that exist on the host? How do I know which ContainerID to set? Or does it not matter? "
+        },
+        {
+            "user": "giuseppe",
+            "body": "Ir works but you have less security because if a malicious process manages to escape a container then it has control on the files owned by the other container.  It is safer if the mappings are distinct and that is what the --userns=auto functionality is for"
+        },
+        {
+            "user": "KCSesh",
+            "body": "Thanks @giuseppe \n\nBut how would I map additional groups if I was user --userns=auto?\n\nAbove you had me map group 1002 as: \n\n```\n--gidmap 100000:1002:1\n```\nBecause host is 100000 would be unused. \n\nWhat about for userns=auto? \nHow do I pick an unused host is when I don't know which ID's auto is setting? "
+        },
+        {
+            "user": "giuseppe",
+            "body": "please look at the documentation for `userns=auto`.  There is a way to force mappings to be present with \"gidmapping\": `auto:gidmapping=...`\n"
+        },
+        {
+            "user": "KCSesh",
+            "body": "\n@giuseppe  do you mind providing me with more context on what this is doing? \n\n> sorry, try:\n> \n> `sudo podman --runtime /usr/local/bin/crun run --uidmap 0:1002:1 --uidmap 1:100000:65536 --gidmap 0:1004:1 --gidmap 1:100000:65536 --gidmap 100000:1002:1 --group-add 100000 -v /tmp:/tmp --rm -it <image>`\n\nSpecifically: \n>--gidmap 100000:1002:1 --group-add 100000\n\n1. This maps group 1002 into the container at ID 100000, then `--group-add 100000` attaches this group to the user running the main container process. Is this accurate?  \n\n2. How does this work with `read-only`? \nI have tested it, and tt works, but I don't understand where this `--group-add 100000` is stored? \nIt does not appear under: `/etc/groups` in the container. \nI guess that is what this complaint is: `groups: cannot find name for group ID 100000`\nSo is this stored in memory? \n\nThis is more for my understanding. \n\nThanks! \n"
+        }
+    ]
+}

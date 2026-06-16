@@ -1,0 +1,267 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 8086,
+    "title": "Error forwarding signal 18 (sometimes 15) to container ...",
+    "state": "closed",
+    "labels": [
+        "kind/bug",
+        "locked - please file new issue/PR"
+    ],
+    "user": "asottile",
+    "body": "**Is this a BUG REPORT or FEATURE REQUEST? (leave only one on its own line)**\n\n/kind bug\n\n**Description**\n\nThis is distilled down from a larger example, reproducing only with coreutils `xargs` / `timeout` + `sleep`\n\nThis is a pretty reliable example:\n\n```\n$ yes | head -10 | xargs --replace -P5 timeout 2 podman run --rm --init ubuntu:focal sleep 5\nERRO[0000] container not running                        \nERRO[0002] Error forwarding signal 18 to container d9ae2ff8a421a835771930f9743210c994e2a162df6d4099eded6f5609048c6c: error sending signal to container d9ae2ff8a421a835771930f9743210c994e2a162df6d4099eded6f5609048c6c: `/usr/lib/cri-o-runc/sbin/runc kill d9ae2ff8a421a835771930f9743210c994e2a162df6d4099eded6f5609048c6c 18` failed: exit status 1 \nERRO[0000] container not running                        \nERRO[0002] Error forwarding signal 18 to container 69b4770e164abce77ecb0c0105414ed59a274296d13703eeaebc00b5f7873283: error sending signal to container 69b4770e164abce77ecb0c0105414ed59a274296d13703eeaebc00b5f7873283: `/usr/lib/cri-o-runc/sbin/runc kill 69b4770e164abce77ecb0c0105414ed59a274296d13703eeaebc00b5f7873283 18` failed: exit status 1 \n```\n\noccasionally I'll get outputs like this:\n\n```console\n+ timeout 2 podman run --rm runner-image:latest python3 -c 'import time; time.sleep(5)'\nERRO[0002] Error forwarding signal 18 to container 473036e98db1884e7a6baac667a135db7e5176b9c34db0c885b6bc10efd6fd11: can only kill running containers. 473036e98db1884e7a6baac667a135db7e5176b9c34db0c885b6bc10efd6fd11 is in state stopped: container state improper \n```\n\n(`runner-image` is [this one](https://hub.docker.com/r/precommitci/runner-image))\n\nMy actual use case ends like this however:\n\n```\ntime=\"2020-10-19T15:07:21-07:00\" level=error msg=\"container not running\"\ntime=\"2020-10-19T15:07:21-07:00\" level=error msg=\"Error forwarding signal 15 to container 31e767a031b7cd086dbda154b9df5adaff694fd111e7feedee748d91c7eedcdb: error sending signal to container 31e767a031b7cd086dbda154b9df5adaff694fd111e7feedee748d91c7eedcdb: `/usr/lib/cri-o-runc/sbin/runc kill 31e767a031b7cd086dbda154b9df5adaff694fd111e7feedee748d91c7eedcdb 15` failed: exit status 1\"\n```\n\nWith `-i`, it occasionally deadlocks, breaking most `podman` commands (such as `podman ps` for that user).  the only way I've been able to recover the deadlock is to `kill -9` that podman process\n\n```\n+ timeout 2 podman run --rm -i runner-image:latest python3 -c 'import time; time.sleep(5)'\n```\n(hung forever)\n\n`strace` of `podman ps` shows what looks like a spinlock with a timeout:\n\n```\n$ strace podman ps\n\n...\n\nfutex(0x28849e8, FUTEX_WAIT_PRIVATE, 0, NULL) = 0\nfutex(0x28849e8, FUTEX_WAIT_PRIVATE, 0, NULL) = 0\nfutex(0x28849e8, FUTEX_WAIT_PRIVATE, 0, NULL) = 0\nfutex(0x28849e8, FUTEX_WAIT_PRIVATE, 0, NULL) = 0\nfutex(0x28849e8, FUTEX_WAIT_PRIVATE, 0, NULL) = 0\nfutex(0x28849e8, FUTEX_WAIT_PRIVATE, 0, NULL) = 0\nfutex(0x28849e8, FUTEX_WAIT_PRIVATE, 0, NULL) = 0\nfutex(0x28849e8, FUTEX_WAIT_PRIVATE, 0, NULL) = 0\nfutex(0x28849e8, FUTEX_WAIT_PRIVATE, 0, NULL) = 0\nfutex(0x28849e8, FUTEX_WAIT_PRIVATE, 0, NULL) = 0\nfutex(0x28849e8, FUTEX_WAIT_PRIVATE, 0, NULL\n```\n\nthe signals in question are:\n\n15: SIGTERM\n18: SIGCONT\n\n**Steps to reproduce the issue:**\n\n1. See commands above\n\n**Describe the results you received:**\n\nSee output above\n\n**Describe the results you expected:**\n\nI expect things to exit gracefully, and not deadlock\n\n**Additional information you deem important (e.g. issue happens only occasionally):**\n\n**Output of `podman version`:**\n\n```\n$ podman version\nVersion:      2.1.1\nAPI Version:  2.0.0\nGo Version:   go1.15.2\nBuilt:        Wed Dec 31 16:00:00 1969\nOS/Arch:      linux/amd64\n```\n\n**Output of `podman info --debug`:**\n\n```\n$ podman info --debug\nhost:\n  arch: amd64\n  buildahVersion: 1.16.1\n  cgroupManager: cgroupfs\n  cgroupVersion: v1\n  conmon:\n    package: 'conmon: /usr/libexec/podman/conmon'\n    path: /usr/libexec/podman/conmon\n    version: 'conmon version 2.0.20, commit: '\n  cpus: 5\n  distribution:\n    distribution: ubuntu\n    version: \"20.04\"\n  eventLogger: journald\n  hostname: babibox\n  idMappings:\n    gidmap:\n    - container_id: 0\n      host_id: 1000\n      size: 1\n    - container_id: 1\n      host_id: 100000\n      size: 65536\n    uidmap:\n    - container_id: 0\n      host_id: 1000\n      size: 1\n    - container_id: 1\n      host_id: 100000\n      size: 65536\n  kernel: 5.4.0-51-generic\n  linkmode: dynamic\n  memFree: 5532704768\n  memTotal: 8348299264\n  ociRuntime:\n    name: runc\n    package: 'cri-o-runc: /usr/lib/cri-o-runc/sbin/runc'\n    path: /usr/lib/cri-o-runc/sbin/runc\n    version: 'runc version spec: 1.0.2-dev'\n  os: linux\n  remoteSocket:\n    path: /run/user/1000/podman/podman.sock\n  rootless: true\n  slirp4netns:\n    executable: /usr/bin/slirp4netns\n    package: 'slirp4netns: /usr/bin/slirp4netns'\n    version: |-\n      slirp4netns version 1.1.4\n      commit: unknown\n      libslirp: 4.3.1-git\n      SLIRP_CONFIG_VERSION_MAX: 3\n  swapFree: 1964396544\n  swapTotal: 1964396544\n  uptime: 5h 13m 0.85s (Approximately 0.21 days)\nregistries:\n  search:\n  - docker.io\n  - quay.io\nstore:\n  configFile: /home/asottile/.config/containers/storage.conf\n  containerStore:\n    number: 2\n    paused: 0\n    running: 2\n    stopped: 0\n  graphDriverName: overlay\n  graphOptions:\n    overlay.mount_program:\n      Executable: /usr/bin/fuse-overlayfs\n      Package: 'fuse-overlayfs: /usr/bin/fuse-overlayfs'\n      Version: |-\n        fusermount3 version: 3.9.0\n        fuse-overlayfs: version 1.1.0\n        FUSE library version 3.9.0\n        using FUSE kernel interface version 7.31\n  graphRoot: /home/asottile/.local/share/containers/storage\n  graphStatus:\n    Backing Filesystem: extfs\n    Native Overlay Diff: \"false\"\n    Supports d_type: \"true\"\n    Using metacopy: \"false\"\n  imageStore:\n    number: 23\n  runRoot: /run/user/1000/containers\n  volumePath: /home/asottile/.local/share/containers/storage/volumes\nversion:\n  APIVersion: 2.0.0\n  Built: 0\n  BuiltTime: Wed Dec 31 16:00:00 1969\n  GitCommit: \"\"\n  GoVersion: go1.15.2\n  OsArch: linux/amd64\n  Version: 2.1.1\n```\n\n**Package info (e.g. output of `rpm -q podman` or `apt list podman`):**\n\n```\n$ apt list podman\nListing... Done\npodman/unknown,now 2.1.1~2 amd64 [installed]\npodman/unknown 2.1.1~2 arm64\npodman/unknown 2.1.1~2 armhf\npodman/unknown 2.1.1~2 s390x\n```\n\n**Have you tested with the latest version of Podman and have you checked the Podman Troubleshooting Guide?**\n\nYes\n\n**Additional environment details (AWS, VirtualBox, physical, etc.):**\n\nVirtualBox + aws\n",
+    "comments": [
+        {
+            "user": "asottile",
+            "body": "ah reproduced the deadlock again,\n\nhere's the process tree when it's locked:\n\n```\npodman,11738 run --rm -i runner-image:latest python3 -c import time; time.sleep(5)\n  ├─(slirp4netns,11752)\n  ├─{podman},11739\n  ├─{podman},11740\n  ├─{podman},11741\n  ├─{podman},11742\n  ├─{podman},11743\n  ├─{podman},11745\n  ├─{podman},11746\n  └─{podman},11749\n```\n\nstracing that:\n\n```console\n$ strace -p 11738\nstrace: Process 11738 attached\n--- stopped by SIGTTIN ---\n```"
+        },
+        {
+            "user": "mheon",
+            "body": "SIGTTIN pauses the process it's sent to; if you hit Podman with that while we're holding a lock, then yes, I fully expect it will effectively deadlock until execution restarts. It's probably getting in before we get `sig-proxy` configured to proxy signals into the container (otherwise it's be the container process getting the signal).\n\nThat snippet you provided seems to be *very aggressively* sending terminal flow control signals to Podman. The warning messages there are narrow race conditions with signals being sent after the container has exited but before `podman run` has exited, and we're getting enough signals to hit them consistently. The deadlock is more concerning - something sent us a SIGTTIN to pause execution but never sent a SIGCONT to resume it. Podman can't do anything about this - we received a stop signal and respected it."
+        },
+        {
+            "user": "asottile",
+            "body": "the `xargs` was just to make it more reproducible -- it reproduces on its own just very rarely\n\nI have for instance a script which is just:\n\n```console\n$ cat t.sh \ntimeout 2 podman run --rm -i runner-image:latest python3 -c 'import time; time.sleep(5)'\ntimeout 2 podman run --rm -i runner-image:latest python3 -c 'import time; time.sleep(5)'\ntimeout 2 podman run --rm -i runner-image:latest python3 -c 'import time; time.sleep(5)'\ntimeout 2 podman run --rm -i runner-image:latest python3 -c 'import time; time.sleep(5)'\ntimeout 2 podman run --rm -i runner-image:latest python3 -c 'import time; time.sleep(5)'\ntimeout 2 podman run --rm -i runner-image:latest python3 -c 'import time; time.sleep(5)'\ntimeout 2 podman run --rm -i runner-image:latest python3 -c 'import time; time.sleep(5)'\ntimeout 2 podman run --rm -i runner-image:latest python3 -c 'import time; time.sleep(5)'\ntimeout 2 podman run --rm -i runner-image:latest python3 -c 'import time; time.sleep(5)'\ntimeout 2 podman run --rm -i runner-image:latest python3 -c 'import time; time.sleep(5)'\ntimeout 2 podman run --rm -i runner-image:latest python3 -c 'import time; time.sleep(5)'\ntimeout 2 podman run --rm -i runner-image:latest python3 -c 'import time; time.sleep(5)'\ntimeout 2 podman run --rm -i runner-image:latest python3 -c 'import time; time.sleep(5)'\ntimeout 2 podman run --rm -i runner-image:latest python3 -c 'import time; time.sleep(5)'\ntimeout 2 podman run --rm -i runner-image:latest python3 -c 'import time; time.sleep(5)'\ntimeout 2 podman run --rm -i runner-image:latest python3 -c 'import time; time.sleep(5)'\ntimeout 2 podman run --rm -i runner-image:latest python3 -c 'import time; time.sleep(5)'\ntimeout 2 podman run --rm -i runner-image:latest python3 -c 'import time; time.sleep(5)'\ntimeout 2 podman run --rm -i runner-image:latest python3 -c 'import time; time.sleep(5)'\n```\n\nI'm not sure what could be sending `SIGTTIN` -- `timeout` only seems to send `SIGTERM` (is it possible `podman` is accidentally signaling itself here?) -- I could only reproduce this deadlock with `-i` (maybe something related to setting tty flags?)\n\nthe actual case where I encountered the error was with a much larger timeout value (`180s`), which should be quite long enough for podman to be up and ready -- but I didn't have the patience to run that in a loop"
+        },
+        {
+            "user": "mheon",
+            "body": "Let me take a look and see if I can reproduce"
+        },
+        {
+            "user": "mheon",
+            "body": "The \"Error forwarding signal\" bit definitely reproduces.\n\nFirst step is probably to drop that down to an Info level log if it's caused by the container being in a bad state - that will stop spamming the terminal with logs, at least."
+        },
+        {
+            "user": "mheon",
+            "body": "I can see a potential race where Podman will allow the Podman process to be killed, but the container to survive, if a signal arrives in a narrow window between signal proxying starting and the container starting (we start proxying before the container is fully started to ensure we don't miss sending anything). I don't think that precisely matches what's going on here, but I will see what can be done about fixing it."
+        },
+        {
+            "user": "mheon",
+            "body": "Partial fix in https://github.com/containers/podman/pull/8191"
+        },
+        {
+            "user": "rhatdan",
+            "body": "@asottile Could you try again with the code in master branch.  @mheon got a partial fix in, see if this helps your issue."
+        },
+        {
+            "user": "asottile",
+            "body": "ok adjusting the above script:\n\n```bash\ntimeout 2 bin/podman run --rm -i ghcr.io/pre-commit-ci/runner-image python3 -c 'import time; time.sleep(5)'\ntimeout 2 bin/podman run --rm -i ghcr.io/pre-commit-ci/runner-image python3 -c 'import time; time.sleep(5)'\ntimeout 2 bin/podman run --rm -i ghcr.io/pre-commit-ci/runner-image python3 -c 'import time; time.sleep(5)'\ntimeout 2 bin/podman run --rm -i ghcr.io/pre-commit-ci/runner-image python3 -c 'import time; time.sleep(5)'\ntimeout 2 bin/podman run --rm -i ghcr.io/pre-commit-ci/runner-image python3 -c 'import time; time.sleep(5)'\ntimeout 2 bin/podman run --rm -i ghcr.io/pre-commit-ci/runner-image python3 -c 'import time; time.sleep(5)'\ntimeout 2 bin/podman run --rm -i ghcr.io/pre-commit-ci/runner-image python3 -c 'import time; time.sleep(5)'\ntimeout 2 bin/podman run --rm -i ghcr.io/pre-commit-ci/runner-image python3 -c 'import time; time.sleep(5)'\ntimeout 2 bin/podman run --rm -i ghcr.io/pre-commit-ci/runner-image python3 -c 'import time; time.sleep(5)'\ntimeout 2 bin/podman run --rm -i ghcr.io/pre-commit-ci/runner-image python3 -c 'import time; time.sleep(5)'\ntimeout 2 bin/podman run --rm -i ghcr.io/pre-commit-ci/runner-image python3 -c 'import time; time.sleep(5)'\ntimeout 2 bin/podman run --rm -i ghcr.io/pre-commit-ci/runner-image python3 -c 'import time; time.sleep(5)'\ntimeout 2 bin/podman run --rm -i ghcr.io/pre-commit-ci/runner-image python3 -c 'import time; time.sleep(5)'\ntimeout 2 bin/podman run --rm -i ghcr.io/pre-commit-ci/runner-image python3 -c 'import time; time.sleep(5)'\ntimeout 2 bin/podman run --rm -i ghcr.io/pre-commit-ci/runner-image python3 -c 'import time; time.sleep(5)'\ntimeout 2 bin/podman run --rm -i ghcr.io/pre-commit-ci/runner-image python3 -c 'import time; time.sleep(5)'\ntimeout 2 bin/podman run --rm -i ghcr.io/pre-commit-ci/runner-image python3 -c 'import time; time.sleep(5)'\ntimeout 2 bin/podman run --rm -i ghcr.io/pre-commit-ci/runner-image python3 -c 'import time; time.sleep(5)'\ntimeout 2 bin/podman run --rm -i ghcr.io/pre-commit-ci/runner-image python3 -c 'import time; time.sleep(5)'\n```\n\nit looks like `--rm` is broken so I can't really run this in a loop:\n\n```console\n$ ./bin/podman ps -a\nCONTAINER ID  IMAGE   COMMAND  CREATED  STATUS  PORTS   NAMES\n$ time timeout 2 bin/podman run --rm -i ghcr.io/pre-commit-ci/runner-image python3 -c 'import time; time.sleep(5)'\n\nreal\t0m2.003s\nuser\t0m0.533s\nsys\t0m1.194s\n$ ./bin/podman ps -a\nCONTAINER ID  IMAGE                               COMMAND               CREATED        STATUS   PORTS   NAMES\nb88107396029  ghcr.io/pre-commit-ci/runner-image  python3 -c import...  4 seconds ago  Created          inspiring_merkle\n```"
+        },
+        {
+            "user": "mheon",
+            "body": "Oh, you're seeing that `--rm` is broken as well? I saw it locally on one of my machines, but other team members didn't. Interesting."
+        },
+        {
+            "user": "mheon",
+            "body": "Can you confirm if `--rm` is working as root?"
+        },
+        {
+            "user": "asottile",
+            "body": "I've never run podman as root, hope I'm doing this right!\n\n```console\n$ sudo ./bin/podman run --rm -ti ubuntu:focal echo hi\n[sudo] password for asottile: \nTrying to pull docker.io/library/ubuntu:focal...\nGetting image source signatures\nCopying blob 6a5697faee43 done  \nCopying blob a254829d9e55 done  \nCopying blob ba13d3bc422b done  \nCopying config d70eaf7277 done  \nWriting manifest to image destination\nStoring signatures\nhi\n$ sudo ./bin/podman ps -a\nCONTAINER ID  IMAGE   COMMAND  CREATED  STATUS  PORTS   NAMES\n```"
+        },
+        {
+            "user": "mheon",
+            "body": "Yes - that looks right. Rootless only, then. Thanks!"
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "rhatdan",
+            "body": "Is this still an issue with the current main branch?"
+        },
+        {
+            "user": "asottile",
+            "body": "the `--rm` issue appears to be fixed, the deadlock is not:\n\n```\n$ bash -x t.sh\n+ timeout 4 bin/podman run --rm -i ghcr.io/pre-commit-ci/runner-image python3 -c 'import time; time.sleep(5)'\n```\n\n```console\n$ pstree -halp 12047\ntimeout,12047 4 bin/podman run --rm -i ghcr.io/pre-commit-ci/runner-image python3 -c import time; time.sleep(5)\n  └─podman,12048 run --rm -i ghcr.io/pre-commit-ci/runner-image python3 -c import time; time.sleep(5)\n      ├─(slirp4netns,12060)\n      ├─{podman},12049\n      ├─{podman},12050\n      ├─{podman},12051\n      ├─{podman},12052\n      ├─{podman},12053\n      ├─{podman},12055\n      ├─{podman},12056\n      └─{podman},12058\n```\n\n```console\n$ strace -p 12048\nstrace: Process 12048 attached\n--- stopped by SIGTTIN ---\n^Cstrace: Process 12048 detached\n```\n\nI'm also still seeing the \"Error forwarding signal 18\" issue:\n\n```console\n$ timeout 4 bin/podman run --rm -i ghcr.io/pre-commit-ci/runner-image python3 -c 'import time; time.sleep(5)'\nERRO[0000] container not running                        \ncontainer not running\nERRO[0004] Error forwarding signal 18 to container bc8b042991732be239cfb2a27e5c5de26debde570dcf2628da0c3485fea8acdc: error sending signal to container bc8b042991732be239cfb2a27e5c5de26debde570dcf2628da0c3485fea8acdc: `/usr/bin/runc kill bc8b042991732be239cfb2a27e5c5de26debde570dcf2628da0c3485fea8acdc 18` failed: exit status 1 \n```\n\n```console\n$ git rev-parse HEAD\n9c5fe954cca8b4bcb8f552645e1f52a5d9824134\n```"
+        },
+        {
+            "user": "rhatdan",
+            "body": "@mheon any more thoughts on this?"
+        },
+        {
+            "user": "mheon",
+            "body": "On the deadlock: we're being sent a SIGTTIN and pausing execution, at a very inconvenient time (in the middle of a critical section). Podman is behaving as expected in my view, and if we're never sent a signal to un-pause execution then the lock remains held and Podman will deadlock. We could look into doing something similar to the signal-inhibit logic we added to the create logic, to inhibit signals like SIGTTIN while in critical sections, I suppose, but I'm a bit leery at the performance implications of adding/removing a signal handler every time we take a lock.\n\nIt also sounds like we still have some races in `--sig-proxy` but I have doubts we will ever fully eliminate those. Forwarding signals at this rate was never the intended purpose of `--sig-proxy` (it was only intended to forward user-sent SIGTERM and similar into the container, not handle any serious volume of signals). Given that it's just a warning message I hesitate to say we should put that much effort in there - might be worth a \"Good First Issue\" tag?\n"
+        },
+        {
+            "user": "asottile",
+            "body": "@mheon it isn't really a rapid succession of signals -- just one SIGTERM is enough to reproduce this.  The original `xargs` command is just to make it happen more often (but it reproduces in serial)\n\nI'm a little confused where the SIGTTIN is coming from at all -- if I'm reading correctly, the docs on this indicate that podman would have to attempt to read from stdin while backgrounded in order to receive that signal"
+        },
+        {
+            "user": "mheon",
+            "body": "When Podman is run attached with `-i` we are always reading from STDIN to forward it into the container. So `podman run -i ...` will always be reading from STDIN.\n\nDo you have a reproducer with a single SIGTERM? The timing conditions here are extremely narrow, and you're the only person I've heard report them. Are you on a particularly slow VM or embedded system?"
+        },
+        {
+            "user": "asottile",
+            "body": "> When Podman is run attached with -i we are always reading from STDIN to forward it into the container. So podman run -i ... will always be reading from STDIN.\n\nhmmm, but it's not backgrounded so I'm confused why it gets SIGTTIN\n\nI filled a shell script with this:\n\n```\ntimeout 4 bin/podman run --rm -i ghcr.io/pre-commit-ci/runner-image python3 -c 'import time; time.sleep(5)'\ntimeout 4 bin/podman run --rm -i ghcr.io/pre-commit-ci/runner-image python3 -c 'import time; time.sleep(5)'\ntimeout 4 bin/podman run --rm -i ghcr.io/pre-commit-ci/runner-image python3 -c 'import time; time.sleep(5)'\ntimeout 4 bin/podman run --rm -i ghcr.io/pre-commit-ci/runner-image python3 -c 'import time; time.sleep(5)'\ntimeout 4 bin/podman run --rm -i ghcr.io/pre-commit-ci/runner-image python3 -c 'import time; time.sleep(5)'\ntimeout 4 bin/podman run --rm -i ghcr.io/pre-commit-ci/runner-image python3 -c 'import time; time.sleep(5)'\ntimeout 4 bin/podman run --rm -i ghcr.io/pre-commit-ci/runner-image python3 -c 'import time; time.sleep(5)'\ntimeout 4 bin/podman run --rm -i ghcr.io/pre-commit-ci/runner-image python3 -c 'import time; time.sleep(5)'\ntimeout 4 bin/podman run --rm -i ghcr.io/pre-commit-ci/runner-image python3 -c 'import time; time.sleep(5)'\ntimeout 4 bin/podman run --rm -i ghcr.io/pre-commit-ci/runner-image python3 -c 'import time; time.sleep(5)'\ntimeout 4 bin/podman run --rm -i ghcr.io/pre-commit-ci/runner-image python3 -c 'import time; time.sleep(5)'\ntimeout 4 bin/podman run --rm -i ghcr.io/pre-commit-ci/runner-image python3 -c 'import time; time.sleep(5)'\n```\n\nand when it doesn't deadlock I get the SIGTERM issue about ~5% of the time (which I showed here: https://github.com/containers/podman/issues/8086#issuecomment-713191267)\n\nI'm in a VM, but I wouldn't consider it slow"
+        },
+        {
+            "user": "asottile",
+            "body": "also the timing conditions aren't narrow -- I'm seeing this with a 180 second `timeout` command -- just the minimal reproduces I've been showing are much smaller because I don't think anyone has the patience to run a 3 minute timeout in a loop to debug (I wouldn't even call  a 4 second timeout narrow either)"
+        },
+        {
+            "user": "bitstrings",
+            "body": "Podman **v2.2.1**\n\nHitting this bug also.\n\n```\nERRO[0000] container not running                        \nERRO[0000] Error forwarding signal 15 to container b260052814cadf180bb9be699a37193842259fbe1ed4b75e85130012cc047b0a: error sending signal to container b260052814cadf180bb9be699a37193842259fbe1ed4b75e85130012cc047b0a: `/usr/bin/runc kill b260052814cadf180bb9be699a37193842259fbe1ed4b75e85130012cc047b0a 15` failed: exit status 1 \n```"
+        },
+        {
+            "user": "bitstrings",
+            "body": "Using CTRL+C on and the entrypoint traps SIG and the container is not started with `-it` we sometime get the error. However, most of the time the container terminates before a clean shutdown (i.e.: trap 'shutdown' SIGTERM SIGINT ...).\n\nUsing `-it` seems to make things stable again."
+        },
+        {
+            "user": "svdHero",
+            "body": "Same problem here with Podman version 2.2.1.\n\nI have an ASP.NET web service running inside a container. When I do a `podman stop -a` the container and the web service inside is shutdown gracefully. However, if I do a `CTRL+C`, then I get the output:\n```\nERRO[0000] container not running                        \nERRO[0003] Error forwarding signal 15 to container 7a9d095b3287e18c8eb131a0101f64dd7105a0181580e74a295d7570c26cd110: error sending signal to container 7a9d095b3287e18c8eb131a0101f64dd7105a0181580e74a295d7570c26cd110: `/usr/bin/runc kill 7a9d095b3287e18c8eb131a0101f64dd7105a0181580e74a295d7570c26cd110 15` failed: exit status 1\n```\nThis happens every time."
+        },
+        {
+            "user": "realJayNay",
+            "body": "I am also experiencing this issue on Podman version 2.2.1, when pressing `Ctrl-C` to shutdown a container that was started via `podman run`. Consistently reproducible.\n\nI can confirm that the issue does not occur when the container is started via `podman run -it`.\n"
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "bitstrings",
+            "body": "This is still an issue podman `3.0.1`."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@mheon Any update or new thoughts?"
+        },
+        {
+            "user": "mheon",
+            "body": "If people are seeing this with single signals and any sort of consistency, it's not the race I was thinking about. Looking at the error messages, I suppose we're looking at a situation where Podman isn't catching the container transitioning from Running to Stopped, but in that case a lot more would be broken."
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "asottile",
+            "body": "still a problem in 3.0.1:\n\n```\n$ yes | head -10 | xargs --replace -P5 timeout 2 podman run --rm --init ubuntu:focal sleep 5\n2021-04-12T00:20:00.000654469Z: open pidfd: No such process\nERRO[0001] Error forwarding signal 18 to container ab5560e0634a3a3466545770d7def57ea01fedfca530332f0a9d6833d5b7582a: error sending signal to container ab5560e0634a3a3466545770d7def57ea01fedfca530332f0a9d6833d5b7582a: `/usr/bin/crun kill ab5560e0634a3a3466545770d7def57ea01fedfca530332f0a9d6833d5b7582a 18` failed: exit status 1 \n$ podman --version\npodman version 3.0.1\n```"
+        },
+        {
+            "user": "bitstrings",
+            "body": "I think it looks better in `3.1.0` but since I can't run rootless I didn't test enough."
+        },
+        {
+            "user": "rhatdan",
+            "body": "I believe this is fixed. Reopen if I am mistaken."
+        },
+        {
+            "user": "asottile",
+            "body": "(can't reopen since it was closed by a maintainer)\n\nthis is still an issue in 3.1.0 using the reproduction in the original report:\n\n```console\n$ yes | head -10 | xargs --replace -P5 timeout 2 podman run --rm --init ubuntu:focal sleep 5\nERRO[0002] Error forwarding signal 18 to container eee9d2ce56463512dc9f12ac70be4b47ac5f988f14d2deb18bf2686af2da81e6: container has already been removed \n$ podman --version\npodman version 3.1.0\n```"
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "psilvaggio",
+            "body": "This is still an issue."
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "asottile",
+            "body": "this is still an issue"
+        },
+        {
+            "user": "rhatdan",
+            "body": "@mheon Any progress on this?"
+        },
+        {
+            "user": "bitstrings",
+            "body": "I've been using `3.1.2` for awhile and I don't get the issue. Maybe it's my use case only."
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "asottile",
+            "body": "I'm still on 3.2.3 (apt hasn't updated yet) but it's still an issue there:\n\n```console\n$ yes | head -10 | xargs --replace -P5 timeout 2 podman run --rm --init ubuntu:focal sleep 5\n2021-09-01T00:36:14.000528871Z: open pidfd: No such process\nERRO[0002] Error forwarding signal 18 to container e9011c0f5fd9d602d6c0468be5d48efacd6860b8365e3b02dbcedb2fa9eaa6b4: error sending signal to container e9011c0f5fd9d602d6c0468be5d48efacd6860b8365e3b02dbcedb2fa9eaa6b4: `/usr/bin/crun kill e9011c0f5fd9d602d6c0468be5d48efacd6860b8365e3b02dbcedb2fa9eaa6b4 18` failed: exit status 1 \n2021-09-01T00:36:14.000538067Z: open pidfd: No such process\nERRO[0002] Error forwarding signal 18 to container cc03ab0a3f5a8d49710b33c6949ffd6cf4046b492eeed9551d3128ebda9e0ce3: error sending signal to container cc03ab0a3f5a8d49710b33c6949ffd6cf4046b492eeed9551d3128ebda9e0ce3: `/usr/bin/crun kill cc03ab0a3f5a8d49710b33c6949ffd6cf4046b492eeed9551d3128ebda9e0ce3 18` failed: exit status 1 \n$ podman version\nVersion:      3.2.3\nAPI Version:  3.2.3\nGo Version:   go1.15.2\nBuilt:        Wed Dec 31 19:00:00 1969\nOS/Arch:      linux/amd64\n```"
+        },
+        {
+            "user": "bitstrings",
+            "body": "Ok, no, it still seems broken, if use `stress-ng -c24` in the background, then yes I get the same errors.\n\n```\n> podman version\nVersion:      3.3.0\nAPI Version:  3.3.0\nGo Version:   go1.16.6\nBuilt:        Fri Aug 20 15:36:14 2021\nOS/Arch:      linux/amd64\n```"
+        },
+        {
+            "user": "asottile",
+            "body": "@rhatdan this isn't fixed, @bitstrings edited their comment after posting"
+        },
+        {
+            "user": "bitstrings",
+            "body": "It's not fixed. It just doesn't happen as often on my desktop on low load. It is however still an issue. "
+        },
+        {
+            "user": "vrothberg",
+            "body": "I tried reproducing but did not manage to.\n\n@asottile, can you share `podman info --debug`?"
+        },
+        {
+            "user": "asottile",
+            "body": "here it is, basically the same as in the original post but with updated versions\n\na note: this machine is running virtualized so it's significantly slower (and others have noted that it requires a loaded system otherwise) so that may help you to reproduce\n\n```console\n$ podman info --debug\nhost:\n  arch: amd64\n  buildahVersion: 1.22.3\n  cgroupControllers: []\n  cgroupManager: cgroupfs\n  cgroupVersion: v1\n  conmon:\n    package: 'conmon: /usr/libexec/podman/conmon'\n    path: /usr/libexec/podman/conmon\n    version: 'conmon version 2.0.27, commit: '\n  cpus: 5\n  distribution:\n    distribution: ubuntu\n    version: \"20.04\"\n  eventLogger: journald\n  hostname: babibox\n  idMappings:\n    gidmap:\n    - container_id: 0\n      host_id: 1000\n      size: 1\n    - container_id: 1\n      host_id: 100000\n      size: 65536\n    uidmap:\n    - container_id: 0\n      host_id: 1000\n      size: 1\n    - container_id: 1\n      host_id: 100000\n      size: 65536\n  kernel: 5.11.0-34-generic\n  linkmode: dynamic\n  memFree: 6699016192\n  memTotal: 8345640960\n  ociRuntime:\n    name: crun\n    package: 'crun: /usr/bin/crun'\n    path: /usr/bin/crun\n    version: |-\n      crun version 0.20.1.5-925d-dirty\n      commit: 0d42f1109fd73548f44b01b3e84d04a279e99d2e\n      spec: 1.0.0\n      +SYSTEMD +SELINUX +APPARMOR +CAP +SECCOMP +EBPF +CRIU +YAJL\n  os: linux\n  remoteSocket:\n    path: /run/user/1000/podman/podman.sock\n  security:\n    apparmorEnabled: false\n    capabilities: CAP_CHOWN,CAP_DAC_OVERRIDE,CAP_FOWNER,CAP_FSETID,CAP_KILL,CAP_NET_BIND_SERVICE,CAP_SETFCAP,CAP_SETGID,CAP_SETPCAP,CAP_SETUID,CAP_SYS_CHROOT\n    rootless: true\n    seccompEnabled: true\n    seccompProfilePath: /usr/share/containers/seccomp.json\n    selinuxEnabled: false\n  serviceIsRemote: false\n  slirp4netns:\n    executable: /usr/bin/slirp4netns\n    package: 'slirp4netns: /usr/bin/slirp4netns'\n    version: |-\n      slirp4netns version 1.1.8\n      commit: unknown\n      libslirp: 4.3.1-git\n      SLIRP_CONFIG_VERSION_MAX: 3\n      libseccomp: 2.4.3\n  swapFree: 1964396544\n  swapTotal: 1964396544\n  uptime: 1m 49.01s\nregistries:\n  search:\n  - docker.io\n  - quay.io\nstore:\n  configFile: /home/asottile/.config/containers/storage.conf\n  containerStore:\n    number: 0\n    paused: 0\n    running: 0\n    stopped: 0\n  graphDriverName: overlay\n  graphOptions:\n    overlay.mount_program:\n      Executable: /usr/bin/fuse-overlayfs\n      Package: 'fuse-overlayfs: /usr/bin/fuse-overlayfs'\n      Version: |-\n        fusermount3 version: 3.9.0\n        fuse-overlayfs: version 1.5\n        FUSE library version 3.9.0\n        using FUSE kernel interface version 7.31\n  graphRoot: /home/asottile/.local/share/containers/storage\n  graphStatus:\n    Backing Filesystem: extfs\n    Native Overlay Diff: \"false\"\n    Supports d_type: \"true\"\n    Using metacopy: \"false\"\n  imageStore:\n    number: 7\n  runRoot: /run/user/1000/containers\n  volumePath: /home/asottile/.local/share/containers/storage/volumes\nversion:\n  APIVersion: 3.3.1\n  Built: 0\n  BuiltTime: Wed Dec 31 19:00:00 1969\n  GitCommit: \"\"\n  GoVersion: go1.16.6\n  OsArch: linux/amd64\n  Version: 3.3.1\n\n```"
+        },
+        {
+            "user": "vrothberg",
+            "body": "Thanks!\n\n@giuseppe should we do some exponential back off when forwarding the signal?"
+        },
+        {
+            "user": "giuseppe",
+            "body": "> @giuseppe should we do some exponential back off when forwarding the signal?\n\ndo not we risk to send the signal multiple times this way?  Would we repeat it only when we get an error from the OCI runtime?"
+        },
+        {
+            "user": "vrothberg",
+            "body": "@giuseppe, yes, we should only do the back off when there's an OCI runtime error."
+        },
+        {
+            "user": "giuseppe",
+            "body": "the error `2021-09-01T00:36:14.000528871Z: open pidfd: No such process` happens when the container process already exited.\n\nOne alternative is to check if the container is still running when we get an error.  If the container is not running, then we ignore it and stop forwarding signals.\n\nThere is a possibility that the container was running when the signal was sent but I think we can live with it.\n\n"
+        },
+        {
+            "user": "giuseppe",
+            "body": "and I am not even sure this is a bug.  If the user tries to send a signal to a container that is already terminated, maybe it is correct to report the problem?"
+        },
+        {
+            "user": "asottile",
+            "body": "> \n> \n> and I am not even sure this is a bug. If the user tries to send a signal to a container that is already terminated, maybe it is correct to report the problem?\n\nfwiw that's not what is happening here -- `timeout` only sends one signal to the container and there's some race in tearing down the container and reporting the exit code when terminated by that signal"
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@vrothberg @mheon @giuseppe any knew thoughts on this one?  I just tried it locally and run 100 containers and had no issues. But my machine is not fully loaded."
+        },
+        {
+            "user": "asottile",
+            "body": "in case it helps, here's a `--log-level=debug` output for a container which hits this\n\n[log.30148.txt](https://github.com/containers/podman/files/7584136/log.30148.txt)\n"
+        },
+        {
+            "user": "rhatdan",
+            "body": "The `open pidfd` error is coming from crun."
+        },
+        {
+            "user": "bitstrings",
+            "body": "Nothing changed. When the system is under some load I do get\n\n![image](https://user-images.githubusercontent.com/911165/142935716-e81fc7ce-4a54-4874-8c9b-e9a8ae5f10a6.png)\n\nI say \"under some load\" because it seems to be much less frequent otherwise."
+        },
+        {
+            "user": "vrothberg",
+            "body": "@giuseppe @flouthoc could you eyeball the pidfd logic in crun?"
+        },
+        {
+            "user": "giuseppe",
+            "body": "crun returns that error when the container is already exited.\n\nI think a fully loaded machine just makes easier to trigger the race where Podman thinks the container is running and sends a signal.\n\nOn such failures, probably Podman should ask the runtime if the container is still alive, and ignore any error when it is already terminated"
+        },
+        {
+            "user": "flouthoc",
+            "body": "@giuseppe @vrothberg I guess in case of error would could make another call to `kill` and if its `unix.ESRCH` means no PID is there and we could terminate gracefully we are already going it for `SIGKILL`. I could open a PR but want to check if everybody agrees with this.\n\n```diff\n--- a/libpod/oci_conmon_linux.go\n+++ b/libpod/oci_conmon_linux.go\n@@ -407,6 +407,11 @@ func (r *ConmonOCIRuntime) KillContainer(ctr *Container, signal uint, all bool)\n                args = append(args, \"kill\", ctr.ID(), fmt.Sprintf(\"%d\", signal))\n        }\n        if err := utils.ExecCmdWithStdStreams(os.Stdin, os.Stdout, os.Stderr, env, r.path, args...); err != nil {\n+               // check if container is already dead, exit gracefully\n+               err := unix.Kill(ctr.state.PID, 0)\n+               if err == unix.ESRCH {\n+                       return nil\n+               }\n                return errors.Wrapf(err, \"error sending signal to container %s\", ctr.ID())\n        }\n```"
+        },
+        {
+            "user": "giuseppe",
+            "body": "I think that would not work well with VMs.  It is better to go through the OCI runtime (`$OCI-RUNTIME state $CTR`)."
+        }
+    ]
+}

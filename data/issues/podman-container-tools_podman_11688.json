@@ -1,0 +1,118 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 11688,
+    "title": "cannot assign device path with colon",
+    "state": "open",
+    "labels": [
+        "kind/bug"
+    ],
+    "user": "martinetd",
+    "body": "**Is this a BUG REPORT or FEATURE REQUEST? (leave only one on its own line)**\n\n/kind bug\n\n**Description**\n\nThere is no way to escape colons in paths provided in `podman run --device ...`\n\n**Steps to reproduce the issue:**\n\n1. Find some device with colons or make one. /dev/*/by-path are good candidates:\n```\n$ ls -l /dev/*/*by*/*:*\nlrwxrwxrwx 1 root root  9 Sep 16 16:08 /dev/disk/by-id/usb-Generic-_Micro_SD_M2_058F84688461-0:1 -> ../../sdb\nlrwxrwxrwx 1 root root  9 Sep 16 16:08 /dev/disk/by-id/usb-Generic-_SD_MMC_058F84688461-0:0 -> ../../sda\nlrwxrwxrwx 1 root root  9 Sep 16 16:08 /dev/disk/by-path/pci-0000:00:14.0-usb-0:2.1:1.0-scsi-0:0:0:0 -> ../../sda\nlrwxrwxrwx 1 root root  9 Sep 16 16:08 /dev/disk/by-path/pci-0000:00:14.0-usb-0:2.1:1.0-scsi-0:0:0:1 -> ../../sdb\nlrwxrwxrwx 1 root root 13 Jul 27 11:00 /dev/disk/by-path/pci-0000:3d:00.0-nvme-1 -> ../../nvme0n1\n...\n```\n\n2. try to pass it to a container with `podman run --device=/dev/... image`\n\n\n**Describe the results you received:**\n\n`stat xxx: no such file or directory` with path truncated before colon. Nothing I could think of as escape worked.\n\n**Describe the results you expected:**\n\nThere should be a way of not splitting at colons, e.g. by allowing escapes or encoding : differently (à la systemd-escape, e.g. `: -> \\x3a` ?)\n\n**Additional information you deem important (e.g. issue happens only occasionally):**\n\nWorkaround: do lookup manually and create with mknod or link destination, and use another fixed path within container\nSolution: iiuc the fix would be in `ParseDevice` in `pkg/specgen/generate/config_linux.go`, replacing `strings.Split(device, \":\")` by something slightly smarter. I didn't try.\n\n**Output of `podman version`:**\n\ntried on 3.2.3 but the code is still the same as of today's master 8e2d25e937",
+    "comments": [
+        {
+            "user": "vrothberg",
+            "body": "Thanks for reaching out, @martinetd.\n\n`--volume` has the same limitation which can be overcome by using `--mount`. @giuseppe, should we add a \"device\" type for `--mount`?"
+        },
+        {
+            "user": "Luap99",
+            "body": "Does this work with docker?"
+        },
+        {
+            "user": "martinetd",
+            "body": "@Luap99 good point, I didn't think of trying. I also cannot seem to get it to work with docker either.\nSearching for docker instead of podman yields a few unsatisfying results:\nhttps://stackoverflow.com/a/56746298 (workaround: make a symlink without dash next to the real one)\nhttps://github.com/moby/moby/issues/39293 (no workaround given, but hints at adding a device type for `--mount`)\n\nI'd be happy with the mount option if given, I have the same problem described in the question as my video devices don't have a fixed /dev/videoX number but the path is not usable. I can workaround by using a different path inside the container and doing the readlink myself (or additional link like described in the SO answer), but being able to use the original paths would be great."
+        },
+        {
+            "user": "giuseppe",
+            "body": "> @giuseppe, should we add a \"device\" type for `--mount`?\n\nThat seems useful to me.\n\nFor now, a possible workaround could be something like:\n\n```\npodman run --device /proc/self/fd/3:/dev/path .... 3</dev/path\n```"
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "rhatdan",
+            "body": "Did https://github.com/containers/podman/pull/11912 fix this issue?"
+        },
+        {
+            "user": "martinetd",
+            "body": "I didn't test, but I assume it wouldn't as device is split directly with `strings.Split(device, \":\")` in containers/common/pkg/config/config.go if I understand this correctly.\nGiven that there is also the path inside the container to consider (host path, container path, permission) I guess a similar fix would also work as long as the path within the container does not contain colons, but frankly that seems optimistic -- I think having have escaping (e.g. `\\\\` -> `\\`, `\\:` -> `:`) if we go this way makes more sense.\nOTOH, the `--mount` type device that was suggested earlier is probably just as simple (hm, I didn't think about it, but in the case of mount then `,` becomes a forbidden character?)"
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "rhatdan",
+            "body": "--mount is the only answer for now."
+        },
+        {
+            "user": "martinetd",
+            "body": "Hi,\n\nignoring the fact that there is no `--mount type=device` type (I don't see the difference with `type=bind`), `-- mount` has the same problem with commas that --device has with colon:\n```\n# touch /tmp/test,comma\n# podman run -ti  --rm --mount type=bind,src=/tmp/test,comma,dst=/tmp/test docker.io/alpine\nError: comma: invalid mount option\n```\n\nI think @giuseppe 's suggestion of using /proc/self/fd/x is more robust, even if it's a bit of a pain to use and might have side-effects for some devices (some drivers don't like having a device open multiple times and podman does not close the fd after getting infos from that path)\n\nThat being said, I honestly don't have a better idea; the only safe delimiter would be a NUL byte and that doesn't work well as a command-line interface, so allowing to escape colons (`\\: -> :, \\\\ -> \\`) would probably be ideal.\nSince you wrote for now, would you be open to a patch? The amount of hits I get grepping for `Split.*:` is scary, but if it's ok to just add this substitution for `--device` (in `containers/common/pkg/config/config.go`) and `--volume` (in I assume `cmd/podman/common/create_opts.go` ?) I can probably make some time for that early next year."
+        },
+        {
+            "user": "giuseppe",
+            "body": "> I think @giuseppe 's suggestion of using /proc/self/fd/x is more robust, even if it's a bit of a pain to use and might have side-effects for some devices (some drivers don't like having a device open multiple times and podman does not close the fd after getting infos from that path)\n\nanother alternative could be a symlink.  You need to clean it up afterwards but at least it doesn't cause side effects like opening the device earlier"
+        },
+        {
+            "user": "ciandonovan",
+            "body": "> > I think @giuseppe 's suggestion of using /proc/self/fd/x is more robust, even if it's a bit of a pain to use and might have side-effects for some devices (some drivers don't like having a device open multiple times and podman does not close the fd after getting infos from that path)\n> \n> another alternative could be a symlink. You need to clean it up afterwards but at least it doesn't cause side effects like opening the device earlier\n\nUsing a symlink doesn't work unfortunately.\n\nI have a device `/dev/iio:device0` from an Intel Realsense 435i symlinked by udev to `/dev/realsense_accel_3d`.\n\nI pass the device using the argument `--device=/dev/realsense_accel_3d:/dev/device0:rw` and get the error `Error: invalid device specification: /dev/iio:device0:/dev/device0:rw`.\n\nClearly Podman resolves the symlink first before mounting the device, and so the issue with the colon in the device name persists."
+        },
+        {
+            "user": "martinetd",
+            "body": "hmm, that definitely used to work, but it looks like it's been broken for a while alright... it does work with volume so I guess it's not all lost.\n\nFor devices now I just gave up and our current recommendation for our users is to just pass /dev as a volume and trust `--device-cgroup-rule` -- it's not as practical as passing a single device, but it works in practice.\nAlso, if you just really need a single device you can extract major/minor and recreate another node with the same name instead of ln, but that's a bit heavyweight..."
+        },
+        {
+            "user": "ciandonovan",
+            "body": "Currently we use udev rules to create well-known named symlinks for devices so a subset can easily be passed through to separate containers, so using `--device-cgroup-rule` with a major number won't work that well unfortunately, and the minor numbers are too unpredictable.\n\nWill experiment with renaming the node itself with udev or recreating a new node under a different name as you suggested, thanks! "
+        },
+        {
+            "user": "rhatdan",
+            "body": "We could change the code to see if a device on the host exists with the name with colons before splitting it.\n\nCheck if\n--device /dev/iio:device0:/dev/device0:rw\n\nCould check if a device named \n/dev/iio:device0:/dev/device0:rw\n/dev/iio:device0:/dev/device0\n/dev/iio:device0\n/dev/iio \nOn the host and then interpret the remainder of the option.\n"
+        },
+        {
+            "user": "ciandonovan",
+            "body": "> We could change the code to see if a device on the host exists with the name with colons before splitting it.\n> \n> Check if --device /dev/iio:device0:/dev/device0:rw\n> \n> Could check if a device named /dev/iio:device0:/dev/device0:rw /dev/iio:device0:/dev/device0 /dev/iio:device0 /dev/iio On the host and then interpret the remainder of the option.\n\nI was worried there might be an issue if both the below devices existed\n```\n$ ls -l /dev\niio\niio:device\n```\nand I pass to Podman `--device /dev/iio:device:rw`, (wanting `/dev/iio` on the host to be mapped to `device` in the working directory in the container) that there might be some ambiguity, but thankfully it doesn't look like Podman supports relative paths on the container side for devices, so not an issue.\n\nAnyway, thanks Dan, what you suggested looks like a solid approach."
+        },
+        {
+            "user": "Luap99",
+            "body": "I don't think we should stat the devices ever. This stuff never works via remote client and as @ciandonovan said this is ambiguous.\n\nI would recommend to use a csv like parser, like we do for --mount (https://github.com/containers/podman/pull/13969).\nWith that we could support something like `--device '\"/dev/path:with:colon\":\"/dev/contianer:here\":rw'`\n\nAlso the man pages are very clear about --device resolving symlinks:\n> Note: if *host-device* is a symbolic link then it is resolved first.\n> The container only stores the major and minor numbers of the host device.\n\nThis seems be the case for a long time (https://github.com/containers/podman/issues/4550)"
+        },
+        {
+            "user": "rhatdan",
+            "body": "Well I believe we currently stat the device if all of the information is not provided, like major/minor number. \n\nBottom line is this is something we should support.\n\nUsing CSV seems like a better alternative. Now we just need someone to implement it.  My point is that this is a bug and something that we should fix."
+        },
+        {
+            "user": "cyqsimon",
+            "body": "Bump. Ran into this today with such a USB device. Fortunately for me I got away with using `/dev/by-uuid/`, but it won't work for everyone.\n\nMay I suggest taking inspiration from `sed`? Usually people would write something like this: `s/foo/bar/`, but you're actually allowed to use anything as a delimiting character, for example: `s|/path/to/foo|/path/to/bar|`.\n\nSo what I'm proposing is an alternative grammar like this: `<D><HOST_PATH>[<D><GUEST_PATH>][<D><PERMS>]<D>`, where `<D>` is the delimiting character. Note that the string starts and ends with `<D>`, which can be used as the switching condition during parsing. For example, OP could then have something like this:\n\n```\n--device \"|/dev/disk/by-id/usb-Generic-_SD_MMC_058F84688461-0:0|rw|\"\n```\n\nIt's also probably best to only support a small subset of symbols for the user to choose from for `<D>` instead of any character to minimise the likelihood of accidental breakages (e.g. we don't want `--device read-only-device:r` to be misunderstood as \"HOST_PATH is `ead-only-device:`\")."
+        },
+        {
+            "user": "rhatdan",
+            "body": "Nice idea, It might be nice to support : | ; \n"
+        },
+        {
+            "user": "Luap99",
+            "body": "I would not invent a new syntax that is not used anywhere in podman.\nAs mentioned above we can use a csv parser like we did for mount. Also I see no reason why we coudn't add `--mount type=device,...`"
+        },
+        {
+            "user": "rhatdan",
+            "body": "That works as well, and is a better solution.\n"
+        },
+        {
+            "user": "cyqsimon",
+            "body": "I've given it some thought and have come to agree that a CSV parser is indeed a better solution, mostly because it extends the old syntax rather than inventing something entirely new.\n\nAlso out of curiosity, what's Podman's policy regarding implementing Docker-divergent features like this? Is there some sort of coordination with Docker people?"
+        },
+        {
+            "user": "rhatdan",
+            "body": "The Podman team attempts to match Docker functionality when they make changes like buildkit supported features.  But there is no effort to go the other way.\nWhen Podman adds features they do not necessarily show up back in Docker."
+        },
+        {
+            "user": "tschan",
+            "body": "Is there any option to use --device with a device name including colons by now?"
+        },
+        {
+            "user": "martinetd",
+            "body": "Since we're wrapping around podman at $work my workaround of detecting if the path has colons and create a symlink to work around the issue still works for us, so I've never spent more time on this.\n\nIt doesn't look like anyone spent the time implementing the suggested --mount type=device (neither on docker side) at this point, but I think we've got the blessings to do it if you want to open a PR"
+        }
+    ]
+}

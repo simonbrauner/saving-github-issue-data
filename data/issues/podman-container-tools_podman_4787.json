@@ -1,0 +1,90 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 4787,
+    "title": "Build gets the wrong version, when built from tarball",
+    "state": "closed",
+    "labels": [
+        "locked - please file new issue/PR"
+    ],
+    "user": "afbjorklund",
+    "body": "Seems like the build script picks up the version of the **build system** instead...\n\nWhen using something like (a branch of) [buildroot](https://buildroot.org/), that builds from dist tarballs.\n\nIt also uses \"git fetch\", which can be quite costly (we are using a shallow clone)\n\nSo it would be better if \"make podman\" didn't do all those magic git commands ?\n\n----\n\nThe workaround is to provide the required version in the \"CIRRUS_TAG\" variable\n\n```bash\n    VERSION*)\n        OUTPUT=\"${CIRRUS_TAG:-$(git fetch --tags && git describe HEAD 2> /dev/null)}\"\n        ;;\n    NUMBER*)\n        OUTPUT=\"$($0 VERSION | sed 's/-.*//')\"\n        ;;\n```\n\nOr to give up a provide both RELEASE_VERSION and RELEASE_NUMBER\n\n```make\nRELEASE_VERSION ?= $(shell hack/get_release_info.sh VERSION)\nRELEASE_NUMBER ?= $(shell hack/get_release_info.sh NUMBER|sed -e 's/^v\\(.*\\)/\\1/')\n```\n\nLike currently done for the GIT_COMMIT variable, similar issue (wrong git repo)\n\n```make\nGIT_COMMIT ?= $(if $(shell git status --porcelain --untracked-files=no),${COMMIT_NO}-dirty,${COMMIT_NO})\n```\n\nhttps://github.com/kubernetes/minikube/tree/master/deploy/iso/minikube-iso/package/podman",
+    "comments": [
+        {
+            "user": "afbjorklund",
+            "body": "The main problem is:\n\n```console\n$ git remote -v\norigin\thttps://github.com/buildroot/buildroot (fetch)\norigin\thttps://github.com/buildroot/buildroot (push)\n```\nWhich then outputs:\n\n```console\n$ git describe HEAD\n2019.02.8\n$ git rev-parse HEAD\naaa1437b110f886ee24757595542f715a77d702a\n```\n"
+        },
+        {
+            "user": "vrothberg",
+            "body": "@afbjorklund mind opening a PR with what you have in mind?"
+        },
+        {
+            "user": "afbjorklund",
+            "body": "I wanted to have some feedback, in what would be the best version to allow building from tarball ?\n\nWhen looking at for instance the `runc` and `conmon` builds, they have a simpler version handling:\n\n```make\nVERSION := ${shell cat ./VERSION}\n```\n\nThat would of course require that this file is updated as part of the release process, not only tagged.\n\n----\n\nBut the current workaround is fine too (=it works).\n\n`CIRRUS_TAG=$(PODMAN_VERSION) $(MAKE) GIT_COMMIT=$(PODMAN_COMMIT) podman`\n\nJust thought the name \"CIRRUS_TAG\" was weird ?\n\nBut I didn't want to mess around with sed'ing the v."
+        },
+        {
+            "user": "afbjorklund",
+            "body": "I guess fedora would have had the same problem too, if it had used `make` instead of `%gobuild` ?\n\nhttps://src.fedoraproject.org/rpms/podman/blob/master/f/podman.spec\n\nEven when building from git, it seems a bit unnecessary to have to download all the _other_ git tags.\n\nSo used the same workaround, also for the brew package that I posted."
+        },
+        {
+            "user": "afbjorklund",
+            "body": "Hacking the build system seems to have had other side effects:\n\n**podman version -f json**\n```\n    \"Client\": {\n        \"RemoteAPIVersion\": 1,\n        \"Version\": \"1.7.0-rc2\",\n        \"GoVersion\": \"go1.13.5\",\n        \"GitCommit\": \"\",\n        \"Built\": 0,\n        \"OsArch\": \"linux/amd64\"\n    },\n```\n\nI guess there was nothing populating gitCommit / buildInfo ?\n\nhttps://koji.fedoraproject.org/koji/buildinfo?buildID=1426822"
+        },
+        {
+            "user": "afbjorklund",
+            "body": "@vrothberg : added PR, as requested\n\nBefore:\n\n``` shell\nCIRRUS_TAG=$(PODMAN_VERSION) $(MAKE) GIT_COMMIT=$(PODMAN_COMMIT) podman\n```\n\nAfter:\n\n``` shell\n$(MAKE) VERSION=$(PODMAN_VERSION) GIT_COMMIT=$(PODMAN_COMMIT) podman\n```\n\nSee #4901"
+        },
+        {
+            "user": "afbjorklund",
+            "body": "Two problems with above PR, it broke builds **not** using $(VERSION) and it _still_ used git..."
+        },
+        {
+            "user": "afbjorklund",
+            "body": "I will go with the (undocumented) `$CIRRUS_TAG` for now, feel free to improve the build."
+        },
+        {
+            "user": "afbjorklund",
+            "body": "Reopen as per comments in the initial attempt. Apparently everyone is doing their own workarounds.\n"
+        },
+        {
+            "user": "baude",
+            "body": "@vrothberg can you look at this again?"
+        },
+        {
+            "user": "vrothberg",
+            "body": "> @vrothberg can you look at this again?\n\nI prefer @afbjorklund and @cevich to continue working on the issue. They seem to have an idea how to move forward on this."
+        },
+        {
+            "user": "cevich",
+            "body": "> I will go with the (undocumented) $CIRRUS_TAG for now, feel free to improve the build.\n\nI originally wanted to do this except found some even less documented complications:\n\n* It's desirable to do throwaway builds on PRs, to validate the build+release process actually works.\n* I found `$CIRRUS_TAG` is only set when executing against a commit that is tagged. Meaning it will almost never be set for a PR.\n* Worse, a tagged commit may show up in the middle of a PR's set of commits.\n* More worser, the maintainer may push the tags before or well after the PR is merged.  We cannot predict the sequence.\n* We don't want versions like ''v1.7.0-288-ge27ce8160' (ever).  It should be simplified to the tag name or 'v.1.7.0-testing' (or similar, for PRs).\n\n:confounded: complicated :confounded: \n\nSo this is what `is_release()` in `contrib/cirrus/lib.sh` is suppose to help with.  In any case, take a peek at that function and I think it will help you understand the Makefile and `hack/get_release_info.sh` better.  I very much do not like the way this is currently, so please, if you have a mind for simplifying it, I'm in favor :+1: "
+        },
+        {
+            "user": "afbjorklund",
+            "body": "I would rather **not** have a situation like fedora, where release ends up being broken for half a year due to overly complex versioning scheme... (looking at you, `cri-o-1.15.2-1.module_f30+6830+9be88745`)\n\nEverything works fine when building from the git repository directly, so the main breakage was when trying to use \"traditional\" packaging systems - normally based on numeric versions and dist tarballs.\n\n----\n\nAdding the git commit to the metadata and build variables is a tolerable workaround, for now.\n\n```Makefile\nPODMAN_VERSION = v1.6.4\nPODMAN_COMMIT = 5cc92849f7fc9dd734ca2fd8f3ae8830b9a7eb26\n```\n\nThe main annoyance is that there is no accepted standard on _what_ those variables should be.\n\nMost common options seem to be `$(VERSION)` (from a VERSION file) and `$(GIT_COMMIT)`.\n\nAnd of course we still haven't even decided whether the `v` is just silent or omitted entirely..."
+        },
+        {
+            "user": "afbjorklund",
+            "body": "And I don't think that build time even _can_ be fixed, as per https://reproducible-builds.org/\n\nBut if anything, one would probably have to add [SOURCE_DATE_EPOCH](https://reproducible-builds.org/docs/source-date-epoch/) to metadata ?"
+        },
+        {
+            "user": "cevich",
+            "body": "> overly complex versioning scheme\n\nThat's why in the Makefile, I went to 'git describe' and for making tgz/zip files, that detail is encoded into release.txt  The problems related to `$CIRRUS_TAG` is related but more about automation knowing when to push artifacts (as opposed to always pushing them on every merge)."
+        },
+        {
+            "user": "cevich",
+            "body": "FWIW: If you want to extend/add to metadata in `release.txt` the only user of it (AFAIK) is `contrib/cirrus/upload_release_archive.sh`.  Might be handy if distro packaging ever wants to use those tarballs/zip files."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@cevich @afbjorklund What is the scoop on this one? Can I close it?"
+        },
+        {
+            "user": "afbjorklund",
+            "body": "I'm using the `CIRRUS_TAG` and `GIT_COMMIT` workaround, which seems to be doing the trick...\n\n```console\n                         _             _            \n            _         _ ( )           ( )           \n  ___ ___  (_)  ___  (_)| |/')  _   _ | |_      __  \n/' _ ` _ `\\| |/' _ `\\| || , <  ( ) ( )| '_`\\  /'__`\\\n| ( ) ( ) || || ( ) || || |\\`\\ | (_) || |_) )(  ___/\n(_) (_) (_)(_)(_) (_)(_)(_) (_)`\\___/'(_,__/'`\\____)\n\n$ sudo podman version\nVersion:            1.6.5\nRemoteAPI Version:  1\nGo Version:         go1.11.13\nGit Commit:         45e7be192ef99e870c59a1cd2c1fa7940b0af2d6\nBuilt:              Fri Feb 14 16:11:48 2020\nOS/Arch:            linux/amd64\n```\n\nMaybe not the prettiest, but \"works for me\". Now, if only I could find some `podman-remote` ;-)\n\nShould I open an issue about adding binaries to the GitHub releases, or will you fix the Cirrus CI ?\n"
+        },
+        {
+            "user": "rhatdan",
+            "body": "I am going to close this issue.  @cevich Is in charge of Cirrus CI..."
+        }
+    ]
+}

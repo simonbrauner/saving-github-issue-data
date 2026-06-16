@@ -1,0 +1,66 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 844,
+    "title": "Podman with image volume fails to create directory after restart",
+    "state": "closed",
+    "labels": [
+        "locked - please file new issue/PR"
+    ],
+    "user": "mheon",
+    "body": "**Is this a BUG REPORT or FEATURE REQUEST?**:\n\n/kind bug\n\n**Description**\nRestarting a container using an image volumes makes `podman` unable to create directories inside the volume mount.\n\n**Steps to reproduce the issue:**\n\n1. podman run -ti --name zmdb -e MYSQL_USER=zmuser -e MYSQL_PASSWORD=zmpass -e MYSQL_DATABASE=zm -e MYSQL_ROOT_PASSWORD=mysqlpassword centos/mariadb-101-centos7\n\n2. podman stop --latest\n\n3. podman start --latest\n\n**Describe the results you received:**\n\n`Fatal error Can't create database directory '/var/lib/mysql/data/mysql'`\n\n**Describe the results you expected:**\n\nMariadb starts successfully in the container\n\n**Additional information you deem important (e.g. issue happens only occasionally):**\n\nThe image `mariadb-101-centos7` defines the following volume:\n`VOLUME [\"/var/lib/mysql/data\"]`\n\n**Output of `podman version`:**\n\nObserved on upstream master and Fedora released 0.5.3\n",
+    "comments": [
+        {
+            "user": "vrothberg",
+            "body": "@mheon I tried to reproduce on current master but it works on my machine. Can you try to reproduce on current master?"
+        },
+        {
+            "user": "mheon",
+            "body": "@vrothberg On latest master, I've actually regressed further, to the point that I get the permission denied without a restart, just using the first `podman run` command. `setenforce 0` makes no difference, so it's not SELinux. I execed into the container, and permissions on the directory look fine."
+        },
+        {
+            "user": "mheon",
+            "body": "After some testing, @vrothberg and I determined this occurs with the `overlay` storage driver but not `btrfs`."
+        },
+        {
+            "user": "mheon",
+            "body": "`--cap-add=all` will allow it to succeed on overlay, so we're looking at a missing capability."
+        },
+        {
+            "user": "vrothberg",
+            "body": "> After some testing, @vrothberg and I determined this occurs with the overlay storage driver but not btrfs.\n\nFor whatever reason, I am now also able to reproduce on btrfs."
+        },
+        {
+            "user": "marcov",
+            "body": "I can also replicate the bug using a locally compiled podman (65033b5).\nFor me the bug is  already happening on the very first run of the container.\n\nThe problem seems related to wrong write permissions for the folder `/var/lib/mysql/data`. Running `ls -ls /var/lib/mysql` from inside the container:\n`0 drwxr-xr-x 1 root root 0 Jun 14 08:51 data`\n\nGiven that the container is run as user `mysql`, write access is denied.  If I force running the container as `root`, then write access is granted.\nAnother way to allow write access is to add the capability `dac_override` that disables checks on file write, as reported by @mheon.\n\nI tried to dump the filesystem of the container image and the data folder has the right permissions:\n`0 drwxrwxr-x 2 27 root 6 Jun  5 17:05 data` \n(UID 27 = `mysql`, and mysql user is in the `root` group)\n\nSo the problem may be with podman setting up the container with wrong permissions for the data folder.\n"
+        },
+        {
+            "user": "rhatdan",
+            "body": "So podman is creating a volume on disk and mounting it on /var/lib/mysql/data owned by root:root rather then mysql:root"
+        },
+        {
+            "user": "mheon",
+            "body": "In Docker, the directory is 775 mysql:root. In Podman, it is 755 root:root.\nI suspect that Docker may be using the owner and permissions of the parent directory of the image volume, as the permissions on their volume are identical to the ones on the directory containing the volume."
+        },
+        {
+            "user": "rhatdan",
+            "body": "Right, I would say that is the correct behavior we should take the security attributes of the directory we are mounting over and set it to the new volume."
+        },
+        {
+            "user": "marcov",
+            "body": "I hacked together a patch to assign the correct owner and permissions to the volume folder (@rhatdan approach is maybe better).\n\nWith this patch write access works for the mysql user but now I can actually fall in the bug as originally reported, that is the start command following a stop does not remount the volume correctly.\n\n\nAfter the start, an  ```ls -ls /var/lib/mysql/data```  from inside the container gives the following:\n```0 drwx------ 1 root root 92 Jun 14 15:38 data```\n\nAnd by checking inside the ```data``` folder (as root user), I see that something is definitely wrong:\n```# ls /var/lib/mysql/data/\nartifacts  attach  config.json  ctl  ctr.log  shm  volumes\n```\nAlso there seems to be an extra mount point that should not be there:\n```\n# mount\n...\nshm on /var/lib/mysql/data/shm type tmpfs (rw,nosuid,nodev,noexec,relatime,size=64000k)\n...\n```\n\nFinally here's the patch I mentioned before:\n\n```diff\ndiff --git a/libpod/container_internal.go b/libpod/container_internal.go\nindex f6d8fc3..f15cb6a 100644\n--- a/libpod/container_internal.go\n+++ b/libpod/container_internal.go\n@@ -1324,6 +1324,21 @@ func (c *Container) addImageVolumes(ctx context.Context, g *generate.Generator)\n \t\t\tif err = os.MkdirAll(volumePath, 0755); err != nil {\n \t\t\t\treturn errors.Wrapf(err, \"error creating directory %q for volume %q in container %q\", volumePath, k, c.ID)\n \t\t\t}\n+\n+\t\t\tif c.config.User != \"\" {\n+\t\t\t\tif !c.state.Mounted {\n+\t\t\t\t\treturn errors.Wrapf(ErrCtrStateInvalid, \"container %s must be mounted in order to translate User field\", c.ID())\n+\t\t\t\t}\n+\t\t\t\tuid, gid, err := chrootuser.GetUser(c.state.Mountpoint, c.config.User)\n+\t\t\t\tif err != nil {\n+\t\t\t\t\treturn err\n+\t\t\t\t}\n+\n+\t\t\t\tif err = os.Chown(volumePath, int(uid), int(gid)); err != nil {\n+\t\t\t\t\treturn errors.Wrapf(err, \"error chowning directory %q for volume %q in container %q\", volumePath, k, c.ID)\n+\t\t\t\t}\n+\t\t\t}\n+\n \t\t\tif err = label.Relabel(volumePath, c.config.MountLabel, false); err != nil {\n \t\t\t\treturn errors.Wrapf(err, \"error relabeling directory %q for volume %q in container %q\", volumePath, k, c.ID)\n \t\t\t}\n```"
+        },
+        {
+            "user": "marcov",
+            "body": "I just tested with  other images configured to use a volume. \nThe problem with volume remount when doing stop + start is there as well, so it's definitely something to investigate."
+        },
+        {
+            "user": "mheon",
+            "body": "@marcov Thanks for the patch. I'll look into getting it merged this afternoon (might need to change it a bit for userns support).\n\nAgree that the original bug still seems to be present with it applied."
+        },
+        {
+            "user": "marcov",
+            "body": "I found the original bug reason: the ```Source``` field of the ```spec.Mount``` is left uninitialized when\nrestarting a container, leading to mounting an incorrect path instead of the volume path on the host.\n\nI am submitting a pull request with the fix to this problem and other improvements."
+        }
+    ]
+}

@@ -1,0 +1,55 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 14557,
+    "title": "additionalimagestore local image copy",
+    "state": "closed",
+    "labels": [
+        "kind/feature",
+        "locked - please file new issue/PR"
+    ],
+    "user": "martinetd",
+    "body": "**Is this a BUG REPORT or FEATURE REQUEST? (leave only one on its own line)**\n\n/kind feature\n\n**Description**\n\nI'd mostly like to confirm I didn't miss anything, but if it's not possible let this be a wishlist item :)\n\nMy current setup involves a local readonly store for safety (OTA updates etc); normal usage is to create a snapshot of the readonly store, use it with `podman --root <normallyReadonlyButNowRwStore> [load|pull|build]` for updates, then make it readonly again.\nIt's all great and works well, but I wasn't able to get it working with podman run + commit, e.g. build new additional images in graphroot and merge the content back into the additionalstore without going through a full save/load that does useless copies of the base image and is cumbersome.\n\n**Steps to reproduce the issue:**\n\n```\n# 1. create new ro store\npodman --root /tmp/ro pull docker.io/alpine\n\n# 2. use it to start a container, save and cleanup\npodman --root /tmp/rw --storage-opt additionalimagestore=/tmp/ro run --name cname docker.io/alpine touch /foo`\npodman --root /tmp/rw --storage-opt additionalimagestore=/tmp/ro commit cname newimage\npodman --root /tmp/rw --storage-opt additionalimagestore=/tmp/ro rm -a\n\n# 3. check\npodman --root /tmp/rw --storage-opt additionalimagestore=/tmp/ro image list\n# REPOSITORY                TAG         IMAGE ID      CREATED         SIZE        R/O\n# localhost/newimage        latest      ed4aef42534a  25 seconds ago  5.56 MB     false\n# docker.io/library/alpine  latest      6e30ab57aeee  2 weeks ago     5.56 MB     true\n\n# 4. \"merge back\" newimage into readonly store\n# is there anything more efficient than the following?\npodman --root /tmp/rw --storage-opt additionalimagestore=/tmp/ro image save -o newimage.tar newimage\npodman --root /tmp/ro load -i newimage.tar\npodman --root /tmp/rw --storage-opt additionalimagestore=/tmp/ro image rm newimage\n```\n\n**Describe the results you expected:**\n\nIs there an easier way of doing that? e.g. \"podman image scp\" but for local storages.\n\nBonus question: is there a way to tell save to skip shared layers? (I do that myself by modifying the tar archive for partial updates if our user cannot use pull, but what I'm doing is [an ugly hack](https://github.com/atmark-techno/mkswu/blob/main/podman_partial_image)\n\n\n\n**Output of `podman version`:**\n\n```\nClient:       Podman Engine\nVersion:      4.1.0\nAPI Version:  4.1.0\nGo Version:   go1.18.2\nGit Commit:   551cccc8e86503cde282f9b8e904e676bd559c2e\nBuilt:        Thu May 12 09:00:55 2022\nOS/Arch:      linux/arm64\n```",
+    "comments": [
+        {
+            "user": "martinetd",
+            "body": "(rename issue to copy instead of manipulations as I only care about copy at this point -- I'm aware of problems around purge and additional stores and am not asking to do anything about that)\n\nBTW for archival here's my copy command right now, until something better shows up, assuming no-argument podman has additional store setup.\nAs said in the description, it stores the layers already in readonly store in the tar needlessly and that's the main part I'd like to improve, either through direct commands or by enhancing save somehow? (But I'm not sure the later is reasonable.)\n```\npodman image list --filter readonly=false \\\n                --format '{{range .Names}}{{.}}{{println}}{{end}}{{.Id}}' \\\n        | xargs podman save -m -o rw_content.tar\npodman image --root readonlystore --storage-opt additionalimagestore=\"\" \\\n        load -i rw_content.tar\n# not worrying about cleaning up old rw data, it's purged at btrfs snapshot level\n```"
+        },
+        {
+            "user": "rhatdan",
+            "body": "@giuseppe @vrothberg @nalind PTAL"
+        },
+        {
+            "user": "nalind",
+            "body": "Pull the base image into read-write storage so that all of the image's layers can be read without needing the additional image store, then use the convoluted-because-I-couldn't-come-up-with-anything-better-at-the-time syntax with skopeo:\n```\nrunroot=`podman info -f '{{ .Store.RunRoot }}'`\nskopeo copy \"containers-storage:[overlay@/tmp/rw+$runroot]localhost/newimage:latest\" \"containers-storage:[overlay@/tmp/ro+$runroot]localhost/newimage:latest\"\n```\nPulling the base image is necessary because in the current implementation, while you can tell skopeo to use the target location as a read-only store when specifying where to copy from (throw a \":imagestore=/tmp/ro\" in between \"$runroot\" and the \"]\" that marks the end of the containers-storage configuration), a single location can't be used both read-only and read-write at the same time."
+        },
+        {
+            "user": "martinetd",
+            "body": "Thanks for the suggestion!\n\nNot being able to use a single store in both ro and rw is not a real problem for me, I keep each store in btrfs subvolumes so I could just make an extra snapshot for this operation...\n\nI'm a bit more torn about having to use skopeo though -- my target is a minimal embedded system, so adding 20MB of binary (skopeo) \"just for that\" is a bit difficult.\nWould it eventually make sense to expose a similar feature though e.g. `podman image copy` like image scp ?\nThe syntax could be (for example) either local image with configured repos or the same syntax as skopeo; that would remove the need to specify half of the command as bonus and be more aligned with podman normal commands.\n\nSorry for being greedy ;)\n\n"
+        },
+        {
+            "user": "vrothberg",
+            "body": "> Would it eventually make sense to expose a similar feature though e.g. podman image copy like image scp ?\n\n@martinetd, we could enhance `podman push` to allow for that.  Currently, `podman push $SOURCE $DESTINATION` wants the source to be a local container image."
+        },
+        {
+            "user": "vrothberg",
+            "body": "@rhatdan @nalind WDYT?"
+        },
+        {
+            "user": "martinetd",
+            "body": "oh, `podman push` allows that?\n\nLet's try again. I have:\n - one btrfs subvolume marked readonly, let's name it `storage_readonly`, normally used as additionalimagestore\n - graph root that can be a btrfs subvolume or tmpfs dir\n - normal configuration has these two stacked, so the images I want to sync from graphroot to the readonly volume are local container images -- perfect candidate for push.\n\nI've just tried creating a snapshot of the readonly volume and push to it:\n```\narmadillo:~# btrfs subvol snapshot /mnt/boot_0/containers_storage/ /mnt/newroot\nCreate a snapshot of '/mnt/boot_0/containers_storage/' in '/mnt/newroot'\narmadillo:~# podman push 0d39a67ca2c240ddf799169f259d44be6193668e92b37419c97b4cf4b1eec878 \"containers-storage:[overlay@/mnt/newroot]localhost/copy_ok:latest\"\nGetting image source signatures\nCopying blob 22bc666b2bd8 done  \nCopying blob c7412c2a6787 skipped: already exists  \nCopying config 0d39a67ca2 done  \nWriting manifest to image destination\nStoring signatures\n```\n\nWhich looks good: It noticed the shared layer, and copied only the new layer. After swapping the subvolumes back in place I see my copy.\n\nYou've just gotten yourself a happy user here :)\n\nI just have one last question before closing: I didn't keep the `+$runroot` in the container-storage destination as that didn't seem to make a difference? is that necessary?\n\n(also, I do not see this `containers-storage:[]x` syntax documented anywhere, is it stable?)\n(EDIT: ah, found it here https://github.com/containers/image/blob/main/docs/containers-transports.5.md#containers-storagestorage-specifierimage-iddocker-referenceimage-id )"
+        },
+        {
+            "user": "vrothberg",
+            "body": ">  I just have one last question before closing: I didn't keep the +$runroot in the container-storage destination as that didn't seem to make a difference? is that necessary?\n\nThe runroot is optional but I defer to @nalind who knows all storage details.\n\n> (also, I do not see this containers-storage:[]x syntax documented anywhere, is it stable?)\n\nIt's documented in `man containers-transports`."
+        },
+        {
+            "user": "nalind",
+            "body": "It's optional, but when I was trying out various permutations, the default I was getting was a location I couldn't write, and that was triggering errors.  If you can get away with not specifying it, that's great; it could just be a problem with my local setup."
+        },
+        {
+            "user": "martinetd",
+            "body": "Okay, thanks for confirming!\n\nI'll be updating my script tomorrow :)"
+        }
+    ]
+}

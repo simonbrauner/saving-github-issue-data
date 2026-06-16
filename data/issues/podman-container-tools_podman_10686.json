@@ -1,0 +1,72 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 10686,
+    "title": "v3.2.1 (on Gentoo): Error: error configuring CNI network plugin: failed to create new watcher too many open files",
+    "state": "closed",
+    "labels": [
+        "rootless",
+        "network",
+        "locked - please file new issue/PR"
+    ],
+    "user": "edsantiago",
+    "body": "rootless podman v3.2.1 fails on my Gentoo laptop, no matter what I run:\n```console\n$ podman info\nError: error configuring CNI network plugin: failed to create new watcher too many open files\n```\nIt fails very early: not even `podman info` nor `podman system reset` get past this point. `strace` shows a smoking gun here:\n```\nnewfstatat(AT_FDCWD, \"/home/esm/.config/cni/net.d\", {st_mode=S_IFDIR|0755, st_size=4096, ...}, 0) = 0\ninotify_init1(IN_CLOEXEC)               = -1 EMFILE (Too many open files)\n```\nPer watercooler discussion 2021-06-15 the source of the error is in CNI plugins. The root cause is almost certainly something on my end, possibly my use of `syncthing` (which also periodically gripes with inotify-related errors). I'm not asking the podman team to spend much time on this, my goal is to file a placeholder to help others who run into this. (For now, the only solution is to revert to 3.1.2).",
+    "comments": [
+        {
+            "user": "Luap99",
+            "body": "Does it work rootful?"
+        },
+        {
+            "user": "edsantiago",
+            "body": "Yes - I tagged with the `rootless` label in hopes of making that clear, but next time I will be more explicit."
+        },
+        {
+            "user": "Luap99",
+            "body": "What is the value in `/proc/sys/fs/inotify/max_user_instances`?"
+        },
+        {
+            "user": "edsantiago",
+            "body": "```\nfs.inotify.max_user_instances = 128\nfs.inotify.max_user_watches = 204800\n```"
+        },
+        {
+            "user": "Luap99",
+            "body": "Maybe the best short term fix is to ignore this error. Only cni needs this, it should only fail when you try to use cni, e.g. `podman run --network mynet...` and not for each podman command.\nIn the long run we should get rid of the inotify requirement."
+        },
+        {
+            "user": "mheon",
+            "body": "EMFILE here is, per the manpage, that the maximum number of user inotify sessions has been reached. I'm assuming you don't have 128 processes using inotify running, so this seems somewhat suspicious to me."
+        },
+        {
+            "user": "edsantiago",
+            "body": ">I'm assuming you don't have 128 processes using inotify running\n\nNot necessarily a safe assumption. I've had problems with this system for years, something to do with dbus (which I *still* have no idea what it is apart from something to irritate us oldtimers). There were 391 \"dbus-daemon\" processes running, and `lsof` on a sampling of those showed inotify active. Killing them fixes the EMFILE problem, allowing me to run `podman images`, but then runs into the \"image not known\" bug (#10682) so I've reverted yet again to 3.1.2"
+        },
+        {
+            "user": "Luap99",
+            "body": "I think this might be a bigger issue. The problem is that you cannot use more than 128 podman processes concurrently without failing. I don't know if there are any users who would reach this but I think 128 is not much. It is also potentially dangerous when podman container cleanup processes start failing. "
+        },
+        {
+            "user": "mheon",
+            "body": "I think we need to add a config knob to CNI so we can turn this off everywhere that is not `podman system service`."
+        },
+        {
+            "user": "Luap99",
+            "body": "> I think we need to add a config knob to CNI so we can turn this off everywhere that is not `podman system service`.\n\nActually we never need inotify, even for the service. I remember changing OCICNI to always reload the networks from disk when you use one which was not found in memory. This was needed because the podman CI flaked to often since inotify was slower than `podman-remote network create ... && podman-remote run --network ...`"
+        },
+        {
+            "user": "mheon",
+            "body": "Nice. Love it when things are simple."
+        },
+        {
+            "user": "edsantiago",
+            "body": ">you cannot use more than 128 podman processes concurrently\n\nI got curious, and tested:\n```console\n$ for i in {1..130};do echo -n $i..;./bin/podman run -d --rm quay.io/libpod/testimage:20210610 sleep 120 >/dev/null;done;echo\n1..2..3..4..5..6..7..8..9..10..11..12..13..14..15..16..17..18..19..20..21..22..23..24..25..26..27..28..29..30..31..32..33..34..35..36..37..38..39..40..41..42..43..44..45..46..47..48..49..50..51..52..53..54..55..56..57..58..59..60..61..62..63..64..65..66..67..68..69..70..71..72..73..74..75..76..77..78..79..80..81..82..83..84..85..86..87..88..89..90..91..92..93..94..95..96..97..98..99..100..101..102..103..104..105..106..107..108..109..110..111..112..113..114..115..116..117..118..119..120..121..122..123..124..125..126..127..128..129..130..\n$ ./bin/podman ps |wc -l\n131\n$ sysctl fs.inotify.max_user_instances\nfs.inotify.max_user_instances = 128\n```\nTo me, that shows 130 concurrent user processes, none of them failing? What did I do wrong?"
+        },
+        {
+            "user": "Luap99",
+            "body": "You run the container detached, so podman already exited. If you run them attached it fails."
+        },
+        {
+            "user": "edsantiago",
+            "body": "Oh - yeah, wow, that sure reproduces it! Thank you!"
+        }
+    ]
+}

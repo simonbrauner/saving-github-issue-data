@@ -1,0 +1,48 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 23750,
+    "title": "run --events-backend=file sometimes means journal",
+    "state": "closed",
+    "labels": [
+        "flakes",
+        "stale-issue",
+        "locked - please file new issue/PR"
+    ],
+    "user": "edsantiago",
+    "body": "Completely bizarre:\n```\nnot ok 160 |090| events - labels included in container die in 1600ms\n...\n# # podman --events-backend=file run --rm --name=c-t160-kctzrzn9 --label=labelt160kctzrzn9=labelvalue-t160-kctzrzn9 mqfvh quay.io/libpod/testimage:20240123 sh -c exit 17\n# [ rc=17 (expected) ]\n\n# # podman --events-backend=file events --filter=container=c-t160-kctzrzn9 --filter=status=died --stream=false --format={{.Attributes.labelt160kctzrzn9}}\n# #/vvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv\n# #|     FAIL: podman-events output includes container label\n# #| expected: = labelvalue-t160-kctzrzn9 mqfvh\n# #|   actual:   ''\n# #\\^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n```\nOnly fails in parallel tests. The test itself is super short. There is no possible way it could fail (obviously this is a lie).\n\nMost curious finding: in every case I looked at (three out of the five flakes), I go look at journal, search for `t160`, and the log line is in the journal. On successful test passes, the string `t160` does not appear in the journal.\n```\nAug 22 21:10:54 cirrus-task-4622351889858560 podman[139554]: 2024-08-22 21:10:54.971131464 -0500 CDT m=+0.256423311 container died 1a0173d68a5a56cfacba954f713f12d4ae71397f591ee8fe0a5b1a69891bd754 (image=quay.io/libpod/testimage:20240123, name=c-t160-qd8tfclf, created_at=2024-01-24T18:38:28Z, created_by=test/system/build-testimage, io.buildah.version=1.34.1-dev, labelt160qd8tfclf=labelvalue-t160-qd8tfclf RXZGE)\n```\n\n\n\n### [sys] |090| events - labels included in container die\n* debian-13 : sys podman debian-13 root host sqlite\n  * PR #23275\n    * [08-25 07:43](https://api.cirrus-ci.com/v1/artifact/task/5670145266286592/html/sys-podman-debian-13-root-host-sqlite.log.html#t--00160p)\n* fedora-39 : sys podman fedora-39 root host boltdb\n  * PR #23275\n    * [08-23 17:22](https://api.cirrus-ci.com/v1/artifact/task/5984234949574656/html/sys-podman-fedora-39-root-host-boltdb.log.html#t--00160p)\n* fedora-39 : sys podman fedora-39 rootless host boltdb\n  * PR #23275\n    * [08-22 22:16](https://api.cirrus-ci.com/v1/artifact/task/6663045471010816/html/sys-podman-fedora-39-rootless-host-boltdb.log.html#t--00160p)\n* rawhide : sys podman rawhide root host sqlite\n  * PR #23275\n    * [08-23 15:28](https://api.cirrus-ci.com/v1/artifact/task/5053229317226496/html/sys-podman-rawhide-root-host-sqlite.log.html#t--00160p)\n* rawhide : sys podman rawhide rootless host sqlite\n  * PR #23275\n    * [08-22 22:15](https://api.cirrus-ci.com/v1/artifact/task/4622351889858560/html/sys-podman-rawhide-rootless-host-sqlite.log.html#t--00160p)\n\n| x | x | x | x | x | x |\n| ---: | ---: | ---: | ---: | ---: | ---: |\n| sys(5) | podman(5) | rawhide(2) | root(3) | host(5) | sqlite(3) |\n|  |  | fedora-39(2) | rootless(2) |  | boltdb(2) |\n|  |  | debian-13(1) |  |  |  |\n",
+    "comments": [
+        {
+            "user": "Luap99",
+            "body": "I see the problem, fix should be simple. "
+        },
+        {
+            "user": "Luap99",
+            "body": "> I see the problem, fix should be simple.\n\nNvm, I take that back. I think the flag is not being propagated correctly into the cleanup process but trying this out locally I see the correct conmon args being set for both cases.\n`--exit-command-arg --events-backend --exit-command-arg file`\n\nIf the args are really the problem then my cleanup tracer from https://github.com/containers/podman/pull/23487 should log that. So I guess I should get that PR ready."
+        },
+        {
+            "user": "Luap99",
+            "body": "Ok I think I know what is triggering this. The died event is created in syncContainer(), and syncContainer() must be called every time we lock the container basically. This means that any other command that acts on all container may notice the conmon exit file and creates the died event based on that. So even something like `podman (un-)mount`, `podman ps` or or really any other command that acts on this container will trigger this tiny race...\n\nThe conclusion the test is not parallel safe. (And knowing that every test using --events-backend may not be parallel safe I fear, at least all the ones that need the died event)"
+        },
+        {
+            "user": "Luap99",
+            "body": "If you want to verify this yourself (assuming journald is the default logger):\n\nterminal 1\n```\nwhile :; do bin/podman --events-backend file run --rm quay.io/libpod/testimage:20240123 true; done\n```\n\nterminal 2\n```\nbin/podman --events-backend file events\n```\n\nterminal 3\n```\nbin/podman events\n```\nterminal 4 (without unshare when running as root)\n```\nwhile :; do bin/podman unshare bin/podman mount; done\n```\n\nJust after a few seconds I got the died event in terminal 3"
+        },
+        {
+            "user": "edsantiago",
+            "body": "When you say \"is not parallel safe\", do you mean \"not currently but it needs to be fixed,\" or \"will never be parallel safe and we cannot guarantee that `--events-backend=file` will actually ever work\"?"
+        },
+        {
+            "user": "Luap99",
+            "body": "> will never be parallel safe and we cannot guarantee that --events-backend=file will actually ever work\n\nThis is expected behavior, you select the events backend per podman process so that does not exclude another podman process with a different event logger from creating events for your container created by the original process.\nSo this is totally normal behavior from how podman works (I known it is most certainly is surprising and not POLA).\n\nIf you want to make sure all test see the same events you must make sure all podman commands run are using the same events backend."
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "edsantiago",
+            "body": "Closing: this is just something we will have to live with."
+        }
+    ]
+}

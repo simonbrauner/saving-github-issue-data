@@ -1,0 +1,99 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 6809,
+    "title": "Alternative to sudo, for remote podman",
+    "state": "closed",
+    "labels": [
+        "stale-issue",
+        "locked - please file new issue/PR"
+    ],
+    "user": "afbjorklund",
+    "body": "\n\nWhen transitioning from the sudo varlink bridge to the new rest API, is there an alternative to logging in as root with ssh ?\n\nLike adding a \"podman\" root-equivalent group, or starting the \"podman.sock\" socket as some other privileged user* perhaps.\n\n\\* I _think_ CoreOS is doing this (for the `core` user) ?\n\nRunning rootless isn't the question here, it's about root.\n\n----\n\nBasically wondering what to use for the CONTAINER_HOST\n\nHere is how they are using DOCKER_HOST (i.e. for docker):\n\n>    If you have ssh login for root on the remote machine set `export DOCKER_HOST=ssh://root@example.com` (may be considered bad security practices)\n>\n>    To use a non-root user user set `export DOCKER_HOST=ssh://user@example.com` after adding user to the docker group using `sudo usermod -aG docker user`. (tested on Ubuntu 18.04)\n\n",
+    "comments": [
+        {
+            "user": "afbjorklund",
+            "body": "Also enquiring about the usual approach to run local podman, currently using passwordless sudo to do it (`sudo -n podman`)"
+        },
+        {
+            "user": "baude",
+            "body": "@afbjorklund we talked about this just last week.  Probably still looking for a solution here.  What are your thoughts or what do you favor."
+        },
+        {
+            "user": "afbjorklund",
+            "body": "I think root logins _might_ be disabled by default, so I would need to enable them \n\n`PermitRootLogin prohibit-password`\n\nAnd then copy the authorized keys during boot, from the user to the `/root` dir.\n\n```sh\nmkdir /root/.ssh\nchmod 700 /root/.ssh\ncp /home/docker/.ssh/authorized_keys /root/.ssh/\nchmod 600 /root/.ssh/authorized_keys\n```\n\n\nI'm not sure what the implications of chown'ing the `podman.sock` is, or how you do it.\n\nFor dockerd I think it just uses the default settings, which uses the `docker` group.\n\n```\n  -G, --group string                            Group for the unix socket (default \"docker\")\n```\n\nWould you edit the user (or group) in the systemd unit somewhere perhaps ?\n\n```ini\n[Socket]\nListenStream=%t/podman/podman.sock\nSocketMode=0660\n```\n\nhttps://www.freedesktop.org/software/systemd/man/systemd.socket.html\n\n> `SocketUser=`, `SocketGroup=`\n> \n>    Takes a UNIX user/group name. When specified, all AF_UNIX sockets and FIFO nodes in the file system are owned by the specified user and group. If unset (the default), the nodes are owned by the root user/group (if run in system context) or the invoking user/group (if run in user context). If only a user is specified but no group, then the group is derived from the user's default group.\n\n```ini\nSocketUser=docker\nSocketGroup=docker\n```\n"
+        },
+        {
+            "user": "afbjorklund",
+            "body": "For minikube/machine, there is a user called \"docker\" who is part of group \"docker\".\n\nIt's also a member of the group \"wheel\", which will enable it to use `sudo` at will...\n\n/etc/sudoers\n\n```\nroot ALL=(ALL) ALL\n%wheel ALL=(ALL) NOPASSWD: ALL\n```\n\nThe group might also be called \"sudo\" (in Ubuntu), but it works the same way.\n\n----\n\nCurrently we are using this, to run `sudo varlink bridge` to activate io.podman socket\nAnd then we prefix all commands that are run over ssh, like: `sudo -n podman load`.\n\nIt _would_ probably have been easier to add a \"podman\" root group, but it seemed undesired ?\nAll the podman documentation refers to running \"**sudo** podman\" (unlike running just \"docker\")"
+        },
+        {
+            "user": "afbjorklund",
+            "body": "Currently, if I run the new `podman-remote` (2.0.1) it will silently fall back to building the images locally instead. :-(\n\nThe previous versions (2.0.0) would give an error, after trying to contact a local socket - rather than use the varlink...\n\n`Error: Get http://d/v1.0.0/libpod../../../_ping: dial unix ///run/user/1000/podman/podman.sock: connect: no such file or directory`\n\nSo one either has to use old podman-remote (1.9.3, since 1.8.x hangs) or we need to add support for this new socket.\n\n\nUnfortunately it is not included by default:\n\n```\n/usr/lib/systemd\n/usr/lib/systemd/system\n/usr/lib/systemd/system/io.podman.service\n/usr/lib/systemd/system/io.podman.socket\n/usr/lib/systemd/user\n/usr/lib/systemd/user/io.podman.service\n/usr/lib/systemd/user/io.podman.socket\n```\n\nOr at least it is missing from Ubuntu 20.04\n\n`podman/unknown,now 2.0.1~1 amd64 [installed]`\n"
+        },
+        {
+            "user": "rhatdan",
+            "body": "I am fine with creating a podman group and adding write access to the socket, but not by default,  This would have to be configured in the containers.conf with strong words about how dangerous this is.  \n\nSetting up podman group access to the root running podman, is equivalent to giving sudo without password access to root, and potentially worse.\n\nIs there something we could do as an alternative with systemd?  IE I turn on the systemd podman.sock socket for a particular user and it sets up permissions for just this user. \nBottom line, I would want this to be specific to the remote service over ssh rather then something local users of a linux system start doing."
+        },
+        {
+            "user": "afbjorklund",
+            "body": "It seems to work, if starting the socket manually and changing the owner (also on the directory, not only the socket)\n\n```\ndrwx------ 2 docker root 60 Jun 29 16:35 /run/podman\nsrw------- 1 docker root  0 Jun 29 16:35 /run/podman/podman.sock\n```\n\nBut one **has** to add the --remote (even to podman-remote), and one **has** to add the path and the secure param.\n\n`CONTAINER_HOST=ssh://docker@127.0.0.1:39375/run/podman/podman.sock?secure=true`\n\nAnd it seems like $CONTAINER_HOST stopped working, so have to use --url \"$CONTAINER_HOST\" for it to work.\n\n`podman-remote --remote --url $CONTAINER_HOST version`\n\n----\n\n```\n podman-remote version\nVersion:      2.0.1\nAPI Version:  1\nGo Version:   go1.13.8\nBuilt:        Thu Jan  1 01:00:00 1970\nOS/Arch:      linux/amd64\n podman-remote --remote version\nError: Get http://d/v1.0.0/libpod../../../_ping: dial unix ///run/user/1000/podman/podman.sock: connect: no such file or directory\n```\n\n```\n podman-remote --remote --url $CONTAINER_HOST version\nERRO[0000] Failed to parse known_hosts: ...\nERRO[0000] Failed to parse known_hosts: ...\nClient:\nVersion:      2.0.1\nAPI Version:  1\nGo Version:   go1.13.8\nBuilt:        Thu Jan  1 01:00:00 1970\nOS/Arch:      linux/amd64\n\nServer:\nVersion:      2.0.1\nAPI Version:  0\nGo Version:   go1.13.8\nBuilt:        Thu Jan  1 01:00:00 1970\nOS/Arch:      linux/amd64\n```"
+        },
+        {
+            "user": "afbjorklund",
+            "body": "The non-working `podman-remote` and the missing `podman.socket` was due to the Ubuntu 20.04 packaging* (not using make)\n\n\\* https://github.com/containers/libpod/issues/6598#issuecomment-651800762\n\nWhen building from source, both are OK. That is, the binary does have the buildflags and the APIv2 services do get installed...\n\nUbuntu:\n```\n\n[  179s] install  -m 644 contrib/varlink/io.podman.socket /usr/src/packages/BUILD/debian/tmp/usr/lib/systemd/system/io.podman.socket\n[  179s] install  -m 644 contrib/varlink/io.podman.socket /usr/src/packages/BUILD/debian/tmp/usr/lib/systemd/user/io.podman.socket\n[  179s] install  -m 644 contrib/varlink/io.podman.service /usr/src/packages/BUILD/debian/tmp/usr/lib/systemd/system/io.podman.service\n[  179s] # User units are ordered differently, we can't make the *system* multi-user.target depend on a user unit.\n[  179s] # For user units the default.target that's the default is fine.\n[  179s] sed -e 's,^WantedBy=.*,WantedBy=default.target,' < contrib/varlink/io.podman.service > /usr/src/packages/BUILD/debian/tmp/usr/lib/systemd/user/io.podman.service\n```\n\nSource:\n\n```\n# Install APIV2 services\ninstall  -m 644 contrib/systemd/user/podman.socket /usr/local/lib/systemd/user/podman.socket\ninstall  -m 644 contrib/systemd/user/podman.service /usr/local/lib/systemd/user/podman.service\ninstall  -m 644 contrib/systemd/system/podman.socket /usr/local/lib/systemd/system/podman.socket\ninstall  -m 644 contrib/systemd/system/podman.service /usr/local/lib/systemd/system/podman.service\n```\n\n@lsm5 : that bug in user io.podman.service seems to also be there in user/podman.service, was it reported somewhere ?\n\nhttps://github.com/containers/libpod/blob/v2.0.1/contrib/systemd/user/podman.service#L16"
+        },
+        {
+            "user": "afbjorklund",
+            "body": "@jwhonce\n\nNow that podman-machine doesn't work anymore, here is how to do the set up with vagrant:\n\n\nVagrantfile\n```ruby\n# -*- mode: ruby -*-\n# vi: set ft=ruby :\n\nVagrant.configure(\"2\") do |config|\n  config.vm.box = \"fedora/32-cloud-base\"\n\n  config.vm.provider \"virtualbox\" do |vb|\n    vb.memory = \"1024\"\n  end\n\n  config.vm.provision \"shell\", inline: <<-SHELL\n    yum install -y podman\n\n    groupadd -f -r podman\n\n    #systemctl edit podman.socket\n    mkdir -p /etc/systemd/system/podman.socket.d\n    cat >/etc/systemd/system/podman.socket.d/override.conf <<EOF\n[Socket]\nSocketMode=0660\nSocketUser=root\nSocketGroup=podman\nEOF\n    systemctl daemon-reload\n    echo \"d /run/podman 0770 root podman\" > /etc/tmpfiles.d/podman.conf\n    sudo systemd-tmpfiles --create\n\n    systemctl enable podman.socket\n    systemctl start podman.socket\n\n    usermod -aG podman $SUDO_USER\n  SHELL\nend\n```\n\nThis installs podman, and adds a \"podman\" system group with socket access (like docker).\n\nThen one can use `vagrant up` to boot it, and `vagrant ssh-config` to get the configuration.\n\nImportant variables from ssh_config:\n\n```\nHost default\n  HostName 127.0.0.1\n  User vagrant\n  Port 2222\n  UserKnownHostsFile /dev/null\n  StrictHostKeyChecking no\n  PasswordAuthentication no\n  IdentityFile $PWD/.vagrant/machines/default/virtualbox/private_key\n  IdentitiesOnly yes\n  LogLevel FATAL\n\n```\n\nThen we `export CONTAINER_HOST=ssh://vagrant@127.0.0.1:2222/run/podman/podman.sock`\nand `export CONTAINER_SSHKEY=$PWD/.vagrant/machines/default/virtualbox/private_key`\n\nWhich enables us to access it remotely (unfortunately --remote is still broken and --url required)\nBut if we make sure to use the old special binary and pass explicit parameters as a workaround:\n\n```console\n$ podman --remote version\nVersion:      2.0.2\nAPI Version:  1\nGo Version:   go1.14.2\nBuilt:        Thu Jan  1 01:00:00 1970\nOS/Arch:      linux/amd64\n$ podman-remote version\nError: Get \"http://d/v1.0.0/libpod../../../_ping\": dial unix ///run/user/1000/podman/podman.sock: connect: no such file or directory\n$ podman-remote --url \"$CONTAINER_HOST\" --identity \"$CONTAINER_SSHKEY\" version\nClient:\nVersion:      2.0.2\nAPI Version:  1\nGo Version:   go1.14.2\nBuilt:        Thu Jan  1 01:00:00 1970\nOS/Arch:      linux/amd64\n\nServer:\nVersion:      2.0.2\nAPI Version:  0\nGo Version:   go1.14.3\nBuilt:        Thu Jan  1 01:00:00 1970\nOS/Arch:      linux/amd64\n```\n\nThe vagrant .box is about the same size as the fedora .iso (250% boot2podman)\n\n```\n290M    Fedora-Cloud-Base-Vagrant-32-1.6.x86_64.vagrant-virtualbox.box\n```\n\n_For linux users it is also possible to use the libvirt/kvm box instead of virtualbox._\n\nSee https://vagrantcloud.com/search and https://alt.fedoraproject.org/cloud/"
+        },
+        {
+            "user": "afbjorklund",
+            "body": "Full example here: https://boot2podman.github.io/2020/07/22/machine-replacement.html\n\nIt looks like the \"tmpfiles.d\" was the missing piece, when it came to changing the group..."
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@ashley-cui PTAL"
+        },
+        {
+            "user": "afbjorklund",
+            "body": "For what it is worth, the systemd units are still missing in podman 2.0.6~1 as well.\n\n```\n    podman |    2.0.6~1 | https://download.opensuse.org/repositories/devel:/kubic:/libcontainers:/stable/xUbuntu_20.04  Packages\n```\n\nIt only has the varlink units:\n\n```\n/usr/lib/systemd\n/usr/lib/systemd/system\n/usr/lib/systemd/system/io.podman.service\n/usr/lib/systemd/system/io.podman.socket\n/usr/lib/systemd/user\n/usr/lib/systemd/user/io.podman.service\n/usr/lib/systemd/user/io.podman.socket\n```\n\nGives error: `Failed to enable unit, unit podman.socket does not exist.`\n\nIt does include varlink, though.\n"
+        },
+        {
+            "user": "rhatdan",
+            "body": "You mean they are not shipped within an RPM?"
+        },
+        {
+            "user": "rhatdan",
+            "body": "@lsm5 PTAL"
+        },
+        {
+            "user": "lsm5",
+            "body": "@afbjorklund `2.0.6~2` fixes the issue of unitfiles. https://build.opensuse.org/package/show/devel:kubic:libcontainers:stable/podman . PTAL."
+        },
+        {
+            "user": "afbjorklund",
+            "body": "Thank you, works now.\n\n`    default: Created symlink /etc/systemd/system/sockets.target.wants/podman.socket → /lib/systemd/system/podman.socket.`\n\n```\nClient:\nVersion:      2.0.6\nAPI Version:  1\nGo Version:   go1.14.2\nBuilt:        Thu Jan  1 01:00:00 1970\nOS/Arch:      linux/amd64\n\nServer:\nVersion:      2.0.6\nAPI Version:  0\nGo Version:   go1.14.2\nBuilt:        Thu Jan  1 01:00:00 1970\nOS/Arch:      linux/amd64\n```\n\nThis was Ubuntu 20.04."
+        },
+        {
+            "user": "afbjorklund",
+            "body": "We now have two working solutions, either connect as root@ and use the default - or change the group and use user@.\n\n@ashley-cui :\nI'm not sure if you want to document it anywhere on podman.io, but now we have a solution to replace the `sudo varlink`:\n\n```console\n$ minikube podman-env\nexport PODMAN_VARLINK_BRIDGE=\"/usr/bin/ssh -F /dev/null -o ConnectionAttempts=3\n-o ConnectTimeout=10 -o ControlMaster=no -o ControlPath=none -o LogLevel=quiet\n-o PasswordAuthentication=no -o ServerAliveInterval=60 -o\nStrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null docker@127.0.0.1 -o\nIdentitiesOnly=yes -i /home/anders/.minikube/machines/minikube/id_rsa -p 34749\n-- sudo varlink -A \\'podman varlink \\\\\\$VARLINK_ADDRESS\\' bridge\"\nexport CONTAINER_HOST=ssh://docker@127.0.0.1:34749/run/podman/podman.sock\nexport CONTAINER_SSHKEY=/home/anders/.minikube/machines/minikube/id_rsa\nexport MINIKUBE_ACTIVE_PODMAN=\"minikube\"\n\n# To point your shell to minikube's podman service, run:\n# eval $(minikube -p minikube podman-env)\n\n```\n\nSo you can close the ticket...\n\nBut I think we will wait for 2.1."
+        },
+        {
+            "user": "afbjorklund",
+            "body": "Note that in the case of minikube we are using `podman` to load images for `crio`, that is why the root requirement here...\n\nThere's  also some missing pieces in the minikube OS, in order to run rootless containers (mainly because it wasn't needed)\n\n```console\ndocker@minikube:~$ podman pull busybox\nTrying to pull docker.io/library/busybox...\nGetting image source signatures\nCopying blob df8698476c65 done  \nCopying config 6858809bf6 done  \nWriting manifest to image destination\nStoring signatures\nERRO[0004] Error while applying layer: ApplyLayer exit status 1 stdout:  stderr: there might not be enough IDs available in the namespace (requested 65534:65534 for /home): lchown /home: invalid argument \n  ApplyLayer exit status 1 stdout:  stderr: there might not be enough IDs available in the namespace (requested 65534:65534 for /home): lchown /home: invalid argument\nTrying to pull quay.io/busybox...\n  error parsing HTTP 404 response body: invalid character '<' looking for beginning of value: \"<!DOCTYPE HTML PUBLIC \\\"-//W3C//DTD HTML 3.2 Final//EN\\\">\\n<title>404 Not Found</title>\\n<h1>Not Found</h1>\\n<p>The requested URL was not found on the server. If you entered the URL manually please check your spelling and try again.</p>\\n\"\nError: unable to pull busybox: 2 errors occurred:\n\t* Error committing the finished image: error adding layer with blob \"sha256:df8698476c65c2ee7ca0e9dbc2b1c8b1c91bce555819a9aaab724ac64241ba67\": ApplyLayer exit status 1 stdout:  stderr: there might not be enough IDs available in the namespace (requested 65534:65534 for /home): lchown /home: invalid argument\n\t* Error initializing source docker://quay.io/busybox:latest: Error reading manifest latest in quay.io/busybox: error parsing HTTP 404 response body: invalid character '<' looking for beginning of value: \"<!DOCTYPE HTML PUBLIC \\\"-//W3C//DTD HTML 3.2 Final//EN\\\">\\n<title>404 Not Found</title>\\n<h1>Not Found</h1>\\n<p>The requested URL was not found on the server. If you entered the URL manually please check your spelling and try again.</p>\\n\"\n\n\n```\n\nBut we do allow the user to run containers with podman, mostly to avoid them having to run **two** VMs (1 podman, 1 k8s)."
+        },
+        {
+            "user": "ashley-cui",
+            "body": "@afbjorklund looks like you've found working solutions, so i'm going to close this issue. Re-open if there's more to be done here. "
+        },
+        {
+            "user": "afbjorklund",
+            "body": "@ashley-cui : yes, the only thing remaining is to actually do it (code). Should have podman support back for next major release."
+        }
+    ]
+}

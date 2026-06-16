@@ -1,0 +1,83 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 5751,
+    "title": "Docker incompatibility: Podman fails if user's uid/gid is mapped in subuid/subgid",
+    "state": "closed",
+    "labels": [
+        "kind/bug",
+        "locked - please file new issue/PR"
+    ],
+    "user": "wardev",
+    "body": "<!--\n---------------------------------------------------\nBUG REPORT INFORMATION\n---------------------------------------------------\nUse the commands below to provide key information from your environment:\nYou do NOT have to include this information if this is a FEATURE REQUEST\n\n**NOTE** A large number of issues reported against Podman are often found to already be fixed\nin more current versions of the project.  Before reporting an issue, please verify the\nversion you are running with `podman version` and compare it to the latest release\ndocumented on the top of Podman's [README.md](../README.md).  If they differ, please\nupdate your version of Podman to the latest possible and retry your command before creating\nan issue.\n\nIf you are filing a bug against `podman build`, please instead file a bug\nagainst Buildah (https://github.com/containers/buildah/issues). Podman build\nexecutes Buildah to perform container builds, and as such the Buildah\nmaintainers are best equipped to handle these bugs.\n-->\n\n/kind bug\n\n**Description**\n\n<!--\nBriefly describe the problem you are having in a few paragraphs.\n-->\n\nI would like podman to use all of the uid/gid mappings in subuid/subgid, which Docker currently does. It seems that currently podman only uses the first one.\n\n**Steps to reproduce the issue:**\n\nOn Ubuntu 18.04, using podman 1.8.2 installed from kubic repo.\n\n```bash\n# setup up multiple mappings for subuid and subgid.\n# Note this is what docker needs for root in container to be my user name on the host.\necho \"$(id -un):$(id -u):1\" | sudo tee -a /etc/subuid /etc/subgid\necho \"$(id -un):120000:65536\" | sudo tee -a /etc/subuid /etc/subgid\n# make sure podman picks up the chages\nkillall podman\n# try to run a container that is not in the local cache\npodman run -it centos:7\n```\nOutput from podman:\n\n```\nTrying to pull optimus.nrl.navy.mil:50443/centos:7...\nGetting image source signatures\nCopying blob ab5ef0e58194 done  \nCopying config 5e35e350ad done  \nWriting manifest to image destination\nStoring signatures\nERRO[0009] Error while applying layer: ApplyLayer exit status 1 stdout:  stderr: there might not be enough IDs available in the namespace (requested 0:54 for /run/lock/lockdev): lchown /run/lock/lockdev: invalid argument \n  ApplyLayer exit status 1 stdout:  stderr: there might not be enough IDs available in the namespace (requested 0:54 for /run/lock/lockdev): lchown /run/lock/lockdev: invalid argument\nError: unable to pull centos:7: 1 error occurred:\n\t* Error committing the finished image: error adding layer with blob \"sha256:ab5ef0e5819490abe86106fd9f4381123e37a03e80e650be39f7938d30ecb530\": ApplyLayer exit status 1 stdout:  stderr: there might not be enough IDs available in the namespace (requested 0:54 for /run/lock/lockdev): lchown /run/lock/lockdev: invalid argument\n```\n\nI expected to container to be run with a user name space that includes 1001,120000-185536. The output of `podman info` indicates it is not picking up all the uid/gid mappings correctly:\n\n```\n  IDMappings:\n    gidmap:\n    - container_id: 0\n      host_id: 1001\n      size: 1\n    uidmap:\n    - container_id: 0\n      host_id: 1001\n      size: 1\n```\n\nAfter commenting out the line that maps a single uid/gid in subuid/gid podman behaves correctly. It even adds the mapping that was commented out:\n\n```\n  IDMappings:\n    gidmap:\n    - container_id: 0\n      host_id: 1001\n      size: 1\n    - container_id: 1\n      host_id: 120000\n      size: 65536\n    uidmap:\n    - container_id: 0\n      host_id: 1001\n      size: 1\n    - container_id: 1\n      host_id: 120000\n      size: 65536\n```\n\n**Output of `podman version`:**\n\n```\nVersion:            1.8.2\nRemoteAPI Version:  1\nGo Version:         go1.10.1\nOS/Arch:            linux/amd64\n```\n\n**Package info (e.g. output of `rpm -q podman` or `apt list podman`):**\n\n```\npodman/unknown,now 1.8.2~143 amd64 [installed]\n```",
+    "comments": [
+        {
+            "user": "mheon",
+            "body": "I recall hearing that this is a limitation of the `newuidmap`/`newgidmap` utilities, but @giuseppe would know more"
+        },
+        {
+            "user": "wardev",
+            "body": "Also I forgot to mention. Thanks for making podman! Once I figured out the workaround it is already a big improvement over Docker in terms of flexibility and configurability. Thanks for all your time making this."
+        },
+        {
+            "user": "giuseppe",
+            "body": "> I recall hearing that this is a limitation of the `newuidmap`/`newgidmap` utilities, but @giuseppe would know more\n\nI think the issue is in podman.  newuidmap/newgid map supports multiple ranges"
+        },
+        {
+            "user": "giuseppe",
+            "body": "I get the multiple mappings:\n\n```\n$ podman unshare cat /proc/self/uid_map\n         0       1000          1\n         1     100000      65536\n     65537     300000      65536\n```\n\n@wardev could you try to recreate the user namespace with `podman system migrate` ?"
+        },
+        {
+            "user": "wardev",
+            "body": "I tried using `podman system migrate` in both configurations. It seems to have the same effect of killing all podman processes. i.e. nothing new to report.\n\nWith both entries in the subuid/subgid files I see:\n\n```\n$ podman unshare cat /proc/self/uid_map\n         0       1001          1\n```\n\nWith only the second entry in the subuid/subgid files I see:\n\n```\n$ podman unshare cat /proc/self/uid_map\n         0       1001          1\n         1     120000      65536\n```\n\nI tried adding another entry to the subuid file and it works as long as the entry for my uid is not present. Perhaps podman assumes that it added that entry itself and then doesn't add the others?\n\nThis fails:\n\n```\n$ cat /etc/subuid && podman system migrate && podman unshare cat /proc/self/uid_map\nward:1001:1\nward:200000:65536\nward:300000:65536\n         0       1001          1\n```\n\nThis works:\n\n```\n$ cat /etc/subuid && podman system migrate && podman unshare cat /proc/self/uid_map\nward:200000:65536\nward:300000:65536\n         0       1001          1\n         1     200000      65536\n     65537     300000      65536\n```\n"
+        },
+        {
+            "user": "giuseppe",
+            "body": "in the first case, podman tries to create a namespace using new*idmap using twice the same mapping, in your case.  That fails because the kernel does not accept the same id mapped twice.  Then Podman fallbacks to create the namespace with just one id mapped, that doesn't require newuidmap.\n\nYour user id should not be present in /etc/subuid, as it can be already used without an explicit mapping."
+        },
+        {
+            "user": "wardev",
+            "body": "Removing my uid from /etc/subuid was the workaround I found.\n\nTo enable the same behavior in Docker my uid must be the first entry in /etc/subuid. I.e. docker doesn't insert an entry for my uid. So this is a difference between docker and podman. At least it should be documented. It would be nice if podman could check if my uid is already in the mapping and skip adding it again so that I can run docker and podman with the same /etc/subuid file.\n\nOnce I figured out the difference I much prefer podman's behavior because it is easier to set up. But I would also like to be able to run podman and docker on the same machine. This issue means I have to start Docker, edit /etc/subuid, then migrate podman to get them to have the same configuration. If I need to restart docker then I have to do it all again. Maybe this should be a bug against Docker instead of podman."
+        },
+        {
+            "user": "rhatdan",
+            "body": "PRs often help these things forward..."
+        },
+        {
+            "user": "giuseppe",
+            "body": "Podman doesn't require any tweak of `/etc/subuid` and `/etc/subgid` files.  Recent versions of `useradd` automatically create a range for new users and that doesn't include the user own ID mapping.   That is not needed anyway since `newuidmap/newgidmap` already allows to add it even if not specified in the `/etc/sub*id` files.\n\nSaid so, I am fine if we add a check in Podman to skip the mapping if it is the user's own ID"
+        },
+        {
+            "user": "giuseppe",
+            "body": "I am closing the issue since it is not really a problem in Podman.  Fell free to open a PR to add the check for the existing UID if you'd like this behaviour"
+        },
+        {
+            "user": "codefist",
+            "body": "This IS a problem in podman, because it's a year later and I'm hitting this wall today.\n![Screenshot from 2021-05-01 08-19-49](https://user-images.githubusercontent.com/16125676/116782272-0d2e9c80-aa56-11eb-928d-fbc2d9c87054.png)\n"
+        },
+        {
+            "user": "giuseppe",
+            "body": "can you show the content of `/etc/subuid`?"
+        },
+        {
+            "user": "RanabirChakraborty",
+            "body": "Faced the same issue as @codefist . \n```\n[rchakrab@rchakrab:~]$ podman ps\nError: invalid configuration: the specified mapping 110000:65536 in \"/etc/subuid\" includes the user UID\n[rchakrab@rchakrab:~]$ cat /etc/subuid\nrchakrab:110000:65536\n```"
+        },
+        {
+            "user": "rhatdan",
+            "body": "What is your UID?  It is not supposed to be part of the range, at least that is what Podman assumes."
+        },
+        {
+            "user": "vixus0",
+            "body": "Hi, I am also currently running into this issue. Specifically, I get this error when trying to run _any_ `podman` command:\n```\nWARN[0000] \"/\" is not a shared mount, this could cause issues or missing mounts with rootless containers\nError: invalid configuration: the specified mapping 1000:1 in \"/etc/subuid\" includes the user UID\n```\n\nContents of `/etc/subuid`:\n```\nanshul:1000:1\nanshul:100000:65536\nanshul:165536:65536\n```\n\nOutput of `id -u`:\n```\n1000\n```\n\nPodman's own [documentation] states that the range in `/etc/{subuid,subgid}` should include the user's UID, which seems at odds with the comment from @rhatdan:\n\n> What is your UID? It is not supposed to be part of the range, at least that is what Podman assumes.\n\n[documentation]: https://github.com/containers/podman/blob/main/docs/tutorials/rootless_tutorial.md#etcsubuid-and-etcsubgid-configuration"
+        },
+        {
+            "user": "mheon",
+            "body": "The answer from @rhatdan is correct - the UID/GID of the user should not be included. We get that implicitly.\n\nI don't see where in the documentation the user's own UID and GID are mentioned?"
+        },
+        {
+            "user": "qhaas",
+            "body": "Ran into a problem with similar symptoms, but different cause, with the latest version of podman 4.x that did not occur with podman 3.x.  I had used `singularity admin` to add my subuid/subgid to a system, which used my uid/gid instead of my username/groupname in the /etc/sub{uid,gid} files.  Solution was to user my username / groupname instead of my uid/gid and restart."
+        }
+    ]
+}

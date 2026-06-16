@@ -1,0 +1,148 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 25201,
+    "title": "Using nftables on a Windows WSL machine (amd64) doesn't work",
+    "state": "open",
+    "labels": [
+        "kind/bug",
+        "machine",
+        "windows"
+    ],
+    "user": "l0rd",
+    "body": "### Issue Description\n\nAfter updating to Fedora 41 and configuring the machine in rootful mode, running a container returns a netavark error:\n\n```log\n# podman run hello\nWARN[0000] Using cgroups-v1 which is deprecated in favor of cgroups-v2 with Podman v5 and will be removed in a future version. Set environment variable `PODMAN_IGNORE_CGROUPSV1_WARNING` to hide this warning.\ninternal:0:0-0: Error: Could not process rule: No such file or directory\n\ninternal:0:0-0: Error: Could not process rule: No such file or directory\n\nError: netavark: nftables error: nft did not return successfully while applying ruleset\n```\n\n### Steps to reproduce the issue\n\nSteps to reproduce the issue\n1. Init/Run a rootful machine: \n```\n> cd <podman git repo>\n> gh pr checkout 26318\n> .\\winmake.ps1 podman\n> .\\bin\\windows\\podman machine init --rootful --now\n> .\\bin\\windows\\podman podman run hello\n```\n\n### podman info output\n\n```yaml\nPodman built from main branch running on Windows 11 with WSL v2.4.9.0 and Kernel v5.15.167.4-1\n```\n\n### Additional information\n\nUsing a more recent version of the Kernel (v6.6.36) doesn't help.\n\nConfiguring podman to use iptables fixes the problem: \n```\n[network]\nfirewall_driver=\"iptables\"\n```",
+    "comments": [
+        {
+            "user": "l0rd",
+            "body": "Tested a rootful WSL machine with a simple nftables ruleset and got no error:\n\n```\n# cat << EOF > /tmp/simplerule\ntable inet filter {\n       chain input {\n           type filter hook input priority 0;\n           policy drop;\n\n           # Allow established/related connections\n           ct state established,related accept\n\n           # Allow HTTP\n           tcp dport 80 accept\n\n           # Allow HTTPS\n           tcp dport 443 accept\n       }\n   }\nEOF\n# nft -f /tmp/simplerule\n# nft list ruleset\ntable inet filter {\n        chain input {\n                type filter hook input priority filter; policy drop;\n                ct state established,related accept\n                tcp dport 80 accept\n                tcp dport 443 accept\n        }\n}\n```\n\nHowever netawark tests in [250-bridge-nftables.bats](https://github.com/containers/netavark/blob/main/test/250-bridge-nftables.bats) failed:\n\n```\n# dnf install -y make rust cargo protobuf-compiler bats jq\n# cd /mnt/c/Users/<folder where netavark was cloned>\n# make\n# bats ./test/250-bridge-nftables.bats -f \"check nftables driver is in use\"\n250-bridge-nftables.bats\n ✗ check nftables driver is in use\n   (from function `die' in file test/helpers.bash, line 249,\n    from function `run_helper' in file test/helpers.bash, line 233,\n    from function `run_in_host_netns' in file test/helpers.bash, line 166,\n    from function `run_netavark' in file test/helpers.bash, line 136,\n    in test file test/250-bridge-nftables.bats, line 12)\n     `RUST_LOG=netavark=info run_netavark --file ${TESTSDIR}/testfiles/simplebridge.json setup $(get_container_netns_path)' failed\n    nsenter -n -m -w -t 14493 ip link set lo up\n    nsenter -n -m -w -t 14493 ./bin/netavark --rootless false --config /tmp/netavark_bats.1qVMcE/config --file /mnt/c/Users/mario/Git/netavark/test/testfiles/simplebridge.json setup /proc/14495/ns/net\n   [INFO  netavark::firewall] Using nftables firewall driver\n   [INFO  netavark::network::netlink] Adding route (dest: 0.0.0.0/0 ,gw: 10.88.0.1, metric 100)\n   [INFO  netavark::firewall::nft] Creating container chain nv_53ce4390_10_88_0_0_nm16\n   internal:0:0-0: Error: Could not process rule: No such file or directory\n\n   internal:0:0-0: Error: Could not process rule: No such file or directory\n\n   {\"error\":\"nftables error: nft did not return successfully while applying ruleset\"}\n   [ rc=1 (** EXPECTED 0 **) ]\n   #/vvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv\n   #| FAIL: exit code is 1; expected 0\n   #\\^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n\n1 test, 1 failure\n```"
+        },
+        {
+            "user": "l0rd",
+            "body": "@Luap99 any idea why running `nft` manually works but netawark fails? Is there a `nft` ruleset I can test?"
+        },
+        {
+            "user": "Luap99",
+            "body": "```\ntable inet netavark {\n\tchain INPUT {\n\t\ttype filter hook input priority filter; policy accept;\n\t\tip saddr 10.88.0.0/16 meta l4proto { tcp, udp } th dport 53 accept\n\t}\n\n\tchain FORWARD {\n\t\ttype filter hook forward priority filter; policy accept;\n\t\tct state invalid drop\n\t\tjump NETAVARK-ISOLATION-1\n\t\tip daddr 10.88.0.0/16 ct state established,related accept\n\t\tip saddr 10.88.0.0/16 accept\n\t}\n\n\tchain POSTROUTING {\n\t\ttype nat hook postrouting priority srcnat; policy accept;\n\t\tmeta mark & 0x00002000 == 0x00002000 masquerade\n\t\tip saddr 10.88.0.0/16 jump nv_2f259bab_10_88_0_0_nm16\n\t}\n\n\tchain PREROUTING {\n\t\ttype nat hook prerouting priority dstnat; policy accept;\n\t\tfib daddr type local jump NETAVARK-HOSTPORT-DNAT\n\t}\n\n\tchain OUTPUT {\n\t\ttype nat hook output priority dstnat; policy accept;\n\t\tfib daddr type local jump NETAVARK-HOSTPORT-DNAT\n\t}\n\n\tchain NETAVARK-HOSTPORT-DNAT {\n\t\tip daddr 10.88.0.1 meta l4proto { tcp, udp } th dport 53 dnat ip to 10.88.0.1:54\n\t\ttcp dport 80 jump nv_2f259bab_10_88_0_0_nm16_dnat\n\t}\n\n\tchain NETAVARK-HOSTPORT-SETMARK {\n\t\tmeta mark set meta mark | 0x00002000\n\t}\n\n\tchain NETAVARK-ISOLATION-1 {\n\t}\n\n\tchain NETAVARK-ISOLATION-2 {\n\t}\n\n\tchain NETAVARK-ISOLATION-3 {\n\t\toifname \"podman0\" drop\n\t\tjump NETAVARK-ISOLATION-2\n\t}\n\n\tchain nv_2f259bab_10_88_0_0_nm16 {\n\t\tip daddr 10.88.0.0/16 accept\n\t\tip daddr != 224.0.0.0/4 masquerade\n\t}\n\n\tchain nv_2f259bab_10_88_0_0_nm16_dnat {\n\t\tip saddr 10.88.0.0/16 tcp dport 80 jump NETAVARK-HOSTPORT-SETMARK\n\t\tip saddr 127.0.0.1 tcp dport 80 jump NETAVARK-HOSTPORT-SETMARK\n\t\ttcp dport 80 dnat ip to 10.88.0.2:80\n\t}\n}\n\n```\n\nThat is from a simple `podman run -d -p 80:80  quay.io/libpod/testimage:20241011 sleep 10`\n\nYou can also `strace -f` the podman command, in the netlink messages there are some more nft error messages encoded that are not displayed otherwise. \n\nLooking at this again I think we are using `l4proto { tcp, udp }` which is a set which per issue https://github.com/microsoft/WSL/issues/6044 is not working"
+        },
+        {
+            "user": "elhananjair",
+            "body": "Hello @l0rd \nI am facing the same issue when executing `podman-compose --in-pod=1 --project-name myproject -f ./docker-compose.yml up -d`, Have you found a solution for that yet?"
+        },
+        {
+            "user": "l0rd",
+            "body": "You should not be facing the problem if you are using the default Podman machine. The problem is with nftables and the WSLv2 kernel but we are currently configuring the WSL machine to use iptables rather than the nftables. "
+        },
+        {
+            "user": "elhananjair",
+            "body": "> You should not be facing the problem if you are using the default Podman machine. The problem is with nftables and the WSLv2 kernel but we are currently configuring the WSL machine to use iptables rather than the nftables.\n\nYeah, I am using WSL2 with the Fedora 42 beta WSL image and facing the issue. \n\n![Image](https://github.com/user-attachments/assets/3ad7574a-0303-4d1b-9cc1-24afbcfcce40)"
+        },
+        {
+            "user": "l0rd",
+            "body": "You can still manually configure podman to use iptables by adding the following lines to the `/etc/containers/containers.conf` (that's what [we currently do automatically when creating the WSL machine](https://github.com/l0rd/podman/blob/dae1541529cc2810fd603460f55f12291ac6ccbb/pkg/machine/wsl/declares.go#L11)):\n\n```\n[network]\nfirewall_driver=\"iptables\"\n```"
+        },
+        {
+            "user": "elhananjair",
+            "body": "> You can still manually configure podman to use iptables by adding the following lines to the `/etc/containers/containers.conf` (that's what [we currently do automatically when creating the WSL machine](https://github.com/l0rd/podman/blob/dae1541529cc2810fd603460f55f12291ac6ccbb/pkg/machine/wsl/declares.go#L11)):\n> \n> ```\n> [network]\n> firewall_driver=\"iptables\"\n> ```\n\nThank you, it worked now"
+        },
+        {
+            "user": "kaikli",
+            "body": "Just because it may help somehow.\n\nI get also with the docker deskop and the wsl integration a similar error besides podman inside the wsl.\n\nThe switch to iptables worked for me with podman."
+        },
+        {
+            "user": "wmcdonald404",
+            "body": "> firewall_driver=\"iptables\"\n\nFor others coming across this, you also need** to install either `iptables-nft` or `iptables-legacy`\n\n ** on the OOTB WSL2 Fedora, at least. CF: https://github.com/containers/podman/issues/16956#issuecomment-1368502060"
+        },
+        {
+            "user": "craigloewen-msft",
+            "body": "Could you try this on the latest version of WSL: 2.5.7 ? \n\nI tried it today and everything worked as expected for me, I think this might be fixed in latest.\n\n```\nPS C:\\Users\\crloewen> podman machine init --image docker://quay.io/mloriedo/machine-os-wsl:5.5-next\nLooking up Podman Machine image at quay.io/mloriedo/machine-os-wsl:5.5-next to create VM\nGetting image source signatures\nCopying blob f1c476e3d441 done   |\nCopying config 44136fa355 done   |\nWriting manifest to image destination\nf1c476e3d441f7ac1e3a963e590b8583a50529e25752204aab3ff431da50871f\nExtracting compressed file: podman-machine-default-amd64: done\nImporting operating system into WSL (this may take a few minutes on a new WSL install)...\nThe operation completed successfully.\nConfiguring system...\nMachine init complete\nTo start your machine run:\n\n        podman machine start\n\nPS C:\\Users\\crloewen> podman machine set --rootful\nPS C:\\Users\\crloewen> podman machine start\nStarting machine \"podman-machine-default\"\nAPI forwarding listening on: npipe:////./pipe/podman-machine-default\n\nAnother process was listening on the default Docker API pipe address.\nYou can still connect Docker API clients by setting DOCKER HOST using the\nfollowing powershell command in your terminal session:\n\n        $Env:DOCKER_HOST = 'npipe:////./pipe/podman-machine-default'\n\nOr in a classic CMD prompt:\n\n        set DOCKER_HOST=npipe:////./pipe/podman-machine-default\n\nAlternatively, terminate the other process and restart podman machine.\nMachine \"podman-machine-default\" started successfully\nPS C:\\Users\\crloewen> podman run hello\nResolved \"hello\" as an alias (/etc/containers/registries.conf.d/000-shortnames.conf)\nTrying to pull quay.io/podman/hello:latest...\nGetting image source signatures\nCopying blob sha256:81df7ff16254ed9756e27c8de9ceb02a9568228fccadbf080f41cc5eb5118a44\nCopying config sha256:5dd467fce50b56951185da365b5feee75409968cbab5767b9b59e325fb2ecbc0\nWriting manifest to image destination\n!... Hello Podman World ...!\n\n         .--\"--.\n       / -     - \\\n      / (O)   (O) \\\n   ~~~| -=(,Y,)=- |\n    .---. /`  \\   |~~\n ~/  o  o \\~~~~.----. ~~\n  | =(X)= |~  / (O (O) \\\n   ~~~~~~~  ~| =(Y_)=-  |\n  ~~~~    ~~~|   U      |~~\n\nProject:   https://github.com/containers/podman\nWebsite:   https://podman.io\nDesktop:   https://podman-desktop.io\nDocuments: https://docs.podman.io\nYouTube:   https://youtube.com/@Podman\nX/Twitter: @Podman_io\nMastodon:  @Podman_io@fosstodon.org\nPS C:\\Users\\crloewen>\n```"
+        },
+        {
+            "user": "Luap99",
+            "body": "@craigloewen-msft Note to force the use of nftables you must either have a rootful machine or use\n```\npodman run --network bridge hello\n```\n\nIn any case we will test again. Though I don't see a 2.5.9 release here https://github.com/microsoft/WSL/releases?"
+        },
+        {
+            "user": "baude",
+            "body": "With WSL-2.5.7 this seems to work now and I believe we can close this.  I have verified with my windows box here. @l0rd given that you reported this, can you `wsl --update` and see if it now works for you?"
+        },
+        {
+            "user": "craigloewen-msft",
+            "body": "@Luap99 I meant to type in `2.5.7` but typed `2.5.9` instead!"
+        },
+        {
+            "user": "l0rd",
+            "body": "That's great! Unfortunately I am traveling and I don't have the Windows laptop with me. I will check in a couple of days."
+        },
+        {
+            "user": "l0rd",
+            "body": "I am not able to reproduce the issue anymore. Thank you @craigloewen-msft for letting us know. I am closing this issue as completed. \n\nI have opened https://github.com/containers/podman/pull/26318 to revert the WSL specific config to use iptables.\nWe should revert https://github.com/containers/podman-machine-wsl-os/commit/cb199ac2e7a64013ecf3b46b77e567978290a8b5 too but considereda that @Luap99 is moving the WSL image to `containers/podman-machine-os` we should fix that there instead."
+        },
+        {
+            "user": "J-PC",
+            "body": "I'm currently using WSL 2.5.7 on Windows 10.0.19045 Build 19045 and the problem still exists.\nI removed iptables like in the PR https://github.com/containers/podman/pull/26318 from the 5.5 and 5.6 versions of the quay.io/podman/machine-os-wsl images and I still get the following errors:\n\n```\ninternal:0:0-0: Error: Could not process rule: No such file or directory\n\ninternal:0:0-0: Error: Could not process rule: No such file or directory\n\nError: netavark: nftables error: \"nft\" did not return successfully while applying ruleset\n```\nThe official FedoraLinux-42 WSL image is also impacted by the same error.\n\n> > You can still manually configure podman to use iptables by adding the following lines to the `/etc/containers/containers.conf` (that's what [we currently do automatically when creating the WSL machine](https://github.com/l0rd/podman/blob/dae1541529cc2810fd603460f55f12291ac6ccbb/pkg/machine/wsl/declares.go#L11)):\n> > ```\n> > [network]\n> > firewall_driver=\"iptables\"\n> > ```\n> \n> Thank you, it worked now\n\nThis workaround works for the three images currently."
+        },
+        {
+            "user": "l0rd",
+            "body": "@J-PC can you please provide detailed instructions on how to reproduce your problem? \n\nI am testing the command `podman run hello`:\n- using the podman binary from PR #26318 \n- with podman configured as rootful\n- with the default image `quay.io/podman/machine-os-wsl:5.6`\n\nThe command fails with WSL v2.4.13.0 and succeeds with v2.5.7.0.\n\nAnd when the command failed, I got a different message compared to what you shared:\n```\nError: preparing container 852c8a664e89c58c68aa8dcd42d0e29654a79b13ebeb1ddb176a382a6f3e8ed7 for attach: netavark (exit code 1): nftables error: \"nft\" did not return successfully while applying ruleset` \n```"
+        },
+        {
+            "user": "l0rd",
+            "body": "I have tested the same scenario on an x64 laptop and I could reproduce the problem. Reopening this issue:\n\n```\n> wsl --version\nWSL version: 2.5.7.0\nKernel version: 6.6.87.1-1\nWSLg version: 1.0.66\nMSRDC version: 1.2.6074\nDirect3D version: 1.611.1-81528511\nDXCore version: 10.0.26100.1-240331-1435.ge-release\nWindows version: 10.0.22631.5189\n``` "
+        },
+        {
+            "user": "craigloewen-msft",
+            "body": "@l0rd were you able to repro this with the exact same steps as above? I am on an x64 desktop and am unable to repro it with those steps. \n\n<details>\n<summary>My logs</summary>\n\n```\nPS C:\\Users\\crloewen>  podman machine init --image docker://quay.io/mloriedo/machine-os-wsl:5.5-next\nLooking up Podman Machine image at quay.io/mloriedo/machine-os-wsl:5.5-next to create VM\nGetting image source signatures\nCopying blob f1c476e3d441 done   |\nCopying config 44136fa355 done   |\nWriting manifest to image destination\nf1c476e3d441f7ac1e3a963e590b8583a50529e25752204aab3ff431da50871f\nExtracting compressed file: podman-machine-default-amd64: done\nImporting operating system into WSL (this may take a few minutes on a new WSL install)...\nThe operation completed successfully.\nConfiguring system...\nMachine init complete\nTo start your machine run:\n\n        podman machine start\n\nPS C:\\Users\\crloewen> podman machine set --rootful\nPS C:\\Users\\crloewen> podman machine start\nStarting machine \"podman-machine-default\"\nAPI forwarding listening on: npipe:////./pipe/docker_engine\n\nDocker API clients default to this address. You do not need to set DOCKER_HOST.\nMachine \"podman-machine-default\" started successfully\nPS C:\\Users\\crloewen> podman run hello\nResolved \"hello\" as an alias (/etc/containers/registries.conf.d/000-shortnames.conf)\nTrying to pull quay.io/podman/hello:latest...\nGetting image source signatures\nCopying blob sha256:81df7ff16254ed9756e27c8de9ceb02a9568228fccadbf080f41cc5eb5118a44\nCopying config sha256:5dd467fce50b56951185da365b5feee75409968cbab5767b9b59e325fb2ecbc0\nWriting manifest to image destination\n!... Hello Podman World ...!\n\n         .--\"--.\n       / -     - \\\n      / (O)   (O) \\\n   ~~~| -=(,Y,)=- |\n    .---. /`  \\   |~~\n ~/  o  o \\~~~~.----. ~~\n  | =(X)= |~  / (O (O) \\\n   ~~~~~~~  ~| =(Y_)=-  |\n  ~~~~    ~~~|   U      |~~\n\nProject:   https://github.com/containers/podman\nWebsite:   https://podman.io\nDesktop:   https://podman-desktop.io\nDocuments: https://docs.podman.io\nYouTube:   https://youtube.com/@Podman\nX/Twitter: @Podman_io\nMastodon:  @Podman_io@fosstodon.org\nPS C:\\Users\\crloewen> wsl --version\nWSL version: 2.5.7.0\nKernel version: 6.6.87.1-1\nWSLg version: 1.0.66\nMSRDC version: 1.2.6074\nDirect3D version: 1.611.1-81528511\nDXCore version: 10.0.26100.1-240331-1435.ge-release\nWindows version: 10.0.26120.4441\nPS C:\\Users\\crloewen>\n```\n\n</details>"
+        },
+        {
+            "user": "l0rd",
+            "body": "Testing with the reproducer provided by @Luap99:\n\n```bash\ncat << EOF > /tmp/seriousrule\ntable inet netavark {\n chain INPUT {\n  type filter hook input priority filter; policy accept;\n  ip saddr 10.88.0.0/16 meta l4proto { tcp, udp } th dport 53 accept\n }\n\n chain FORWARD {\n  type filter hook forward priority filter; policy accept;\n  ct state invalid drop\n  jump NETAVARK-ISOLATION-1\n  ip daddr 10.88.0.0/16 ct state established,related accept\n  ip saddr 10.88.0.0/16 accept\n }\n\n chain POSTROUTING {\n  type nat hook postrouting priority srcnat; policy accept;\n  meta mark & 0x00002000 == 0x00002000 masquerade\n  ip saddr 10.88.0.0/16 jump nv_2f259bab_10_88_0_0_nm16\n }\n\n chain PREROUTING {\n  type nat hook prerouting priority dstnat; policy accept;\n  fib daddr type local jump NETAVARK-HOSTPORT-DNAT\n }\n\n chain OUTPUT {\n  type nat hook output priority dstnat; policy accept;\n  fib daddr type local jump NETAVARK-HOSTPORT-DNAT\n }\n\n chain NETAVARK-HOSTPORT-DNAT {\n  ip daddr 10.88.0.1 meta l4proto { tcp, udp } th dport 53 dnat ip to 10.88.0.1:54\n  tcp dport 80 jump nv_2f259bab_10_88_0_0_nm16_dnat\n }\n\n chain NETAVARK-HOSTPORT-SETMARK {\n  meta mark set meta mark | 0x00002000\n }\n\n chain NETAVARK-ISOLATION-1 {\n }\n\n chain NETAVARK-ISOLATION-2 {\n }\n\n chain NETAVARK-ISOLATION-3 {\n  oifname \"podman0\" drop\n  jump NETAVARK-ISOLATION-2\n }\n\n chain nv_2f259bab_10_88_0_0_nm16 {\n  ip daddr 10.88.0.0/16 accept\n  ip daddr != 224.0.0.0/4 masquerade\n }\n\n chain nv_2f259bab_10_88_0_0_nm16_dnat {\n  ip saddr 10.88.0.0/16 tcp dport 80 jump NETAVARK-HOSTPORT-SETMARK\n  ip saddr 127.0.0.1 tcp dport 80 jump NETAVARK-HOSTPORT-SETMARK\n  tcp dport 80 dnat ip to 10.88.0.2:80\n }\n}\nEOF\n# sudo nft -f /tmp/seriousrule\n/tmp/seriousrule:23:3-16: Error: Could not process rule: No such file or directory\n  fib daddr type local jump NETAVARK-HOSTPORT-DNAT\n  ^^^^^^^^^^^^^^\n/tmp/seriousrule:28:3-16: Error: Could not process rule: No such file or directory\n  fib daddr type local jump NETAVARK-HOSTPORT-DNAT\n  ^^^^^^^^^^^^^^\n```\n\nNote that this works fine on a WSL instance created on an arm64 Windows."
+        },
+        {
+            "user": "l0rd",
+            "body": "@craigloewen-msft no, those instructions were valid before we merged #25202. Currently, to reproduce the issue, you need to first checkout PR #26318 and build podman. I ~~will update~~ have updated the instructions in the description because it's confusing:\n\n```pwsh\ncd <podman git repo>\ngh pr checkout 26318\n.\\winmake.ps1 podman\n.\\bin\\windows\\podman machine init --rootful --now\n.\\bin\\windows\\podman run hello\n```"
+        },
+        {
+            "user": "Luap99",
+            "body": "Do you have a link to the kernel config used by WSL? I am not sure why it differs but AFAIK wsl doesn't use the dynamically loaded modules and nft complains about the NFT_FIB module missing from the error above. \n\nThat is what I have on my fedora system.\n```\n$ grep FIB  /boot/config-6.14.9-200.fc41.x86_64\nCONFIG_IP_FIB_TRIE_STATS=y\nCONFIG_NFT_FIB=m\nCONFIG_NFT_FIB_INET=m\nCONFIG_NFT_FIB_NETDEV=m\nCONFIG_NFT_FIB_IPV4=m\nCONFIG_NFT_FIB_IPV6=m\nCONFIG_FIB_RULES=y\n\n```"
+        },
+        {
+            "user": "l0rd",
+            "body": "For the x86 `CONFIG_NFT_FIB_INET=m` and `CONFIG_NFT_FIB_NETDEV=m` aren't configured.\n\n```bash\n$ # ARM64\n$ curl -sSL https://raw.githubusercontent.com/microsoft/WSL2-Linux-Kernel/refs/heads/linux-msft-wsl-6.6.y/arch/arm64/configs/config-wsl-arm64 | grep FIB\nCONFIG_IP_FIB_TRIE_STATS=y\nCONFIG_NFT_FIB=m\nCONFIG_NFT_FIB_INET=m\nCONFIG_NFT_FIB_NETDEV=m\nCONFIG_NFT_FIB_IPV4=m\nCONFIG_NFT_FIB_IPV6=m\nCONFIG_FIB_RULES=y\n$\n$ # x86\n$ curl -sSL https://raw.githubusercontent.com/microsoft/WSL2-Linux-Kernel/refs/heads/linux-msft-wsl-6.6.y/arch/x86/configs/config-wsl | grep FIB\nCONFIG_IP_FIB_TRIE_STATS=y\nCONFIG_NFT_FIB=m\nCONFIG_NFT_FIB_IPV4=m\n# CONFIG_NFT_FIB_IPV6 is not set\nCONFIG_FIB_RULES=y\n``` "
+        },
+        {
+            "user": "Luap99",
+            "body": "m means it is compiled as module, AFAIK nftables will load it automatically. But how is module loading even supposed to work on WSL2? At least with regular linux distros the modules are provided under /usr where modprobe would find and load them. But I don't think that is a thing with WSL2 where everything must be compiled in? "
+        },
+        {
+            "user": "TobiX",
+            "body": "> But how is module loading even supposed to work on WSL2?\n\nYou need to provide modules in a vhdx, as described in https://github.com/microsoft/WSL2-Linux-Kernel?tab=readme-ov-file#build-instructions (and indeed, you can fix the issue by building your own kernel including the missing modules)\n\nI requested the missing kernel modules in https://github.com/microsoft/WSL/issues/13479, maybe someone from this issue can prod the right people at Microsoft? 🥺 "
+        },
+        {
+            "user": "Luap99",
+            "body": "Note we have strong plans to drop the iptables driver with podman 6 next year so this really should be fixed on WSL before then so it can work correctly with nftables."
+        },
+        {
+            "user": "l0rd",
+            "body": "Latest version of WSL still doesn't work on x86 (`v2.6.1.0` with kernel ` 6.6.87.2-1`).\n\nWSL Kernel recompiled with the config suggested [here](https://github.com/microsoft/WSL/issues/13479) by @TobiX works fine. ~~doesn't seem to work neither. But the error is different, compared to the default Kernel, when running `podman run hello`~~:\n\n```diff\n-- Error: preparing container <...> for attach: netavark (exit code 1): nftables error: \"nft\" did not return successfully while applying ruleset\n++ Error: preparing container <...> for attach: netavark (exit code 1): create bridge: Netlink error: Operation not supported (os error 95)\n```\n\n~~@Luap99 any idea of other modules that may be missing?~~\n\n**EDIT** After a second try I was able to use the Kernel config suggested by @TobiX to maek Podman work fine with nftables on WSL."
+        },
+        {
+            "user": "Luap99",
+            "body": "@l0rd That is not a nftables error but an error that happens much earlier when creating a bridge device, any chance the kernel doesn't have the bridge module?\ni.e. something like this must work `unshare -rn sh -c \"ip link add test-br0 type bridge && ip link\"` and be able to create the bridge\n\nI think that would be CONFIG_BRIDGE and likely CONFIG_BRIDGE_NETFILTER? I have never really looked into what modules are needed exactly."
+        },
+        {
+            "user": "Luap99",
+            "body": "And `CONFIG_VETH` as well so it can create the veth pair"
+        },
+        {
+            "user": "l0rd",
+            "body": "I gave it another try, and with the Kernel rebuilt with the config changes in https://github.com/microsoft/WSL/issues/13479, rootful podman works with nftables. (When I tried yesterday, I wasn't loading any module, which explained why it was failing earlier.) So, if https://github.com/microsoft/WSL/issues/13479 gets fixed, this problem will also be fixed. cc @craigloewen-msft "
+        },
+        {
+            "user": "Luap99",
+            "body": "I believe https://github.com/microsoft/WSL/issues/13479 is ultimately a duplicate of https://github.com/microsoft/WSL/issues/6044 which is open for a long time. I really hope the default wsl kernel can enable the missing nftables modules soon so we can fully transition of iptables"
+        },
+        {
+            "user": "hasan4791",
+            "body": "> I believe https://github.com/microsoft/WSL/issues/13479 is ultimately a duplicate of https://github.com/microsoft/WSL/issues/6044 which is open for a long time. I really hope the default wsl kernel can enable the missing nftables modules soon so we can fully transition of iptables\n\nItseems to only address the x86 hope aarch64 would also be taken care of!!!"
+        }
+    ]
+}

@@ -1,0 +1,116 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 14786,
+    "title": "When using :z mount option, avoid relabeling files with lsetxattr() unless required",
+    "state": "closed",
+    "labels": [
+        "kind/bug",
+        "stale-issue",
+        "locked - please file new issue/PR"
+    ],
+    "user": "jkroon81",
+    "body": "<!--\n---------------------------------------------------\nBUG REPORT INFORMATION\n---------------------------------------------------\nUse the commands below to provide key information from your environment:\nYou do NOT have to include this information if this is a FEATURE REQUEST\n\n**NOTE** A large number of issues reported against Podman are often found to already be fixed\nin more current versions of the project.  Before reporting an issue, please verify the\nversion you are running with `podman version` and compare it to the latest release\ndocumented on the top of Podman's [README.md](../README.md).  If they differ, please\nupdate your version of Podman to the latest possible and retry your command before creating\nan issue.\n\nAlso, there is a running list of known issues in the [Podman Troubleshooting Guide](https://github.com/containers/podman/blob/main/troubleshooting.md),\nplease reference that page before opening a new issue.\n\nIf you are filing a bug against `podman build`, please instead file a bug\nagainst Buildah (https://github.com/containers/buildah/issues). Podman build\nexecutes Buildah to perform container builds, and as such the Buildah\nmaintainers are best equipped to handle these bugs.\n-->\n\n**Is this a BUG REPORT or FEATURE REQUEST? (leave only one on its own line)**\n\n/kind bug\n\n**Description**\n\n<!--\nBriefly describe the problem you are having in a few paragraphs.\n-->\n\nWhen using \":z\" mount option, podman will recursively relabel the SELinux context of all mounted files, causing the \"Change\" timestamp to be updated, even if the files would have the correct SELinux context to begin with. This is not so great since it tricks tools like git/gitk into thinking that the file content might have changed. Also I guess it inflicts a little more \"wear and tear\" on the disk.\n\n\n**Output of `podman version`:**\n\n```\nClient:       Podman Engine\nVersion:      4.1.1\nAPI Version:  4.1.1\nGo Version:   go1.18.3\nBuilt:        Wed Jun 15 16:31:58 2022\nOS/Arch:      linux/amd64\n```",
+    "comments": [
+        {
+            "user": "giuseppe",
+            "body": "it adds a cost for the general use case where the files have the wrong label.  We'd have first to first to read the extended attribute and then overwrite it.  Can't it be addressed outside of Podman and then just use the volume without relabelling?"
+        },
+        {
+            "user": "jkroon81",
+            "body": "Is it really true that the \"general\" case is that they have the wrong label ? At least in my case, where I run podman multiple times with the same \"environment\", it is only the first run that actually changes the file selinux contexts. I don't modify them outside of podman. Sure, it can be addressed outside of podman, but having podman do the check would relieve the user from taking on that responsibility. But I understand that maybe there is not a clear \"yes\" or \"no\" here."
+        },
+        {
+            "user": "jkroon81",
+            "body": "And if I understand correctly, it would only add an additional cost the *first* time, when it is doing the relabeling. Subsequent runs would just read the context, which I guess would be slightly cheaper than updating the new context all the time."
+        },
+        {
+            "user": "rhatdan",
+            "body": "The problem here is it is somewhat difficult to judge whether or not the relabel is required.\nIf you are relabeling on a directory with the correct labels, we could optimize for this use case. If you attempt to relabel a directory that is labeled nfs_t then this is not going to work, even though the nfs directory or a volume from a MAC would not work."
+        },
+        {
+            "user": "giuseppe",
+            "body": "maybe we could just check the root mount, if the label is wrong, then we assume it was never relabelled and we always setxattr, as we do now.  Instead if the root mount has the correct label, we assume it was already relabelled and we can enter the new mode where we do a getxattr first."
+        },
+        {
+            "user": "rhatdan",
+            "body": "We should do this at the Podman side not in go-selinux."
+        },
+        {
+            "user": "rhatdan",
+            "body": "This does leave the risk, that files under the top level directory are mislabeled, and :z will not fix.  But I think this is reasonable to allow."
+        },
+        {
+            "user": "giuseppe",
+            "body": "I was thinking of something like:\n\n```diff\ndiff --git a/vendor/github.com/opencontainers/selinux/go-selinux/rchcon.go b/vendor/github.com/opencontainers/selinux/go-selinux/rchcon.go\nindex feb739d32..a5de0dcc9 100644\n--- a/vendor/github.com/opencontainers/selinux/go-selinux/rchcon.go\n+++ b/vendor/github.com/opencontainers/selinux/go-selinux/rchcon.go\n@@ -11,7 +11,20 @@ import (\n )\n \n func rchcon(fpath, label string) error {\n+       slowMode := false\n+       if currentLabel, err := lFileLabel(fpath); err == nil {\n+               if label == currentLabel {\n+                       slowMode = true\n+               }\n+       }\n        return pwalkdir.Walk(fpath, func(p string, _ fs.DirEntry, _ error) error {\n+               if slowMode {\n+                       if currentLabel, err := lFileLabel(p); err == nil {\n+                               if label == currentLabel {\n+                                       return nil\n+                               }\n+                       }\n+               }\n                e := lSetFileLabel(p, label)\n                // Walk a file tree can race with removal, so ignore ENOENT.\n                if errors.Is(e, os.ErrNotExist) {\n```"
+        },
+        {
+            "user": "rhatdan",
+            "body": "In Podman we are already doing this here:\nhttps://github.com/containers/podman/blob/main/libpod/container_internal_linux.go#L3239-L3255"
+        },
+        {
+            "user": "rhatdan",
+            "body": "I can update my PR for goselinux with your improvement."
+        },
+        {
+            "user": "giuseppe",
+            "body": "> In Podman we are already doing this here:\n> https://github.com/containers/podman/blob/main/libpod/container_internal_linux.go#L3239-L3255\n\nbut that doesn't cover bind mounts that are used by different containers.\n\nSaid so, I'd personally leave it as it is now, if you specify `:z` then you get the files relabelled.\n\nThe user could also fix it with something like `podman run -v $PATH:/foo:z alpine true` to relabel the path then always use it without `:z`.\n\n\n"
+        },
+        {
+            "user": "jkroon81",
+            "body": "> This does leave the risk, that files under the top level directory are mislabeled, and :z will not fix. But I think this is reasonable to allow.\n\nAssuming I understood the comment above, with the suggested \"new\" mode suggested by Giuseppe, why would :z not relabel files under the top level directory ? "
+        },
+        {
+            "user": "jkroon81",
+            "body": "Looking at the increased complexity introduced by the proposed patches, I'd say it is a small price to pay for relieving the user from having to remember whether or not he has run podman with :z at some point before."
+        },
+        {
+            "user": "rhatdan",
+            "body": "New mode by Giuseppe will update labels. if they are different."
+        },
+        {
+            "user": "rhatdan",
+            "body": "BTW This change does not relieve that, it does cause files to not change if they had the correct label in the first point."
+        },
+        {
+            "user": "jkroon81",
+            "body": "Ok. I suppose what the proposed changes will mean is that, since I have the memory of a goldfish, I will always pass :z, but the files will not change after the first relabeling is done. And the negative effect of always passing :z is that podman takes a little longer to startup, since it has to check that the files have the right labels. But I'd be happy with that tradeoff."
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "jkroon81",
+            "body": "Was there some improvement merged for the \"bug\" I reported ?"
+        },
+        {
+            "user": "rhatdan",
+            "body": "Yes this should be optimized in podman 4.2"
+        },
+        {
+            "user": "jkroon81",
+            "body": "Thanks Daniel!"
+        },
+        {
+            "user": "jkroon81",
+            "body": "I'm using podman v4.2.0, latest in Fedora 36, but I am still seeing that gitk thinks that files have changed. The folder I mount bind into the container does contain relative symlinks that point to other folders inside the top directory I am mounting. Does this somehow trick the optimization in some way, making podman still relabel files unnecessarily ?"
+        },
+        {
+            "user": "rhatdan",
+            "body": "Could you give an example podman command where this is happening, and show the volume you are mounting?"
+        },
+        {
+            "user": "jkroon81",
+            "body": "I pushed a repo here: https://github.com/jkroon81/podman-issue-14786\n\nYou can clone it, then do:\nmake\nstat dir/foobar\nmake\nstat dir/foobar\n\nand you will see that the \"Change\" timestamp is updated after every \"make\"."
+        },
+        {
+            "user": "jkroon81",
+            "body": "I understand that I can handle this outside of podman, by using an approach like I've done in the branch \"optimize-relabel-outside-podman\" in the \"podman-issue-14786\" repo, but if possible I would prefer if podman could just handle it automatically."
+        },
+        {
+            "user": "jkroon81",
+            "body": "Any comments on my remarks above ? "
+        }
+    ]
+}

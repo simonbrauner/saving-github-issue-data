@@ -1,0 +1,39 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 23909,
+    "title": "race: system df: failed to get read/write size of container: /proc/something: ENOENT or EINVAL",
+    "state": "closed",
+    "labels": [
+        "flakes",
+        "locked - please file new issue/PR"
+    ],
+    "user": "edsantiago",
+    "body": "In window 1:\n```console\n$ sudo bash -c 'while :;do bin/podman system df --format \"{{\\\"\\\"}}\" || break;done';beep  \n```\nIn window 2:\n```console\n$ while :;do hack/bats --root 252:rootfs || break;done\n```\nDoesn't take too long for window 1 to fail:\n```\nError: failed to get read/write size of container xxx: readdirent /proc/1347012/net: invalid argument\n```\nAlso seen: \n```\nError: failed to get read/write size of container xxx: lstat /proc/2688266/fd/5: no such file or directory\n```\nFound in parallel testing. It should be possible to minimize the reproducer if necessary.",
+    "comments": [
+        {
+            "user": "Luap99",
+            "body": "Why do we even read /proc when computing the size? That doesn't make sense as these are not real files."
+        },
+        {
+            "user": "Luap99",
+            "body": "Oh I see why, the quadlet is using a overlyfs rootfs over `/` and podman of course in order to know the size has to walk over everything and because well /proc is a normal mount point on the host it walks /proc there too. The actual containers /proc is mounted in the container mount namespace only so we would not walk that by default.\nOnly because we see the /proc on the host here it happens..."
+        },
+        {
+            "user": "Luap99",
+            "body": "So I think found the cause for the ENOENT errors (https://github.com/containers/storage/pull/2097) which seems like a real bug that can always happen, however walking /proc in general seem to generate a bunch of weird errors, i.e. EINVAL and that is certainly not an error that we like to ignore by default when walking+stating each file to get the size.\n\nI am not sure how important this is, I guess it blocks you from running this rootfs test in parallel?\nWe can try something like this:\n```diff\ndiff --git a/test/system/252-quadlet.bats b/test/system/252-quadlet.bats\nindex 3ef297b869..566a512ab5 100644\n--- a/test/system/252-quadlet.bats\n+++ b/test/system/252-quadlet.bats\n@@ -726,7 +726,12 @@ EOF\n     local quadlet_file=$PODMAN_TMPDIR/basic_$(safename).container\n     cat > $quadlet_file <<EOF\n [Container]\n-Rootfs=/:O\n+Rootfs=$PODMAN_TMPDIR:O\n+Volume=/usr:/usr\n+Volume=/lib:/lib\n+Volume=/lib64:/lib64\n+Volume=/etc:/etc\n+Volume=/var:/var\n Exec=sh -c \"echo STARTED CONTAINER; echo \"READY=1\" | socat -u STDIN unix-sendto:\\$NOTIFY_SOCKET; top -b\"\n Notify=yes\n EOF\n```\nOr like we do in other tests use an actual mounted container image as source for rootfs which I guess is more robust then only mounting certain host directories. "
+        },
+        {
+            "user": "ygalblum",
+            "body": "@Luap99 but then what are you really testing? If we want to avoid this walk, I think the test will need to prepare the rootfs directory and use it and not mount all these directories."
+        },
+        {
+            "user": "edsantiago",
+            "body": "See https://github.com/containers/podman/pull/23275/commits/522c718bf5b502554921976beacf9d6226b207a7"
+        },
+        {
+            "user": "ygalblum",
+            "body": "> See [522c718](https://github.com/containers/podman/commit/522c718bf5b502554921976beacf9d6226b207a7)\n\nYes, this is what I meant. Thanks"
+        }
+    ]
+}

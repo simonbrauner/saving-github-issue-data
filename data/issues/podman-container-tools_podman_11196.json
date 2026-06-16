@@ -1,0 +1,59 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 11196,
+    "title": "Make use of remoting support consistent between platforms (CONTAINER_HOST)",
+    "state": "closed",
+    "labels": [
+        "kind/bug",
+        "locked - please file new issue/PR"
+    ],
+    "user": "ssbarnea",
+    "body": "/kind bug\n\n**Description**\n\nBased on discussions made yesterday on irc, I will try to describe what we should do in order to ensure that podman command line works similarly across all platforms.\n\nAt this moment on non-linux platforms we do not install `podman-remote` and instead we have a `podman` executable which is acting like `podman --remote`. If I understood @mheon correctly, **there are no differences between calling podman-remote and podman --remote** on platforms that have both executables. On non-linux platforms, we can consider that the `--remote` argument is implicit and that some other commands are obviously not available.\n\nFor example on non-linux hosts, if you define something like `CONTAINER_HOST=ssh://root@hostname/run/podman/podman.sock`, `podman` will start using it right away for all commands.\n\nThat is great because it does match the behavior or docker, which does the same for DOCKER_HOST, were even the APIs do respect the environment variable.\n\nSadly, the same is not true for Linux podman, were podman will continue to use local host. This creates an undesired  divergence in behavior across platforms. \n\nMy proposal is to minimic docker behavior which maximizes flexibility and allow users to determine the backend to be used only by environment variables and avoiding the need to add complex conditions in their code like: if not-on-linux and CONTAINER_HOST in environ do add --remote to all podman commands. These kind of hacks to make code complex and prone to bugs.\n\n**Describe the results you received:**\n\n\n**Describe the results you expected:**\n\nAs a podman user, I expect to be able to use one or more environment variables to control which backend will be used by podman on all supported platforms. No code that makes use of podman cli or api should need changes in order to be able to do that.\n\nWe are aware that this change would need to be introduced in v4.0.0 because it counts as major. Mainly presence of the variable will tell podman to use a different host, something that is not happening how on linux. While I think that the risk is very low (to have the var defined and not to use it already), is better to do it like this.\n\nThis change has no impact on macos/windows, as this is already happening there.\n\nPS. Feel free to edit this proposal.\n",
+    "comments": [
+        {
+            "user": "afbjorklund",
+            "body": "Pretty sure we talked about this before.(~#4390~ ~#8070~) And that it ended up being required, and different:\n\ne.g. https://minikube.sigs.k8s.io/docs/handbook/pushing/#3-pushing-directly-to-in-cluster-cri-o-podman-env\n\n![podman-tabs](https://user-images.githubusercontent.com/10364051/129058936-bb092156-920a-4715-a665-a52a6d29abe0.png)\n\nI think the end solution was _going away_ from using environment variables altogether, and invent \"connections\"* ?\n\nThe `podman-remote` or `podman --remote` was still required, though. That is, `podman` is still local on Linux.\n\n----\n\n\\* there is actually a undocumented CONTAINER_CONNECTION to choose between them.\n\n```\n -c, --connection string   Connection to use for remote Podman service\n      --identity string     path to SSH identity file, (CONTAINER_SSHKEY)\n      --url string          URL to access Podman service (CONTAINER_HOST) (default \"unix:/run/user/1000/podman/podman.sock\")\n```\n"
+        },
+        {
+            "user": "mheon",
+            "body": "We are coming up on 4.0, so if there is a time to revisit this and make breaking changes, it is now.\n\nI do wonder if this should be configurable - have a `containers.conf` field to set a preference between local Podman and remote connections."
+        },
+        {
+            "user": "afbjorklund",
+            "body": "> We are coming up on 4.0, so if there is a time to revisit this and make breaking changes, it is now.\n\nWouldn't that just mean having one instruction for podman3 and one for podman4, in Python-style ?\n\nCurrently we got stuck on podman2, since someone reverted my go compiler upgrade (that was needed)\nEventually that will be solved and we can upgrade, but I thought [some were stuck on podman 3.0 forever](https://podman.io/blogs/2021/03/02/podman-support-for-older-distros.html).\n\nAt the moment the struggle is with `github.com/docker/client`, so stuck with `/var/run/docker.sock` 😔\n\n\n```\nminikube ssh -- sudo ln -sf /run/podman/podman.sock /var/run/docker.sock\neval $(minikube podman-env)\nssh-add $CONTAINER_SSH_KEY\nexport DOCKER_HOST=${CONTAINER_HOST/\\/run\\/podman\\/podman.sock/}\n```\n\nBut it would still be nice if `CONTAINER_HOST` worked on all platforms, even **if** it makes the binary bigger etc."
+        },
+        {
+            "user": "afbjorklund",
+            "body": "> I do wonder if this should be configurable - have a `containers.conf` field to set a preference between local Podman and remote connections.\n\nI think there was a \"remote\" flag added to containers.conf, last time around ? https://github.com/containers/podman/issues/8070#issuecomment-733363430\n\n> `remote = false` Indicates whether the application should be running in remote mode. This flag modifies the --remote option on container engines. Setting the flag to true will default podman --remote=true for access to the remote Podman service.\n\nhttps://github.com/containers/common/commit/379e35329ab640bd1cb55d87af5bc86b90a7dcce\n"
+        },
+        {
+            "user": "ssbarnea",
+            "body": "> We are coming up on 4.0, so if there is a time to revisit this and make breaking changes, it is now.\n> \n> I do wonder if this should be configurable - have a `containers.conf` field to set a preference between local Podman and remote connections.\n\nIn fact configurable using config files and/or environment variables is an implementation detail. Both are good and usually env takes precedence over config files, as way to switch the implicit option.\n\nWhat i find key in that feature is that calls made to podman via cli or API should not need to be patched when config is changed. For example we have some ansible code that talks with podman with both approaches and we don't really want to be forced to add conditions for local and remote mode. If podman itself would know which mode to use, we should not bother about having to update the calls.  I think that https://github.com/ansible-community/molecule-podman/pull/53/files can be seen as an example that explains the current extra complexity, as the OP tried to find a workaround for allowing him to use remote connections on linux. I am sure we can do better for the v4.\n\nI wonder if, for v3  we could maybe add support for `CONTAINER_ARGS=--remote` in order to allow those on linux to force use of remote without having to change existing code?\n\n"
+        },
+        {
+            "user": "afbjorklund",
+            "body": "I guess the suggestion is for remote to be true, and then have it \"fall back\" on just running if no host or connection is found ?\n\nThat is, to allow for the `podman-remote` binary to replace the `podman` binary also on Linux (if it now can do both of them)"
+        },
+        {
+            "user": "afbjorklund",
+            "body": "> In fact configurable using config files and/or environment variables is an implementation detail. Both are good and usually env takes precedence over config files, as way to switch the implicit option.\n\nWe have a problem when running multiple \"profiles\" / clusters, in that the configuration file is shared between shells but the environment variable is possible to set to different things for each shell.\n\nThe environment variables are problem in that you cannot set them from the command, without having the user run `eval` or somesuch - different for each shell of course, and doubly so on Windows"
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "rhatdan",
+            "body": "Bottom line on this, you want\nif $COTAINER_HOST != \"\", the podman --remote=true as the default correct?"
+        },
+        {
+            "user": "ssbarnea",
+            "body": "> Bottom line on this, you want\n> \n> if $COTAINER_HOST != \"\", the podman --remote=true as the default correct?\n\nMostly yes. The reality is that recently I configured podman config to use remote by default. Having that implicit remote would be a great benefit, making \"podman\" command more portable across different platforms."
+        }
+    ]
+}

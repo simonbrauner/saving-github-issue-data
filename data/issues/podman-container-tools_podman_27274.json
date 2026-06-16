@@ -1,0 +1,29 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 27274,
+    "title": "Default network should delegate DNS to 127.0.0.53",
+    "state": "closed",
+    "labels": [
+        "kind/feature",
+        "network",
+        "locked - please file new issue/PR",
+        "triaged"
+    ],
+    "user": "tangentsoft",
+    "body": "### Feature request description\n\nI have `systemd-resolve` proxying mDNS here, evidenced by this command succeeding on the host:\n\n```\n$ getent hosts DEVICE.local\n192.168.x.y DEVICE.local\n```\n\nAchieving this requires a multi-step process that isn't on-topic here, but I include my footsteps in case it helps someone pursue this issue:\n\n```\n$ sudo -i\n# systemctl disable --now avahi-daemon\n# echo -e '[Resolve]\\nMulticastDNS=yes' > /etc/systemd/resolved.conf\n# systemctl restart systemd-resolved\n# resolvectl mdns $IFNAME yes\n```\n\nThe initial problem was that those steps do not prevent this from failing:\n\n```\n$ podman run --rm -it ubi10 getent hosts DEVICE.local || echo \"No joy.\"\n```\n\nI've got a heavy-handed solution: add `--network=host --dns=127.0.0.53` to the above command. Now it works by delegating the host name lookup to resolved, which as we have seen above _does_ know how to proxy mDNS via regular DNS.\n\nWhat I'm hoping to accomplish by filing this issue is to get Podman's stock 169.254.1.1 DNS proxy service to contact 127.0.0.53 on the host instead of…_whatever it is doing now_, without the need for the exposure `--net=host` brings.\n\nIf I drop the `--net` flag, it fails because 127.0.0.53 is interpreted as \"localhost inside the container's netns\" which doesn't know about mDNS because it is not running resolved or Avahi inside the container.\n\n(And that's a good thing! I do not want a duplicate mDNS stack inside each container. This should be delegated to the host, just like regular DNS.)\n\n### Suggest potential solution\n\nI suspect the default network is contacting the host's external DNS server (192.168.x.y) instead of the localhost-bound resolved. If it's running on a systemd system and resolved is configured, prefer that for all the reasons resolved exists in the first place, not just my mDNS case.\n\n### Have you considered any alternatives?\n\nUgly one given above. Rejected because ugly. :)\n\n### Additional context\n\nI don't believe I have anything clever set up with Podman. It's the stock config on EL10, as far as I'm aware:\n\n```\n$ podman network inspect podman\n[\n     {\n          \"name\": \"podman\",\n          \"id\": \"2f259bab93aaaaa2542ba43ef33eb990d0999ee1b9924b557b7be53c0b7a1bb9\",\n          \"driver\": \"bridge\",\n          \"network_interface\": \"podman0\",\n          \"created\": \"2025-10-11T02:41:30.993838794-06:00\",\n          \"subnets\": [\n               {\n                    \"subnet\": \"10.88.0.0/16\",\n                    \"gateway\": \"10.88.0.1\"\n               }\n          ],\n          \"ipv6_enabled\": false,\n          \"internal\": false,\n          \"dns_enabled\": false,\n          \"ipam_options\": {\n               \"driver\": \"host-local\"\n          },\n          \"containers\": {}\n     }\n]\n```\n\nYes, I see the `dns_enabled` line, but I am not speaking here about \"…container to container name resolution,\" to quote `man podman-network-create`.",
+    "comments": [
+        {
+            "user": "Honny1",
+            "body": "PTAL @Luap99 "
+        },
+        {
+            "user": "Luap99",
+            "body": "There are two cases here, rootless and rootful networking.\n\nFor rootful this is about `dns_enabled` because that is the only way to proxy dns requests to the host namespace. Aardvark-dns runs in the host namespace and as such can reach 127.0.0.53, that works by either reading that server from resolv.conf or by via the --dns option as with aardvark-dns that value is actually being passed to aardvark-dns and not directly resolved in the container netns.\nWithout aardvark-dns there is no way to make this work because there is simply no way to route to a localhost address on the host from the container.\n\nAs rootless the story is a bit different because we already needs a user space proxy there, i.e. pasta. And with pasta we make use of the --dns-forward option via the 169.254.1.1 address, in that case pasta resolves the first address from resolv.conf and passes the dns queries there. So if you actually have `127.0.0.53` as nameserver in resolv.conf I would expect this to work.\nNow if you pass `--dns 127.0.0.53` then this doesn't work because it gets resolved inside the container namespace.\n\nThe way to pass a different dns server to pasta would be via the pasta(1) --dns-host option. Something like should work as rootless:\n```\npodman run --network pasta:--dns-host,1.1.1.1 quay.io/libpod/testimage:20241011 nslookup google.com\n```\n"
+        },
+        {
+            "user": "Luap99",
+            "body": "Ok I just tested on a VM with systemd-resolved enabled and `127.0.0.53` in resolv.conf and that definitely works out of the box already.\nIt works with all modes rootless, the default (--network pasta), with --network bridge (dns_enabled=false) and a custom network with (dns_enabled=true). In all cases I see pasta makes the request to 127.0.0.53.53 on the lo interface"
+        }
+    ]
+}

@@ -1,0 +1,107 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 13419,
+    "title": "rootless podman internal GID is one higher than external user sometimes",
+    "state": "closed",
+    "labels": [
+        "kind/bug",
+        "locked - please file new issue/PR"
+    ],
+    "user": "jahamilton12121",
+    "body": "<!--\n---------------------------------------------------\nBUG REPORT INFORMATION\n---------------------------------------------------\nUse the commands below to provide key information from your environment:\nYou do NOT have to include this information if this is a FEATURE REQUEST\n\n**NOTE** A large number of issues reported against Podman are often found to already be fixed\nin more current versions of the project.  Before reporting an issue, please verify the\nversion you are running with `podman version` and compare it to the latest release\ndocumented on the top of Podman's [README.md](../README.md).  If they differ, please\nupdate your version of Podman to the latest possible and retry your command before creating\nan issue.\n\nAlso, there is a running list of known issues in the [Podman Troubleshooting Guide](https://github.com/containers/podman/blob/main/troubleshooting.md),\nplease reference that page before opening a new issue.\n\nIf you are filing a bug against `podman build`, please instead file a bug\nagainst Buildah (https://github.com/containers/buildah/issues). Podman build\nexecutes Buildah to perform container builds, and as such the Buildah\nmaintainers are best equipped to handle these bugs.\n-->\n\n**Is this a BUG REPORT or FEATURE REQUEST? (leave only one on its own line)**\n\n/kind bug\n\n**Description**\nSometimes the gid map inside of the user is one more than it should be. Sometimes it will work as expected\nFor ex it will be correctly set to 30000 sometimes \n```\nsu -s /bin/bash - myuser -c \"podman unshare cat /proc/self/gid_map\"\n         0      30000          1\n         1     165536      65536\n```\n\nOther times it will be 30001\n```\nsu -s /bin/bash - myuser -c \"podman unshare cat /proc/self/gid_map\"\n         0      30001          1\n         1     165536      65536\n```\n\n<!--\nBriefly describe the problem you are having in a few paragraphs.\n-->\n\n\n\n**Steps to reproduce the issue:**\n\n1. I am creating users with `/usr/sbin/adduser --shell /usr/sbin/nologin --gid 30000 --gecos \"\" --disabled-password myuser`\n\n2. I create a container `/usr/bin/su -s /bin/bash - username -c \"podman load --input image.tar.gz\"`\n\n**Describe the results you received:**\n```\nsu -s /bin/bash - myuser -c \"podman unshare cat /proc/self/gid_map\"\n         0      30001          1\n         1     165536      65536\n```\n\n**Describe the results you expected:**\n```\nsu -s /bin/bash - myuser -c \"podman unshare cat /proc/self/gid_map\"\n         0      30000          1\n         1     165536      65536\n```\n\n**Additional information you deem important (e.g. issue happens only occasionally):**\nIssue only happens occasionally\n\n**Output of `podman version`:**\n\n```\npodman version 3.2.1\n```\n\n**Output of `podman info --debug`:**\nI dont want to put all of the info here\n```\narch: amd64\n  buildahVersion: 1.21.3\n GoVersion: go1.13.8\n```\n\n**Package info (e.g. output of `rpm -q podman` or `apt list podman`):**\n\n```\npodman/unknown,now 3.2.1+ds1-2ubuntu2\n```\n\n**Have you tested with the latest version of Podman and have you checked the Podman Troubleshooting Guide? (https://github.com/containers/podman/blob/main/troubleshooting.md)**\n\n\nNo\n\n**Additional environment details (AWS, VirtualBox, physical, etc.):**\nModified version of ubuntu",
+    "comments": [
+        {
+            "user": "Luap99",
+            "body": "@giuseppe PTAL"
+        },
+        {
+            "user": "giuseppe",
+            "body": "could you share the output of `id` when the issue happens (`su -s /bin/bash - myuser -c \"id; podman unshare cat /proc/self/gid_map\"`)?"
+        },
+        {
+            "user": "vrothberg",
+            "body": "@jahamilton12121, friendly ping."
+        },
+        {
+            "user": "jahamilton12121",
+            "body": "I am trying to get another user to demonstrate this however it only happens infrequently. The project I am working on creates and removes users frequently. "
+        },
+        {
+            "user": "jahamilton12121",
+            "body": "@giuseppe I do not have the user at hand but I did run these commands previously. \n```\n# su -s /bin/bash - myuser -c \"podman unshare cat /proc/self/gid_map\"\n         0      40001          1\n         1     165536      65536\n```\n\n```\n# groups myuser\nmyuser: mygroup_with_gid_40000\n```\n\n```\n# grep mygroup_with_gid_40000 /etc/group\nmygroup_with_gid_40000:x:40000:\n```"
+        },
+        {
+            "user": "jahamilton12121",
+            "body": "```\nmyuser@machine$ id\nuid=1009(myuser) gid=40000(mygroup) groups=40000(mygroup)\n```\n\n```\nmyuser@machine$ ps -o uid,gid -p $(pidof process_podman_is_running)\n  UID   GID\n 1009 40001\n```"
+        },
+        {
+            "user": "giuseppe",
+            "body": "could it be a race condition?\n\nWhat was the first session that created the podman pause process?  e.g. was it running in a separate ssh session?\n\nrootless podman cannot use any GID it wishes to, newgidmap would not allow using a gid if it not already allocated to the user.\n\nwhat is the parent process of `catatonit -P` process that keeps the rootless user namespace alive and what is its UID/GID?\n\n"
+        },
+        {
+            "user": "giuseppe",
+            "body": "I am closing this issue since I don't see how it could be caused by Podman.  Podman runs as unprivileged user and it cannot change its UID/GID (except to the ones configured in `/etc/sub?id` through the newuidmap/newgidmap tools).\n\nPlease add more comments and we try to help debug what is going on"
+        },
+        {
+            "user": "jahamilton12121",
+            "body": "@giuseppe I have it set up so the user and podman containers are created by a systemd job running a single threaded python script and not initiated by ssh sessions/direct user input. Basically it creates a user, then loads a podman image inside of it, then a new systemd job will load podman run inside the user.\n\nCreating a user\n```\ncmd = shlex.split(f'/usr/sbin/adduser --shell /usr/sbin/nologin --gid {gid} --gecos \"\" --disabled-password {username}')\n```\n\nHow I load the container image inside the user. (the image is copied from root into the user directory and chown is ran on it `chown {username} {tmp_image}`)\n```\ncmd = [\"podman\", \"load\", \"--input\", tmp_image]\ncmd = [\"/usr/bin/su\", \"-s\", \"/bin/bash\", \"-\", username, \"-c\"] + [\" \".join(cmd)]\n```\n\nsnippet of start script that new systemd job will run\n```\nsu -s /bin/bash - {username} -c \"podman run --network=host -d --restart on-failure --log-opt=path=${{LOG}} --log-driver=journald --name {name} ${{ENV}} --conmon-pidfile=${{PID_FILE}} {name}\"\n```\n\nAnother design element is that some GIDs are supposed to be 40000 and some are 40001. The issue of this post is that somehow a user which is correctly assigned GID 40000, has its podman process be 40001 which is a rare occurrence but will break some things.\n\n> what is the parent process of catatonit -P process that keeps the rootless user namespace alive and what is its UID/GID?\n\nHow do I find this? `catatonit -P` isn't a command on my system. "
+        },
+        {
+            "user": "jahamilton12121",
+            "body": "Also I have two users with different names that run the same image. These users are the only ones that are problematic\n```\n$ ps -e -o pidns,pid,args\n29153 ./binaryfile\n27708 ./binaryfile\n```\n```\n$ ps -o gid 29153\n  GID\n40000\n$ ps -o gid 27708\n  GID\n40001\n```"
+        },
+        {
+            "user": "jahamilton12121",
+            "body": "```\nroot@machine:~# su -s /bin/bash - name-thing -c \"podman unshare cat /proc/self/gid_map\"\n         0      40001          1\n         1     231072      65536\nroot@machine:~# su -s /bin/bash - name -c \"podman unshare cat /proc/self/gid_map\"\n         0      40000          1\n         1     296608      65536\nroot@machine:~# su -s /bin/bash - name-thing -c \"id\"\nuid=1010(name-thing) gid=40000(group_0) groups=40000(group_0)\n\nroot@machine:~# su -s /bin/bash - name -c \"id\"\nuid=1011(name) gid=40000(group_0) groups=40000(group_0)\n```"
+        },
+        {
+            "user": "giuseppe",
+            "body": "can you share the content of `/etc/passwd` and `/etc/group` when that happens (at least the portion for `name` and `name-thing`)?"
+        },
+        {
+            "user": "jahamilton12121",
+            "body": "```\nroot@machine# su -s /bin/bash - name-thing -c \"podman unshare cat /proc/self/gid_map\"\n         0      40001          1\n         1     231072      65536\n\nroot@machine# cat /etc/passwd | grep \"name\"\nname-thing:x:1010:40000:,,,:/home/name-thing:/usr/sbin/nologin\nname:x:1011:40000:,,,:/home/name:/usr/sbin/nologin\n\nroot@machine# cat /etc/group\ngroup_0:x:40000:\ngroup_1:x:40001:\n```\n"
+        },
+        {
+            "user": "jahamilton12121",
+            "body": "@giuseppe After testing a reproduction script for a while it seems it only happens when the virtual machine undergoes a custom ssd reset which deletes several things. The service files to the systemd jobs are removed but the jobs themselves can stay running. Users are not affected and the container keeps running. But I have a script which will remove them after a reset\n\nCurrently this happens:\nreset which removes service and script files instantly but containers are still running fine\na script detects reset and begins to remove the containers with podman rm and then stops systemd jobs and removes service file, and then forcibly removes users.\n _About 3 minutes later (well after removal and reset stuff)_\nname-thing is installed\nname is installed\nothername is installed\n\nI didn't realize at first but othername has incorrect GID as well. it is supposed to have gid 40001 and instead has the name-thing's GID of 40000. Like they switched. When running \"id\" on both, they both have the correct respective id's of 40000 for name-thing and 40001 for othername. \"name\" which is basically the same as \"name-thing\" has the correct gid in this specific instance but in other repros it is the opposite. Other repros can be just one that is wrong as well. They do not have to switch. I have never seen a GID out of the range of 40000 to 40001. Those are the only GIDs that are ever assigned though more groups with GIDs do exist above that number. \n\nAlso again, usually they are correct. It takes a few loops for the reproduction script to run into this"
+        },
+        {
+            "user": "jahamilton12121",
+            "body": "I forgot to mention, a reboot fixes the GID issue. Just leaving everything as is and rebooting without doing anything else"
+        },
+        {
+            "user": "jahamilton12121",
+            "body": "This is what a correct/nonproblematic gid maps look like. Is it normal for the second number to increase like this?\n```\nsu -s /bin/bash - name-thing -c \"podman unshare cat /proc/self/gid_map\"\n         0      40000          1\n         1     231072      65536\nsu -s /bin/bash - name -c \"podman unshare cat /proc/self/gid_map\"\n         0      40000          1\n         1     296608      65536\nsu -s /bin/bash - othername -c \"podman unshare cat /proc/self/gid_map\"\n         0      40001          1\n         1     362144      65536\n```"
+        },
+        {
+            "user": "rhatdan",
+            "body": "The 40001 is the GID of the \"othername\" user, so yes this is normal."
+        },
+        {
+            "user": "jahamilton12121",
+            "body": "I mean 231072      296608     362144      "
+        },
+        {
+            "user": "rhatdan",
+            "body": "Yes these come from the /etc/subgid files for each user. useradd automatically generates them."
+        },
+        {
+            "user": "jahamilton12121",
+            "body": "More information, I can repro without doing a reset and just uninstalling and reinstalling. I uninstall all 3 agents in synchronously and reinstall about 60 seconds after the last one is finished being removed. The issue doesn't seem to happen when alternating the uninstall and reinstall. "
+        },
+        {
+            "user": "jahamilton12121",
+            "body": "uninstall process: `systemctl stop jobname` -> remove service file and script file -> remove podman container then image -> remove user. \n```\ndef remove_image(name, username, image_name):\n        try:\n            cmd = [PodmanCommand.podman, \"rm\", \"--force\", name]\n            cmd = [\"/usr/bin/su\", \"-s\", \"/bin/bash\", \"-c\"] + [\" \".join(cmd)] + [\"-\", f\"{username}\"]\n            run_command(cmd)\n        except Exception as e:\n            logger.error(f\"remove container failed with exception {e}\")\n        # as we are using podman tagging, we need to remove all tags\n        try:\n            images = _get_images_by_name(image_name)\n            cmd = [PodmanCommand.podman, \"rmi\", \"--force\"] + images\n            cmd = [\"/usr/bin/su\", \"-s\", \"/bin/bash\", \"-c\"] + [\" \".join(cmd)] + [\"-\", f\"{username}\"]\n            run_command(cmd)\n        except Exception as e:\n            logger.error(f\"remove image failed with exception {e}\")\n```\n\nremove user\n```\nf\"/usr/sbin/userdel -f -r {username}\"\n```"
+        },
+        {
+            "user": "jahamilton12121",
+            "body": "UPDATE: If I kill podman pause before removing the user then I no longer run into this issue. I believe it is an issue with podman and not my code. "
+        },
+        {
+            "user": "giuseppe",
+            "body": "when you delete the user, you also need to ensure all its processes are terminated.  Otherwise, you reuse the UID/GID for a different user causing a potential security issue."
+        }
+    ]
+}

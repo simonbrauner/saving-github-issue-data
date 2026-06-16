@@ -1,0 +1,109 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 21194,
+    "title": "static ip address is already allocated, but that container is already deleted",
+    "state": "closed",
+    "labels": [
+        "kind/bug",
+        "stale-issue",
+        "network",
+        "locked - please file new issue/PR"
+    ],
+    "user": "khain0",
+    "body": "### Issue Description\n\nAfter rebooting a server a rootless container is spawned by systemd service and failed with information: IP address is already allocated.\n\n### Steps to reproduce the issue\n\nSteps to reproduce the issue\n0. Prepare user which wants to run container by systemd service\na) Enable linger for the user\nloginctl enable-linger user_name\nb) Delegate user ids range for child namespaces\nAdd below line to files:\nvi -o /etc/subuid /etc/subgid\nuser_name:362144:65536\n\n1.  Create an nginx container:\n/usr/bin/podman run \\\n        --rm \\\n        --replace \\\n        -d \\\n        --name nginx \\\n        -h nginx \\\n        -p 443:443 \\\n        -p 80:80 \\\n        --network=wind:ip=10.89.0.12 \\\n        -v /home/windserviceuser/nginx/wind:/var/www/wind:Z \\\n        -v /home/windserviceuser/nginx/conf:/etc/nginx/conf.d:Z \\\n        -v /home/windserviceuser/nginx/certs:/etc/ssl/certs:Z nginx\n\n2. Generate systemd files:\npodman generate systemd --name windserver --new --files\n\n3. Create folder and move it to user's home directory\nmkdir -p ~/.config/systemd/user/\nmv /home/windserviceuser/container-windserver.service ~/.config/systemd/user/\n\n4. ssh to server with user you want to run container (switch user will not work, you need to establish ssh session as user who wants to run container by systemd service)\n\n5.  Start systemd service\nsystemctl --user enable --now container-windserver.service\n\n6. Reboot the server\n\n\n\n\n\n\n### Describe the results you received\n\npodman ps -a \nCONTAINER ID  IMAGE                                 COMMAND               CREATED     STATUS      PORTS                                     NAMES\nf35da1d2c2ae  docker.io/library/nginx:latest        nginx -g daemon o...  Created        0.0.0.0:80->80/tcp, 0.0.0.0:443->443/tcp  nginx\npodman start nginx\nError: IPAM error: requested ip address 10.89.0.12 is already allocated to container ID 1e967bae12d2cf693e9e0ed3fa3593c694db671f994444a2d8bf6d0b942cee13\n\n### Describe the results you expected\n\nAfter server is rebooted the container should be already started by systemd user service.\n\n### podman info output\n\n```yaml\nRed Hat Enterprise Linux release 9.3 (Plow)\npodman version 4.6.1\n\n/usr/libexec/podman/aardvark-dns version\n{\n  \"version\": \"1.7.0\",\n  \"commit\": \"42349ad219a890de8f447aeae6d580eb8dc3886c\",\n  \"build_time\": \"2023-07-07T00:00:00+00:00\",\n  \"target\": \"x86_64-unknown-linux-gnu\"\n}\n```\n\n\n### Podman in a container\n\nNo\n\n### Privileged Or Rootless\n\nRootless\n\n### Upstream Latest Release\n\nNo\n\n### Additional environment details\n\nCannot use latest upstream release on RHEL production server.\n\n### Additional information\n\nIssue occurs randomly. Not every reboot the IP address is already allocated.\nWorkaround after issue is encountered:\nrm /tmp/containers-user-1041/containers/networks/ipam.db\nrm /tmp/containers-user-1041/containers/networks/ipam.db\nps aux |grep aardvark\nkill -15 173122\n/usr/libexec/podman/aardvark-dns --config /tmp/containers-user-1041/containers/networks/aardvark-dns -p 53 run\nsystemctl --user restart container-windserver.service",
+    "comments": [
+        {
+            "user": "khain0",
+            "body": "Seems this is a regression:\nhttps://github.com/containers/podman/issues/15708"
+        },
+        {
+            "user": "Luap99",
+            "body": "Is /tmp on a tmpfs and thus empty after the reboot?\n(Also the path should really use /run/user/... on a systemd distro, likely when you first used podman as this user you did not log in correctly and no systemd session was created. Thus podman uses the /tmp fallback, I recommend you run `podman system reset` and then run `podman info` and then make sure runroot is set to /run/user/$UID... then try again)\n"
+        },
+        {
+            "user": "khain0",
+            "body": "/tmp is mounted under LVM partition:\ndf -h /tmp\nFilesystem                          Size  Used Avail Use% Mounted on\n/dev/mapper/rhel_rhel9--master-tmp  5.0G   70M  5.0G   2% /tmp\n\nPath is set correctly to /run/user/...\n podman info |grep -i runroot\n  runRoot: /run/user/1153650084/containers\n"
+        },
+        {
+            "user": "Luap99",
+            "body": "Your workaround mentions `rm /tmp/containers-user-1041/containers/networks/ipam.db` so when the problem happens it was under /tmp. You have to make sure this is always deleted after boot. "
+        },
+        {
+            "user": "khain0",
+            "body": "As I understand after performing `podman system reset` ipam.db should be created under /run/user... after starting the container, correct?"
+        },
+        {
+            "user": "Luap99",
+            "body": "`podman system reset` should delete everything podman related and thus should include the ipam.db.\nBut system reset is not really important, the important bit is that this directory must on a tmpfs or manually cleared on each boot before you run podman, other critical functionality depends on that fact as well. "
+        },
+        {
+            "user": "Luap99",
+            "body": "The ipam location should be `$XDG_RUNTIME_DIR/containers/networks` for rootless assuming defaults are used."
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "fccagou",
+            "body": "Got the same pb, Ip are never removed from ipam.db  nor from aardvark-dns when container or network are stopped/rm/prune.\n\n**Versions**\n```bash\n$ podman --version\npodman version 4.9.3\n$ podman info  --format \"{{.Host.NetworkBackendInfo.Path}}\"\n/usr/lib/podman/netavark\n$ podman info  --format \"{{.Host.NetworkBackendInfo.Version}}\"\nnetavark 1.10.3\n```\n\n**Reproducer** \n```bash\n\n# Create networks\npodman network create --label io.podman.test=test_multinetworks --driver bridge --subnet '10.11.11.0/24' test_multi_net11\npodman network create --label io.podman.test=test_multinetworks --driver bridge --subnet '10.22.22.0/24' test_multi_net22\n\n# Run busybox in each network\npodman run --name=test_run11 --rm -d --label io.podman.test=test_multinetworks --net test_multi_net11 busybox  sh -c 'while : ; do printf -- \"test_run11: %s\\n\" \"$(ip r s)\"; sleep 1; done'\npodman run --name=test_run22 --rm -d --label io.podman.test=test_multinetworks --net test_multi_net22 busybox  sh -c 'while : ; do printf -- \"test_run22: %s\\n\" \"$(ip r s)\"; sleep 1; done'\n\n# Get ipadress (always increment)\npodman inspect test_run11 --format '{{range .NetworkSettings.Networks}}{{.NetworkID}} {{.IPAddress }}{{end}}'\npodman inspect test_run22 --format '{{range .NetworkSettings.Networks}}{{.NetworkID}} {{.IPAddress }}{{end}}'\n\n# Run busybox in 2 network using static ip address.\npodman run --name=test_run --rm -d --label io.podman.test=test_multinetworks --net test_multi_net11:ip=10.11.11.11 --net test_multi_net22:ip=10.22.22.22  --requires=test_run11,test_run22 busybox  sh -c 'while : ; do printf -- \"test_run: %s\\n\" \"$(ip r s)\"; sleep 1; done'\n```\nIt fails with same error as #15708 \n\n**Checks**\n\n```bash\n# Remove all containers and networks\npodman stop test_run11 test_run22 \npodman network rm test_multi_net11 test_multi_net22\n\n\n# Dns configuration still there\n\nls  -1 /run/user/1000/containers/networks/aardvark-dns/test_*\n/run/user/1000/containers/networks/aardvark-dns/test_multi_net11\n/run/user/1000/containers/networks/aardvark-dns/test_multi_net22\n\n# Show dns entries\n\ncat /run/user/1000/containers/networks/aardvark-dns/test_multi_net11 \n10.11.11.1\n9e530d00dde7af14cd63da57c05103de1b8a065e11c8c4022e49f231332e28c0 10.11.11.2  test_run11,9e530d00dde7\n0d18bdf86dfc3ff50f52d671edad50b3fb555b89294dd6c98d3f369e9c60c400 10.11.11.3  test_run11,0d18bdf86dfc\ndaed369acb93e9c5b224689d3b96718e766e6aee3b6b9b1ea4f64c1cfe46423c 10.11.11.4  test_run11,daed369acb93\n940b91fd5912d46fdb629b6c0343df4aeefcc3472209dd6168c870fd1c82d3f3 10.11.11.5  test_run11,940b91fd5912\n...\n\n# all entries are in ipam\n\nboltbrowser -ro /run/user/1000/containers/networks/ipam.db\n...\n```\n\nI's like  if `deallocIPs` is never called in `ipam.go`\n"
+        },
+        {
+            "user": "Luap99",
+            "body": "@fccagou I don't have much time right now to look into this, if you only run the command listed there then I don't see how it would fail. I tried it real quick but it seems to work fine for me?\nYou could try adding `--log-level debug` all commands and look for some errors there, also check in the journal for errors."
+        },
+        {
+            "user": "fccagou",
+            "body": "Thx @Luap99 \n\nYou are right, everything is ok with this reproducer...\nThe error occurs while I'm using `podman-compose`, I definitely made some mistakes during my testing :thinking:\n\nI'm new using podman, interactions between all components is not clear in my mind.\nIt looks like netawark doesn't receive teardown message when containers are suppressed  through podman-compose.\n\nI keep looking !\n\n\n"
+        },
+        {
+            "user": "fccagou",
+            "body": "Got this test reproducing the problem. \n \n```bash\n# Create the network\npodman network --log-level debug create --driver bridge --subnet 10.11.11.0/24 mynet\n# Create the container\npodman create --log-level debug --name=mytest --network mynet:ip=10.11.11.10 docker.io/library/busybox sleep 10\n# Start the container : first time is ok\npodman start --log-level debug mytest\n# Re start the container  fails\npodman start --log-level debug mytest\n...\nmany debug logs\n...\nError: unable to start container \"ef9691b9fbbacf0caf385b5c4bbbe9ead8fa7c8bf945cf88e7a20efe71e7ff65\": IPAM error: requested ip address 10.11.11.10 is already allocated to container ID ef9691b9fbbacf0caf385b5c4bbbe9ead8fa7c8bf945cf88e7a20efe71e7ff65 time=\"2024-02-25T17:54:39+01:00\" level=debug msg=\"Shutting down engines\"\n\n```\n\n\nHere is the script wrote to produce  [full logs](https://github.com/containers/podman/files/14397123/simple-reproducer.log)\n\n``` bash \n#!/usr/bin/bash\n\nset -o errexit\n#set -o pipefail\nset -o nounset\n\nmybanner () {\n        printf --  \"\\n\\n================================================================================================================\\n\"\n}\n\nmybanner\npodman network --log-level debug create --driver bridge --subnet 10.11.11.0/24 mynet\n\nmybanner\npodman create --log-level debug --name=mytest --network mynet:ip=10.11.11.10 docker.io/library/busybox sleep 10\n\nmybanner\npodman start --log-level debug mytest\n\nsleep 15\n\nmybanner\npodman start --log-level debug mytest\n\n# clean all\npodman rm mytest\npodman network rm mynet\nkill $(pidof aardvark-dns)\nrm -rf /run/user/\"$(id -u)\"/containers/networks/*\n```\n\n"
+        },
+        {
+            "user": "fccagou",
+            "body": "hum ... Ok, I can't start a container with static ip twice, I have to recreate it.\n\nIs it my lack of knowledge _(and I'm out of topic there)_ or is this a bug ?\n"
+        },
+        {
+            "user": "Luap99",
+            "body": "That should work, this looks like the podman container cleanup process is not working for you, check journal for any logs.\nBefore the second start can you do a podman inspect and provide the full output. Also if you run podman stop before it does it work?"
+        },
+        {
+            "user": "fccagou",
+            "body": "It's ok with stop, netvark \"teardrops\" :  [simple-reproducer-with-inspect-stop.log](https://github.com/containers/podman/files/14408841/simple-reproducer-with-inspect-stop.log)\n\n\n```bash\n#!/usr/bin/bash\n\nset -o errexit\n#set -o pipefail\nset -o nounset\n\nmybanner () {\n        printf --  \"\\n\\n================================================================================================================\\n\"\n}\n\n\nmybanner\npodman network --log-level debug create --driver bridge --subnet 10.11.11.0/24 mynet\n\nmybanner\npodman create --log-level debug --name=mytest --network mynet:ip=10.11.11.10 docker.io/library/busybox sleep 10\n\nmybanner\npodman start --log-level debug mytest\n\nmybanner\npodman inspect mytest\n\nmybanner\nsleep 2\n\nmybanner\npodman stop --log-level debug mytest\n\nmybanner\npodman start --log-level debug mytest || /bin/true\n\nmybanner\nsleep 15\n\n# mybanner\n# podman rm mytest\n#\n# mybanner\n# podman create --log-level debug --name=mytest --network mynet:ip=10.11.11.10 docker.io/library/busybox sleep 10\n\nmybanner\npodman rm mytest\npodman network rm mynet\nkill $(pidof aardvark-dns)\nrm -rf /run/user/\"$(id -u)\"/containers/networks/*\n```"
+        },
+        {
+            "user": "Luap99",
+            "body": "Please check your journal logs, podman container cleanup is not working at all for you it seems.\nIf that doesn't yield anything attach strace to the podman run process `strace -f -o log podman run ...` this should show us exactly what it is doing and why it fails."
+        },
+        {
+            "user": "fccagou",
+            "body": "Got errors in journal  that looks interesting   [Full logs](https://github.com/containers/podman/files/14409246/simple-reproducer-journal-error.log)\n \n\n```bash\n...\nfévr. 26 19:14:55 l1nux podman[1203637]: 2024-02-26 19:14:55.155650342 +0100 CET m=+0.052614522 container died 97e5b67b8ff3ea386d6cb2ced12b539069d1edd1d063197478c3768d21aa2c2f (image=docker.io/library/busybox:lat\nest, name=mytest)\nfévr. 26 19:14:55 l1nux /usr/bin/podman[1203637]: time=\"2024-02-26T19:14:55+01:00\" level=debug msg=\"Cleaning up container 97e5b67b8ff3ea386d6cb2ced12b539069d1edd1d063197478c3768d21aa2c2f\"\nfévr. 26 19:14:55 l1nux /usr/bin/podman[1203637]: time=\"2024-02-26T19:14:55+01:00\" level=debug msg=\"Tearing down network namespace at /run/user/1000/netns/netns-c6ed13b8-9615-bac9-d576-130ce0370e3e for container \n97e5b67b8ff3ea386d6cb2ced12b539069d1edd1d063197478c3768d21aa2c2f\"\nfévr. 26 19:14:55 l1nux /usr/bin/podman[1203637]: time=\"2024-02-26T19:14:55+01:00\" level=error msg=\"Unable to clean up network for container 97e5b67b8ff3ea386d6cb2ced12b539069d1edd1d063197478c3768d21aa2c2f: \\\"get\nting rootless network namespace: failed to Statfs \\\\\\\"/run/user/1000/netns/rootless-netns-8efa473fa70e9f64eba2\\\\\\\": no such file or directory\\\"\"\n...\n```\n\n"
+        },
+        {
+            "user": "fccagou",
+            "body": "For every next tests, the same errors occurs checking unknown file `/run/user/1000/netns/rootless-netns-8efa473fa70e9f64eba2` \n\nExiting one is \n\n```bash\n$ ls -al /run/user/1000/netns/rootless-*\ntrw-------  1 fccagou fccagou   0 26 févr. 19:03 rootless-netns-7571ed7d42a2d3c62564\n```\n\n\n\n```bash\n journalctl --since 19:14:44 | grep rootless-netns-8efa473fa70e9f64eba2 \nfévr. 26 19:14:55 l1nux /usr/bin/podman[1203637]: time=\"2024-02-26T19:14:55+01:00\" level=error msg=\"Unable to clean up network for container 97e5b67b8ff3ea386d6cb2ced12b539069d1edd1d063197478c3768d21aa2c2f: \\\"getting rootless network namespace: failed to Statfs \\\\\\\"/run/user/1000/netns/rootless-netns-8efa473fa70e9f64eba2\\\\\\\": no such file or directory\\\"\"\nfévr. 26 19:29:57 l1nux /usr/bin/podman[1206528]: time=\"2024-02-26T19:29:57+01:00\" level=error msg=\"Unable to clean up network for container 026f57916f70f908dafed111e439e49003b227cb02db61be907f70cc1930582e: \\\"getting rootless network namespace: failed to Statfs \\\\\\\"/run/user/1000/netns/rootless-netns-8efa473fa70e9f64eba2\\\\\\\": no such file or directory\\\"\"\nfévr. 26 19:32:27 l1nux /usr/bin/podman[1207214]: time=\"2024-02-26T19:32:27+01:00\" level=error msg=\"Unable to clean up network for container 35fa09c7f38809ef50d7e0461a18e85502a6e7693b1d1a01d073493021ad8673: \\\"getting rootless network namespace: failed to Statfs \\\\\\\"/run/user/1000/netns/rootless-netns-8efa473fa70e9f64eba2\\\\\\\": no such file or directory\\\"\"\nfévr. 26 19:37:12 l1nux /usr/bin/podman[1208364]: time=\"2024-02-26T19:37:12+01:00\" level=error msg=\"Unable to clean up network for container 397b6bb4de4f0f8fb33e13a8a41c7906e707b0f8ca8ad5733181435bc2c19c16: \\\"getting rootless network namespace: failed to Statfs \\\\\\\"/run/user/1000/netns/rootless-netns-8efa473fa70e9f64eba2\\\\\\\": no such file or directory\\\"\"\n\n```\n"
+        },
+        {
+            "user": "fccagou",
+            "body": "After reboot, the error still occurs looking at file  _rootless-netns-_ **8efa473fa70e9f64eba2**\nWhere does this ID come from ?\n"
+        },
+        {
+            "user": "fccagou",
+            "body": "Got it in ` libpod/networking_linux.go`\n\n```go\n358-    hash := sha256.Sum256([]byte(r.config.Engine.StaticDir))\n359:    netnsName := fmt.Sprintf(\"%s-%x\", rootlessNetNsName, hash[:10])\n```\n\nOk, one step beyond to try to leave the Madness ... \n\n- Looking in log, we can see that podman start creating rootless network namespace with name \"rootless-netns-**7571ed7d42a2d3c62564**\"\n\n- Looking in journal, we can see podman fail getting rootless network namespace: failed to Statfs \"/run/user/1000/netns/rootless-netns-**8efa473fa70e9f64eba2**\"  \n\n\nAfter some code reading, I think the pb appears because my storage directory is a link `/home/fccagou/.local/share/containers/storage -> /srv/data/fccagou/containers/storage`  because the 2 hash match. \n\n\n```bash\n$ (id=\"$(echo -n /home/fccagou/.local/share/containers/storage/libpod  | sha256sum )\"; echo ${id:0:20})\n8efa473fa70e9f64eba2\n```\n\n```bash\n$ (id=\"$(echo -n /srv/data/fccagou/containers/storage/libpod  | sha256sum )\"; echo ${id:0:20})\n7571ed7d42a2d3c62564\n```\n\nI don't now the source of the error now but the value of `config.Engine.StaticDir` seems different when it's called in `setUpNetwork` and `teardownNetworkBackend`.\n\n\nToo much inception ..."
+        },
+        {
+            "user": "Luap99",
+            "body": "yes this seems to be the problem for you\nAnyhow the whole rootless-netns code has been rewritten for podman 5.0 and it will no longer use the sha from the static dir but rather just a file in the rundir and there it will not matter if symlink or not so I consider this fixed.\n\nI don't think however that is the same problem @khain0 is seeing."
+        },
+        {
+            "user": "fccagou",
+            "body": "Ok.\n\nI made a patch for my personal use but no pull-request, it's available [there](https://github.com/fccagou/podman/commits/fix-4.9.3-getroolessnetns-error-with-symlink/)\n \nThanks for the time"
+        },
+        {
+            "user": "Luap99",
+            "body": "I assume this is fixed in 5.0, however the runroot/tmpdir for podman still must be on tmpfs so that the ipam db is deleted on reboot."
+        }
+    ]
+}

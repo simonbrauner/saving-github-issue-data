@@ -1,0 +1,120 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 7262,
+    "title": "/libpod/networks/create API generates broken conflist on non-conforming Mask values",
+    "state": "closed",
+    "labels": [
+        "kind/bug",
+        "network",
+        "locked - please file new issue/PR"
+    ],
+    "user": "danopia",
+    "body": "/kind bug\n\n**Description**\n\nA valid request body to the create network API looks like:\n\n```json\n{\"Subnet\":{\"IP\":\"10.10.1.0\",\"Mask\":\"////AA==\"}}\n```\n\nNote that Mask is decoded as base64. If the Mask can decode, but isn't an expected bitmask afterwards, Podman stores an invalid conflist to disk.\n\nBodies that are accepted and produce an invalid conflist include:\n\n* `{\"Subnet\":{\"IP\":\"10.10.1.0\",\"Mask\":\"ffffff80\"}}`\n* `{\"Subnet\":{\"IP\":\"10.10.1.0\",\"Mask\":\"\"}}`\n* `{\"Subnet\":{\"IP\":\"10.10.1.0\",\"Mask\":\"aaaaaaaaaaaaaaaaaaaa\"}}`\n\n**Steps to reproduce the issue:**\n\n1. `sudo podman system service -t 30 tcp:127.0.0.1:8410`\n\n2. `curl -H 'Content-type: application/json' -XPOST http://localhost:8410/v1.0.0/libpod/networks/create --data '{\"Subnet\":{\"IP\":\"10.10.1.0\",\"Mask\":\"\"}}'`\n\n3. `curl http://localhost:8410/v1.0.0/libpod/networks/testnet/json`\n\n**Describe the results you received:**\n\n```json\n[{\"cniVersion\":\"0.4.0\",\"name\":\"testnet\",\"plugins\":[{\"bridge\":\"cni-podman1\",\"hairpinMode\":true,\"ipMasq\":true,\"ipam\":{\"ranges\":[[{\"gateway\":\"?01\",\"subnet\":\"\\u003cnil\\u003e\"}]],\"routes\":[{\"dst\":\"0.0.0.0/0\"}],\"type\":\"host-local\"},\"isGateway\":true,\"type\":\"bridge\"},{\"capabilities\":{\"portMappings\":true},\"type\":\"portmap\"},{\"backend\":\"\",\"type\":\"firewall\"},{\"domainName\":\"dns.podman\",\"type\":\"dnsname\"}]}]\n```\n\nIn particular: `{\"gateway\":\"?01\",\"subnet\":\"\\u003cnil\\u003e\"}`\n\n**Describe the results you expected:**\n\nAn error message on creation.\n\n**Additional information you deem important (e.g. issue happens only occasionally):**\n\nNothing in the API docs says that Mask should be base64. https://docs.podman.io/en/latest/_static/api.html#operation/libpodCreateNetwork\n\nWith the invalid network created, the list and describe APIs show the invalid network config. However, creating new networks no longer works. The error payload is simply `{\"cause\":\"invalid IP address: ?01\",\"message\":\"invalid IP address: ?01\",\"response\":500}`. It seems that creating a new network has the effect of performing extra checks on all existing conflists.\n\n**Output of `podman version`:**\n\n```\nVersion:      2.0.4\nAPI Version:  1\nGo Version:   go1.14\nBuilt:        Thu Jan  1 01:00:00 1970\nOS/Arch:      linux/amd64\n```\n\n**Output of `podman info --debug`:**\n\n```\nhost:\n  arch: amd64\n  buildahVersion: 1.15.0\n  cgroupVersion: v1\n  conmon:\n    package: 'conmon: /usr/libexec/podman/conmon'\n    path: /usr/libexec/podman/conmon\n    version: 'conmon version 2.0.18, commit: '\n  cpus: 2\n  distribution:\n    distribution: debian\n    version: \"10\"\n  eventLogger: file\n  hostname: penguin\n  idMappings:\n    gidmap: null\n    uidmap: null\n  kernel: 5.4.40-04224-g891a6cce2d44\n  linkmode: dynamic\n  memFree: 15240572928\n  memTotal: 15260385280\n  ociRuntime:\n    name: runc\n    package: 'runc: /usr/sbin/runc'\n    path: /usr/sbin/runc\n    version: |-\n      runc version 1.0.0~rc6+dfsg1\n      commit: 1.0.0~rc6+dfsg1-3\n      spec: 1.0.1\n  os: linux\n  remoteSocket:\n    path: /run/podman/podman.sock\n  rootless: false\n  slirp4netns:\n    executable: \"\"\n    package: \"\"\n    version: \"\"\n  swapFree: 0\n  swapTotal: 0\n  uptime: 23h 1m 45s (Approximately 0.96 days)\nregistries:\n  search:\n  - docker.io\n  - quay.io\nstore:\n  configFile: /etc/containers/storage.conf\n  containerStore:\n    number: 0\n    paused: 0\n    running: 0\n    stopped: 0\n  graphDriverName: btrfs\n  graphOptions: {}\n  graphRoot: /var/lib/containers/storage\n  graphStatus:\n    Build Version: 'Btrfs v5.2.1 '\n    Library Version: \"102\"\n  imageStore:\n    number: 2\n  runRoot: /var/run/containers/storage\n  volumePath: /var/lib/containers/storage/volumes\nversion:\n  APIVersion: 1\n  Built: 0\n  BuiltTime: Thu Jan  1 01:00:00 1970\n  GitCommit: \"\"\n  GoVersion: go1.14\n  OsArch: linux/amd64\n  Version: 2.0.4\n\n```\n\n**Package info (e.g. output of `rpm -q podman` or `apt list podman`):**\n\n```\npodman/unknown,now 2.0.4~1 amd64 [installed]\n```\n\n**Additional environment details (AWS, VirtualBox, physical, etc.):**\n\nlxc container (Chromebook Linux Beta)",
+    "comments": [
+        {
+            "user": "Luap99",
+            "body": "I did some debugging and found out that the problem resides in the golang net package. `net.IP` has a unmarshal method but `net.IPMask` has not. That's the reason why IP only accept a string (contrary to the podman api documetation), while Mask does not. The correct way to define the mask is `[255,255,255.0]`, like the doc states. Not sure why base64 works.\n\nSo a vaild request would be `{\"Subnet\":{\"IP\":\"10.10.1.0\",\"Mask: [255,255,255,0]}}`."
+        },
+        {
+            "user": "danopia",
+            "body": "Interesting, I tried having a byte slice in both arguments, but forgot to try a byte slice for just Mask. Good to see that works.\n\nI tried base64 because it's how IPmask *serializes*: https://play.golang.org/p/BYbprvC-EPi which would logically mean that it's accepted when parsing as well."
+        },
+        {
+            "user": "danopia",
+            "body": "So, using byte arrays actually makes it a bit easier to see what's going on here, since the unmarshalling isn't the problem.\n\nHere's a byte slice of the wrong length:\n\n```\n> curl -H 'Content-type: application/json' -XPOST http://localhost:8410/v1.0.0/libpod/networks/create'?name=testnet' \\\n    --data '{\"Subnet\":{\"IP\":\"10.10.1.0\",\"Mask\":[0,0]}}'\n{\"Filename\":\"/etc/cni/net.d/testnet.conflist\"}\n\n> grep -B1 -A2 subnet /etc/cni/net.d/testnet.conflist\n                  {\n                     \"subnet\": \"\\u003cnil\\u003e\",\n                     \"gateway\": \"?01\"\n                  }\n```\n\nAnd a nonstandard IPMask slice produces somewhat different, and slightly less broken networks:\n\n```\n> curl -H 'Content-type: application/json' -XPOST http://localhost:8410/v1.0.0/libpod/networks/create'?name=testnet' \\\n    --data '{\"Subnet\":{\"IP\":\"10.10.1.0\",\"Mask\":[0,0,255,0]}}'\n{\"Filename\":\"/etc/cni/net.d/testnet.conflist\"}\n\n> grep -B1 -A2 subnet /etc/cni/net.d/testnet.conflist\n                  {\n                     \"subnet\": \"10.10.1.0/0000ff00\",\n                     \"gateway\": \"?0101\"\n                  }\n```"
+        },
+        {
+            "user": "zhangguanzhang",
+            "body": "doc is :\n```\nArray of integers <uint8> (An IPMask is a bitmask that can be used to manipulate IP addresses for IP addressing and routing.)See type IPNet and func ParseCIDR for details.\n--\n```"
+        },
+        {
+            "user": "rhatdan",
+            "body": "Can someone open a PR to improve our documentation so that this becomes easier to discover?"
+        },
+        {
+            "user": "zhangguanzhang",
+            "body": "> Can someone open a PR to improve our documentation so that this becomes easier to discover?\n\nI think docs is ok， but I will submit pr to prevent this error from happening"
+        },
+        {
+            "user": "Luap99",
+            "body": "> I think docs is ok， but I will submit pr to prevent this error from happening\n\nDoc clearly states the IP has to be an unit8 array which is wrong (throws error), instead it has to be a string."
+        },
+        {
+            "user": "danopia",
+            "body": "There's a handful of angles related to this ticket... nice and convoluted 😄 \n\nThe docs for both Range and Subnet (two different `/networks/create` fields) are seemingly from the raw godoc of net.IPNet:\n\n>   * IP: Array of integers <uint8> - Note that in this documentation, [... irrelevant info about golang internals ...]\n>   * Mask: Array of integers <uint8> - See type IPNet and func ParseCIDR [useless golang struct references]\n\nNote that both fields claim to accept the same data type.\n\nIn reality, the podman API demands these types:\n\n* IP: String form of an IP Address (e.g. `\"10.1.0.0\"`)\n* Mask: JSON array of integers in the range 0-255 (e.g. `[255,255,255,0]`)\n    * **OR** Base64 string of a bitmask (e.g. `\"////AA==\"`)\n\nSo &mdash; on top of the missing validation which #7267 addresses &mdash; the docs also are plainly wrong about the IP subfield, and at best unclear about the Mask subfield.\n\n(It _seems_ like Range and Subnet should merely accept a standard CIDR string and use `net.ParseCIDR()` to produce the actual values used internally. However, that is more of a feature request, presumably?)"
+        },
+        {
+            "user": "mheon",
+            "body": "Ideally these would both be strings, but that would also technically be a breaking API change.\n\nAt this point, I think we add validation to subnet to ensure it is valid, update the documentation to indicate the correct types, and change both to a string next time we make a breaking change to the API."
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@Luap99 @mheon Any movement on this issue?"
+        },
+        {
+            "user": "rhatdan",
+            "body": "@Luap99 @mheon @zhangguanzhang @danopia Is this still a valid issue?  Or can I close?"
+        },
+        {
+            "user": "danopia",
+            "body": "The headline issue of writing broken conflists to disk seems fixed. I just tried all my original repros on 2.2.1 and it looks fine.\n\nThe REST API docs are still wrong and/or misleading. (one item on [my notes](https://docs.google.com/document/d/1e6CbzzV7IHo3ypzkxWI1LwjvmlJeWwBq4O7s6M38iGI/edit?usp=sharing)...)"
+        },
+        {
+            "user": "baude",
+            "body": "mind giving us a doc pr for that?"
+        },
+        {
+            "user": "zhangguanzhang",
+            "body": "code fixes it, but doc  need update"
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@zhangguanzhang Any progress on the docs update."
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "zhangguanzhang",
+            "body": "> > I think docs is ok， but I will submit pr to prevent this error from happening\n> \n> Doc clearly states the IP has to be an unit8 array which is wrong (throws error), instead it has to be a string.\n\nyou are right, But I look at it and don’t know how to modify it to change the generation of swagger. "
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@danopia @zhangguanzhang Do we still have this issue?"
+        },
+        {
+            "user": "danopia",
+            "body": "[The docs](https://docs.podman.io/en/latest/_static/api.html#operation/NetworkCreateLibpod) are still wrong\n\nNothing has changed since before [this comment](https://github.com/containers/podman/issues/7262#issuecomment-750864324):\n\n> The headline issue of writing broken conflists to disk seems fixed. I just tried all my original repros on 2.2.1 and it looks fine.\n> \n> The REST API docs are still wrong and/or misleading. (one item on [my notes](https://docs.google.com/document/d/1e6CbzzV7IHo3ypzkxWI1LwjvmlJeWwBq4O7s6M38iGI/edit?usp=sharing)...)\n\nIf the mindset is that the docs will just stay wrong because changing how they show golang internals is too hard, then 🤷 "
+        },
+        {
+            "user": "mheon",
+            "body": "This API is due for a rework in 4.0 as part of the overall network stack rework so I'm not in a terrible rush to fix this, so long as the new API is better-structured."
+        },
+        {
+            "user": "zhangguanzhang",
+            "body": "> @danopia @zhangguanzhang Do we still have this issue?\n\nyes"
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "Luap99",
+            "body": "This should be fixed on main"
+        }
+    ]
+}

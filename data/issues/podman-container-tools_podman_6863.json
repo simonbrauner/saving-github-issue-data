@@ -1,0 +1,100 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 6863,
+    "title": "userspace network between containers",
+    "state": "closed",
+    "labels": [
+        "rootless",
+        "kind/feature",
+        "locked - please file new issue/PR"
+    ],
+    "user": "tmds",
+    "body": "Creating a network requires root.\n\nTo avoid that, you can:\n- put containers in a pod and communicate via \"localhost\"\n- use the \"--network host\" network\n\nBoth options use ports from the same \"host\", so it is not possible to run multiple containers that have the same containerport, like when the same image is used to create multiple containers.\n\nCan podman support creating a 'network' between containers that: doesn't require root, allows containers to bind to the same port, and map ports from the containers to the host?\n\nRelated slirp4netns issue: https://github.com/rootless-containers/slirp4netns/issues/172\n\nThis would be useful also for https://github.com/containers/podman-compose.",
+    "comments": [
+        {
+            "user": "vrothberg",
+            "body": "Thanks for reaching out, @tmds!\n\nI think that what you need is mentioned on [podman.io](https://podman.io/getting-started/network.html) \"Container <-> Host Communication\"."
+        },
+        {
+            "user": "tmds",
+            "body": "@vrothberg I'm looking for Container <-> Container communication.\n\nThis is what I'd like (similar to rootfull network):\n\n- limit which containers can communicate (no communication with containers which are not part of the 'network')\n- don't expose ports publically on the machine (bound to 0.0.0.0)\n- port map container port, so the same image can run multiple times\n- disallow access to any service running on the host (no `--network host`)."
+        },
+        {
+            "user": "vrothberg",
+            "body": "That doesn't work at the moment. Pulling in the slirp4netns specialists: @AkihiroSuda @giuseppe, what do you think?"
+        },
+        {
+            "user": "mheon",
+            "body": "I think this is something we need to look into in the future; the limitation on what we can do with networking in rootless is a major drawback."
+        },
+        {
+            "user": "AkihiroSuda",
+            "body": "Duplicate: https://github.com/containers/libpod/issues/1733"
+        },
+        {
+            "user": "AkihiroSuda",
+            "body": "Documented how to set up inter-namespace communication:  https://github.com/rootless-containers/slirp4netns/blob/master/slirp4netns.1.md#inter-namespace-communication\n\nSo, podman could support multi-container networks in two possible ways:\n* Nest multiple network namespaces and vEths inside a singleton slirp4netns instance (#1733)\n* Use vde_plug (or its equivalent) for communication across multiple slirp4netns instances\n\nRootless Docker supports `docker network create` using the former one."
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "AkihiroSuda",
+            "body": "POC scripts for allowing an equivalent of `podman network create` with Rootless Podman, by running CNI plugins inside a \"sandbox\" container that is similar to Kubernetes Pod sandboxes: https://github.com/AkihiroSuda/podman-network-create-for-rootless-podman\n\n~~Haven't got DNS to work yet, but probably it shouldn't be difficult.~~ (**EDIT**: now DNS works)\n\n@giuseppe @rhatdan Do you think executing CNI inside a \"sandbox\" container is the right approach?"
+        },
+        {
+            "user": "giuseppe",
+            "body": "> @giuseppe @rhatdan Do you think executing CNI inside a \"sandbox\" container is the right approach?\n\ndefinitely.  I've started working on the side on supporting it in rootless podman: https://github.com/giuseppe/libpod/tree/allow-rootless-cni\n\nBut before that, we need a new release of iptables with this patch: https://git.netfilter.org/iptables/commit/?id=5105e844c2ff6a3e320bf8cdadc5094d4eaef2b7\n"
+        },
+        {
+            "user": "AkihiroSuda",
+            "body": "> . I've started working on the side on supporting it in rootless podman: https://github.com/giuseppe/libpod/tree/allow-rootless-cni\n\nThe branch doesn't seem to contain sandboxing code at the moment, is there anything I can help?\n\n> But before that, we need a new release of iptables with this patch:\n\nNot necessarily if you execute sandbox as a container, or at least unshare mount namespace and mount a writable tmpfs on `/run`."
+        },
+        {
+            "user": "giuseppe",
+            "body": "I like your idea of sandboxing the network and I think it makes sense for something like KIND.\n\n> > . I've started working on the side on supporting it in rootless podman: https://github.com/giuseppe/libpod/tree/allow-rootless-cni\n> \n> The branch doesn't seem to contain sandboxing code at the moment, is there anything I can help?\n\nI am still not sure how it should work, so I was just playing around with it.  The painful part with having a new network namespace and then create bridges there, is that for each exposed port we need to make sure slirp4netns allocates them and also frees them when the container exits while now we don't risk such leaks if the slirp4netns process is per-container.  I am all hears to suggestions on how it should look like :-)  Perhaps something similar to what you've done but per pod and embedded in Podman itself?  We already have some limitations with what ports are exposed, so maybe per pod it would not be too bad.\n\n\n> > But before that, we need a new release of iptables with this patch:\n> \n> Not necessarily if you execute sandbox as a container, or at least unshare mount namespace and mount a writable tmpfs on `/run`.\n\nbut that would cover the host `/run` that we would still like to access if a container uses a bind mount from there.\n"
+        },
+        {
+            "user": "AkihiroSuda",
+            "body": "Should be per user rather than per pod, so as to support attaching multiple networks.\n\n(For single-network usecase, we can optionally support spawning slirp4netns per network. That would provide slightly better isolation.)"
+        },
+        {
+            "user": "giuseppe",
+            "body": "> Should be per user rather than per pod, so as to support attaching multiple networks.\n\nit would be better, I am just worried it becomes more difficult to keep track of open ports and cleaning them up."
+        },
+        {
+            "user": "AkihiroSuda",
+            "body": "As long as the port_handler is set to rootlesskit, `pkg/rootlessport` is spawned per Pod, so we don't need to keep track of ports.\n"
+        },
+        {
+            "user": "AkihiroSuda",
+            "body": "Opened draft PR https://github.com/containers/podman/pull/7460"
+        },
+        {
+            "user": "tmds",
+            "body": "@mheon @giuseppe @AkihiroSuda I'd like to try this out.\n\nI've installed `podman` from copr repo:\n```\npodman.x86_64                                          99:2.1.0-1594142770.git54d16f3b.fc32   @copr:copr.fedorainfracloud.org:baude:Upstream_CRIO_Family\n```\nI'm not able to create a network:\n```\n$ podman network create podman1\nError: cannot run command \"podman network create\" in rootless mode\n```\n\nWhat is the recommended way to install a version of `podman` that supports this feature on Fedora 32?"
+        },
+        {
+            "user": "gasinvein",
+            "body": "@tmds Podman 2.1.0 is [available](https://bodhi.fedoraproject.org/updates/FEDORA-2020-3a4b8fca5e) in updates-testing repo for Fedora 32."
+        },
+        {
+            "user": "mheon",
+            "body": "@baude What's going on with the COPR? It's claiming to provide 2.1.0 but it seems like it's a very old version if it hasn't picked this up yet?"
+        },
+        {
+            "user": "tmds",
+            "body": "> Podman 2.1.0 is available in updates-testing repo for Fedora 32.\n\nI have it installed from updates-testing now:\n\n```\n$ dnf list installed podman\nInstalled Packages\npodman.x86_64                                     2:2.1.0-2.fc32                                      @updates-testing\n```\n\nCreating a network doesn't work for me yet, I get a permission denied error:\n```\n$ podman network create podman1\nWARN[0000] Found deprecated file /home/tmds/.config/containers/libpod.conf, please remove. Use /home/tmds/.config/containers/containers.conf to override defaults. \nWARN[0000] Ignoring libpod.conf EventsLogger setting \"journald\". Use \"/home/tmds/.config/containers/containers.conf\" if you want to change this setting and remove libpod.conf files. \nWARN[0000] Found deprecated file /home/tmds/.config/containers/libpod.conf, please remove. Use /home/tmds/.config/containers/containers.conf to override defaults. \nWARN[0000] Ignoring libpod.conf EventsLogger setting \"journald\". Use \"/home/tmds/.config/containers/containers.conf\" if you want to change this setting and remove libpod.conf files. \nError: open /etc/cni/net.d/podman1.conflist: permission denied\n```\n\n@giuseppe @AkihiroSuda is this broken, or am I still missing some bits?"
+        },
+        {
+            "user": "AkihiroSuda",
+            "body": "If you have `/etc/cni` strings in `/home/tmds/.config/containers/libpod.conf`, please try removing them"
+        },
+        {
+            "user": "tmds",
+            "body": "@AkihiroSuda I commented out `cni_config_dir = \"/etc/cni/net.d/\"` in `libpod.conf` and now it works, thanks!!"
+        }
+    ]
+}
