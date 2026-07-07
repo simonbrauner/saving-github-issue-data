@@ -24,7 +24,7 @@ def main(organization_name, repository_name):
 
     try:
         issues = repo.get_issues(state="all", sort="updated", direction="asc", since=latest_timestamp)
-        for issue in filter(lambda issue: not issue.pull_request, issues):
+        for issue in issues:
             issue_data = process_issue(organization_name, repository_name, issue)
 
             with open(f"{DATA_DIR}/{repo_prefix}_{issue.number}.json", "w") as f:
@@ -42,6 +42,7 @@ def process_issue(organization_name, repository_name, issue):
     data["repository"] = repository_name
 
     data["number"] = issue.number
+    data["type"] = "pull_request" if issue.pull_request else "issue"
     data["title"] = issue.title
     data["state"] = issue.state
     data["labels"] = [label.name for label in issue.labels]
@@ -49,6 +50,8 @@ def process_issue(organization_name, repository_name, issue):
     data["body"] = normalize_text(issue.body)
 
     data["comments"] = process_comments(issue)
+
+    data["cross_references"] = process_cross_references(issue)
 
     return data
 
@@ -65,6 +68,30 @@ def process_comments(issue):
 
     return comments
 
+def process_cross_references(issue):
+    cross_references = []
+
+    seen = set()
+    for event in issue.get_timeline():
+        if event.event != "cross-referenced" or not event.source:
+            continue
+
+        source = event.source.issue
+        organization, repository = source.repository_url.rsplit("/", 2)[-2:]
+
+        key = (organization, repository, source.number)
+        if key in seen:
+            continue
+        seen.add(key)
+
+        cross_references.append({
+            "organization": organization,
+            "repository": repository,
+            "number": source.number,
+        })
+
+    return cross_references
+
 def normalize_text(text):
     if text is None:
         return ""
@@ -74,7 +101,7 @@ def normalize_text(text):
 def get_latest_timestamp(timestamp_file):
     try:
         with open(timestamp_file, "r") as f:
-            return datetime.fromisoformat(f.read())
+            return datetime.fromisoformat(f.read().strip())
     except FileNotFoundError:
         return datetime.fromisoformat("2000-01-01T00:00:00Z")
 
