@@ -1,0 +1,126 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "container-libs",
+    "number": 177,
+    "type": "issue",
+    "title": "RFC: Partial storage locking to increase 'storing signature' performance",
+    "state": "closed",
+    "labels": [
+        "storage"
+    ],
+    "user": "saschagrunert",
+    "body": "This is more a rough idea and I'm wondering if you had any thoughts on this as well.\nIt relates somehow to https://github.com/containers/storage/issues/420\n\nWe're currently locking the whole containers, images and layers directories when doing write operations on the store. I think this could be improved by the penalty of a more complex locking mechanism.\n\nThe idea is to not lock the whole layer store, but only the layers which belong to a certain image. This would allow to store two images in parallel if they do not share the same layers.\n\nWDYT?",
+    "comments": [
+        {
+            "user": "vrothberg",
+            "body": "@nalind, WDYT?\n\nThat's roughly related to a PR over at c/image (https://github.com/containers/image/pull/611) which does per-layer locking to avoid redundantly downloading a given blob. This PR isn't merged and I doubt we ever will but the conclusion regarding the layer-locks is that it is fine as long as those locks reside on a tmpfs (the amount of lockfiles could grow high over time).\n\nMy 2 cents: Fine-granular locking can be really tricky to implement (more critical sections to lock and get wrong) and can sometimes decrease performance (more locks need to be acquired, scheduling can screw caches etc.). But I'm convinced it would speed things up here.\nOne thing we might need to check is the risk of running into ABBA-deadlocks (in case of multi-writer copy-dependencies)."
+        },
+        {
+            "user": "rhatdan",
+            "body": "Be careful about creating to many files on tmpfs, I think we found a cache leak in the kernel based on number of files left in tmpfs.  @mheon would know the specifics."
+        },
+        {
+            "user": "vrothberg",
+            "body": "Ouch, yes that'll hurt. @rhatdan, any other way to do that? We need some way to clean them up."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@vrothberg memory based locking?"
+        },
+        {
+            "user": "vrothberg",
+            "body": "@rhatdan sounds complex in shared memory but possible.\n\nOne thing the afternoon coffee made me think is how could we migrate? Assuming we have fine-grained locking in place. How could we remain backward compatible? Other tools with older versions of c/storage might be running in parallel."
+        },
+        {
+            "user": "rhatdan",
+            "body": "Well they would still be taking the higher locks, so they could block the newer tools.  The newer tools could not block the older.  \nI guess it would be best to have a flag that would block the older tools from running.  But I am not sure we can do this."
+        },
+        {
+            "user": "vrothberg",
+            "body": "New versions could take the big lock as readers, this way old versions would block trying to acquire it as writers."
+        },
+        {
+            "user": "saschagrunert",
+            "body": "Sounds like a plan, I would still keep the locks close to the storage somehow. Would something like bbolt work out for this use case?"
+        },
+        {
+            "user": "vrothberg",
+            "body": "@mheon will know. It's crucial that the locks are non-persistent (in contrast to the containers, image, layer databases etc.). Is that possible with bolt?"
+        },
+        {
+            "user": "mheon",
+            "body": "As long as the DB lives on a tmpfs, sure - that'll wipe the DB on reboot. If you need something even less persistent than that, you can close your DB connection, remove the DB, and reopen, and that ought to resolve things."
+        },
+        {
+            "user": "saschagrunert",
+            "body": "> As long as the DB lives on a tmpfs, sure - that'll wipe the DB on reboot. If you need something even less persistent than that, you can close your DB connection, remove the DB, and reopen, and that ought to resolve things.\n\nI think we should still store the (let me call it) lock db on ~~disk~~ a filesystem to allow multiple processed (buildah, podman) to be able to see if something is locked or not, right?"
+        },
+        {
+            "user": "rhatdan",
+            "body": "Yes, I believe so."
+        },
+        {
+            "user": "mheon",
+            "body": "Hmmm. So in that case, you'd want to detect reboots, and then \"unlock\" all the locks?\n\nLibpod does something similar (detect a reboot via a file in tmpfs disappearing, and then \"refresh\" the DB by clearing nonpersistent state). That might work?"
+        },
+        {
+            "user": "vrothberg",
+            "body": "@mheon, I'd just put the entire DB on a tmpfs."
+        },
+        {
+            "user": "rhatdan",
+            "body": "I agree putting the DB on tmpfs would work.  Container/storage already relies on tmpfs for cleaning up mount counts."
+        },
+        {
+            "user": "vrothberg",
+            "body": "https://github.com/containers/image/pull/611 is placing the layer lock also on the storage tmpfs."
+        },
+        {
+            "user": "saschagrunert",
+            "body": "So if we speak in terms of boltdb, then the database would have three buckets for _layers,_ _containers_ and _images_, whereas the entries indicate (per id) if it's a read or write lock, right?"
+        },
+        {
+            "user": "vrothberg",
+            "body": "I am not actually sure how we could implement process-locking with bolt. We still need file-locks, which makes me believe that we can follow the idea of containers/image#611 and put them in the storage's tmpfs and reference them by convention (e.g., layers in ./layer-locks, images in ./image-locks etc.)."
+        },
+        {
+            "user": "saschagrunert",
+            "body": "\n\n\n\n> I am not actually sure how we could implement process-locking with bolt. We still need file-locks, which makes me believe that we can follow the idea of [containers/image#611](https://github.com/containers/image/pull/611) and put them in the storage's tmpfs and reference them by convention (e.g., layers in ./layer-locks, images in ./image-locks etc.).\n\nSounds also good, some additional questions from my side:\n- Which file locks would we need additionally when trying to go via the database?\n- How could the _convention_ look like, are we storing the locks per line or in some serialized hash map format?\n- Would it be faster than a key value store?\n"
+        },
+        {
+            "user": "vrothberg",
+            "body": ">     * Which file locks would we need additionally when trying to go via the database?\n\nI assume we would need one lock to serialize accesses to the database (which would turn into a bottleneck). I would not know how to implement a synchronization mechanism in a database without reimplementing a mutex. That's why I feel more attached to just use file locking.\n\nThere is an open PR against storage to add a `flock` package (i.e., https://github.com/containers/storage/pull/378) which allows for try-lock semantics which might come in handy at some time. @rhatdan, maybe we should revive the PR again?\n\n>     * How could the _convention_ look like, are we storing the locks per line or in some serialized hash map format?\n\nIn containers/image#611 we create file locks at a specific folder. The file names are the digests of a blob. We can do the same for containers, images and layers if we want to.\n\nIf we want to acquire a layer as reader, we would do an `RLock()` on the lock file (e.g., `/storage-tmps/$storage-driver/layer-lock/$digest-of-layer.lock`).\n\n>     * Would it be faster than a key value store?\n\nI bet that file locking performs better as we don't need to load the entire DB for each process but only use the lock we actually need. File locks are real synchronization primitives with proper scheduling, signaling etc. If we tried to emulate them with a DB we'd run into all kinds of issues regarding fairness, scheduling, signaling, etc."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@saschagrunert @vrothberg Still something we want to pursue?"
+        },
+        {
+            "user": "saschagrunert",
+            "body": "Yes, but we're still waiting for feedback from @nalind :)"
+        },
+        {
+            "user": "vrothberg",
+            "body": "> @saschagrunert @vrothberg Still something we want to pursue?\n\nYes, definitely worth pursuing. Layer-locking is something we might need to generalize to cover other scenarios as well (e.g., pull-delete races, simultaneous pulls, etc.)."
+        },
+        {
+            "user": "rhatdan",
+            "body": "Also this issue is still waiting for containers/storage#473 correct?"
+        },
+        {
+            "user": "saschagrunert",
+            "body": "> Also this issue is still waiting for containers/storage#473 correct?\n\nBasically yes. Technically the features could live on their own but I see containers/storage#473 as a pre-step for this enhancement."
+        },
+        {
+            "user": "Luap99",
+            "body": "I think we have done quite some improvements for adding in https://github.com/containers/container-libs/pull/378 (https://blog.podman.io/2025/12/accelerating-parallel-layer-creation/) and removal of layers in https://github.com/containers/storage/pull/2325 to reduce lock times\n\nAs such I guess it is solved now and close this"
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "containers",
+            "repository": "storage",
+            "number": 473
+        }
+    ]
+}

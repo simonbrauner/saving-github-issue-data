@@ -1,0 +1,89 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "container-libs",
+    "number": 82,
+    "type": "issue",
+    "title": "libimage.Image.matchesPlatform() is sometimes wrong",
+    "state": "open",
+    "labels": [
+        "common"
+    ],
+    "user": "nalind",
+    "body": "matchesPlatform() inspects images to retrieve their OS/Architecture/Variant values and, after canonicalization, compares the values it finds to passed-in values.  Images don't always have this information, so it can be wrong, and this can trigger bugs.\n\nFor example, the manifest list for quay.io/libpod/busybox:musl (the tag currently points to sha256:22637757f2d0f8e20b74e3ef226eedd0bdf8802cc74ae58b6e6316857d3bde56) includes both linux/arm/v6 and linux/arm/v7 entries, but the config blobs for those images do not include variant information, which is the source for the inspection data which it uses to determine its results.\n\nThe linux/arm/v6 image triggers \"image platform ... does not match the expected platform ...\" warnings, but the linux/arm/v7 image doesn't because normalization turns the \"linux/arm\" that it returns into \"linux/arm/v7\", which masks the warning.\n",
+    "comments": [
+        {
+            "user": "nalind",
+            "body": "With podman@a702d442e98850f56bc86ee4d6adf5f493a06201:\n```shell\npodman create --platform linux/arm/v6 quay.io/libpod/busybox:musl\npodman create --platform linux/arm/v7 quay.io/libpod/busybox:musl\n```\nonly pulls an image once.  I _think_ this is the cause of a flake we saw when testing https://github.com/containers/podman/pull/17143."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@vrothberg PTAL"
+        },
+        {
+            "user": "vrothberg",
+            "body": "The behavior changed with commit ba3a9c0f770b but aligns with Docker (and presumably containerd).\n\n@nalind can you point out which test flaked?  Since the behavior is deterministic, I do not yet see how it can flake (unless `quay.io/libpod/busybox:musl` changed during the test)."
+        },
+        {
+            "user": "nalind",
+            "body": "The test ([one example](https://cirrus-ci.com/task/6506882769092608?logs=main#L363)) builds with `--all-platforms`, which iterates through a map of the target platforms, building for each in turn.  Depending on which order we process `linux/arm/v6` and `linux/arm/v7`, we may or may not actually end up using different base images.  I imagine the result would be the same with `buildah from --platform`."
+        },
+        {
+            "user": "vrothberg",
+            "body": "I am really not sure what to do.  The behavior of always pulling down the image when `--platform` is not user friendly (and in a way a bug).  @nalind should we special case \"arm\" and \"arm/v7\"?  Probably also \"arm64\" and \"arm64/v8\"?"
+        },
+        {
+            "user": "nalind",
+            "body": "I don't like the idea of special casing arches that are known to have variants, because I think we're going to start seeing linux/amd64/v2 at some point, too.\n\nThe crux of it is that we can't depend on the image's config blob to always include variant information, even if we found the image by looking at an image index or manifest list which did.  When that's the case, we could perhaps store that information alongside the image so that we can consult it, and fall back to the current assumption that it's not a match for the desired platform when that information isn't present, whether because the image was pulled before we started storing that information, or the image was pulled without going through an image index or manifest list."
+        },
+        {
+            "user": "vrothberg",
+            "body": "That is a nice idea.  @mtrmac WDYT?  Would need a change in c/image when storing the image."
+        },
+        {
+            "user": "mtrmac",
+            "body": "It seems to me (without detailed research) that the case of “always pulling an image” still needs to exist, and must be efficient enough to not worry about. Unless the image was built locally or c/storage stores the full manifest list as an object (using `podman manifest …`?), a c/storage name:tag can AFAICS always only point to one image, so a `pull` / `create` with an overridden architecture is going to reach to the registry in many other cases.\n\nIf that is “not user friendly (and in a way a bug)” (which I don’t immediately understand and I have no opinion about), we might want to make it more user-friendly, _maybe_ using/enhancing `OptimizeDestinationImageAlreadyExists`. That would, kind of, make the other part moot.\n\n(It would also be… plausible… to, somehow turn all of the c/storage-stored manifests into a “local manifest cache”, in the sense that searching for name:tag would find the relevant _manifest list_ in one of the images, and use that to look up the right per-platform image, and check if that per-platform image already exists locally; then all of that could happen without contacting a registry. But that would also be a fairly major change to the semantics of the local storage and of `podman tag` in particular — it could find per-platform images using a name:tag that were _never_ uploaded using that tag to a registry, just because an image with a _different_ platform was locally tagged to that name:tag.)\n\n---\n\nSure, if the manifest list contains a more authoritative platform information, we can nowadays modify the private variant of `List.ChooseInstance` (which is _just_ being added in https://github.com/containers/image/pull/1789 for other reasons) to provide that information, add something like `private.ImageDestinationInternalOnly.CommitWithOptions` (or is that `PutManifestWithOptions`?) that allows storing that information around, and have `copy.Image` use both.\n\n---\n\nActually, we might not even need to do _that_: Already now, during ordinary pull, we store the manifest list in c/storage (so that digest references to the manifest list can be resolved). So we don’t even _need_ to add an extra c/storage field, the code could find the manifest list, and see what architecture is used in that resolved manifest. (Pedantic note: the manifest list might point at the same manifest with multiple platform entries… what then?). Admittedly that would be fairly ugly and inefficient, the simplest approach would involve quite a few c/storage API boundary crossings, and corresponding locking — but if the efficiency really were a concern on this non-default (and I guess, with no data, fairly rare) path, we could push the logic deeper down to c/storage to do it with a single API call."
+        },
+        {
+            "user": "mtrmac",
+            "body": "> find the manifest list, and see what architecture is used in that resolved manifest.  (Pedantic note: the manifest list might point at the same manifest with multiple platform entries… what then?)\n\nUh, that’s not actually a concern. We would find the manifest list, and run exactly the same `List.ChooseInstance` code that actual pulls use, and obtain the digest we _want_ to pull. Then we can just see whether the image we have is the one we want, and any other entries in the manifest list don’t figure in the decision any more.\n\n"
+        },
+        {
+            "user": "mtrmac",
+            "body": "BTW one other (_very half-baked_) point to possibly think about is that the check https://github.com/containers/common/blob/dbef45f8be7ef344322dcf0a4c8fcd957c9d4375/libimage/pull.go#L498 is conceptually wrong. It doesn’t matter so much whether _this_ pull uses a custom platform, rather it should matter whether the platform of the existing image, however it was created, matches the _current_ request.\n\nWith a\n\n```sh\npodman pull --plaform … foo\npodman pull foo # no --platform\n```\nthe second pull should, arguably, _not_ find the previously-pulled image because it is not a valid match.\n\nOTOH I wouldn’t be surprised to hear that this point has been vigorously debated before, and going that path gets immediately a bit ugly, WRT interactions with `pullPolicy` (we would need to strongly rely on locally-available manifest list copies), and interactions with `podman tag` (what do we do if the user intentionally tags a matching-but-non-optimal-variant platform image, or a completely-nonmatching-platform image, and then runs `podman pull`?).\n\nI don’t really have a good coherent mental model of how this all fits together. It’s quite likely that one or more of you do have that mental model, and that this is either a settled situation or a problem you know how to deal with."
+        },
+        {
+            "user": "vrothberg",
+            "body": "> is conceptually wrong. It doesn’t matter so much whether this pull uses a custom platform, rather it should matter whether the platform of the existing image, however it was created, matches the current request.\n\nConceptually, I agree.  In practice, however, the vast amount of images with false or incomplete platforms have rendered \"default\" platform matching to be a bad idea.  We ran into similar situations in c/image when the K8s pause image started to fall apart.\n\n> the second pull should, arguably, not find the previously-pulled image because it is not a valid match.\n\nWithout specifying a platform, we resolve locally purely by name for the reasons mentioned above.  So in that example, the second will find the previously pulled image.\n\nBut, if a \"custom image\" was requested by the user (i.e., os/arch/variant specified) we could - in theory and conceptually - resolve locally by name AND platform: that's pretty much the idea of the issue.\n\nI think there is a number of alternatives but ... every time I touched this specific logic, things fell apart.  That's why I liked @nalind's idea of matching only when we know exactly which platform an image has been pulled with.\n\n> Actually, we might not even need to do that: Already now, during ordinary pull, we store the manifest list in c/storage (so that digest references to the manifest list can be resolved).\n\nThat sounds very promising.  How can I retrieve the manifest list, if present, of an image from c/storage?"
+        },
+        {
+            "user": "mtrmac",
+            "body": "> How can I retrieve the manifest list, if present, of an image from c/storage?\n\nUh, by hard-coding implementation details and guessing, right now. `c/storage.Store.ListImageBigData`, search for those prefixed by `ImageDigestManifestBigDataNamePrefix`, heuristically look for one that looks like a manifest list.\n\nCompare also `c/image/storage.multiArchImageMatchesSystemContext`, but that one starts with a specific digest reference.\n\nIdeally we should make this easier, maybe by storing the digest of the manifest list in the image metadata, so that it is one read instead of several individual checks (and individual c/storage locks). … which makes it, in this ideal form, no easier than storing the platform in the image metadata directly in the fist place :)"
+        },
+        {
+            "user": "vrothberg",
+            "body": "Going back to this issue.\n\nFollowing @nalind's suggestion in https://github.com/containers/container-libs/issues/82, I think we should probably just store the platform an image was committed with to c/storage.\n\nWe could start with the pull code and then extend the build code as well.  I wonder whether this data should be considered \"big data\" or be made a first-class citizen in the [storage.Image](https://github.com/containers/storage/blob/main/images.go#L32) struct.  That would cover all cases, not just images pulled from a manifest list/index.\n\n@nalind @mtrmac WDYT? "
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "buildah",
+            "number": 4520
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "buildah",
+            "number": 4527
+        },
+        {
+            "organization": "containers",
+            "repository": "common",
+            "number": 1299
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 27779
+        }
+    ]
+}

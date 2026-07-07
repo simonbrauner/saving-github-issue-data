@@ -1,0 +1,94 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "container-libs",
+    "number": 717,
+    "type": "pull_request",
+    "title": "libimage: pass UID/GID mappings through the pull path",
+    "state": "open",
+    "labels": [
+        "storage",
+        "common",
+        "image"
+    ],
+    "user": "giuseppe",
+    "body": "<!--- Please read the [contributing guidelines](https://github.com/containers/container-libs/blob/main/CONTRIBUTING.md) before proceeding --->\n\nNeeded for: https://github.com/containers/podman/pull/28393",
+    "comments": [
+        {
+            "user": "giuseppe",
+            "body": "I've not thought of all the implications because we had this feature in the past, and it was likely lost once we moved to libimage.\n\nAt that time though, we had the problem with root containers since idmapped mounts were not available, and rootless solved it within fuse-overlayfs.  Now we have the opposite problem, since it works fine with root, but native overlay does not support idmapped mounts.\n"
+        },
+        {
+            "user": "packit-as-a-service[bot]",
+            "body": "Packit jobs failed. @containers/packit-build please check."
+        },
+        {
+            "user": "giuseppe",
+            "body": "@podman-container-tools/container-libs-maintainers PTAL\n\nCan we please agree on what we should do here?\n\nI think we should fix this since some users expect it to work this way, and it worked this way before we moved to libimage."
+        },
+        {
+            "user": "giuseppe",
+            "body": "@nalind what do you think of this change?"
+        },
+        {
+            "user": "Luap99",
+            "body": "I am fine with the ability to pass the uid maps from podman through libimage.\n\nThe idmapping logic in storage is quite confusing though so I share @mtrmac concerns about the mapped parent and then later pulling an image unmapped base don it. It would be nice to have a test for that in storage I guess to prove that it works.\n\n"
+        },
+        {
+            "user": "giuseppe",
+            "body": "We don't test pulls in containers/storage.  I have added a test to the Podman PR"
+        },
+        {
+            "user": "Luap99",
+            "body": "Sure podman test is helpful. As for storage tests I though they are handled in storage/tests and this does not need a pull it just ends up in the `containers-storage create-layer`/`containers-storage apply-diff` commands? No need to pull we just need add some basic files?"
+        },
+        {
+            "user": "giuseppe",
+            "body": "I've added a new test and extended an existing one"
+        },
+        {
+            "user": "nalind",
+            "body": "> @nalind what do you think of this change?\n\nThe two new fields alone are probably enough to specify mappings for the image, if we know what empty maps are supposed to indicate, but I'm not clear on what this is in service of.  Is it fixing @Luap99's example of `podman run --uidmap 0:1:1 quay.io/libpod/testimage:20241011` failing to pull the image from the linked podman PR?"
+        },
+        {
+            "user": "giuseppe",
+            "body": "rootless doesn't have metacopy or idmapped mounts yet, so when you run e.g. `podman run --userns=keep-id ...` you end up pulling the image without any mapping and then doing the chown.  This is not a problem when fuse-overlayfs is used, but it is with native overlay.  Some images like toolbox are quite big and they are always used with a mapping, so with this change we avoid a wasted copy and the chown."
+        },
+        {
+            "user": "nalind",
+            "body": "The initialization logic in podman and buildah both parse their respective basic ID mapping flags and set the UIDMap and GIDMap fields in the options struct that they use to initialize local storage, so this looks like it's mostly going to be useful in cases where the \"--userns\" flag is being used to affect the mappings in ways that they don't parse at startup.\n\nIt looks like these new input fields will let it accomplish that, but I don't see a way to not clear inherited mappings if the caller should want to do that.  The current version looks like it clears them unconditionally, which isn't in line with the behavior we currently get when someone runs podman with \"--uidmap\", as I think @mtrmac has noted."
+        },
+        {
+            "user": "giuseppe",
+            "body": "I've added two new attributes (`HostUIDMapping` and `HostGIDMapping`) to be explicit about that instead of guessing what the correct value is.\n\n`idMappingOptions` no longer unconditionally sets `HostUIDMapping` and `HostGIDMapping`.\n\nI've vendored the new changes in: https://github.com/podman-container-tools/podman/pull/28393 to run the CI"
+        },
+        {
+            "user": "mtrmac",
+            "body": "> Some images like toolbox are quite big and they are always used with a mapping, so with this change we avoid a wasted copy and the chown.\n\n… as long as the toolbox image does not share a layer with any other image; otherwise copies/chowns happen again.\n\nI’m not really _happy_ with losing the “images are all default-mapped; containers have their own mapping” design to “every image layer is deduplicated but the mappings are unpredictable”; that makes the performance also unpredictable. \\*shrug\\* it might very well be sufficient for specific use cases. But it’s one more option to document for `pulls` and for most users to study and then ignore…\n\n---\n\nWDYT about changing `image/storage/layerID` to hash in the ID mappings (in some consistent form!) if they are not the default? That would keep the default-mapped image layers and non-default-mapped image layers separate, with no chowns between image layers — but that’s also another way of saying “taking up twice the disk space”, a pretty significant downside."
+        },
+        {
+            "user": "giuseppe",
+            "body": "> WDYT about changing `image/storage/layerID` to hash in the ID mappings (in some consistent form!) if they are not the default? That would keep the default-mapped image layers and non-default-mapped image layers separate, with no chowns between image layers — but that’s also another way of saying “taking up twice the disk space”, a pretty significant downside.\n\nwhy would that be an advantage?  Isn't a chown preferable to a complete pull (we can still use reflinks where possible)?\n\nI've no strong opinions about this feature, but this isn't a new feature, it's restoring the old behavior that was lost during the migration to libimage and affected some use cases like toolbx.  @nalind what do you think?"
+        },
+        {
+            "user": "mtrmac",
+            "body": "> > WDYT about changing `image/storage/layerID` to hash in the ID mappings\n> \n> why would that be an advantage? Isn't a chown preferable to a complete pull (we can still use reflinks where possible)?\n\nI think what would happen is that we find the layer by compressed/uncompressed digest, but not match the expected layer ID: in that case the code does `Diff()` to a temporary file, and uses that to create a layer with the expected ID; i.e. it should not do network pulls, but it would do local I/O — and yes, prevent using reflinks.\n\nThe only advantage would be higher/more predictable performance for the users who don’t modify the network namespace when pulls, while sharing the storage. That might very well not be worth it."
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 28393
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "container-libs",
+            "number": 730
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "container-libs",
+            "number": 734
+        }
+    ]
+}

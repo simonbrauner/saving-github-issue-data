@@ -1,0 +1,38 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "container-libs",
+    "number": 45,
+    "type": "issue",
+    "title": "Improve login error reporting with non-TTY stdin",
+    "state": "open",
+    "labels": [
+        "common"
+    ],
+    "user": "MalteMagnussen",
+    "body": "I am trying to do skopeo login and then skopeo sync in gitlab ci with a docker runner (ideally a rootless k8s runner, but trying on docker atm).\n\nI am getting this error. What does it mean? \n\nHow do I use \"the Docker-compatible file path option\", and what does \"inappropriate ioctl for device\" mean? \n\n```\n$ skopeo login  -u \"$REGISTRY_USERNAME\" -p \"$REGISTRY_PASSWORD\" \"$REGISTRY_HOST\"\ntime=\"2025-07-08T16:09:18Z\" level=warning msg=\"$REGISTRY_AUTH_FILE points to ~/.docker/config.json, but the file format is not fully compatible; use the Docker-compatible file path option instead\"\nNo credentials found for my_registry.azurecr.io\nPassword: time=\"2025-07-08T16:09:18Z\" level=fatal msg=\"getting username and password: reading password: inappropriate ioctl for device\"\n```",
+    "comments": [
+        {
+            "user": "mtrmac",
+            "body": "Thanks for reaching out.\n\n“The Docker-compatible file path option” is, for `login`, `--compat-auth-file`. But it is not exposed for `skopeo sync` currently.\n\n“inappropriate ioctl for device” almost certainly means that the code is trying to _prompt_ for a password; that should happen only if the parameter to `-p` is empty. Maybe some scripting mistake?\n\n---\n\nAt a higher level: inside an automation, it should not be necessary to do a `skopeo login` at all.\n- Run `skopeo login` with `--authfile`, in some manual setup step, perhaps several times: Collect all relevant credentials inside a single auth file.\n- Store the _whole auth file_ as a secret / input to the automation.\n- Then, in the automated process, run only `skopeo sync --authfile=$my_authfile_from_secret`. That way, the operation is isolated from the larger runtime state (neither reading nor writing credentials used for some other purpose), gets _exactly_ a controlled set of credentials; and it avoids registry round-trips to verify the password during `login`."
+        },
+        {
+            "user": "MalteMagnussen",
+            "body": "@mtrmac - Thank you. I'll try that authfile approach tomorrow, when I am back in the office! "
+        },
+        {
+            "user": "mtrmac",
+            "body": "> “inappropriate ioctl for device” almost certainly means that the code is trying to prompt for a password; that should happen only if the parameter to -p is empty. Maybe some scripting mistake?\n\nBTW if this is the case, please say so — we should improve the error handling."
+        },
+        {
+            "user": "MalteMagnussen",
+            "body": "@mtrmac - The password was empty. You were spot on. The variable was only exposed to main branch, but not to a Merge Request.... Spent way too long debugging that. \n\nFinally got something that works. \n\n<details>\n\n<summary>Working GitLab CI config</summary>\n\n```yaml\nlogin:\n  image: ubuntu\n  tags: [k8s-small]\n  needs: []\n  stage: sync\n  variables:\n    GIT_STRATEGY: none\n  script:\n    - |\n      # Fail if any required variable is unset or empty\n      for var in FOO_REGISTRY_USERNAME FOO_REGISTRY_PASSWORD HARBOR_REGISTRY_USER HARBOR_REGISTRY_PASSWORD; do\n        if [ -z \"${!var}\" ]; then\n          echo \"Error: Environment variable $var is not set or is empty\"\n          exit 1\n        fi\n      done\n    - export FOO_AUTH=$(printf \"%s:%s\" \"$FOO_REGISTRY_USERNAME\" \"$FOO_REGISTRY_PASSWORD\" | base64 -w 0)\n    - export HARBOR_AUTH=$(printf \"%s:%s\" \"$HARBOR_REGISTRY_USER\" \"$HARBOR_REGISTRY_PASSWORD\" | base64 -w 0)\n    - >\n      jq -n --arg HARBOR_AUTH \"$HARBOR_AUTH\" --arg FOO_AUTH \"$FOO_AUTH\" '{\n        auths: {\n          \"harbor.company.com\": { auth: $HARBOR_AUTH },\n          \"foo.azurecr.io\": { auth: $FOO_AUTH }\n        }\n      }' > auth.json\n  artifacts:\n    when: on_success\n    access: all\n    expire_in: 1 hour\n    paths:\n      - auth.json\n\ncopy images:\n  image:\n    name: quay.io/skopeo/stable\n    entrypoint: [\"\"]\n  tags: [docker]\n  needs: [login]\n  stage: sync\n  variables:\n    GIT_STRATEGY: none\n  script:\n    - |\n      if [ ! -s auth.json ]; then\n        echo \"auth.json does not exist or is empty\"\n        exit 1\n      fi\n    - skopeo copy --authfile auth.json docker://${FROM} docker://${TO}\n  parallel:\n    matrix:\n      - FROM: \"$FOO_REGISTRY_HOST/example_one:$DATAAPI_TAG\"\n        TO: \"$HARBOR_REGISTRY_PREFIX/example_one:$CI_COMMIT_SHA\"\n      - FROM: \"$FOO_REGISTRY_HOST/example_two:$DATAAPI_TAG\"\n        TO: \"$HARBOR_REGISTRY_PREFIX/example_two:$CI_COMMIT_SHA\"\n      - FROM: \"$FOO_REGISTRY_HOST/example_three:$BILLING_TAG\"\n        TO: \"$HARBOR_REGISTRY_PREFIX/example_three:$BILLING_TAG\"\n... add more images to copy\n```\n\n</details>"
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "containers",
+            "repository": "common",
+            "number": 2469
+        }
+    ]
+}

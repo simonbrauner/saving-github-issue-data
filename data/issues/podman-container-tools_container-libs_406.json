@@ -1,0 +1,86 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "container-libs",
+    "number": 406,
+    "type": "issue",
+    "title": "Support shortname resolution for artifacts",
+    "state": "closed",
+    "labels": [],
+    "user": "bitoku",
+    "body": "Pulling artifact doesn't support shortname resolution, which is supported for images.\n\n```\n❯ podman artifact pull crio/artifact:singlefile\nError: initializing source docker://crio/artifact:singlefile: reading manifest singlefile in docker.io/crio/artifact: requested access to the resource is denied\n\n❯ podman pull crio/busybox\nTrying to pull quay.io/crio/busybox:latest...\nGetting image source signatures\nCopying blob a3ed95caeb02 done\nCopying blob f70adabe43c0 skipped: already exists\nWriting manifest to image destination\n8ac48589692a53a9b8c2d1ceaa6b402665aa7fe667ba51ccc03002300856d8c7\n```\n\nThe registries.conf is \n```toml\nunqualified-search-registries = [\"quay.io\"]\n```\n\nThe repository is available.\nhttps://quay.io/organization/crio\n\nversion\n```\n❯ podman version\nClient:       Podman Engine\nVersion:      5.7.0-dev\nAPI Version:  5.7.0-dev\nGo Version:   go1.25.3\nGit Commit:   24872421a894f9ffde40fdc256c6886bc732b982\nBuilt:        Mon Oct 20 16:18:46 2025\nOS/Arch:      linux/amd64\n```\n\ncontainer-libs version were:\n```\n\tgo.podman.io/common v0.65.1-0.20251016162239-c4c5e00ad22d\n\tgo.podman.io/image/v5 v5.37.1-0.20251016133615-aa970d2c7532\n\tgo.podman.io/storage v1.60.1-0.20251016133615-aa970d2c7532\n```\n\nLooking at the code, the image resolution code is implemented in common ([code](https://github.com/containers/podman/blob/feb36e4fe672f899303f8aeddf7663cf70d2b17b/vendor/go.podman.io/common/libimage/pull.go#L559)), so will the one for artifact be implemented in common?\nLet me know if I should open an issue in c/podman repo.",
+    "comments": [
+        {
+            "user": "mtrmac",
+            "body": "Short names are generally a very bad idea, and IIRC it was an intentional decision not to repeat the mistake for artifacts. Cc: @Luap99 @baude ."
+        },
+        {
+            "user": "Luap99",
+            "body": "yeah I tend to agree we should not do shortnames but I am aware of explicit design discussions around it"
+        },
+        {
+            "user": "Luap99",
+            "body": "That said not doing shortnames also makes the UI much more confusing for users as some commands resolve the names and others not.\n\nAlso unqualified-search-registries and short name aliases are two different things, I assume we support neither? Should we support the short name aliases?"
+        },
+        {
+            "user": "mtrmac",
+            "body": "Aliases are primarily an interactive feature (with interactive prompts and users’ choices stored into per-user state); CRI-O can’t use that. Although it _is_ possible to ship a set of pre-defined aliases in a system-wide config file ( https://github.com/containers/shortnames ) and IIRC OpenShift does ship _some_ configuration of that kind.\n\nAliases are much better than search because they are not _ambiguous_, but there can still be conflicts (“to install our software, set the `mysql` alias to `registry.vendor.example/our-patched-version/mysql`” from two different vendors).\n\nAnd, relevant for OpenShift, the only existing credential passing mechanism (to my knowledge) from users’ namespaces to CRI-O does not work with short names at all (compare the extremely horrible warning in https://docs.redhat.com/en/documentation/openshift_container_platform/4.19/html/images/image-configuration-classic#images-configuration-shortname_image-configuration — basically any time the user references a short name, CRI-O receives, and will try to use, `docker.io` credentials with that short name). There were vague plans to fix that approximately forever, and it never happened — so I think adding any more short-name supporting features to Kubernetes is irresponsible.\n\nIf users want artifacts, it’s by definition a new application / deployment, so let them do the work to work with fully-qualified names only."
+        },
+        {
+            "user": "bitoku",
+            "body": "Thank you for the explanation.\nIt makes sense that this is a design decision.\n\nI also found that artifacts can't be specified by its digest if I pulled with a tag.\n```\n❯ podman artifact inspect quay.io/crio/artifact:singlefile\n{\n     \"Manifest\": {\n          \"schemaVersion\": 2,\n          \"mediaType\": \"application/vnd.oci.image.manifest.v1+json\",\n          \"artifactType\": \"application/x.test.test.test.v1\",\n          \"config\": {\n               \"mediaType\": \"application/vnd.oci.empty.v1+json\",\n               \"digest\": \"sha256:44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a\",\n               \"size\": 2,\n               \"data\": \"e30=\"\n          },\n          \"layers\": [\n               {\n                    \"mediaType\": \"application/vnd.oci.image.layer.v1.tar\",\n                    \"digest\": \"sha256:d1cc3064379fca32757730461bd728cb7de430e46a0046aa59ab55c65be7ce3b\",\n                    \"size\": 14,\n                    \"annotations\": {\n                         \"org.opencontainers.image.title\": \"artifact.txt\"\n                    }\n               }\n          ],\n          \"annotations\": {\n               \"org.opencontainers.image.created\": \"2025-03-13T00:12:12Z\"\n          }\n     },\n     \"Name\": \"quay.io/crio/artifact:singlefile\",\n     \"Digest\": \"sha256:d2dbbc46e94529be98d2513fe2a46ef650683af96c584e1287dd966300aaf583\"\n}\n\n❯ podman artifact inspect quay.io/crio/artifact@sha256:d2dbbc46e94529be98d2513fe2a46ef650683af96c584e1287dd966300aaf583\nError: quay.io/crio/artifact@sha256:d2dbbc46e94529be98d2513fe2a46ef650683af96c584e1287dd966300aaf583: artifact does not exist\n```\n\nAlso latest tag is not automatically appended to the artifact name.\n```\n❯ podman artifact inspect quay.io/crio/busybox\nError: quay.io/crio/busybox: artifact does not exist\n\n❯ podman artifact inspect quay.io/crio/busybox:latest\n{\n     \"Manifest\": {\n          \"schemaVersion\": 2,\n          \"mediaType\": \"application/vnd.oci.image.manifest.v1+json\",\n          \"config\": {\n               \"mediaType\": \"application/vnd.oci.image.config.v1+json\",\n               \"digest\": \"sha256:eb13477d9ef899224bc2dea9698a335e9cf9df1a8d284a26a0c8797444a74202\",\n               \"size\": 594\n          },\n          \"layers\": [\n               {\n                    \"mediaType\": \"application/vnd.oci.image.layer.v1.tar+gzip\",\n                    \"digest\": \"sha256:f70adabe43c0cccffbae8785406d490e26855b8748fc982d14bc2b20c778b929\",\n                    \"size\": 723172\n               }\n          ]\n     },\n     \"Name\": \"quay.io/crio/busybox:latest\",\n     \"Digest\": \"sha256:f2463a82068a315d4661261907dcc33b6daac88ec2082eddb755bd061660f9ae\"\n}\n```\n\nThose behaviors are also different from images. Are they also intentional?\nIf I should open a new issue for it, feel free to close this issue and I'll open a new one."
+        },
+        {
+            "user": "Luap99",
+            "body": "latest tag is tacked in https://github.com/containers/podman/issues/27083\n\nThe digest likely deserve its own bug, that should work I assume"
+        },
+        {
+            "user": "bitoku",
+            "body": "Thanks I opened #408 and closing this one."
+        },
+        {
+            "user": "bitoku",
+            "body": "Sorry, let me reopen this issue, because I have something I want to confirm.\n\nThis command successfully pulled nginx image. I don't set no nginx aliases in the config.\nIs this, resolving to docker.io by default, intentional as well?\n```\n❯ podman artifact pull nginx\nGetting image source signatures\nCopying blob 80bfbb8a41a2 done   |\nCopying config 0ed463b26d done   |\nWriting manifest to image destination\n```\nAccording to the log, it seems it uses `docker.io/library/nginx`.\n```\nDEBU[0000] Trying to access \"docker.io/library/nginx:latest\"\n```\nApparently, any images are resolved to `docker.io/library/<name>`.\n```\n❯ podman artifact pull aaaaaaaa\nError: initializing source docker://aaaaaaaa:latest: reading manifest latest in docker.io/library/aaaaaaaa: requested access to the resource is denied\n```\n\nalso this artifact can be specified only with `nginx` not `docker.io/library/nginx`.\n\n```\n❯ podman artifact inspect nginx\n{\n...\n}\n```\n\n```\n❯ podman artifact inspect docker.io/library/nginx\nError: docker.io/library/nginx: artifact does not exist\n```\n"
+        },
+        {
+            "user": "mtrmac",
+            "body": "Hum… with my c/image hat on, I’m fine with short names _always, deterministically_, resolving to `docker.io[/library]`. There is no ambiguity.\n\nAs for whether c/common or Podman should enforce users writing a fully-qualified name and avoid this special case, I don’t have a strong opinion.\n\n**But** what is the CRI-O impact? The “image volume” pulls happen through the long-standing CRI-O “PullImage” API, don’t they? In that case Kubelet ~correctly finds the `docker.io` credentials, and correctly passes them to CRI-O, so that works — but CRI-O’s `PullImage` is implemented to interpret short names as a search, consuming the credentials incorrectly again. And only within the short-name-search loop it finds that the input might be an artifact and switches to an artifact-pulling backend.\n\nSo, for CRI-O, I think it’s still desirable to prohibit short names, and that implies that they should be prohibited for Podman, and in the c/common shared code, as well. @containers/podman-maintainers ?"
+        },
+        {
+            "user": "Luap99",
+            "body": "I was talking with @baude today, I think the consensus is do not allow any short names whatsoever so we should enforce that."
+        },
+        {
+            "user": "baude",
+            "body": "Correct, shortnames should not be used.  We can enforce that reasonably simply. \n\n After talking with @mtrmac , I will make a proposal for a new type of `ArtifactReference` which would contain something like a `namedD`.  Then we'd have a New constructor that would do all the validation of \"rules\" and return an error on the invalid reference.  This would become a type change, however, so would everyone be cool with that ?\n\n@Luap99 @mtrmac @rhatdan @bitoku "
+        },
+        {
+            "user": "bitoku",
+            "body": "> But what is the CRI-O impact?\n\nThere's not that big impact. I opened this issue because I thought artifacts should have the same behavior as images.\nkubelet doesn't resolve unqualified names, but CRI-O resolves those before passing the name to the pull function. We can resolve the name if container-libs doesn't. (we may be going to remove unqualified resolution for artifacts though).\n\n> This would become a type change, however, so would everyone be cool with that ?\n\n+1 for implementing `ArtifactReference`. I think that would fill the UI gaps between images and artifacts.\n\ncc @saschagrunert "
+        },
+        {
+            "user": "rhatdan",
+            "body": "I am fine with the library enforcing this, I would like the podman CLI to handle at least default tag of :latest if not specified.  Or throw an error on empty tag."
+        },
+        {
+            "user": "bitoku",
+            "body": "Since the shortname resolution is not supported by design, I'm closing this issue."
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "cri-o",
+            "repository": "cri-o",
+            "number": 9520
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "container-libs",
+            "number": 409
+        },
+        {
+            "organization": "cri-o",
+            "repository": "cri-o",
+            "number": 9639
+        }
+    ]
+}

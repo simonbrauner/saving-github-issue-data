@@ -1,0 +1,56 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "container-libs",
+    "number": 98,
+    "type": "issue",
+    "title": "Exposing object storage to clients",
+    "state": "open",
+    "labels": [
+        "storage"
+    ],
+    "user": "cgwalters",
+    "body": "See https://github.com/coreos/rpm-ostree/pull/5386#issuecomment-2884890075\n\nThe default overlay driver is a \"layer store\", it doesn't identify individual files. When zstd:chunked is enabled, files can be identified by their individual sha256 digest and also deduplicated across layers.\n\nHowever, in neither case is the underlying storage model exposed to higher levels at all to what can be reached from `podman|buildah` build or really even Go clients AFAIK.\n\n## An object store as a socket API\n\nImagine that inside a default `podman build` there was something like a socket `/run/objectstore` that speaks DBus|varlink|whatever and has just two core primitives:\n\n(queue bikeshed for $digest; fsverity or full-file sha256|sha512 etc)\n\n- Put an object by $digest (any space limitations would be restricted based on any limits in place for writing to the layer)\n- Link an object named by $digest into a specific place in the target filesystem tree (and gracefully returns an ENOENT equivalent if the object isn't present)\n\nThe latter operation is the key one - it would operate *underneath* the overlayfs mount, and that would allow avoiding copying and re-checksumming.\n",
+    "comments": [
+        {
+            "user": "cgwalters",
+            "body": "This came up in a live chat; it relates to https://github.com/containers/container-libs/issues/197 and https://github.com/bootc-dev/bootc/issues/20\n\nBasically even outside of a container image build, such an API would make sense as a way to get access to the underlying files of a c/storage instance (and actually a composefs-rs instance too).\n\nSo if we added such an API to c/storage for example, I think it'd be interesting to have it expressed via this socket API to start (but wrapped with Go bindings of course).\n\nAnd we would also have e.g. a `podman image object-store` command that would operate like `skopeo experimental-image-proxy` and  speak this protocol over fd 0 by default."
+        },
+        {
+            "user": "cgwalters",
+            "body": "I've been thinking about this more, and I created https://github.com/cgwalters/spec-json-rpc-fdpass as a possible IPC mechanism for it. There's obviously a *ton* of IPC but of those that support fd passing in-band it's not a huge set. JSON-RPC is now pretty widely used as part of both LSP and MCP.\n"
+        },
+        {
+            "user": "mtrmac",
+            "body": "- How would references / uses be tracked to prevent / detect leaks / dangling links? (Also consider what happens if the machine loses power in the middle of the initial “put an object to $digest” — or just _after_ that succeeds but before the caller makes any use of the object.)\n- What happens for graph drivers like btrfs where files are not always available to the maintainer of c/storage, and each layer needs to be specifically (and statefully) mounted? [… and we have locking bugs for those …]\n"
+        },
+        {
+            "user": "cgwalters",
+            "body": "> How would references / uses be tracked to prevent / detect leaks / dangling links? (Also consider what happens if the machine loses power in the middle of the initial “put an object to $digest” — or just after that succeeds but before the caller makes any use of the object.)\n\nSomething not very well defined by this strawman proposal is whether it's reflinks or hard links. The problem as always with hardlinks is that unless we use composefs, the increased hardlink count will leak into higher layers.\n\nI think we should specify that it it is required to maintain the semantic hardlink count for containers - so if composefs (or equiv) is not used, then reflinks must be used or an error (e..g EOPNOTSUPP equiv is returned).\n\nBut that aside...the beauty is container-libs doesn't need to do any refcount/use tracking here, that's all handled by the filesystem's reflink or hardlink support.\n\n> What happens for graph drivers like btrfs where files are not always available to the maintainer of c/storage, and each layer needs to be specifically (and statefully) mounted? [… and we have locking bugs for those …]\n\nI may be missing something but I think the btrfs reflink support will work just fine with this proposal, it's orthogonal to subvolume usage AFAIK.\n"
+        },
+        {
+            "user": "mtrmac",
+            "body": "> But that aside...the beauty is container-libs doesn't need to do any refcount/use tracking here\n\nI can’t see how that’s true with the proposed “put object by digest” / “use object by digest” API. In the meantime, the object has no links from layers, and exists only with the name. Sure, it would be a file on the filesystem, named by the digest, but when is that file used / dangling?"
+        },
+        {
+            "user": "cgwalters",
+            "body": "Sorry I should have made clear that for me in the short term https://github.com/containers/container-libs/issues/144 is the priority - but it's *related* to this in that ideally there's code sharing (this one also involves language-agnostic IPC w/fd passing) but this one is also harder in that we clearly need to consider things like malicious build processes, DoS etc. in a way that we don't for just better direct access to the underlying storage.\n\n"
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "coreos",
+            "repository": "rpm-ostree",
+            "number": 5386
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "container-libs",
+            "number": 144
+        },
+        {
+            "organization": "osbuild",
+            "repository": "osbuild",
+            "number": 2228
+        }
+    ]
+}

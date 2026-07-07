@@ -1,0 +1,106 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "container-libs",
+    "number": 178,
+    "type": "issue",
+    "title": "'Layer not known' error on parallel image removal",
+    "state": "open",
+    "labels": [
+        "storage"
+    ],
+    "user": "saschagrunert",
+    "body": "Relates to kubernetes-sigs/cri-tools#472\n\nWe discovered some flakyness when running critest in parallel. It seemed that an image we want  to remove already got removed by a parallel test, which should not be possible at all.",
+    "comments": [
+        {
+            "user": "saschagrunert",
+            "body": "I'm not sure if anyone is already working on this.\n\n/cc @nalind "
+        },
+        {
+            "user": "rhatdan",
+            "body": "I don't think anyone is working on this.\nThe issue is an image was removed that currently had a container on it?  Or could this just be that multiple threads are trying to remove the same image?"
+        },
+        {
+            "user": "saschagrunert",
+            "body": "I think it is the second one.\n\nI will check if I can reproduce the issue within a single test these days. "
+        },
+        {
+            "user": "vrothberg",
+            "body": "I concur with @saschagrunert. Multiple processes were removing the same image in parallel. My suspicion (did not look into the code yet) is that the 2nd process is blocked on the layer lock and is then trying to delete the layer which doesn't exist any more once the lock is acquired.\n\n@saschagrunert, could you provide instructions to reproduce? I guess we need to add tests here in c/storage to make sure we don't regress."
+        },
+        {
+            "user": "saschagrunert",
+            "body": "> @saschagrunert, could you provide instructions to reproduce? I guess we need to add tests here in c/storage to make sure we don't regress.\n\nThis is going to be fun: I can reproduce the issue on the current CRI-O master via:\n\n```\n> sed -i 's;flakeAttempts=3;flakeAttempts=0;g' test/critest.bats\n> sudo make clean\n> make $(pwd)/build/bin/ginkgo\n> sudo podman run --privileged -e STORAGE_OPTIONS=\"--storage-driver=vfs\" -e TRAVIS=true \\\n    -e RUN_CRITEST=true -v $(pwd):/go/src/github.com/cri-o/cri-o \\\n    -w /go/src/github.com/cri-o/cri-o \\\n    -v $(pwd)/build/bin/ginkgo:/usr/bin/ginkgo -it saschagrunert/criocircle \\\n    bash -c 'make all test-binaries && test/test_runner.sh critest.bats'\n```\n\nAt least this should trigger a failing test (in some cases), where the image :\n\n```\n# Summarizing 2 Failures:\n#\n# [Fail] [k8s.io] Image Manager [AfterEach] public image without tag should be pulled and removed [Conformance]\n# /go/src/github.com/kubernetes-sigs/cri-tools/pkg/framework/util.go:310\n#\n# [Fail] [k8s.io] Image Manager [AfterEach] listImage should get exactly 3 repoTags in the result image [Conformance]\n# /go/src/github.com/kubernetes-sigs/cri-tools/pkg/framework/util.go:294\n#\n# Ran 66 of 73 Specs in 47.746 seconds\n# FAIL! -- 64 Passed | 2 Failed | 0 Pending | 7 Skipped\n```\n\n"
+        },
+        {
+            "user": "rhatdan",
+            "body": "I guess we should ignore the error, if the image does not exists?"
+        },
+        {
+            "user": "vrothberg",
+            "body": "I think that depends on the code path, but for deletion it makes sense to ignore \"layer not known\" errors."
+        },
+        {
+            "user": "vrothberg",
+            "body": "I'll spin up a PR."
+        },
+        {
+            "user": "vrothberg",
+            "body": "https://github.com/containers/storage/pull/374 could do the trick. I am still looking into how this can happen. The locks should protect against that case."
+        },
+        {
+            "user": "vrothberg",
+            "body": "The good news is that `store.DeleteImage` is fine. The issue comes from a TOCTOU triggered by multiple processes pulling and deleting simultaneously (see https://github.com/kubernetes-sigs/cri-tools/issues/472#issue-455696700).\n\nProcess P1 tries to pull image bar. P1 checks if bar's blobs are already in the storage and tries to reuse them later when committing the image. At the time of committing the image, another process P2 has already deleted the layers and the commit fails with `Error committing the finished image: error locating layer for blob \"sha256:65fc92611f38c5c3e31d5c0faec078c60f41103f2ad4a3700fff122c49aab358\": layer not known`.\n\nI don't think there's a real solution to that as the storage is always subject of such races for resources."
+        },
+        {
+            "user": "mheon",
+            "body": "IMO, based on that, errors like this are better handled in CRI-O. So long as c/storage makes a consistent error return in cases like this, we can catch and discard any errors in the caller, preserving them in c/storage for cases where we do care about them."
+        },
+        {
+            "user": "vrothberg",
+            "body": "The problem is that the error does not occur during deletion but during pull, where we cannot discard the error as callers would be tricked into believing the image has been pulled successfully."
+        },
+        {
+            "user": "mtrmac",
+            "body": "> Process P1 tries to pull image bar. P1 checks if bar's blobs are already in the storage and tries to reuse them later when committing the image. At the time of committing the image, another process P2 has already deleted the layers and the commit fails with `Error committing the finished image: error locating layer for blob \"sha256:65fc92611f38c5c3e31d5c0faec078c60f41103f2ad4a3700fff122c49aab358\": layer not known`.\n\nNaively, in the ideal case I’d expect P1 to hold a “handle” / counted reference / something to the in-progress layer sequence, so that it is considered “busy” and P2 won’t be able to remove it. That “handle” could be a native c/storage object, or, maybe (very kludgy), an invisible image with a random name that points to the in-progress layer sequence as its `TopLayer`.\n\nThe only difficulty is with automatically dropping this “handle” if P1 dies unexpectedly.\n\n---\n\nSure, CRI-O could catch this error and automatically try retrying the pull, but that’s not going to be able to accurately detect this situation (vs. real bugs, for example), and it’s not obvious to me how CRI-O could make a guarantee of forward progress."
+        },
+        {
+            "user": "vrothberg",
+            "body": "> The only difficulty is with automatically dropping this “handle” if P1 dies unexpectedly.\n\nI thought about repurposing the digest locks from (https://github.com/containers/image/pull/611) but I believe it's just moving the TOCTOU problem to another layer as between a `pull A; run A` the image could again be deleted."
+        },
+        {
+            "user": "mtrmac",
+            "body": "Isn’t that something the Kubelet is fully in control of, though? (Maybe not, I have never read all of it.)\n\nThe Kubelet could, at least in principle, if it is not doing so already, track that an image is being pulled to be run, and just not issue a “delete A” CRI request in the meantime.\n\nThe Kubelet can’t quite do this for individual layers because it’s never told about them, or at least not during the pull process."
+        },
+        {
+            "user": "vrothberg",
+            "body": "I really don't know much about the Kubelet, so I am not sure if that's in scope of it or not.\n\n> The Kubelet could, at least in principle, if it is not doing so already, track that an image is being pulled to be run, and just not issue a “delete A” CRI request in the meantime.\n\nAn in-memory implementation sounds feasible in c/storage and comparatively quick to implement (please don't nail me to it).\n\nBut ideally, it should work across processes which reminds me of https://github.com/containers/image/pull/61. When pulling blobs, they can be marked as \"being pulled\" by locking digest locks (in another specific directory) and released when the image is committed. When deleting an image, a layer can only be deleted if the lock isn't owned by somebody else - presumably via the same `go tryAcquire/sleep/signal` trick as in https://github.com/containers/image/pull/611. But as for 611, I think it's a lot of complexity for little gain."
+        },
+        {
+            "user": "mtrmac",
+            "body": "Ah, right, the “handles” can’t, for an ideal solution, be in-process-only because some other process using c/storage could come and delete apparently-unreferenced layers. That, together with the need to actually orphan the layers if the process pulling the image dies, does seem rather complex (similar to, but not quite the same as, containers/image#611, because that one focuses on exclusion / sequencing; this one should, ideally, allow several processes pulling an image in parallel to keep a handle to the same parent layer while they concurrently pull different child layers.)\n\nFocusing on the single-process CRI-O situation should be much easier, and get us ~60% of the benefit."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@vrothberg @mtrmac @nalind Is this still something we should pursue?  "
+        },
+        {
+            "user": "vrothberg",
+            "body": "I think so yes but solving it across processes is tough. As @mtrmac mentions above, it has a similar nature to https://github.com/containers/image/pull/611 (i.e., the blob-copy detection PR). Tough to get it right. Let's leave this issue open."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@vrothberg This is still something you want to pursue correct?"
+        },
+        {
+            "user": "vrothberg",
+            "body": "@nalind wants to have a look at it this week."
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "containers",
+            "repository": "storage",
+            "number": 374
+        }
+    ]
+}

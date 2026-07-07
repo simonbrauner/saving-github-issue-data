@@ -1,0 +1,41 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "container-libs",
+    "number": 737,
+    "type": "issue",
+    "title": "overlay: Put() returns EBUSY when CSI drivers use Bidirectional mount propagation",
+    "state": "closed",
+    "labels": [],
+    "user": "trilamsr",
+    "body": "## Bug\n\n`Put()` in the overlay driver fails with `\"replacing mount point: device or resource busy\"` when the overlay `merged/` directory is shared with other mount namespaces via Bidirectional mount propagation.\n\n## How to reproduce\n\nOn a Kubernetes cluster using CRI-O with overlay storage:\n\n1. Run a CSI driver DaemonSet with `mountPropagation: Bidirectional` on `/var/lib/kubelet`\n2. Create and stop containers on the same node\n\n`Put()` calls `unix.Unmount(mountpoint, MNT_DETACH)` (succeeds), then `unix.Rename(merged.1, merged)` (fails with EBUSY). The kernel can't complete the deferred unmount because the CSI driver's namespace still holds a mount reference via shared propagation.\n\n## Impact\n\nCRI-O reports `FailedKillPod`, pods stuck `Terminating` indefinitely. Kubelet retries every few seconds. I hit this with JuiceFS CSI on CRI-O 1.34.0 / kernel 5.15.0 — pods stuck 42 days, 423k+ event repeats.\n\n```\nerror killing pod: failed to \"KillPodSandbox\" ... \n  replacing mount point \"/var/lib/containers/storage/overlay/.../merged\": device or resource busy\n```\n\n## Proposed fix\n\nHandle EBUSY on the rename — clean up the temp dir and return success. `MNT_DETACH` already detached the mount from the calling namespace. `DeferredRemove()` handles directory cleanup later.\n\nPR: #738\n\nRelated: #100",
+    "comments": [
+        {
+            "user": "trilamsr",
+            "body": "Investigated further — posting findings here for context.\n\n`skip_mount_home` isn't set. `MakePrivate(home)` runs and works for current mounts. The 18 stale shared overlay mounts are from before the current CRI-O instance. They were successfully detached by a previous `MNT_DETACH` (`stat -f merged/` returns ext4, not overlay), but `DCACHE_MOUNTED` remains set on the dentry because `put_mountpoint()` only clears it when `m_count` reaches 0 and the shared peer group keeps `m_count > 0`.\n\nThis leaves the mounts in a state where:\n- `umount2` with any flags → EINVAL (`check_mnt` fails, `mnt_ns` is NULL from previous `umount_tree`)\n- `rmdir/rename` → EBUSY (`d_mountpoint` flag still set)\n- `crictl stopp` / `crictl rmp -f` → fail with same EBUSY\n- Only a node reboot clears them\n\nFix in #738 — handle the EBUSY on rename in `Put()` and return success since the mount is already detached."
+        },
+        {
+            "user": "trilamsr",
+            "body": "Closing the PR but leaving this issue open for reference.\n\nAfter deeper investigation, the root cause was our infrastructure: our NVMe setup DaemonSet mounted devices with default shared propagation. CRI-O overlay mounts under NVMe inherited shared, which triggered a transient EBUSY on the rename in `Put()` during container namespace cleanup. Fixed downstream by making the NVMe mounts private (`mount --make-private`). No new occurrences in 8+ days.\n\nKey findings from the investigation:\n\nThe shared overlay mounts themselves work correctly through `Put()`. `MNT_DETACH` and rename both succeed on shared overlays. `crictl stopp` completes cleanly. The original EBUSY was a transient condition we couldn't reproduce, likely a race between container namespace destruction and `is_local_mountpoint()` checking `ns->list` during the rename.\n\nKernel paths involved: `vfs_rename` checks `is_local_mountpoint(new_dentry)` which iterates `ns->list`. `vfs_rmdir` has the same check. Both return EBUSY if the mount is present. `MNT_DETACH` removes from `ns->list` via `umount_tree` → `list_move`. `DCACHE_MOUNTED` is cleared by `put_mountpoint` when `m_count` reaches 0."
+        },
+        {
+            "user": "mtrmac",
+            "body": "I think the conversation around https://github.com/containers/container-libs/pull/738#discussion_r3088980870 has ended up with “if this fails, there is no way to recover, so we _must_ return the error”. @giuseppe did I get that right? If so, I don’t think there’s anything we could possibly do, and the issue should be closed as well."
+        },
+        {
+            "user": "giuseppe",
+            "body": "yes, I think we can't do anything about that, because the workaround makes things worse"
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "container-libs",
+            "number": 738
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "container-libs",
+            "number": 100
+        }
+    ]
+}

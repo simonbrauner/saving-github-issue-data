@@ -1,0 +1,64 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "container-libs",
+    "number": 619,
+    "type": "pull_request",
+    "title": "TLS configuration options",
+    "state": "closed",
+    "labels": [
+        "image"
+    ],
+    "user": "mtrmac",
+    "body": "This is _sufficient_, and if users use `…/tlscobra`, we can change the details without changing the callers again; but we might want to do something else.",
+    "comments": [
+        {
+            "user": "mtrmac",
+            "body": "OK, a complete rewrite:\n- Renamed the primary config object from `tlsopts.BaseTLSConfig` to `basetls.Config`\n- To support Podman’s remote operation, the object now exposes `MarshalText` and `UnmarshalText`: the CLI can provide a `basetls.Config` to the engine abstraction, and the engine can either consume the config directly, or send it over the wire. (Alternatively, the config _could_ be set at Podman machine creation, and when starting the remote server; this API just _allows_ for passing the data around, with a decision to be made later.)\n- The configuration is now primarily in a file, using YAML (matching `sigstore-params`, more or less to allow comments). Added a centralized man page.\n- This makes the `tlscobra` wrappers less necessary, it’s just one option now. And with the way `buildah bud` is wired into `podman build`, where the Cobra flag definitions and their consumption are split across different subpackages (I don’t like that much but I have no ambition to change that now),  requiring the `tlscobra` abstraction would be difficult. So, now, programs are expected to define their own CLI flags, and consume them via `basetls.NewFromOptionalFile`.\n\nPTAL again."
+        },
+        {
+            "user": "Luap99",
+            "body": "> To support Podman’s remote operation, the object now exposes MarshalText and UnmarshalText: the CLI can provide a basetls.Config to the engine abstraction, and the engine can either consume the config directly, or send it over the wire. (Alternatively, the config could be set at Podman machine creation, and when starting the remote server; this API just allows for passing the data around, with a decision to be made later.)\n\nI think we are better off not accepting those via remote API. In the case of podman system service you could just add the option to that command to cover all of the service actions.\nAnd in terms of podman buildah I really think we need the containers.conf option anyway.\n\nLooking at your podman PR you have the option defined globally which seem right but then you pass it to remote only on pull? That is broken design wise because both play kube and podman build both send the content via file and the pull is triggered on the remote not via the /pull endpoint\n\nSo IMO the only sensible thing never send this thing via remote and get rid of the custom marshal format. Everything else will just end up a security issue if we forget some code path that triggers a remote pull without sending that config.\n\n\n> This makes the tlscobra wrappers less necessary, it’s just one option now. And with the way buildah bud is wired into podman build, where the Cobra flag definitions and their consumption are split across different subpackage\n\nIt this not defined once globally for buildah? I don't think adding it on bud would help there either, you have to expose this to buildah from and buildah add (if we care regular about https downloads) so then I don't think this inter dependency should matter.\n\n\n"
+        },
+        {
+            "user": "mtrmac",
+            "body": "> I think we are better off not accepting those via remote API.\n\nI’m open to that, it would certainly simplify things a lot. (Maybe we wouldn’t need to worry about ciphers in `ssh` at all.)\n\nThe marshaling would then be remain unused, but I don’t think it hurts to have it (there are fairly comprehensive unit tests).\n\n---\n\n> but then you pass it to remote only on pull?\n\nThat part of the Podman PR is really a proof of concept, I was assuming that we’d have to wire every single Podman operation individually. (And it would certainly be easy to forget something, but that’s always going to be the case with the various operation that don’t go through `libimage`.)\n\n---\n\n> > And with the way buildah bud is wired into podman build, where the Cobra flag definitions and their consumption are split across different subpackage\n>\n> It this not defined once globally for buildah?\n\nIt is ~centralized but not encapsulated: compare https://github.com/containers/buildah/blob/0e32de077a526d7e2bfd4f552136357b2f0a1502/pkg/cli/common.go#L251 and https://github.com/containers/buildah/blob/0e32de077a526d7e2bfd4f552136357b2f0a1502/pkg/parse/parse.go#L446 , connected just by a string literal.\n\n\nI have chosen this flag entirely randomly, and it seems that it might actually be parsed _three_ ways:\n- For `buildah bud`, from the variable defined in `pkg/cli` via `BoolVarP`\n- For `commit` and `push`, from a variable defined in `cmd/buildah/…` via `BoolVarP`\n- From `pkg/parse` setting up a `SystemContext`, by matching a string literal to either of the above\n\nThat’s an even stronger argument why the original version of the PR, where a single function returned both a `FlagSet` and a struct holding a field where the value is to be written, would be harder to integrate into the existing Buildah structure."
+        },
+        {
+            "user": "mtrmac",
+            "body": "Restructed a bit more: `TLSDetailsFile` is now in `basetls`, and the CLI-consuming `NewFrom[Optional]File` are now `tlsdetails.BaseTLSFrom[Optional]File`, so that `basetls` only depends on the standard library."
+        },
+        {
+            "user": "TomSweeneyRedHat",
+            "body": "Code LGTM, but I definitely want @Luap99 or @mheon to have a looksee.\n"
+        },
+        {
+            "user": "mtrmac",
+            "body": "> One thing that is missing from the first iteration is the onceValue flag definition. I understand you want to define the flag just once in the cli tools which is fine overall but raises the question are you fine now with people specifying the cli option multiple times now?\n\nI think it’s just too hard now.\n\nThat was easy to do with the previous design, where the callers got an encapsulated state object and a `FlagSet`; the code could enforce it all within this package, without the callers having to care.\n\nNow that the callers define the `StringVar` on their own (and Buildah uses `flags.GetString` without any state object available), it’s not possible to do it invisibly.\n\nEach caller still _can_ do it, as you say:\n\n> I guess if you do want to guard aginst that missuse we could add that oncevlaue flag type to common/pkg/flag/flag.go and then have the other tools use that?\n\nand that would be invisible to this package.\n\nBut I don’t care strongly enough to propose making this the default behavior for all of Podman/Buildah/Skopeo , at least for all future options (and to fight against the Go ecosystem’s conventions all the way)."
+        },
+        {
+            "user": "Luap99",
+            "body": "> But I don’t care strongly enough to propose making this the default behavior for all of Podman/Buildah/Skopeo , at least for all future options (and to fight against the Go ecosystem’s conventions all the way).\n\nMy point was more it was important enough for you before but now it isn't just because we use a filepath? I do not object just trying to ask if we should still have that check and the flag type in common.\nIf you do not think so I am cool"
+        },
+        {
+            "user": "mtrmac",
+            "body": "It’s both that the risk was higher with the individual options, where a user could reasonably use `--tls-cipher-suites` twice with different values, and that doing it now is harder.\n\nI wouldn’t _mind_ being precise here, and if someone wants to add a subpackage to c/common and propose using it in most future flags, I’d support that, but I don’t think it’s a blocker for _this_ work any more, on balance."
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "container-libs",
+            "number": 277
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "container-libs",
+            "number": 623
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 28043
+        }
+    ]
+}

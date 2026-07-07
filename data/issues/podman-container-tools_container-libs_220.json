@@ -1,0 +1,67 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "container-libs",
+    "number": 220,
+    "type": "issue",
+    "title": "Decide on a `dir:` compatibility guarantee, if any, and a format transition plan, if any",
+    "state": "open",
+    "labels": [
+        "image"
+    ],
+    "user": "mtrmac",
+    "body": "`dir:` started as a debugging / scripting tool, and has, per https://github.com/containers/image/blob/main/docs/containers-transports.5.md#dirpath , basically no guarantees.\n\nMeanwhile, we are recommending `dir:` as a transport format (second best after using a registry, but still distinctly better than `docker-archive:` for most cases); and that brings up questions of forward/backward compatibility. Typically, we assume that the consumers and producers of `dir:` use fairly close versions (and can manage the consumer and producer versions to be compatible and to notice breakage), but there are requests for a long-term commitment so that future versions of software can reliably produce `dir:` data consumable by an old (presumably frozen) version.\n\nRight now, `dir:` creates a `version` file; that would at least allow _detecting_ incompatibility, but does not allow _ensuring_ it.\n\n\nSome options:\n- Do nothing and hope that `dir:` is already good enough that this will never come up. (We have had one incompatible format change in Feb 2018. OTOH the generalization of image “attachments” from signatures to SBOMs and referenced images https://github.com/opencontainers/distribution-spec/blob/main/spec.md#listing-referrers is on the horizon.)\n- Freeze `dir:` as is, commit to compatibility (assuming the image _contents_, e.g. the manifest format, are consumable), and assume that any future additions will become a `dir2:`\n- Add a `--dir-output-version` option (currently accepting only `1.1`), and commit to supporting all past formats for the future. (Or only to cleanly failing if the old format is no longer implemented??)\n\n@vrothberg @rhatdan @mheon (others) WDYT?",
+    "comments": [
+        {
+            "user": "mtrmac",
+            "body": "`dir2:` would be one less option, OTOH that would force users who keep producers and consumers in sync to care.\n\nSo, `--dir-output-version` seems more appropriate, adding that cognitive burden only on those (probably rarer) users who need compatibility across long time horizons."
+        },
+        {
+            "user": "mheon",
+            "body": "For the third option - would we have to commit to perpetually support the old versions, or could we just offer a ~12 month migration period and remove support for the old version after that point?"
+        },
+        {
+            "user": "mtrmac",
+            "body": "A request was to target old stable releases (which wouldn’t be updated with a newer consumer). I’m not sure how strong that commitment should be. @achilleas-k ?\n\n"
+        },
+        {
+            "user": "vrothberg",
+            "body": "If we start versioning now, old clients would still break, right?\n\nI feel/think we will find solutions to add new features without breaking backwards compat."
+        },
+        {
+            "user": "achilleas-k",
+            "body": "From our side, our guarantee is that Image Builder (osbuild) can produce images for any version of RHEL, CentOS, and Fedora currently in support.  In the worst case, the producer of the `dir:` (the build host) can be running the most up-to-date version of the container tools (skopeo, in our case) and the consumer (the build-root for the target OS) is the oldest version of supported RHEL.\n\nGiven [the lifetime of the .10 releases](https://access.redhat.com/support/policy/updates/errata#RHEL8_and_9_Life_Cycle) (5 years), that's a pretty long support lifecycle that we haven't had to deal with yet.\n\nTo answer the question directly, \"perpetual\" support would be nice for us, but I understand that might not be convenient or desirable for you.  A shorter support lifetime on the order of a major RHEL release would be workable if we had a long enough deprecation time to work around it."
+        },
+        {
+            "user": "achilleas-k",
+            "body": "> If we start versioning now, old clients would still break, right?\n> \n> I feel/think we will find solutions to add new features without breaking backwards compat.\n\nIf the producer of a `dir` can create the old format (and drop any features of a newer format in the process), I think that would be enough for us.\n\nFor everyone's benefit here, and for posterity, a brief description of our use case:\n\nWe produce images by pulling a container using the tools on the host into a cache, then they're copied into the build root and are then pulled into the target OS image's tree using tools from the target image's repo sources.  When the OS is live, the container is run using tools from the OS itself.\nIn other words:\n1. On the host (running potentially up-to-date software) we run `skopeo copy <remote> <cache>`\n2. In the build root (running potentially old software) we run `skopeo copy <cache> <containers store>`\n3. On the live OS, the user uses podman to run the container.\n\nThe requirement here is for `skopeo` in step 1 (new) to be able to produce a `dir` that can be read by `skopeo` in step 2 (old).\nThe compatibility between 2 and 3 is assumed since they use the same versions of software."
+        },
+        {
+            "user": "mtrmac",
+            "body": "> If we start versioning now, old clients would still break, right?\n\n`dir` had a version number file added the first time we made a breaking change. So that would not be new.\n\n(But, I’m afraid I only noticed this now currently that version file is write-only, and existing clients don’t reject unknown versions. containers/container-libs#219 .)\n\nFundamentally, the structure of `dir:`, producing an ~immutable artifact, without any direct communication between producers and consumers, means that it must be the producer’s responsibility to create data that the consumer can support (i.e. the producer must _somehow_ know, and determine, the version to produce).\n\n---\n\n> I feel/think we will find solutions to add new features without breaking backwards compat.\n\nIs that basically the “Do nothing and hope that dir: is already good enough” approach?\n\nOr is the proposal to never alter format of existing files, but to possibly add more files to the generated directory?\n\nSuppose a future producer version adds new files to the generated directory. Old consumer versions don’t look for those files (and don’t fail if unexpected files are found), so they would not _break_, but they would also not consume the new files.\n\nDid we, or did we not, break compatibility, by creating an image that old consumers can’t consume the way the producers understood them?\n\nPragmatically, that depends both on the nature of the files (are they nice icons for a GUI console, or mandatory firewall settings?) and on the nature of the operation (is the old client running the container, where losing icons is OK, or is the old client a part of the official product publishing pipeline, where losing icons is a failure to publish the intended artifact?).\n\nIt seems to me `skopeo-new copy something: dir:dir1  && skopeo-old copy dir:dir1 dir:dir2 && skopeo-new dir:dir2 something:` will basically always break if we add new files. Now, why would anyone do that is certainly a valid question to ask.\n\nBut given the request that motivates this issue, to support `skopeo-new copy docker: dir && skopeo-old copy dir: containers-storage:`, and the increasing prevalence to use containers in multi-stage build pipelines, I’m not sure we can rule any version combination out."
+        },
+        {
+            "user": "vrothberg",
+            "body": "> Or is the proposal to never alter format of existing files, but to possibly add more files to the generated directory?\n\nYes, I had that in mind.  I am not at all set on that but thought to throw the idea out to discuss it."
+        },
+        {
+            "user": "mtrmac",
+            "body": "It’s a definitely a good point.\n\nArguably the `skopeo-old copy dir: dir:` case is not a compatibility failure at all, because `skopeo-old` not copying the new files does ”exactly, and correctly, what the `skopeo-old` version was designed to do”.\n\nOTOH if the net effect is losing data, _something_ in that sequence should at least recognize that it might happen, if not prevent that from happening. Currently we require explicit `copy --remove-signatures` when copying signed images to transports that don’t support signatures, and dropping signatures might not have that bad consequences compared to dropping some new sandboxing configuration or the like.\n\nOne option would be two producer options like `--dir-consumable-by=1.1` (create data that version 1.1 can consume, possibly losing features) vs. `--dir-fully-supported-by=1.2` (fail creating the data if any part would not be recognized by version 1.2). Ugh. That feels to me like an extreme overkill."
+        },
+        {
+            "user": "vrothberg",
+            "body": "I think it's possible to make newer clients smart enough to be able to detect such potential data loss.\n\n> OTOH if the net effect is losing data, something in that sequence should at least recognize that it might happen\n\nTotally agree.  Assuming we find a way to have some persistent metadata that doesn't alter the digest/identify of an image, new clients should be able to detect such a data loss.  For instance, the metadata claims the existence of an absent file."
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "skopeo",
+            "number": 1935
+        },
+        {
+            "organization": "osbuild",
+            "repository": "osbuild",
+            "number": 1252
+        }
+    ]
+}

@@ -1,0 +1,62 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "container-libs",
+    "number": 590,
+    "type": "pull_request",
+    "title": "fix unshare infinite loop without CGO_ENABLED",
+    "state": "open",
+    "labels": [
+        "storage"
+    ],
+    "user": "lyp256",
+    "body": "fix unshare.MaybeReexecUsingUserNamespace()  infinite loop without CGO_ENABLED.\n\nfixes: #160 ",
+    "comments": [
+        {
+            "user": "podmanbot",
+            "body": "✅ A new PR has been created in buildah to vendor these changes: **https://github.com/containers/buildah/pull/6637**"
+        },
+        {
+            "user": "lyp256",
+            "body": "> Thanks!\n> \n> I can’t see how this can possibly work. AFAICT the code with `_Containers-pid-pipe` and `_Containers-continue-pipe` exists in C became we need it to run (and give all the process environment changes in `unshare.Cmd.Start` an opportunity to happen) _before_ the Go runtime starts creating any OS-level threads.\n> \n> We can _mimic_ the child process’ behavior in Go but I don’t see how we can reliably achieve the same outcome.\n> \n> Cc: @giuseppe\n\n\n\n> how is this supposed to work?\n> \n> Is this AI-generated?\n\nI needed to use statically compiled Skopeo and Buildah for container image migration tasks in an offline environment. I compiled the necessary executables using commands similar to:\n\n`CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -tags exclude_graphdriver_btrfs,containers_image_openpgp skopeo/cmd/skopeo`.\n\nHowever, I encountered an issue where the unsharepackage did not function properly when CGO_ENABLED=0. While Skopeo worked correctly in most scenarios, operations involving containers-storage(which call unshare.MaybeReexecUsingUserNamespace, e.g. `skopeo copy docker://docker.io/library/alpine:3 containers-storage:alpine:3`) resulted in an infinite loop of child process creation.\n\nTo resolve this, I modified the code to directly pass `syscall.CLONE_NEWUSER` via `exec.Cmd.SysProcAttr.Cloneflags`. In the initfunction, I implemented logic to mimic the operations related to `_Containers-pid-pipe` and `_Containers-continue-pipe` as done in the C code. After recompiling both Buildah and Skopeo with these modifications, they now function as expected.\n"
+        },
+        {
+            "user": "mtrmac",
+            "body": ">  I implemented logic to mimic the operations related to _Containers-pid-pipe and _Containers-continue-pipe as done in the C code. After recompiling both Buildah and Skopeo with these modifications, they now function as expected.\n\nNone of this addresses the concern that doing any such changes after the Go runtime starts is too late. What am I missing? (Giuseppe?)\n\nThe conversation in #160 was AFAICT saying that to resolve this\n> `MaybeReexecUsingUserNamespace` can fail with an useful error message\n\nI realize that does not _help_ your use case but that doesn’t mean that we can ignore the constraints (if there indeed are any)."
+        },
+        {
+            "user": "lyp256",
+            "body": "Under Giuseppe guidance, I re-investigated the implementation of unshare. After reading the source code related to golang's `exec.Cmd`, I found that `exec.Cmd.Start()` handles uid/gid mapping by writing directly to the `u(g)id_map` files. Due to Linux kernel restrictions, ordinary users cannot write additional ID mappings to the uid_mapand gid_mapfiles directly; this requires using the `newuidmap` and `newgidmap` commands in conjunction with the `/etc/subuid` and `/etc/subgid` files.\n\nThe golang `exec.Cmd.Start()` method does not use the `newu(g)idmap` commands. Writing directly to the `u(g)id_map` files results in permission issues. If the child process does not have the uid/gid mapping set, the system will not grant capabilities to the child process.\n\nThe current approach uses the `EXECVE` system call to handle the issue of writing ID mappings too late (a step I had previously missed, which necessitated the Ambient set). The complete process is roughly as follows:\n\nThe main process uses `clone()` to create a child process -> The child process uses `execve()` to start the child program -> The parent and child processes interactively complete the ID mapping -> The child process uses `execve()` again to re-execute the child program.\n\nPlease review @mtrmac @giuseppe "
+        },
+        {
+            "user": "TomSweeneyRedHat",
+            "body": "LGTM"
+        },
+        {
+            "user": "TomSweeneyRedHat",
+            "body": "re-ping @mtrmac "
+        },
+        {
+            "user": "giuseppe",
+            "body": "@lyp256 are you still working on this PR?"
+        },
+        {
+            "user": "lyp256",
+            "body": "Currently, Go only provides the clone functionality, and for the C code implementation, I can only do my best to mimic it. The initial idea behind this PR was mainly to enable skopeo to work without CGO, so I may have overlooked some details. I plan to reimplement it using clone following the C code logic. Completely replacing the C (unshare) code with Go (clone) code might have some errors, and I may need the original author to review the feasibility. @mtrmac  @giuseppe "
+        },
+        {
+            "user": "mtrmac",
+            "body": "I don’t really know enough to review this properly.\n\nMy first question is; do you really _need_ all of this? Would it be sufficient to just fix the infinite loop by reporting an \"you must recompile with CGo to use this feature\" error?"
+        },
+        {
+            "user": "lyp256",
+            "body": "> I don’t really know enough to review this properly.\n> \n> My first question is; do you really _need_ all of this? Would it be sufficient to just fix the infinite loop by reporting an \"you must recompile with CGo to use this feature\" error?\n\nIn some offline scenarios, I need to use the skopeo tool for handling image transfers. These environments may have very old operating system versions (e.g., CentOS 7—I know they are outdated) or face difficulties installing dependencies due to being offline. I need the skopeo tool to run directly in such environments (even with limited functionality). I’m not sure if others have the same needs, but for me, it’s meaningful.\n\nCurrently, a skopeo binary compiled without CGO cannot run at all due to this issue. I previously tried using the container method (quay.io/containers/skopeo) to resolve dependency problems, but that introduced new issues: it requires a container runtime, and the target environment might not have Docker or Podman. So, having a pure Go binary of skopeo would be the most convenient solution for me.\n\nThese are the problems I encountered and my use case. I’m not sure if others share the same need, but for me, it’s definitely meaningful."
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "buildah",
+            "number": 6637
+        }
+    ]
+}

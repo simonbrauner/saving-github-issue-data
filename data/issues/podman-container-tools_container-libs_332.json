@@ -1,0 +1,54 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "container-libs",
+    "number": 332,
+    "type": "pull_request",
+    "title": "cirrus: add global modules cache",
+    "state": "closed",
+    "labels": [],
+    "user": "Luap99",
+    "body": "Key of all go.sum files so the cache doesn't grow forever.\nThis should speed up the CI times a bit.\n",
+    "comments": [
+        {
+            "user": "Luap99",
+            "body": "thanks, yeah I need to test a bit more and compare the numbers.\n\n> “so the cache doesn't grow forever”: AFAICT, unless reupload_on_changes is set (and that’s a somewhat problematic concept, it turns the caches into a long-term modifiable state, adding risk of long-term broken caches introducing hard-to-trace problems), the cache is only populated the first time the fingerprint is seen. So it should never grow without bounds.\n\nAh yeah I was worried because I noticed recently the podman golangci-cache grows to much and slowed the tasks down a lot because it just got to big, I cleaned the caches manually but didn't look deeper yet but you are right they use reupload_on_changes so that is the bug then I suppose and need to be removed there \n\nhttps://github.com/containers/podman/blob/3d5aeba29fc070feaa9a99ea67824b1d5a976bd7/.cirrus.yml#L343"
+        },
+        {
+            "user": "Luap99",
+            "body": "compare initial push which had no cache hits https://cirrus-ci.com/build/5267626198302720 and now the repush with cache hits https://cirrus-ci.com/build/6671158025650176\n\nOn average it is is definitely faster but I have to look into the skopeo test task, it seem to still download some modules as the repo uses different ones. So I guess that task should have its own individual cache"
+        },
+        {
+            "user": "mtrmac",
+            "body": "Nice! As I said, I don’t want to block this on perfection.\n\nIf you want to merge as is now, that LGTM — just maybe add a comment noting that we know that the cache is only set at the first use and it might not be a perfect fit for other jobs.\n\nIf you want to improve this further in this PR already, that’s great too."
+        },
+        {
+            "user": "Luap99",
+            "body": "I pushed a new version with a populate script which should correctly load all modules into the cache on first use, though I have to invalidate the cache here to test that it works here."
+        },
+        {
+            "user": "Luap99",
+            "body": "Seems to work https://cirrus-ci.com/task/6322285348388864 populated the cache and \nhttps://cirrus-ci.com/task/5247746606628864 used it. Test times itself seem to have a very high variance so it is hard to say it was faster but it definitely should be by just looking at the cache timings."
+        },
+        {
+            "user": "mtrmac",
+            "body": "The `populate_script` is neat, and works pretty well. Thanks!\n\n\nFor the record, some further opportunities:\n\n- Storage tests show\n   ```\n   go: downloading gotest.tools/v3 v3.5.2\n   go: downloading github.com/mattn/go-shellwords v1.0.12\n   go: downloading github.com/google/go-cmp v0.7.0\n   ```\n   I guess test-only dependencies might not all be covered? I can’t see how that happens.\n- The c/image tests running as an unprivileged user don’t use the same cache\n- The modules required by Skopeo seem not to be included in the cache\n- `storage_gofix_task` could use the cache as well… and save maybe 4 seconds?"
+        },
+        {
+            "user": "Luap99",
+            "body": ">  I guess test-only dependencies might not all be covered? I can’t see how that happens.\n\nNote I only manually rerun some task not all of them, that might still be on old run. Keep an eye on future PRs.\n\n> The c/image tests running as an unprivileged user don’t use the same cache\n\nI assume that should be easy to fix, we could chmod the go modules dir to the user and set the env var for it to pick it up in the right location.\n\n\n> The modules required by Skopeo seem not to be included in the cache\n\nI was wondering if I could remove the make vendor step that downloads the skopoe modules because it has the vendor dir already, but then I noticed that cannot work since the module replace can trigger transitive updates and then the vendor dir would not be clean.\nSo I think for skopeo we likely need a separate cache without the populate script, though the problem is how to fingerprint the cache there? Because we need to key it of the skopeo go.sum which is not cloned by the time cirrus resolves it. I think there were ways to overwrite what cirrus clones so maybe I can look into that but this may be not worth it timing wise.\n\n> storage_gofix_task could use the cache as well… and save maybe 4 seconds?\n\nsure, although I rather get rid of that task as I don't see its value.\n\n"
+        },
+        {
+            "user": "mtrmac",
+            "body": "> > I guess test-only dependencies might not all be covered? I can’t see how that happens.\n> \n> Note I only manually rerun some task not all of them, that might still be on old run.\n\nThese were runs from the merged commit, and they were consuming a pre-populated cache. Anyway, it’s just 3 modules — it’s mostly me being curious why `go mod tidy` doesn’t need / fetch them.\n\n> > The modules required by Skopeo seem not to be included in the cache\n> \n> I was wondering if I could remove the make vendor step that downloads the skopoe modules because it has the vendor dir already, but then I noticed that cannot work since the module replace can trigger transitive updates and then the vendor dir would not be clean.\n\nI think it would be perfectly fine to disable the cleanliness check. Maybe we can avoid running `make vendor` in the Skopeo repo, I’m not sure whether that would work.\n\n> So I think for skopeo we likely need a separate cache without the populate script, though the problem is how to fingerprint the cache there? Because we need to key it of the skopeo go.sum which is not cloned by the time cirrus resolves it.\n\nYes, that’s problematic.\n\n> I think there were ways to overwrite what cirrus clones so maybe I can look into that but this may be not worth it timing wise.\n\nSkopeo is one of the longest-running test parts — but I suspect a lot there could be improved by not downloading so many images from the internet, I have a vague impression that the `skopeo sync` tests are fairly expensive.\n\n> > storage_gofix_task could use the cache as well… and save maybe 4 seconds?\n> \n> sure, although I rather get rid of that task as I don't see its value.\n\nWorks for me, I don’t feel strongly either way."
+        },
+        {
+            "user": "Luap99",
+            "body": "> > > The modules required by Skopeo seem not to be included in the cache\n> > \n> > \n> > I was wondering if I could remove the make vendor step that downloads the skopoe modules because it has the vendor dir already, but then I noticed that cannot work since the module replace can trigger transitive updates and then the vendor dir would not be clean.\n> \n> I think it would be perfectly fine to disable the cleanliness check. Maybe we can avoid running `make vendor` in the Skopeo repo, I’m not sure whether that would work.\n\nNo the issue is if the vendor dir and module is not in sync then go errors, and the problem is we need to make vendor to pull up the container-libs module updates into the vendor dir.\nUnless we don't want to go mod replace and cp the dirs over manually which sounds much more hacky than I would like."
+        },
+        {
+            "user": "mtrmac",
+            "body": "`rm -rf $skopeoDir/vendor`, and rely on the cache? Anyhow, I’m just guessing without having tried it."
+        }
+    ],
+    "cross_references": []
+}

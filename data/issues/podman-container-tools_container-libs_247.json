@@ -1,0 +1,68 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "container-libs",
+    "number": 247,
+    "type": "issue",
+    "title": "Log when credentials are ignored on mirrors/redirects",
+    "state": "open",
+    "labels": [
+        "image"
+    ],
+    "user": "amouat",
+    "body": "At the moment, if a registry forwards a client to a different server to log-in, image will strip the username and password for security reasons: https://github.com/containers/image/blob/97b3ffa7bb92a7778238b58010454031b0c2cbee/docker/docker_image_src.go#L111\n\nWould it be possible to add some logging so that users are aware when this happens? It's already causing a lot of confusion, see https://github.com/cri-o/cri-o/issues/4941 and https://github.com/ContainerSolutions/trow/issues/251.\n\nI tried to come up with a PR myself, but I'm not a Go programmer and I ran into some problems getting the build to work.",
+    "comments": [
+        {
+            "user": "rhatdan",
+            "body": "@mtrmac PTAL"
+        },
+        {
+            "user": "mtrmac",
+            "body": "> At the moment, if a registry forwards a client to a different server to log-in\n\nTo be precise, that’s not what that line does. Mirror configuration is a client-side matter, not a registry deciding to forward (and this matters because we have had some compatibility issues WRT redirects reported).\n\nThe request does make some sense but it’s not immediately clear what that logging would look like, especially across the abstractions of pkg/docker/config reporting _how_ it found the credentials. Ultimately the data is _already_ there — `Returning credentials from DockerAuthConfig` vs. that line missing — though it arguably isn’t obvious. But then to what extent can _debug_ logs be reasonably expected to be obvious to someone unfamiliar with the implementation…"
+        },
+        {
+            "user": "amouat",
+            "body": "Would you mind describing exactly what it does and/or is intended to do?\n\nIt is causing a bit of pain and confusion at the minute, as you can see from the issues. In my case, seeing it in a WARN log or similar would have helped a lot. It does seem a fairly strong action to take without informing the user.\n\nI understand your point about _where_ to fix it though, perhaps it should be CRI-O?"
+        },
+        {
+            "user": "mtrmac",
+            "body": "> Would you mind describing exactly what it does and/or is intended to do?\n> \n> It is causing a bit of pain and confusion at the minute, as you can see from the issues.\n\nI mean… how can you attribute the issues to this line if you don’t understand the link?\n\nThis causes credentials sent by the caller via `types.SystemContext` not to be applied to redirected/mirrored registries, only to the original host name specified in the image reference. That redirect/mirror happens via `registries.conf` and `registries.conf.d` _on the client_, the registry itself has no say in that. So the “if a registry forwards a client” description is not what happens here.\n\n> I understand your point about _where_ to fix it though, perhaps it should be CRI-O?\n\nCRI-O is too far up the abstraction stack to be able to tell; it doesn’t even know a mirror/redirect is configured, let alone whether it was used. (And the existing debug logs that show where credentials come from are too far down the abstraction stack to know about mirrors.)"
+        },
+        {
+            "user": "mtrmac",
+            "body": "Also, supposing we somehow log this, either in a debug log (in a way that is relevant to the pull, and can be linked to the full sequence!), or in the error handling code at the end of `newImageSource`, what would that log say?\n\n“`types.SystemContext.DockerAuthConfig` was ignored for this registry” has no relevance to the end user who has provided the credentials using a completely differently-named option or feature."
+        },
+        {
+            "user": "mtrmac",
+            "body": "Ultimately the right thing is to modify the CRI (Kubelet/CRI-O interface) to be able to provide a set of credentials instead of just one; then this credential stripping would be irrelevant, and the need to configure mirror credentials directly on nodes would go away. But I don’t expect that to happen any time soon."
+        },
+        {
+            "user": "amouat",
+            "body": "@mtrmac Thanks for the replies and clarifications.\n\nI made a mistake; I should have opened with what my problem is rather than a suggested fix. Let me try again:\n\n---\n\nAt the moment if I try to pull an image through cri-o (either via k8s or crictl) and:\n - the registry is behind a redirect/mirror specified in registries.conf; and\n - the registry requires the user to authenticate and be authorized; and\n - correct credentials are supplied either directly to to crictl or as a k8s secret\n \nOr:\n  - the registry requires the user to authenticate and be authorized; and\n  - the login server is on a different domain to the address used to contact the registry\n\nThe pull will fail with unauthorized. It's difficult to debug this issue as there no indication of why things are failing. Looking at other issues and the source code indicates it's caused by containers/image ignoring credentials for mirrors/redirects. \n\n---\n\nIf I rephrase things this way, it's not clear that this is even the right repo for the report - should I move it somewhere else?\n\nAllowing multiple sets of credentials would help in some cases, but IMO would still require an error/log message which states the server name that containers/image is looking for.\n\nFinally, it's worth noting that a registry may ask containers/image to login into the same server but using a different address and this will still result in ignoring credentials e.g. when the server can be reached via multiple domain names and responds with a canonical one, or with the IP address instead of the domain name (as happens in https://github.com/ContainerSolutions/trow/issues/251)."
+        },
+        {
+            "user": "mtrmac",
+            "body": "> * the registry is behind a redirect/mirror specified in registries.conf; and\n> * the registry requires the user to authenticate and be authorized; and\n> * correct credentials are supplied either directly to to crictl or as a k8s secret\n\nYup, that’s the credential removal line you pointed out. I do agree that better error reporting would be useful but it’s not at all clear how to do that with the current APIs/abstractions (we definitely don’t want to log a loud WARNING on every single use of a mirrored registry, which would often happen with a global pull secret for quay.io when quay.io is mirrored to a local registry).\n\n(reordered)\n\n> Allowing multiple sets of credentials would help in some cases, but IMO would still require an error/log message which states the server name that containers/image is looking for.\n\nThat should already exist since https://github.com/containers/image/pull/788 .\n\n\n---\n\n> * the registry requires the user to authenticate and be authorized; and\n> * the login server is on a different domain to the address used to contact the registry\n\nIf something like that fails (and as suggested above there are some known problems in vaguely related areas, but the above description does not immediately seem like _exactly_ the known issue), it fails completely differently, and the “redirect” wording, if applicable, does not refer to `registries.conf`. So I’d prefer that one to be tracked as a separate issue — and it’s somewhat likely that it’s just a bug to be fixed, not something to be only logged.\n\n---\n\n> If I rephrase things this way, it's not clear that this is even the right repo for the report - should I move it somewhere else?\n\nYes, containers/image seems closest (if excluding the “improve CRI” approach).\n\n---\n\n> Finally, it's worth noting that a registry may ask containers/image to login into the same server but using a different address and this will still result in ignoring credentials e.g. when the server can be reached via multiple domain names and responds with a canonical one, or with the IP address instead of the domain name (as happens in [ContainerSolutions/trow#251](https://github.com/ContainerSolutions/trow/issues/251)).\n\nReading that, it seems to me to be the `registries.conf` mirror/redirect case — the only discussed configuration is `registries.conf`. Is a _registry server_ behavior really involved?"
+        },
+        {
+            "user": "amouat",
+            "body": "Thanks @mtrmac. Your point about warnings with Quay makes sense. It's a shame there's no easy answer :)\n\n>Reading that, it seems to me to be the registries.conf mirror/redirect case — the only discussed configuration is registries.conf. Is a registry server behavior really involved?\n\nWhat I configured the Trow registry to do was tell the client to go the \"login\" url on the domain they contacted the registry on, which is taken from the `HOST` header. I'm not sure what other registries do, but one possibility is to use a server name passed on start-up which leads to different behaviour in this case (potentially more problems, but also potential workarounds)."
+        },
+        {
+            "user": "mtrmac",
+            "body": "Comparing https://github.com/ContainerSolutions/trow/issues/251#issuecomment-860513150 and https://github.com/ContainerSolutions/trow/issues/251#issuecomment-861199298 seems to only say that changing `registries.conf` not to redirect fixed the issue.\n\nIf the actual difference was a server-side redirect change, please file that separately."
+        },
+        {
+            "user": "amouat",
+            "body": "No, you're correct about the difference.\n\nI was responding to the comment about server side behaviour being involved; in my opinion it is. I was unsure what to do about the server name when I coded the behaviour and different choices would lead to different effects here. It partly comes down to the definition of redirect - is a redirect any deviation from the domain name specified in the HOST header? What about subdomain names, cnames that resolve to the same A record, IP addresses vs domains etc... But I think this is offtopic :)\n\nAnyway, I'm not sure what to say about this issue. It is a problem but I don't know what to suggest. I won't complain if you want to close this, I don't want to take up any more of your time."
+        },
+        {
+            "user": "mtrmac",
+            "body": "I think it’s worth keeping this open for a while.\n\nI can’t think of a good solution, but maybe someone else can come up with one; at the very least the record of this issue may inform future design changes.\n\n(I have also seen some suggestions that the CRI change per https://github.com/containers/container-libs/issues/247 might actually be feasible. That would make this problem go away.)"
+        },
+        {
+            "user": "mtrmac",
+            "body": "Since https://github.com/containers/image/pull/1193 , we log “No credentials for _scope_ found”. That doesn’t say that we explicitly ignored the Kubelet-provided credentials, but it’s at least much more explicit than looking for an absence of a `DockerAuthConfig` line as per https://github.com/containers/container-libs/issues/247 ."
+        }
+    ],
+    "cross_references": []
+}

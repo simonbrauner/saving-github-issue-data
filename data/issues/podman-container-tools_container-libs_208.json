@@ -1,0 +1,56 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "container-libs",
+    "number": 208,
+    "type": "issue",
+    "title": "Copy fails with \"use of closed network connection\" error when using a slow proxy",
+    "state": "closed",
+    "labels": [
+        "image"
+    ],
+    "user": "vinzent",
+    "body": "We have an internal Quay registry where we mirror external images. We need to use a proxy (ZScaler). Sometimes some blobs take quite a while to finish downloading. Up to 3 minutes. I suspect they run some scans on the proxy before the download can be finished. Seems skopeo opens a connection to the target registry, wehre the TCP connection closes due to idleness before the download from the source layer finishes (just wild guessing).\n\nExample of a failed copy:\n\n```\nsh-5.2$ rpm -q skopeo\nskopeo-1.13.2-1.fc38.x86_64\nsh-5.2$ no_proxy=.internal.domain https_proxy=zscaler:443 skopeo copy docker://docker.io/kibana:6.7.1 docker://quay.internal.domain/kibana/kibana:6.7.1\nGetting image source signatures\nCopying blob 5334d2bd41b7 done\nCopying blob f0b755f02a6c done\nCopying blob 41d16359541e done\nCopying blob 2a0588ea5574 done\nCopying blob 9de755da2607 done\nCopying blob 8ba884070f61 skipped: already exists\nCopying blob fc3de62ddb21 done\nCopying blob 64b08a88c3fb done\nFATA[0173] copying system image from manifest list: writing blob: Patch https://quay.internal.domain/v2/kibana/kibana/blobs/uploads/4211057a-e8d9-446a-ac54-cd6d157857ba: use of closed network connection\n```\n\n## Workaround\n\nCopy to local storage first, then to the internal registry.\n\n```\nhttps_proxy=zscaler:443 skopeo copy docker://docker.io/kibana:6.7.1 containers-storage:quay.internal.domain/kibana/kibana:6.7.1\nskopeo copy containers-storage:quay.internal.domain/kibana/kibana:6.7.1 docker://quay.internal.domain/kibana/kibana:6.7.1\n```\n\n## Versions\n\nI used the following to versions:\n\n* skopeo-1.13.2-1.fc38.x86_64 (Fedora 38)\n* skopeo-1.11.2-0.2.module+el8.8+18251+ad5b274c (RHEL 8.8)\n\n## Other things\n\nI see the same error when using the Red Hat Quay Repo Mirror feature (Support-Case opened). Looking at the logs, it seems that skopeo is used in the background.",
+    "comments": [
+        {
+            "user": "mtrmac",
+            "body": "Thanks for your report.\n\n> Seems skopeo opens a connection to the target registry, wehre the TCP connection closes due to idleness before the download from the source layer finishes (just wild guessing).\n\nThe implementation always reads at least _a few_ bytes from the source before initiating the upload to the destination; so it’s not that the source somehow spends a lot of time _starting_ the download. The download is either delayed somewhere in between, or possibly at the very end at EOF. In both cases I think there’s little the destination can do about a slow source — and the design of the copy implementation (with a possible compression/decompresssion transformation) makes it very hard, in general, to somehow restart the upload on failure.\n\nIt would progably be valuable to gather some more data about the timing / cause. Is it a delay when starting the copy? When finishing? Is it just slow? Is the cause the source or the destination?\n\n---\n\nIn this area, Skopeo is just a dumb wrapper around the c/image implementation, so I’m transferring the report there.\n\nI also rather suspect that this is an error handling bug in the standard Go library. There are ~two network connections involved: The destination one is purely internal to the standard-library HTTP stack, and not managed by the c/image code; the source one more of a responsibility of the c/image code, but errors from that one would include an `happened during read` annotation. I realize blaming the standard library is usually the wrong guess, investigating more…\n\n---\n\nWRT the workaround, I would recommend using `dir:` instead of `containers-storage:`, unless you need the image in local storage anyway. `dir:` is much less resource-intensive, and it can preserve the original representation of the image (notably including the original digests).\n"
+        },
+        {
+            "user": "mtrmac",
+            "body": "> * skopeo-1.13.2-1.fc38.x86_64 (Fedora 38)\n\nBuilt with `golang-1.20.7-1.fc38`."
+        },
+        {
+            "user": "mtrmac",
+            "body": "> I also rather suspect that this is an error handling bug in the standard Go library.\n\nTo clarify, I suspect a mostly-cosmetic issue: there is probably some underlying cause (“connection closed by the remote server”, “timed out”) which isn’t reported but should be — but the underlying cause wouldn’t go away just because it would be correctly reported. "
+        },
+        {
+            "user": "mtrmac",
+            "body": "Randomly guessing a reproducer, yes, there is a standard library error handling problem:\n```go\nfunc TestUseOfClosedNetworkConnection(t *testing.T) {\n\ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {\n\t\tvar buf1 [5]byte\n\t\tn, err := r.Body.Read(buf1[:])\n\t\trequire.NoError(t, err, \"reading body\")\n\t\tlogrus.Errorf(\"Got %d bytes: %s\", n, string(buf1[:n]))\n\n\t\trc := http.NewResponseController(w)\n\t\tc, buf, err := rc.Hijack()\n\t\trequire.NoError(t, err, \"Hijack\")\n\t\tbufLen := buf.Reader.Buffered()\n\t\tbuf2 := make([]byte, bufLen)\n\t\tn, err = buf.Read(buf2)\n\t\trequire.NoError(t, err)\n\t\tlogrus.Errorf(\"Buffered %d bytes: %s\", n, buf2[:n])\n\t\tlogrus.Errorf(\"Closing\")\n\t\terr = c.Close()\n\t\trequire.NoError(t, err)\n\t}))\n\tdefer s.Close()\n\n\tsourceReader, sourceWriter := io.Pipe()\n\tgo func() {\n\t\t_, err := sourceWriter.Write([]byte(\"line 1\\n\"))\n\t\trequire.NoError(t, err, \"Writing line 1\")\n\t\ttime.Sleep(1 * time.Second)\n\t\t_, err = sourceWriter.Write([]byte(\"line 2\\n\"))\n\t\trequire.NoError(t, err, \"Writing line 2\")\n\t\terr = sourceWriter.Close()\n\t\trequire.NoError(t, err, \"Closing writer\")\n\t}()\n\tdefer sourceReader.CloseWithError(errors.New(\"Test exited\"))\n\n\tclient := &http.Client{\n\t\tTransport: tlsclientconfig.NewTransport(),\n\t}\n\treq, err := http.NewRequestWithContext(context.Background(), http.MethodPatch, s.URL, sourceReader)\n\trequire.NoError(t, err)\n\tres, err := client.Do(req)\n\trequire.NoError(t, err)\n\tdefer res.Body.Close()\n\tbody, err := io.ReadAll(res.Body)\n\trequire.NoError(t, err)\n\tlogrus.Errorf(\"Response status %d, body \\n%s\\n\", res.StatusCode, string(body))\n}\n```\n\n```console\n% go test -v -v -timeout 600s -run ^TestUseOfClosedNetworkConnection$ ./docker                             \n=== RUN   TestUseOfClosedNetworkConnection\ntime=\"2023-09-04T22:46:57+02:00\" level=error msg=\"Got 5 bytes: line \"\ntime=\"2023-09-04T22:46:57+02:00\" level=error msg=\"Buffered 4 bytes: 1\\n\\r\\n\"\ntime=\"2023-09-04T22:46:57+02:00\" level=error msg=Closing\n    docker_image_dest_test.go:84: \n        \tError Trace:\t…/docker/docker_image_dest_test.go:84\n        \tError:      \tReceived unexpected error:\n        \t            \tPatch \"http://127.0.0.1:64956\": write tcp 127.0.0.1:64957->127.0.0.1:64956: use of closed network connection\n        \tTest:       \tTestUseOfClosedNetworkConnection\n--- FAIL: TestUseOfClosedNetworkConnection (1.00s)\nFAIL\nFAIL\tgithub.com/containers/image/v5/docker\t1.457s\nFAIL\n```\nthough the error text is not _exactly_ the same. "
+        },
+        {
+            "user": "mtrmac",
+            "body": "The basic cause is that the Go HTTP/1.1 implementation has a separate “read” and “write” loops.\n\nThe read loop waits for responses; and that one terminates with “net/http: Transport failed to read from server: EOF” (compare https://github.com/golang/go/issues/53472 ). And it’s the _read_ end that is responsible for actually closing the socket. The read end does not know or care whether the write end is still sending the request; a “full duplex” operation where an (error) response can be sent before the full request is sent is, apparently, an intentionally desired feature.\n\nMeanwhile, the write loop is busy sending request data. And that code is unaware of the read end having closed the socket, hence the error text."
+        },
+        {
+            "user": "mtrmac",
+            "body": "I have filed https://github.com/golang/go/issues/62447 against the upstream Go standard library’s error reporting behavior.\n\nOf course, that’s not directly helpful for making the copy _work_.\n\nI’m not sure that is reasonably possible; understanding the timing/cause, as mentioned above, would be a prerequisite."
+        },
+        {
+            "user": "vinzent",
+            "body": "Related Quay issue: https://issues.redhat.com/browse/RFE-4643"
+        },
+        {
+            "user": "vinzent",
+            "body": "Hi @mtrmac \n\n> It would progably be valuable to gather some more data about the timing / cause. Is it a delay when starting the copy? When finishing? Is it just slow? Is the cause the source or the destination?\n\nThe download is delayed by ZScaler at the end. Until this happens, its fast. This is how the skopeo copy kibana:6.7.1 image download output looks like for about 2m40s:\n\n```\nGetting image source signatures\nCopying blob f0b755f02a6c [=====================================>] 179.3MiB / 179.3MiB\nCopying blob 41d16359541e done\nCopying blob 2a0588ea5574 done\nCopying blob 9de755da2607 done\nCopying blob 5334d2bd41b7 done\nCopying blob 8ba884070f61 skipped: already exists\nCopying blob fc3de62ddb21 done\nCopying blob 64b08a88c3fb done\n```\n\n> WRT the workaround, I would recommend using dir: instead of containers-storage:,\n\nThanks for the hint!"
+        },
+        {
+            "user": "mtrmac",
+            "body": "Hum. Does the source actually deliver all data, and block before reporting EOF / success, or is there at least one byte outstanding that we _have_ to block on? If all data is available, we could, in many but not all cases, finish processing the data without waiting for a successful EOF indication (probably defeating the point of the scan — we would consume the data even if the scan later detected an error).\n\nI suppose longer-term we should add an option for downloading to a file locally, and pushing from that file — this is not the only case where significantly different transport speeds between sources and destinations cause trouble, although it’s probably the most notable one so far. That would not be too much code — I’m mostly concerned that we need to understand the root cause enough to rule out some other bug in our code that should be fixed instead."
+        },
+        {
+            "user": "mtrmac",
+            "body": "> Does the source actually deliver all data, and block before reporting EOF / success, or is there at least one byte outstanding that we _have_ to block on?\n\nPlease reopen if more information becomes available."
+        }
+    ],
+    "cross_references": []
+}

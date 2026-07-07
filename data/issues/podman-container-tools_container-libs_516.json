@@ -1,0 +1,48 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "container-libs",
+    "number": 516,
+    "type": "issue",
+    "title": "Feature Request: `container` Transport Type (or equivalent)",
+    "state": "closed",
+    "labels": [],
+    "user": "adambkaplan",
+    "body": "The current containers-transport spec has a somewhat confusing naming scheme that reflects the history of container technologies:\n\n- `docker` for container images hosted on a Docker v2 container registry. This API is considered \"legacy\" and has been incorporated into the OCI v1 distribution standard.\n- `oci` for container images stored locally with the expected [OCI directory structure](https://github.com/containers/image/blob/main/docs/containers-transports.5.md#ocipathreferencesource-index). Today `oci` is being used to refer to OCI-compliant container images/artifacts in general. For example, Helm resolves charts stored as OCI artifacts using an `oci://` URL scheme. See [helm push](https://helm.sh/docs/topics/registries/#the-push-subcommand) and use in other [sub-commands](https://helm.sh/docs/topics/registries/#other-subcommands).\n\n\nPersonally I would love to see the `oci` transport refer to \"an OCI-compliant container image or artifact hosted on an OCI-compliant container registry\" in the Podman container tools, and have the current `oci` transport be renamed to `oci-dir` to better communicate that it is referring to a local directory. However this would be a breaking change likely requiring cascading major version bumps in podman, buildah, skopeo, and other dependent tools. `container` (or something similar) is a compromise.",
+    "comments": [
+        {
+            "user": "adambkaplan",
+            "body": "See also #256 (an oldie, but a goodie) - `registry://` is fine too, but may be less intuitive for developers."
+        },
+        {
+            "user": "adambkaplan",
+            "body": "This came up in a discussion in the [pURL community](https://github.com/package-url/purl-spec/issues/425#issuecomment-3597144508) with respect to changes being considered for their \"oci\" package type."
+        },
+        {
+            "user": "mtrmac",
+            "body": "Thanks for reaching out!\n\n> However this would be a breaking change likely requiring cascading major version bumps in podman, buildah, skopeo, and other dependent tools. \n\nYes. I think that’s very clearly not worth it.\n\n---\n\nAdding an alias (like the proposed `registry`) would be much less disruptive, but it still isn’t _great_:\n- There are things like `transports.ImageName` converting a reference back to a string, and that can only return one value. So, users would pull with `registry:` and see `docker://` in error messages, or maybe vice versa.\n  - Because `ImageTransport` values are Go interfaces and don’t have a well-defined concept of equality, there is code (incl. in c/common) comparing `reference.Transport().Name()` with `dockerTransport.Name()` (or, in the worst case, with hard-coded `\"docker\"`. That, sort of, forces us to always use the same name, i.e. we cannot easily embed the transport name used by the user into the reference so that error messages preserve the users’ spelling. This would all need to be new APIs while preserving the behavior of the existing ones.\n- `policy.json` would need to special-case the logic to disallow having both transports defined, with differing policies. Or, I guess, merge two separate per-transport policies scope by scope?? Either way software trying to _edit_ a `docker` policy unaware of a `registry` one would break.\n\n---\n\n> See also [#256](https://github.com/containers/container-libs/issues/256) (an oldie, but a goodie) - `registry://` is fine too, but may be less intuitive for developers.\n\n`container` is:\n- possibly confused with “read contents of a running container” or “write a container usable by OCI runtime” (e.g. https://github.com/containers/skopeo/issues/467 ). That’s something we are unlikely to implement in c/image, but it is a reasonable thing to think about in this space.\n- incorrect for artifacts stored on a registry.\n"
+        },
+        {
+            "user": "Luap99",
+            "body": "Personally I would love to get rid of the docker verb for this.\nThat said I agree with @mtrmac here doing breaking changes for this would be way to disruptive. "
+        },
+        {
+            "user": "adambkaplan",
+            "body": "> incorrect for artifacts stored on a registry.\n\nGood point. \"containers\" are executable software in an OS-isolated environment. \"artifacts\" are a bag of files with some metadata that _can't_ be executed on their own. Both happen to use the same representation/schema (OCI image).\n\n`registry` as a transport name works. And to continue \"painting the bikeshed,\" I'll also add `oci-image` as an option that makes the connection to the OCI standard more explicit.\n\n> Adding an alias (like the proposed registry) would be much less disruptive, but it still isn’t great:\n\nI don't think this feature request implies an alias for `docker`. In fact, a quick view of the man page for the [docker transport](https://github.com/containers/image/blob/main/docs/containers-transports.5.md#dockerdocker-reference) reveals several shortcomings:\n\n1. Locked support for the Docker v2 HTTP API, meaning that it can't (or shouldn't) support the OCI [Referrers API](https://github.com/opencontainers/distribution-spec/blob/main/spec.md#listing-referrers).\n2. No support for `:tag@digest` image references. This is an increasingly common pattern, especially as tools like Dependabot and Renovate use `:tag@digest` to determine semantic versioning for container images/OCI artifacts.\n\nI'd argue we keep the `docker` transport as is and declare it \"deprecated\" in favor of this new one, once the community feels confident in its implementation."
+        },
+        {
+            "user": "mtrmac",
+            "body": "> I'd argue we keep the docker transport as is and declare it \"deprecated\" in favor of this new one\n\nAdding a new transport that _diverges in behavior_ is a novel idea, and worth considering … but I don’t think it _significantly_ fixes either of the two downsides mentioned above. Sure, on a pedantic level, it’s always fine to add a new transport, but in practice many consumers of a registry would _have_ to add support for the new one, i.e. would be faced with an incompatible migration. And the proposed divergence in behavior would make that _even harder_ on them (it would now _have_ to show up in UIs which would otherwise prefer to hide the `docker://` syntax, like `podman pull` and various GUIs); as well as miring _this issue_ in even more discussions.\n\n---\n\n> Locked support for the Docker v2 HTTP API\n\nThat’s at best a documentation bug — in being too precise and not updated when distribution spec was updated. Strictly-compliant OCI clients would not be compatible with existing registries (well… would not have been compatible with registries as of 2018, when the client code was being developed, to be even more pedantic; I’m not sure about the current state) so we wouldn’t want to commit to that _either_.\n\n> No support for :tag@digest image references.\n\nI continue to think that the widely-desired “tag is a comment with no meaning to the tool doing the pull” behavior is confusing and a bad idea, in the extreme a security risk. Anyway higher-level tools like Podman can define their own syntax which allows for that, and Podman does do that."
+        },
+        {
+            "user": "TerryHowe",
+            "body": "ORAS uses `oci-layout`, but I think `oci-dir` makes more sense."
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "container-libs",
+            "number": 256
+        }
+    ]
+}

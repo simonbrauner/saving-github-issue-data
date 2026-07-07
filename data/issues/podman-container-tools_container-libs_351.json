@@ -1,0 +1,41 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "container-libs",
+    "number": 351,
+    "type": "issue",
+    "title": "Add support for amd64 platform variants",
+    "state": "open",
+    "labels": [
+        "enhancement",
+        "image"
+    ],
+    "user": "WanzenBug",
+    "body": "Go 1.18 introduced platform variants [for amd64](https://go.dev/wiki/MinimumRequirements#amd64) (example: `linux/amd64/v2`). As far as I know, this lines up with [microarchitecture levels](https://en.wikipedia.org/wiki/X86-64#Microarchitecture_levels) defined by Linux distributions.\n\nAs such, it would be great if we could ship containers optimized for a specific microarchitecture, where the container platform detects the correct image to use. Right now, the detected platform is always \"linux/amd64\", which causes only the fallback image to be used instead of an optimized one when using an image manifest like this:\n\n```json\n    [{\n      \"mediaType\": \"application/vnd.oci.image.manifest.v1+json\",\n      \"digest\": \"sha256:a70b99317ded05d4bc9dfcf218c47c5376a24dc38c29676be971f1ce6eb449b0\",\n      \"size\": 1249,\n      \"platform\": {\n        \"architecture\": \"amd64\",\n        \"os\": \"linux\",\n        \"variant\": \"v3\"\n      }\n    },\n    {\n      \"mediaType\": \"application/vnd.oci.image.manifest.v1+json\",\n      \"digest\": \"sha256:e82466228ba672a78d80391d1d7863512ed6688db4c1490c3220536372086e32\",\n      \"size\": 1249,\n      \"platform\": {\n        \"architecture\": \"amd64\",\n        \"os\": \"linux\",\n        \"variant\": \"v2\"\n      }\n    },\n    {\n      \"mediaType\": \"application/vnd.oci.image.manifest.v1+json\",\n      \"digest\": \"sha256:59c4b481a2bfd500cee1e97e4fe2cdaa5dfdc9575404e7384c62661763c52cb8\",\n      \"size\": 1249,\n      \"platform\": {\n        \"architecture\": \"amd64\",\n        \"os\": \"linux\"\n      }\n    }]\n```\n\nCould we add the required logic to detect the support microarchitecture to [image/internal/pkg/platform/platform_matcher.go](https://github.com/containers/container-libs/blob/main/image/internal/pkg/platform/platform_matcher.go)?",
+    "comments": [
+        {
+            "user": "mtrmac",
+            "body": "Thanks for reaching out!\n\nI do think adding support for this makes sense, and doing that when pulling images _in order to run them_ seems clearly to be an improvement.\n\nBut this might interact with builds - a `FROM base-image` automatically pulling a v4 variant would result in an image not consumable on ≤v3.\n\n@containers/buildah-maintainers , does anything special need to be done around Buildah to support amd64 variants? Looking at the `buildah from` implementation, I can’t see any code specifically dealing with variants _by default_; I don’t know whether that’s because the default behavior is OK, because this has only affected ARM and so far has not been a priority, or (most likely) because I have missed something important about the code / design."
+        },
+        {
+            "user": "WanzenBug",
+            "body": "Very good point. I think the right behaviour would be for all builds to assume the baseline variant unless explicitly requested. \nBut that could quickly get murky in more advanced set ups, when it is not clear if some container will eventually be commited and pushed 🤔 \n\nI'm guessing for ARM this is fine because there really is only one variant in use (arm64/v8)."
+        },
+        {
+            "user": "nalind",
+            "body": "The `github.com/containerd/platforms` package we use for normalization defaults to normalizing linux/amd64/v1 to linux/amd64, and we preserve the variant in the config for image builds that use \"FROM scratch\", so I think we're okay as far as those cases go.\n\nWe tend to preserve the information from base images when committing images that are based on them, and that could make things interesting when it comes to pulling images.\n\nI'm guessing that whether a \"linux/amd64\" image is okay when we're looking for \"linux/amd64/v2\", for example, is probably going to vary depending on whether we want to use it as a base image for a build (I'm guessing no?), or we want to run it (where I'm guessing it'll do?), and I don't know that we're ready for that."
+        },
+        {
+            "user": "mtrmac",
+            "body": "Reading `libimage/LookupImage`, I think (but didn’t test) that lookup with an _explicit_ `linux/amd64/v2` will not match a `linux/amd64[/v1]` image, and vice versa — and, I guess, trigger a re-pull (moving the local tag to the other alternative). So, that might be be “correct” in the sense that builds and pulls can choose their own desired variant — modulo races in concurrent use redirecting each others’ tag :| There are also some comments about architecture handling of manifest lists being suspect.\n\nThat’s that one little part; something would need to still set the _desired_ platform on pulls, and on builds. (For pulls, if we first build for /v1 and then pull to run the same image locally, if the caller does not explicitly ask for /v2, I think we might end up finding the /v1 and using it, not re-pulling a /v2 — not optimal but maybe not a disaster.)"
+        },
+        {
+            "user": "nalind",
+            "body": "If we're not using the `platforms.DefaultSpec()` value when we need info about the current platform (there are some places where we used to wing it with just `runtime.GOOS` and `runtime.GOARCH`, and I don't know that we've gone through everything to find them all), then we probably should."
+        },
+        {
+            "user": "mtrmac",
+            "body": "There are, roughly, three kinds of pulls (and lookups of local images — the two might not achieve equivalent results):\n- give me the best image that runs on this system\n- give me the best image compatible with (os, arch, variant) — a more general case of the above\n- give me _precisely_ (os, arch, variant).\n\nMost of the APIs we have don’t strictly differentiate between the “best compatible” and “precisely” cases — if anything, we tend to have “best image for this system” (set no flags) and “precisely this” (set _any_ of os/arch/variant)."
+        }
+    ],
+    "cross_references": []
+}

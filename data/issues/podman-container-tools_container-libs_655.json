@@ -1,0 +1,69 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "container-libs",
+    "number": 655,
+    "type": "pull_request",
+    "title": "copy: add option to strip sparse manifest lists",
+    "state": "closed",
+    "labels": [
+        "image"
+    ],
+    "user": "aguidirh",
+    "body": "# Add option to strip sparse manifest lists\n\nThis PR adds the ability to strip missing instances from manifest lists when copying only a subset of images from a multi-architecture manifest, addressing compatibility issues with registries that don't support sparse manifest lists. The implementation of this PR was based on containers/image#1707\n\n## Motivation\n\nCloses #227\n\nWhen using `CopySpecificImages` to copy only certain platforms from a multi-architecture image, the resulting manifest list in the destination still references all original instances, even though only a subset was actually copied. This creates a \"sparse\" manifest list where some referenced instances don't exist.\n\n**Problem:**\n1. **Registry Compatibility**: Some registries reject sparse manifest lists or fail to serve them correctly\n2. **Digest Mismatches**: The manifest list still has the original digest even though the content differs\n3. **No User Control**: Users had no way to control this behavior - they were forced to accept sparse lists\n\nThis PR provides users explicit control over this behavior.\n\n## Changes\n\n### 1. New `SparseManifestListAction` type and option\n\n- Added `SparseManifestListAction` enum with two values:\n  - `KeepSparseManifestList` (default): Preserves existing behavior - keeps manifest list as-is even when some instances are missing\n  - `StripSparseManifestList`: Removes non-copied instances from the destination manifest list\n- Added `SparseManifestListAction` field to `Options` struct\n- Works with `CopySpecificImages` mode\n\n### 2. New `RemoveListSignatures` option for granular signature control\n\n- Added `RemoveListSignatures` field to `Options` struct\n- Removes only the manifest list signature while preserving per-instance signatures\n- Provides more granular control than `RemoveSignatures` (which removes all signatures)\n- When `RemoveSignatures` is true, it takes precedence\n\n### 3. Instance operation refactoring\n\n- Renamed `instanceCopy` → `instanceOp` and `instanceCopyKind` → `instanceOpKind` for clarity\n- Added `instanceOpDelete` operation alongside `instanceOpCopy` and `instanceOpClone`\n- Modified `prepareInstanceOps()` to return both the operation list and the count of copy/clone operations (excluding deletes)\n- Delete operations are processed in reverse order (highest to lowest index) to avoid index shifting issues\n\n### 4. Manifest list editing support\n\n- Added `ListOpDelete` operation to `ListEdit`\n- Added `DeleteIndex` field to `ListEdit` for specifying which instance to delete\n- Implemented delete support in both OCI Index and Docker Schema2 List formats\n- Added bounds checking to prevent invalid delete operations\n\n### 5. Validation and error handling\n\n- Prevents creating empty manifest lists (returns error if all instances would be deleted)\n- Validates that stripping can only happen when signatures are handled (via `RemoveSignatures` or `RemoveListSignatures`)\n- Clear error messages when stripping is requested but signatures prevent modification\n- Improved error context for system image selection from manifest lists\n\n## User Experience\n\n**Before (sparse lists always created):**\n```go\noptions := &copy.Options{\n    ImageListSelection: copy.CopySpecificImages,\n    Instances:         []digest.Digest{amd64Digest},\n}\n// Result: Sparse manifest list with missing instances\n// Some registries may reject or fail to serve this\n\nopy.Options{\n    ImageListSelection:       copy.CopySpecificImages,\n    Instances:                []digest.Digest{amd64Digest},\n    SparseManifestListAction: copy.StripSparseManifestList,\n    RemoveSignatures:         true,\n}\n```\n\n## Implementation Details\n\n### Code structure refactoring\n- Unified single-instance and manifest-list system image code paths for better maintainability\n- Moved error wrapping logic to common code path\n- Added validation to prevent RemoveListSignatures with single-instance copies\n\n### Safe deletion processing\n- Delete operations appended in reverse index order to prevent shifting issues\n- Separate tracking of copy/clone operations vs delete operations\n- Progress reporting reflects actual copy count, not total operation count\n\n## Testing\nComprehensive test coverage includes:\n\n✅ Basic copy operations with and without stripping\n✅ Delete operations in OCI Index and Docker Schema2 formats\n✅ Bounds checking for invalid delete indices\n✅ Signature handling validation (requires explicit removal when stripping)\n✅ Empty manifest list prevention\n✅ Integration tests with actual copy operations\n✅ Copy count assertions in prepareInstanceOps tests\n✅ All existing tests continue to pass\nCompatibility\n✅ Fully backward compatible - new optional fields with safe defaults\n✅ Default behavior (KeepSparseManifestList) matches existing behavior\n✅ Existing code continues to work unchanged\n✅ No breaking changes to public API\n\n## Credits\n\nThis implementation is based on the original work by @bertbaron and @mtrmac in containers/image#1707, adapted for the container-libs monorepo structure.",
+    "comments": [
+        {
+            "user": "packit-as-a-service[bot]",
+            "body": "Packit jobs failed. @containers/packit-build please check."
+        },
+        {
+            "user": "aguidirh",
+            "body": "@mtrmac when using `StripSparseManifestList` it will fail with `Manifest list was edited, but we cannot modify it: \"Would invalidate signatures\"` should we make mandatory the usage of `--remove-signatures` when using `StripSparseManifestList` ? "
+        },
+        {
+            "user": "mtrmac",
+            "body": "> should we make mandatory the usage of `--remove-signatures` when using `StripSparseManifestList` ?\n\nHum… it’s a thought.\n\nWe currently ask the user to explicitly use `--remove-signatures` for all other edits (e.g. converting the manifest format or changing compression), so I think also requiring an explicit ACK that the signatures are going to be broken would be consistent here.\n\n---\n\nActually, c/image only _cares_ about the signatures of the per-platform instances, it never validates the signature on the list (but it does _create_ it). So, ideally, we should allow stripping the list’s signature but keep the per-instance signatures, so that users can create sparse mirrors but _still_ validate image integrity. I think that would be a new option in `copy.Options` — and maybe _some_ mirroring tools (in _some_ situations?) would enable it by default when the user explicitly asks for sparse copies.\n\nE.g., purely hypothetically, it might make sense to hard-code this to on when mirroring the OpenShift product payload, because we know how signatures are validated there; and maybe not hard-code it for other images, because those might be validated using some other software like `cosign`."
+        },
+        {
+            "user": "TomSweeneyRedHat",
+            "body": "LGTM\nand happy green test buttons."
+        },
+        {
+            "user": "aguidirh",
+            "body": "> We currently ask the user to explicitly use `--remove-signatures` for all other edits (e.g. converting the manifest format or changing compression), so I think also requiring an explicit ACK that the signatures are going to be broken would be consistent here.\n\nI added a validation which requires the user to use `RemoveSignatures` or the new option `StripOnlyListSignatures` when `SparseManifestListAction == StripSparseManifestList`\n\n> \n> Actually, c/image only _cares_ about the signatures of the per-platform instances, it never validates the signature on the list (but it does _create_ it). So, ideally, we should allow striping the list’s signature but keep the per-instance signatures, so that users can create sparse mirrors but _still_ validate image integrity. I think that would be a new option in `copy.Options` — and maybe _some_ mirroring tools (in _some_ situations?) would enable it by default when the user explicitly asks for sparse copies.\n\nI added an option `StripOnlyListSignatures` where it removes the signature of the manifest list while it keeps the signature of the instances requested by the user.\n\n> \n> E.g., purely hypothetically, it might make sense to hard-code this to on when mirroring the OpenShift product payload, because we know how signatures are validated there; and maybe not hard-code it for other images, because those might be validated using some other software like `cosign`.\n\nI'm not sure if I understood this last comment, could you please explain it to me? \n\nI just pushed a commit with the last changes that I mentioned above.\n"
+        },
+        {
+            "user": "mtrmac",
+            "body": "> > purely hypothetically, it might make sense to hard-code this to on when mirroring the OpenShift product payload, because we know how signatures are validated there; and maybe not hard-code it for other images, because those might be validated using some other software like `cosign`.\n> \n> I'm not sure if I understood this last comment, could you please explain it to me?\n\nSoftware that _knows_ how the images is going to be used can hard-code option values so that users don’t have to care; generic software like `skopeo` should probably default to doing the safe thing, and not discard potentially-valuable data or break signatures without the user understanding the consequence."
+        },
+        {
+            "user": "TomSweeneyRedHat",
+            "body": "LGTM"
+        },
+        {
+            "user": "TomSweeneyRedHat",
+            "body": "/lgtm"
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "container-libs",
+            "number": 227
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 28339
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "buildah",
+            "number": 6740
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "container-libs",
+            "number": 713
+        }
+    ]
+}

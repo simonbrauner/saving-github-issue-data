@@ -1,0 +1,64 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "container-libs",
+    "number": 254,
+    "type": "issue",
+    "title": "http.Transport configuration enforces http1.1 and causes issues with istio",
+    "state": "open",
+    "labels": [
+        "image"
+    ],
+    "user": "jhart1685",
+    "body": "This code https://github.com/containers/image/blob/master/pkg/tlsclientconfig/tlsclientconfig.go#L100-L105 \n\nCreates an http transport with a custom dialler, which means that by default, Go will not allow the connection to be upgraded to http2 (this is explained in the documentation of the [ForceAttemptHTTP2](https://github.com/golang/go/blob/master/src/net/http/transport.go#L277-L282) option).\n\nThis, coupled with the `DisableKeepAlives: true` option, means that the resulting connection is susceptible to being chopped quickly by the server.\nSee https://github.com/istio/istio/issues/30577 for background of this.. \nBut essentially, if you are doing (for example) a skopeo copy of an image between two registries, and the source registry is hosted behind an istio ingress, the image read is likely to get terminated early with an EOF. \n\nI've seen other issues in this repo around EOFs, improving diagnostics and logging of them for example.\nBut the frequency of these EOFs can be much reduced by implementing one of the following options:\n- Allowing keepalives on the http(1.1) client connection.\n- Allowing the connection to be upgraded to http2 , either by not using a custom dialler, or by setting the `ForceAttemptHTTP2` option.",
+    "comments": [
+        {
+            "user": "vrothberg",
+            "body": "Thanks for reaching out and the great summary, @jhart1685!\n\nI browsed a bit around and had a look. Docker is also disabling the keep alives while containerd does not. I need to look a bit closer to check whether changing that in c/image would have other implications.\n\n@mtrmac @rhatdan WDYT?"
+        },
+        {
+            "user": "mtrmac",
+            "body": "I’ll try to check in more detail later — just as a very general point, the `pkg/tlsclientconfig` was created for compatibility, but we mostly have neither the interest nor the expertise to fine-tune TCP and similar low-level layers, and especially to keep up with the changing best practices.\n\nWe probably can’t just blindly drop everything in there; overall, it does seem attractive to decrease the deviation from defaults when we don’t have a specific reason to keep deviating."
+        },
+        {
+            "user": "jhart1685",
+            "body": "Hi @vrothberg @mtrmac - Thanks for looking. I take your point about fine-tuning TCP not being the core function of this project. Likewise, it's not my area of expertise either.\n\nBut in this case, we've tracked down one of the causes of the EOFs that make Skopeo unusable in certain situations. It looks like a relatively small modification here (albeit one still to be made carefully and with due diligence wrt testing etc.) \ncould make the client much more tolerant of different server configurations, and provide a big win in terms of reliability."
+        },
+        {
+            "user": "mtrmac",
+            "body": "Oh I’m absolutely not saying that we shouldn’t change the code in that package ever; I mean that it would be nice to avoid making such choices if we are not in a position to maintain them well, i.e. tend to remove code from there if possible / reasonable."
+        },
+        {
+            "user": "mtrmac",
+            "body": "> This code https://github.com/containers/image/blob/master/pkg/tlsclientconfig/tlsclientconfig.go#L100-L105\n> \n> Creates an http transport with a custom dialler, which means that by default, Go will not allow the connection to be upgraded to http2 (this is explained in the documentation of the [ForceAttemptHTTP2](https://github.com/golang/go/blob/master/src/net/http/transport.go#L277-L282) option).\n\nJust for the record, that would happen anyway because we always set `TLSClientConfig`. So we would have to affirmatively opt into HTTP/2. (And the `http` package documentation doesn’t say why `TLSClientConfig` disables HTTP/2…)\n\n> This, coupled with the `DisableKeepAlives: true` option, means that the resulting connection is susceptible to being chopped quickly by the server.\n> See [istio/istio#30577](https://github.com/istio/istio/issues/30577) for background of this..\n\n… and reading https://github.com/istio/istio/issues/30577#issuecomment-772120680 / https://github.com/istio/istio/issues/30577#issuecomment-772705815 , we are talking about an unreliable workaround to a heuristic, not(?) some fundamental property of TCP.\n\n---\n\nIt’s seriously unclear to me why Docker and containerd did / did not make the choices they did. The decision to disable keepalives seems to come from https://github.com/moby/moby/pull/797/commits/cff3b37a61b8da883437eec799b7b852d22538f0 , which does not document any rationale, at best the containing PR vaguely suggests a direction."
+        },
+        {
+            "user": "mtrmac",
+            "body": "Linking for context: containers/container-libs#260 ."
+        },
+        {
+            "user": "jhart1685",
+            "body": "> Just for the record, that would happen anyway because we always set TLSClientConfig. So we would have to affirmatively opt into HTTP/2. (And the http package documentation doesn’t say why TLSClientConfig disables HTTP/2…) \n\nHmm - yes, could be that my simplified recreate moved too far away from this code and introduced that different dimension.\n\n> … and reading istio/istio#30577 (comment) / istio/istio#30577 (comment) , we are talking about an unreliable workaround to a heuristic, not(?) some fundamental property of TCP.\n\nYes. I think the server-side configuration to mitigate this is an unreliable workaround. The client modifications being discussed here are more like defensive coding, to harden the code against a variety of server types and configurations.\n"
+        },
+        {
+            "user": "mtrmac",
+            "body": "As of containers/image#1867, nothing in c/image disables HTTP keep-alive; so, per the initial motivation,\n> But the frequency of these EOFs can be much reduced by implementing one of the following options:\n\nthat should now work better.\n\n---\n\nHTTP/2 is still effectively opted out because we set `DialContext`."
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "container-libs",
+            "number": 260
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "container-libs",
+            "number": 245
+        },
+        {
+            "organization": "containers",
+            "repository": "image",
+            "number": 1469
+        }
+    ]
+}

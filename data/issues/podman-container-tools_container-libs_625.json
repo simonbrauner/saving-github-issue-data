@@ -1,0 +1,39 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "container-libs",
+    "number": 625,
+    "type": "pull_request",
+    "title": "image: Add buildSignerURI for Fulcio workflow identity verification",
+    "state": "open",
+    "labels": [
+        "image"
+    ],
+    "user": "abyrne55",
+    "body": "This PR adds support for verifying Sigstore signatures from CI workflows (e.g., GitHub Actions) by matching on the Fulcio `BuildSignerURI` certificate extension (OID `1.3.6.1.4.1.57264.1.9`).\n\nThis addresses a gap where keyless Sigstore signatures created by automated CI workflows could not be verified via `policy.json`, since the existing `subjectEmail` field only matches email-based identities from interactive signing.\n\nCloses containers/container-libs#34\n\n## Security Model\n\n**What does a signature with `buildSignerURI` prove?**\n\nA valid signature means:\n1. The OIDC issuer (e.g., `https://token.actions.githubusercontent.com`) [authenticated the signer](https://docs.sigstore.dev/certificate_authority/oidc-in-fulcio/)\n2. The Fulcio CA issued a [certificate](https://docs.sigstore.dev/certificate_authority/certificate-issuing-overview/) binding that identity to a signing key\n3. The certificate's `BuildSignerURI` extension ([Fulcio OID 1.3.6.1.4.1.57264.1.9](https://github.com/sigstore/fulcio/blob/main/docs/oid-info.md)) matches the policy-specified workflow URI exactly\n4. The signature was recorded in [Rekor's immutable transparency log](https://docs.sigstore.dev/logging/overview/)\n\nThis allows policies like: *\"Accept images signed by the `release.yml` workflow in `myorg/myrepo` on the `main` branch, authenticated via GitHub Actions OIDC.\"*\n\n## Design Decisions\n\n| Decision | Rationale |\n|----------|-----------|\n| **Match on OID 1.9, not SAN URI** | Fulcio can include multiple identities in a certificate's SAN field; matching the dedicated `BuildSignerURI` OID is semantically unambiguous. |\n| **Exact string matching** | No substring or regex matching — reduces misconfiguration risk. |\n| **Follows existing OID extraction pattern** | `fulcioBuildSignerURIInCertificate` mirrors `fulcioIssuerInCertificate` for consistency. |\n\n## Example Configuration\n\n```json\n{\n  \"type\": \"sigstoreSigned\",\n  \"fulcio\": {\n    \"caPath\": \"/etc/pki/containers/fulcio.sigstore.dev.pub\",\n    \"oidcIssuer\": \"https://token.actions.githubusercontent.com\",\n    \"buildSignerURI\": \"https://github.com/myorg/myrepo/.github/workflows/release.yml@refs/heads/main\"\n  },\n  \"rekorPublicKeyPath\": \"/etc/pki/containers/rekor.sigstore.dev.pub\",\n  \"signedIdentity\": {\"type\": \"matchRepository\"}\n}\n```\n\n## Testing\n\n- [x] Unit tests for `fulcioBuildSignerURIInCertificate` (valid extraction, missing extension, duplicate extension, invalid ASN.1)\n- [x] Unit tests for `fulcioTrustRoot.validate()` with new field combinations\n- [x] Unit tests for policy JSON unmarshaling with `buildSignerURI`\n- [x] Unit tests for certificate verification with `buildSignerURI` matching/mismatching\n- [x] Manual integration test with Skopeo and a signed GHCR image - see [test report](https://gist.github.com/abyrne55/03608b0ba811f18eada4c6d950f496f2)\n\n## Related\n\n- Original discussion: containers/image#2235\n- Fulcio OID documentation: https://github.com/sigstore/fulcio/blob/main/docs/oid-info.md",
+    "comments": [
+        {
+            "user": "TomSweeneyRedHat",
+            "body": "@nalind @mtrmac WDYT?\nLGTM, but I don't have in depth Fulcio knowledge\n"
+        },
+        {
+            "user": "baude",
+            "body": "@mtrmac ptal"
+        },
+        {
+            "user": "andrewdunndev",
+            "body": "Same gap here, on the GitLab side.\n\nI sign bootc images (a FROM-scratch Fedora base plus instance images layered on top) via GitLab CI keyless against the public-good Sigstore. The goal is `containers/image` policy verification active at `bootc install` and `bootc upgrade` time, same `Required email \"...\" not found (got [])` failure as my earlier comment on [container-libs#388](https://github.com/containers/container-libs/issues/388#issuecomment-4057252260), just from a different OIDC issuer (`https://gitlab.com`).\n\nSome GitLab-side facts since the thread is GitHub-only so far.\n\nGitLab fixes the token claim set. Operators control `aud` via [`id_tokens:`](https://docs.gitlab.com/ci/yaml/#id_tokens); the rest of the claim roster is enumerated at [id_token_authentication](https://docs.gitlab.com/ci/secrets/id_token_authentication/), and there's no documented mechanism to override or add claims from CI. Custom claims are [an open proposal in the unscheduled Backlog](https://gitlab.com/gitlab-org/gitlab/-/issues/462017), so there's no client-side workaround in sight. Whatever GitLab and Fulcio produce is what we have to verify against.\n\nFulcio's `gitlab-pipeline` mapping was added in [Fulcio PR #983](https://github.com/sigstore/fulcio/pull/983) (May 2023). From [`config/identity/config.yaml`](https://github.com/sigstore/fulcio/blob/main/config/identity/config.yaml) the cert produces:\n\n| OID 1.3.6.1.4.1.57264.1.x | What | Source |\n|---|---|---|\n| .9 | buildSignerURI (this PR's matcher) | `\"https://\" + ci_config_ref_uri` |\n| .12 | sourceRepositoryURI | `<url> + \"/\" + project_path` |\n| .14 | sourceRepositoryRef | `refs/heads/<ref>` or `refs/tags/<ref>` |\n| .20 | buildTrigger | `pipeline_source` |\n| .22 | sourceRepositoryVisibilityAtSigning | `project_visibility` |\n\nSAN URI is `https://<ci_config_ref_uri>`, where `ci_config_ref_uri` has the form `gitlab.com/group/project//.gitlab-ci.yml@refs/heads/main` (per the comment in Fulcio's config). `EmailAddresses` is empty, which is what produces the `got []`.\n\nThe matcher this PR adds (`buildSignerURI`, OID 1.9) lands the GitLab case. GitLab populates OID 1.9 with a stable URI for the signing job, so the matcher is semantically correct for us out of the box. Happy to dump a real cert from our registry as a non-GitHub fixture if the test suite wants one.\n\nOn the \"what does the signature mean\" question from #2235: for an operator who controls only `aud` at signing time, all the trust narrowing has to live in `policy.json`. What we want it to assert is \"image came from a pipeline in our GitLab project, on a protected branch, from a CI identity we recognize.\" `buildSignerURI` matches the workflow identity; combining it with a `sourceRepositoryRef` matcher for the branch constraint gets us the assertion.\n\nThe plugin proposal in [container-libs#388 (May 4 comment)](https://github.com/containers/container-libs/issues/388#issuecomment-4373407591) is complementary: this PR closes the GitLab case via OID 1.9, the plugin path would handle issuers Fulcio doesn't yet map cleanly.\n\nGlad to run this branch against our production signatures and report back if it helps.\n"
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "jfroy",
+            "repository": "etincelle",
+            "number": 2
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "container-libs",
+            "number": 388
+        }
+    ]
+}

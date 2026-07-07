@@ -1,0 +1,117 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "container-libs",
+    "number": 171,
+    "type": "issue",
+    "title": "`podman images` slow with `--uidmap`",
+    "state": "open",
+    "labels": [
+        "storage"
+    ],
+    "user": "freva",
+    "body": "**Is this a BUG REPORT or FEATURE REQUEST? (leave only one on its own line)**\n\n/kind bug\n\n**Description**\n\nWe run a single ~6 GB podman image with multiple containers, each rootfull and with a unique `--uidmap` & `--gidmap`. When running many (~20-30) such containers `podman images` command becomes very slow. After a quick look with `strace` and some other debugging, I believe most of the time spent is to calculate the image size. Unfortunately there is no way to skip that, even with `--quiet`.\n\n**Steps to reproduce the issue:**\n\n1. Reset podman system:\n```\n$ sudo podman system reset\n\nWARNING! This will remove:\n        - all containers\n        - all pods\n        - all images\n        - all build cache\nAre you sure you want to continue? [y/N] y\nA storage.conf file exists at /etc/containers/storage.conf\nYou should remove this file if you did not modified the configuration.\n```\n\n2. Pull a large image and , run `podman images -a`:\n```\n$ sudo podman pull example.com/repo/image\n...\n$ time sudo podman images -a\nREPOSITORY              TAG         IMAGE ID      CREATED       SIZE\nexample.com/repo/image  latest    55e255254b1f  35 hours ago  6.33 GB\n\nreal\t0m0.160s\nuser\t0m0.040s\nsys\t0m0.048s\n```\n\n3. Start 30 containers, each with unique `--uidmap`\n\n```\n$ for i in {1..30}; do sudo podman run -d --uidmap 0:$i:100000 example.com/repo/image; done\n...\n$ time sudo podman images -a\nREPOSITORY              TAG         IMAGE ID      CREATED       SIZE\nexample.com/repo/image  latest    55e255254b1f  35 hours ago  23.1 GB\n\nreal\t1m0.881s\nuser\t0m37.914s\nsys\t0m43.773s\n```\n\n4. Remove all containers (also very slow...):\n```\n$ time sudo podman rm -f $(sudo podman ps -aq) > /dev/null\nreal\t5m9.833s\nuser\t0m1.020s\nsys\t0m1.159s\n$ time sudo podman images -a\nREPOSITORY              TAG         IMAGE ID      CREATED       SIZE\nexample.com/repo/image  latest    55e255254b1f  35 hours ago  23.1 GB\n\nreal\t0m57.164s\nuser\t0m36.532s\nsys\t0m41.995s\n```\n\n5. Remove the image (Even though there are no containers or images at this point, podman still uses lots of space, see table below. But `podman images -a` is fast):\n```\n$ time sudo podman rmi $(sudo podman images -aq)\nUntagged: example.com/repo/image:latest\nDeleted: 55e255254b1f146a3857e9e57c7c9f1d8fc5c8be8e26e32f475081885d8fa23f\n\nreal\t1m20.925s\nuser\t0m50.986s\nsys\t0m59.144s\n$ time sudo podman images -a\nREPOSITORY  TAG         IMAGE ID    CREATED     SIZE\n\nreal\t0m0.162s\nuser\t0m0.033s\nsys\t0m0.042s\n```\n\n6. Redownload last image (note that all except last layer already exist even though I've just deleted the last image in the previous step):\n```\n$ sudo podman pull example.com/repo/image:latest\nTrying to pull example.com/repo/image:latest...\nGetting image source signatures\nCopying blob 273b8b71b7b6 skipped: already exists  \nCopying blob 5f4a79f41734 skipped: already exists  \nCopying blob 1d7e57823380 skipped: already exists  \nCopying blob 094dd4168f45 skipped: already exists  \nCopying blob 1da4ce7e5083 skipped: already exists  \nCopying blob 66934d8f93e1 skipped: already exists  \nCopying blob 933e13ee990c skipped: already exists  \nCopying blob 7ef04668fb37 skipped: already exists  \nCopying blob 6f9c51b8f8b2 skipped: already exists  \nCopying blob d2f3b5997ad1 skipped: already exists  \nCopying blob e0f5f3dbfa53 skipped: already exists  \nCopying blob 1f5c8166c3ba skipped: already exists  \nCopying blob 6862b881cb80 skipped: already exists  \nCopying blob 33c7276c4f03 skipped: already exists  \nCopying blob c53545616dfe skipped: already exists  \nCopying blob 7d8d70253d88 skipped: already exists  \nCopying blob 670c55e249d5 skipped: already exists  \nCopying blob b6436833b837 done  \nCopying config 55e255254b done  \nWriting manifest to image destination\nStoring signatures\n55e255254b1f146a3857e9e57c7c9f1d8fc5c8be8e26e32f475081885d8fa23f\n```\n\n7. Delete the image again:\n```\n$ time sudo podman rmi $(sudo podman images -aq)\nUntagged: example.com/repo/image:latest\nDeleted: 55e255254b1f146a3857e9e57c7c9f1d8fc5c8be8e26e32f475081885d8fa23f\n\nreal\t0m1.825s\nuser\t0m0.730s\nsys\t0m1.219s\n```\n\nI've also collected a few stats at the end of each of steps above:\n* \\# nodes: `sudo find /var/lib/containers/storage/ | wc -l`\n* `du` size: `sudo du -skh /var/lib/containers/storage/`\n* Δ `df` size: Difference in used size from `df` on the filesystem that has `/var/lib/containers/storage/`\n\n| Step | #FS nodes | `du` size | Δ `df` size |\n|---:|---:|---:|---:|\n| 1 |  - | - | - |\n| 2 | 55000 | 6.0G | +6.2G |\n| 3 | 3221487 | 179G | +0.9G |\n| 4 | 1714063 | 17G | -29M |\n| 5 | 51137 | 5.5G | -1.6G |\n| 6 | 55001 | 6.0G | +0.7G |\n| 7 | 21 | 660K | -6.2G |\n\n**Describe the results you expected:**\nThere needs to be a way to list images without size information or at least optimize it, my understanding is that the image is written only once, the other \"copies\" are just mounts over the original storage with ShiftFS. So it should be enough to stat the real image files once and skip the ShiftFS mounts?\n\nAnother issue I discovered while collecting the data above; Why are nearly all layers of the original image still there after I remove the image in step 5? \n\n**Output of `podman info --debug`:**\n\n```\nhost:\n  arch: amd64\n  buildahVersion: 1.21.3\n  cgroupControllers:\n  - cpuset\n  - cpu\n  - io\n  - memory\n  - hugetlb\n  - pids\n  cgroupManager: systemd\n  cgroupVersion: v2\n  conmon:\n    package: conmon-2.0.29-1.module+el8.4.0+11822+6cc1e7d7.x86_64\n    path: /usr/bin/conmon\n    version: 'conmon version 2.0.29, commit: ae467a0c8001179d4d0adf4ada381108a893d7ec'\n  cpus: 24\n  distribution:\n    distribution: '\"rhel\"'\n    version: \"8.4\"\n  eventLogger: file\n  hostname: xxx\n  idMappings:\n    gidmap: null\n    uidmap: null\n  kernel: 4.18.0-305.19.1.el8_4.x86_64\n  linkmode: dynamic\n  memFree: 3411726336\n  memTotal: 50383847424\n  ociRuntime:\n    name: crun\n    path: /usr/bin/crun\n    version: |-\n      crun version 1.0\n      commit: 139dc6971e2f1d931af520188763e984d6cdfbf8\n      spec: 1.0.0\n      +SYSTEMD +SELINUX +APPARMOR +CAP +SECCOMP +EBPF +YAJL\n  os: linux\n  remoteSocket:\n    path: /run/podman/podman.sock\n  security:\n    apparmorEnabled: false\n    capabilities: CAP_NET_RAW,CAP_CHOWN,CAP_DAC_OVERRIDE,CAP_FOWNER,CAP_FSETID,CAP_KILL,CAP_NET_BIND_SERVICE,CAP_SETFCAP,CAP_SETGID,CAP_SETPCAP,CAP_SETUID,CAP_SYS_CHROOT\n    rootless: false\n    seccompEnabled: true\n    seccompProfilePath: /usr/share/containers/seccomp.json\n    selinuxEnabled: false\n  serviceIsRemote: false\n  slirp4netns:\n    executable: \"\"\n    package: \"\"\n    version: \"\"\n  swapFree: 0\n  swapTotal: 0\n  uptime: 71h 4m 13.08s (Approximately 2.96 days)\nregistries:\n  search:\n  - registry.access.redhat.com\n  - registry.redhat.io\n  - docker.io\nstore:\n  configFile: /etc/containers/storage.conf\n  containerStore:\n    number: 1\n    paused: 0\n    running: 1\n    stopped: 0\n  graphDriverName: overlay\n  graphOptions:\n    overlay.mountopt: nodev,metacopy=on\n  graphRoot: /data/containers/graph\n  graphStatus:\n    Backing Filesystem: xfs\n    Native Overlay Diff: \"false\"\n    Supports d_type: \"true\"\n    Using metacopy: \"true\"\n  imageStore:\n    number: 1\n  runRoot: /data/containers/run\n  volumePath: /data/containers/graph/volumes\nversion:\n  APIVersion: 3.2.3\n  Built: 1627370979\n  BuiltTime: Tue Jul 27 07:29:39 2021\n  GitCommit: \"\"\n  GoVersion: go1.15.7\n  OsArch: linux/amd64\n  Version: 3.2.3\n```\n\n**Package info (e.g. output of `rpm -q podman` or `apt list podman`):**\n\n```\npodman-3.2.3-0.10.module+el8.4.0+11989+6676f7ad.x86_64\n```\n\n**Have you tested with the latest version of Podman and have you checked the Podman Troubleshooting Guide? (https://github.com/containers/podman/blob/master/troubleshooting.md)**\n\nYes (with the latest available on RHEL 8.4 (podman 3.2.3))\n",
+    "comments": [
+        {
+            "user": "mheon",
+            "body": "@vrothberg PTAL, I know you've been doing some work in this area.\n\n@freva Any chance you can try with a more-recent Podman (3.4.x ideally)? We've definitely made some improvements already in this area."
+        },
+        {
+            "user": "vrothberg",
+            "body": "Thanks for the ping, @mheon!\n\nI recently did some major improvement to speed-up image listing.  But those improvement only apply when there is more than one image.  In this case, we have exactly one image and the performance degrades with the number of containers using that image.\n\n```\n$ time sudo podman images -a\nREPOSITORY              TAG         IMAGE ID      CREATED       SIZE\nexample.com/repo/image  latest    55e255254b1f  35 hours ago  23.1 GB\n```\n\nThat is very suspicious as the the image has been listed initially to be `6.33 GB`.  It seems like something's going on in storage.  The more containers use the image, the more expensive it gets to calculate the total storage consumption.  But I think that container shouldn't play any role here at all."
+        },
+        {
+            "user": "vrothberg",
+            "body": "Not sure if I will find time today but I will next week."
+        },
+        {
+            "user": "vrothberg",
+            "body": "@giuseppe PTAL\n\nThe reproducer works reliably on my machine as well.  Looks c/storage related to me."
+        },
+        {
+            "user": "giuseppe",
+            "body": "this problem will go away once we move to idmapped mounts"
+        },
+        {
+            "user": "giuseppe",
+            "body": "this happens because everytime you use a different mapping, c/storage needs to clone the image and chown it, effectively creating a new image.\n\nSo even if there is one image visible, in reality there are multiple images in the storage and we calculate the size for them.\n\nAFAICS, the cost grows linearly with how many images are in the storage (even if they are not visible with `podman images`).  \n\nI'd say it is better to just wait for the problem to be solved once idmapped mounts work well with overlay that adding more heuristics to c/storage."
+        },
+        {
+            "user": "vrothberg",
+            "body": "That makes sense, thank you, @giuseppe!\n\nDo you have a rough ETA on when idmapped mounts will arrive?"
+        },
+        {
+            "user": "rhatdan",
+            "body": "We have been told that they hope to have the kernel fixed by end of year.\nIDMapps do not work with Overlay at this point in the kernel"
+        },
+        {
+            "user": "vrothberg",
+            "body": "Shall we make showing the size optional?  It's expensive in any case but Docker displays it by default."
+        },
+        {
+            "user": "rhatdan",
+            "body": "Yes I think we should make it optional."
+        },
+        {
+            "user": "rhatdan",
+            "body": "And then have a containers.conf flag, if people want to match Docker behaviour."
+        },
+        {
+            "user": "ykuksenko",
+            "body": "Can the size be calculated once during image pull/import/creation/clone and stored instead of being calculated during each query?\nI am not aware of a reason an image would change without its Id also changing."
+        },
+        {
+            "user": "rhatdan",
+            "body": "That would make sense, @giuseppe WDYT?"
+        },
+        {
+            "user": "giuseppe",
+            "body": "that seems to make sense to me, I am wondering why we currently don't do that.  It might be because with images copied with `metacopy` the size is different since files are empty"
+        },
+        {
+            "user": "ykuksenko",
+            "body": "Doesn't an image that is copied with `metacopy`  become a container and therefore is not actually listable with `podman image ls`?\n\nNow that I think of it, the command to get a container size requires the `--size` flag (`podman ps --format=json --size`).\n- This makes sense to me, because it is an expensive operation. There is also not a good way to calculate the size of a container in advance as it is mutable.\n- An image on the other hand should not be mutable so should be pre-computable. \n  - If an image was mutable the `Id` would not have much meaning, at least to me.\n- If an image shares layers with other images that would be more of a `size on disk` number or an optimization rather than an image size.\n  - This may be covered by a `podman system df` command or possibly by `SharedSize` from `podman images --format=json -a`. My systems just show `0` for `SharedSize` for all my images. Not sure what else would cover this area.\n  - `metacopy` could fall under being an optimization (`size on disk`) with this logic."
+        },
+        {
+            "user": "Ramblurr",
+            "body": "> We have been told that they hope to have the kernel fixed by end of year. IDMapps do not work with Overlay at this point in the kernel\n\nA few years on, do idmapps work with the overlay driver on Linux 6.x? If not, would it be better to use the fuse-overlayfs to get the perf back?"
+        },
+        {
+            "user": "rhatdan",
+            "body": "idmap works for rootful not for rootless."
+        },
+        {
+            "user": "acromc",
+            "body": ">idmap works for rootful not for rootless.\n\n@rhatdan Is this still the case for overlay in modern kernel versions? what's the reason behind that?"
+        },
+        {
+            "user": "acromc",
+            "body": "I actually tried mounting overlay inside `podman unshare` and it worked perfectly. But somehow rootless podman pulls are unbearably slow (usually 2x time compared to rootful on same machine) especially for bigger images.\n\nHere is the mount info inside the userns via podman unshare\n```\noverlay /tmp/a01/merged overlay rw,relatime,lowerdir=/tmp/a01/lower,upperdir=/tmp/a01/upper,workdir=/tmp/a01/work,redirect_dir=nofollow,index=off,metacopy=off 0 0\n```\n\nMy kernel is v6.5.5 and podman is 4.7.1"
+        },
+        {
+            "user": "rhatdan",
+            "body": "Yes, We are working on podman pull being able to be done within the user namespace.  But for now, the kernel does not allow idmaping in rootless user namespace."
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 12316
+        },
+        {
+            "organization": "containers",
+            "repository": "prometheus-podman-exporter",
+            "number": 114
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 25821
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 25834
+        }
+    ]
+}

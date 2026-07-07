@@ -1,0 +1,80 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "container-libs",
+    "number": 174,
+    "type": "issue",
+    "title": "Reuse pgzip reader to avoid excessive buffer allocation",
+    "state": "closed",
+    "labels": [
+        "storage"
+    ],
+    "user": "mrunalp",
+    "body": "Here is an output from pulling a jboss wildfly image with a debugging diff:\n\n```\nINFO[2021-08-18 14:10:31.535974307-07:00] Pulling image: docker.io/jboss/wildfly:latest  id=8c2b83df-c6b9-4718-9164-7a92a34c29fc name=/runtime.v1alpha2.ImageService/PullImage\nINFO[2021-08-18 14:10:31.578657001-07:00] Trying to access \"docker.io/jboss/wildfly:latest\" \nINFO[2021-08-18 14:10:33.410380288-07:00] Trying to access \"docker.io/jboss/wildfly:latest\" \nAllocating 4 blocks of size 1048576\nAllocating 4 blocks of size 1048576\nAllocating 4 blocks of size 1048576\nAllocating 4 blocks of size 1048576\nAllocating 4 blocks of size 1048576\nAllocating 4 blocks of size 1048576\nAllocating 4 blocks of size 1048576\nAllocating buffer in pool\nAllocating 4 blocks of size 1048576\nAllocating buffer in pool\nAllocating 4 blocks of size 1048576\nAllocating 4 blocks of size 1048576\nAllocating 4 blocks of size 1048576\nAllocating 4 blocks of size 1048576\nAllocating buffer in pool\nAllocating 4 blocks of size 1048576\nAllocating 4 blocks of size 1048576\nAllocating 4 blocks of size 1048576\nAllocating 4 blocks of size 1048576\nAllocating buffer in pool\nAllocating 4 blocks of size 1048576\nAllocating 4 blocks of size 1048576\nAllocating 4 blocks of size 1048576\nAllocating 4 blocks of size 1048576\nAllocating buffer in pool\nAllocating 4 blocks of size 1048576\nAllocating 4 blocks of size 1048576\nAllocating 4 blocks of size 1048576\nAllocating 4 blocks of size 1048576\nAllocating 4 blocks of size 1048576\nAllocating 4 blocks of size 1048576\nAllocating 4 blocks of size 1048576\nAllocating 4 blocks of size 1048576\nAllocating 4 blocks of size 1048576\nAllocating 4 blocks of size 1048576\nAllocating 4 blocks of size 1048576\nAllocating 4 blocks of size 1048576\nAllocating 4 blocks of size 1048576\nAllocating 4 blocks of size 1048576\nAllocating 4 blocks of size 1048576\nAllocating 4 blocks of size 1048576\nAllocating 4 blocks of size 1048576\nAllocating 4 blocks of size 1048576\nAllocating 4 blocks of size 1048576\nAllocating 4 blocks of size 1048576\nAllocating buffer in pool\nINFO[2021-08-18 14:10:49.887144958-07:00] Pulled image: docker.io/jboss/wildfly@sha256:1f39dbbe874367e008c6d70fa687f1afec00a0304a53a8cf7d832b77221f6922  id=8c2b83df-c6b9-4718-9164-7a92a34c29fc name=/runtime.v1alpha2.ImageService/PullImage\n```\n\nDiff:\n\n```\ndiff --git a/vendor/github.com/klauspost/pgzip/gunzip.go b/vendor/github.com/klauspost/pgzip/gunzip.go\nindex d1ae730b2..5eab78acb 100644\n--- a/vendor/github.com/klauspost/pgzip/gunzip.go\n+++ b/vendor/github.com/klauspost/pgzip/gunzip.go\n@@ -17,6 +17,7 @@ package pgzip\n import (\n        \"bufio\"\n        \"errors\"\n+       \"fmt\"\n        \"hash\"\n        \"hash/crc32\"\n        \"io\"\n@@ -118,6 +119,7 @@ func NewReader(r io.Reader) (*Reader, error) {\n        z.multistream = true\n        z.blockPool = make(chan []byte, z.blocks)\n        for i := 0; i < z.blocks; i++ {\n+               fmt.Printf(\"Allocating %v blocks of size %v\\n\", z.blocks, z.blockSize)\n                z.blockPool <- make([]byte, z.blockSize)\n        }\n        if err := z.readHeader(true); err != nil {\n\n```\n\nThere is a ReaderN method that allows us to modify the number of blocks allocated.\nAlso, we could benefit from allocating the gzip Reader from a sync.Pool, so there is better reuse\nof the buffers during image pulls.\n\n@nalind @giuseppe @rhatdan @umohnani8 ",
+    "comments": [
+        {
+            "user": "mrunalp",
+            "body": "@mtrmac "
+        },
+        {
+            "user": "mrunalp",
+            "body": "https://github.com/emicklei/go-restful/blob/v3/compressor_cache.go https://github.com/emicklei/go-restful/blob/v3/compressor_pools.go implements a cache and a pool of gzip reader/writers"
+        },
+        {
+            "user": "giuseppe",
+            "body": "they don't seem like many allocations, but we probably improve it as you suggested with a pool of decompressors.\n\nWe can use `Reader.Reset(r io.Reader)` to re-use an existing allocated decompressor with a new stream"
+        },
+        {
+            "user": "mrunalp",
+            "body": "It looks like ~160 MB for that one image and if there are concurrent image pulls we can spike very high. Instead we can have a max layer pulls knob and tie the allocations based on that, so our memory usage is more predictable. "
+        },
+        {
+            "user": "mtrmac",
+            "body": "Does reuse actually help _spikes_? If there are concurrent image pulls, that implies concurrent buffer / pgzip uses, so reusing allocations _over time_ does not decrease the amount of memory actually necessary.\n\nSure, making work easier for the GC to avoid the GC over-allocating might still be very useful (tens of percent of memory usage is a real memory), but ultimately spike prevention and predictability might require actually limiting the concurrency, much more than reducing allocations."
+        },
+        {
+            "user": "vrothberg",
+            "body": "Isn't cri-o pulling in a dedicated cgroup?  If so, we could (in addition) set memory limits there."
+        },
+        {
+            "user": "mtrmac",
+            "body": "> Isn't cri-o pulling in a dedicated cgroup? If so, we could (in addition) set memory limits there.\n\nThat’s an extremely important point. “In a dedicated cgroup” actually means _in a separate process_ (https://github.com/cri-o/cri-o/blob/abbfb13221625fa8145253272079723dea4f742d/internal/storage/image.go#L467 ), so any work we could do to reduce allocations _across copies_ would be completely ineffective. Any reuse in that case would be scoped to a single `copy.Image`.\n\nBut I can see nothing setting `SeparatePullCgroup` in the CRI-O repo nor in MCO. I might be missing a place.\n\nDoes anyone know for certain?"
+        },
+        {
+            "user": "mrunalp",
+            "body": "The pull in cgroup isn't enabled by default today. That's something we have to test for various scenarios. The main motivation to enable it is charging the image pull to a pod. However, a pod could specify a low memory limit like ~20MB and we want image pulls to succeed even for such cases. "
+        },
+        {
+            "user": "mrunalp",
+            "body": "> Sure, making work easier for the GC to avoid the GC over-allocating might still be very useful (tens of percent of memory usage is a real memory), but ultimately spike prevention and predictability might require actually limiting the concurrency, much more than reducing allocations.\n\nAgree that limiting the concurrency will limit how much we allocate at a time. I am advocating for both. If we want to do only one at a time then we can start with limiting the concurrency. "
+        },
+        {
+            "user": "mtrmac",
+            "body": "> It looks like ~160 MB for that one image and if there are concurrent image pulls we can spike very high. Instead we can have a max layer pulls knob and tie the allocations based on that, so our memory usage is more predictable.\n\nBTW the standard library gzip implementation uses about 32 KB, instead of 4 MB. That would, I think, make this problem pretty much completely go away; the price we would pay is, per https://github.com/containers/storage/pull/255 , “30% improvement in the wall clock time”."
+        },
+        {
+            "user": "mtrmac",
+            "body": "> BTW the standard library gzip implementation uses about 32 KB, instead of 4 MB. That would, I think, make this problem pretty much completely go away; the price we would pay is, per containers/storage#255 , “30% improvement in the wall clock time”.\n\nSome data in https://github.com/containers/image/issues/1349#issuecomment-902057119 ."
+        },
+        {
+            "user": "vrothberg",
+            "body": "We could, in theory, synchronize across processes as well by means of shared memory.  But making it opt-in for one process space would be my favored approach (e.g., a semaphore that can be passed to copy.Options).\n\n@mtrmac @mrunalp WDYT?"
+        },
+        {
+            "user": "mtrmac",
+            "body": "> We could, in theory, synchronize across processes as well by means of shared memory.\n\nWay too much infrastructure (shared memory across what scope (all of the UID is not obviously what the user wants)? how do we recover from pulls starting, claiming one of the limited number of pulls, and crashing?), at least now when we aren’t actually using the out-of-process pulls.\n\n> But making it opt-in for one process space would be my favored approach (e.g., a semaphore that can be passed to copy.Options).\n\nYes, that seems like a great option (c/image already uses a semaphore for limiting concurrency, so we would just expand the scope)."
+        },
+        {
+            "user": "mrunalp",
+            "body": "Yeah, opt-in sounds good to me. Also, we will need to tune it in OpenShift for different environments depending on how much resources they have. "
+        },
+        {
+            "user": "mtrmac",
+            "body": "For the record, letting the caller of `copy.Image` limit concurrency was implemented by @vrothberg in https://github.com/containers/image/pull/1356 ."
+        },
+        {
+            "user": "mtrmac",
+            "body": "`ConcurrentBlobCopiesSemaphore` exists, to allow limiting the total memory that we might want to allocate concurrently; CRI-O doesn’t use it.\n\nGiven that, micro-optimizing _how_ we allocate buffers is not likely to make a noticeable difference."
+        }
+    ],
+    "cross_references": []
+}

@@ -1,0 +1,44 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "container-libs",
+    "number": 122,
+    "type": "issue",
+    "title": "OOMs in zstd code with zstd:chunked",
+    "state": "open",
+    "labels": [
+        "storage"
+    ],
+    "user": "cgwalters",
+    "body": "I am consistently getting `skopeo` being OOM killed when running this to convert a local overlay image I have to an OCI zstd:chunked format (so I can easily inspect/debug it):\n\n`skopeo --dest-compress-format zstd:chunked containers-storage:localhost/bootc-bound oci:/var/home/walters/tmp/oci:bootc-zstd-chunked`\n:arrow_right: \n`[195791.594936] Out of memory: Killed process 8421 (skopeo) total-vm:12788772kB, anon-rss:7695604kB, file-rss:0kB, shmem-rss:0kB, UID:0 pgtables:16388kB oom_score_adj:0`\n\nAnd yeah, I only have 8G allocated to this podman-machine instance right now.\n\nThis being my first time needing to profile a Go application's memory usage, some searching on the internet helped me craft this patch to skopeo:\n\n```\ndiff --git a/cmd/skopeo/main.go b/cmd/skopeo/main.go\nindex 8b8de3c7..64831579 100644\n--- a/cmd/skopeo/main.go\n+++ b/cmd/skopeo/main.go\n@@ -3,6 +3,8 @@ package main\n import (\n \t\"context\"\n \t\"fmt\"\n+\t\"os\"\n+\t\"runtime/pprof\"\n \t\"strings\"\n \t\"time\"\n \n@@ -33,6 +35,7 @@ type globalOptions struct {\n \tcommandTimeout     time.Duration           // Timeout for the command execution\n \tregistriesConfPath string                  // Path to the \"registries.conf\" file\n \ttmpDir             string                  // Path to use for big temporary files\n+\tmemprofile         string                  // Path to use for memory profiling\n }\n \n // requireSubcommand returns an error if no sub command is provided\n@@ -91,6 +94,7 @@ func createApp() (*cobra.Command, *globalOptions) {\n \t\tlogrus.Fatal(\"unable to mark registries-conf flag as hidden\")\n \t}\n \trootCommand.PersistentFlags().StringVar(&opts.tmpDir, \"tmpdir\", \"\", \"directory used to store temporary files\")\n+\trootCommand.PersistentFlags().StringVar(&opts.memprofile, \"memprofile\", \"\", \"write memory profiles to this path\")\n \tflag := commonFlag.OptionalBoolFlag(rootCommand.Flags(), &opts.tlsVerify, \"tls-verify\", \"Require HTTPS and verify certificates when accessing the registry\")\n \tflag.Hidden = true\n \trootCommand.AddCommand(\n@@ -120,6 +124,23 @@ func (opts *globalOptions) before(cmd *cobra.Command, args []string) error {\n \tif opts.tlsVerify.Present() {\n \t\tlogrus.Warn(\"'--tls-verify' is deprecated, please set this on the specific subcommand\")\n \t}\n+\tif opts.memprofile != \"\" {\n+\t\tgo func() {\n+\t\t\tticker := time.NewTicker(time.Second * 5)\n+\n+\t\t\tfor range ticker.C {\n+\t\t\t\tf, err := os.Create(opts.memprofile + \".tmp\")\n+\t\t\t\tif err != nil {\n+\t\t\t\t\tpanic(err)\n+\t\t\t\t}\n+\t\t\t\tpprof.WriteHeapProfile(f)\n+\t\t\t\tf.Close()\n+\t\t\t\tif err := os.Rename(opts.memprofile+\".tmp\", opts.memprofile); err != nil {\n+\t\t\t\t\tpanic(err)\n+\t\t\t\t}\n+\t\t\t}\n+\t\t}()\n+\t}\n \treturn nil\n }\n \n```\n\nThe results look like this:\n\n```\n(pprof) top\nShowing nodes accounting for 3542.16MB, 99.63% of 3555.19MB total\nDropped 119 nodes (cum <= 17.78MB)\nShowing top 10 nodes out of 20\n      flat  flat%   sum%        cum   cum%\n 2448.56MB 68.87% 68.87%  2448.56MB 68.87%  github.com/klauspost/compress/zstd.encoderOptions.encoder\n    1072MB 30.15% 99.03%     1072MB 30.15%  github.com/klauspost/compress/zstd.(*fastBase).ensureHist (inline)\n   18.77MB  0.53% 99.55%    18.77MB  0.53%  github.com/klauspost/compress/zstd.(*blockEnc).init\n    2.83MB 0.079% 99.63%   278.78MB  7.84%  github.com/klauspost/compress/zstd.(*Encoder).Reset\n         0     0% 99.63%   140.49MB  3.95%  github.com/containers/storage/pkg/chunked/compressor.newTarSplitData\n         0     0% 99.63%  3415.66MB 96.08%  github.com/containers/storage/pkg/chunked/compressor.writeZstdChunkedStream\n         0     0% 99.63%  3135.88MB 88.21%  github.com/containers/storage/pkg/chunked/compressor.writeZstdChunkedStream.func3\n         0     0% 99.63%  3415.66MB 96.08%  github.com/containers/storage/pkg/chunked/compressor.zstdChunkedWriterWithLevel.func1\n         0     0% 99.63%   278.78MB  7.84%  github.com/containers/storage/pkg/chunked/internal.ZstdWriterWithLevel\n         0     0% 99.63%  3135.88MB 88.21%  github.com/klauspost/compress/zstd.(*Encoder).Close\n```\n\nThat's only 2.4G of memory, but presumably I caught it just before some more serious memory usage inflation.\n\nThe next thing I tried was doing \"pure\" `zstd` (not `zstd:chunked`), and that seems quite reliable. The profiler seems to report pretty flat usage:\n\n```\n(pprof) top\nShowing nodes accounting for 82.50MB, 92.96% of 88.74MB total\nShowing top 10 nodes out of 136\n      flat  flat%   sum%        cum   cum%\n      64MB 72.12% 72.12%       64MB 72.12%  github.com/klauspost/compress/zstd.(*fastBase).ensureHist\n    5.47MB  6.17% 78.28%     5.47MB  6.17%  github.com/klauspost/compress/zstd.encoderOptions.encoder\n    4.63MB  5.21% 83.50%     4.63MB  5.21%  github.com/klauspost/pgzip.NewReader\n    2.26MB  2.55% 86.04%     2.26MB  2.55%  github.com/klauspost/compress/zstd.(*blockEnc).init\n    1.13MB  1.27% 87.32%     8.86MB  9.99%  github.com/klauspost/compress/zstd.(*Encoder).Reset\n    1.01MB  1.14% 88.45%     1.01MB  1.14%  regexp/syntax.(*compiler).inst\n       1MB  1.13% 89.58%        1MB  1.13%  github.com/modern-go/reflect2.(*unsafeType).UnsafeNew\n       1MB  1.13% 90.71%     1.50MB  1.69%  github.com/tchap/go-patricia/v2/patricia.NewTrie\n       1MB  1.13% 91.84%        1MB  1.13%  github.com/json-iterator/go.(*Iterator).ReadString\n       1MB  1.13% 92.96%     2.50MB  2.82%  github.com/containers/storage/pkg/truncindex.(*TruncIndex).addID\n```",
+    "comments": [
+        {
+            "user": "rhatdan",
+            "body": "@giuseppe @mtrmac PTAL"
+        },
+        {
+            "user": "giuseppe",
+            "body": "it happens only with a `--compression-level >= 10`\n\nThere is a discussion in https://github.com/klauspost/compress/discussions/655 and indeed `zstd.WithEncoderConcurrency(1)` seems to reduce memory requirements but still needs ~2GB to convert `quay.io/fedora/fedora-bootc:40`.\n\nShould we lower the default compression level?"
+        },
+        {
+            "user": "mtrmac",
+            "body": "> This being my first time needing to profile a Go application's memory usage\n\nI have https://github.com/mtrmac/skopeo/tree/profile-options pending (inspired by Podman’s implementation) from earlier, but I never got around to making that production-ready."
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "containers",
+            "repository": "common",
+            "number": 2123
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 24527
+        },
+        {
+            "organization": "bootc-dev",
+            "repository": "bootc",
+            "number": 1204
+        }
+    ]
+}

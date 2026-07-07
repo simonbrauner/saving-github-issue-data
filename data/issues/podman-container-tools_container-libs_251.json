@@ -1,0 +1,47 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "container-libs",
+    "number": 251,
+    "type": "issue",
+    "title": "storage destination: remove downloaded files once they're committed (and not needed)",
+    "state": "open",
+    "labels": [
+        "image"
+    ],
+    "user": "vrothberg",
+    "body": "When copying an image to a storage destination, each blob is written to a file in a temporary directory. Once the image has been committed, the temporary directory gets removed. As shown in https://github.com/containers/buildah/issues/2850, the late removal of the blobs can increase the disk consumption considerably.\n\nWe can improve on that by reference counting the individual files.  With https://github.com/containers/image/pull/1185 being merged, layers are now committed as early as possible.  We can extend the logic when committing layers to decrement the individual reference counter and remove the file once the counter hits 0.",
+    "comments": [
+        {
+            "user": "rhatdan",
+            "body": "SGTM"
+        },
+        {
+            "user": "flouthoc",
+            "body": "@vrothberg Would it it be possible if we could remove blobs as soon as they are committed instead of only removing them when reference counter hits to 0. What would be the possible side-effects of this ?"
+        },
+        {
+            "user": "vrothberg",
+            "body": "@flouthoc, a given blob _may_ be used more than once in an image."
+        },
+        {
+            "user": "mtrmac",
+            "body": "> @flouthoc, a given blob may be used more than once in an image.\n\nJust removing immediately after a commit might actually be an option:\n\nLooking at `commitLayer`, once we know a DiffID for a layer, we can either read it from a file, or reconstruct the layer from c/storage via `Store.Diff`. So, AFAICS, we can, in principle:\n- Only maintain one downloaded blob per DiffID , if we encounter differently-compressed variants, just remove the duplicates immediately\n- Immediately remove downloaded blobs if we, only after computing the DiffID, find a local match\n- In `commitLayer`, the _first_ time a DiffID is encountered, we may need to use a downloaded blob; any future times we would ~strictly rely on `Store.Diff` finding the previous version and reusing it.\n\nI’m sure there is more subtle state to maintain, but at a high level this seems feasible.\n\nBut as far as _storage size_, it is could actually be worse, because `PutBlob` stores temporary compressed files, but the `Store.Diff` code path creates a temporary _uncompressed_ file. (And right now, we leave the uncompressed file around until the pull is complete, though we would probably want to change that?) Also, the `Store.Diff` code is pretty expensive (many small files read, tar-split involved), though expensive in a different way than decompressing a compressed file on the `PutBlob` path.\n\n---\n\nThe originally-suggested reference-counting (add a point on every `PutBlob`/`TryReusingBlob` for a specific compressed digest, remove a point on every `commitLayer`?) seems less disruptive on a first impression (we would continue to use exactly the same compressed blobs, with the same costs as before), but it also ultimately relies on the `LayersByUncompressedDigest` code (due to parallelism writing layers out of order):\n- <s>`PutBlob(index=1, digest=shared)` succeeds</s>\n- <s>`PutBlob(index=0; digest=…)`</s>`… and triggers:\n  - <s>`commitLayer(index=0)`</s>\n  - `commitLayer(index=1, digest=shared)`: use $digest=shared, then remove it (zero references)\n- `TryReusingBlob(index=2, digest=shared)`: finds the layer via `LayersByCompressedDigest`, triggers the `Store.Diff` path (before reference counting it would reuse a digest=shared blob that is kept around).\n\n---\n\nOverall I’m not too worried about intra-image layer reuse; it does happen and we do need to handle it _correctly_ but it’s pretty rare (apart from trivial completely-empty layers, probably primarily on repeated `RUN rm` instructions) so I wouldn’t spend much extra effort optimizing storage in that case.\n\nSimilarly the cross-image layer reuse code path, if a layer is reused but does not share the full parent sequence, triggering `Store.Diff` and creating an _uncompressed_ temporary file that is kept around until the end of the pull can amount to an unexpected amount of storage (especially if there were many such layers in an image, somehow), is intriguing and we might consider removing the `Store.Diff` temporary file immediately, making such rare pulls potentially slower but with less disk space. It’s a thought but it seems like something pretty unlikely to be relevant in practice.\n\n---\n\nI don’t currently have a strong preference between the two… the _smallest possible version_ of reference counting is probably a bit larger patch, but it is conceptually less disruptive WRT the existing trade-offs."
+        },
+        {
+            "user": "mtrmac",
+            "body": "Actually, now that we can modify `private.ImageDestination`, it would be even better for the copy code to pass the full set of expected digests before starting the copy; then `storageImageDestination` can know _precisely_ when to delete the file."
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "buildah",
+            "number": 2850
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "buildah",
+            "number": 4423
+        }
+    ]
+}

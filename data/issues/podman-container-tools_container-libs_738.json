@@ -1,0 +1,64 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "container-libs",
+    "number": 738,
+    "type": "pull_request",
+    "title": "overlay: don't fail Put() when merged/ rename fails",
+    "state": "closed",
+    "labels": [
+        "storage"
+    ],
+    "user": "trilamsr",
+    "body": "The rename in `Put()` is a non-critical optimization — it atomically replaces `merged/` with a fresh directory. `Get()` handles an existing `merged/` via `MkdirAllAndChownNew` regardless. `Put()`'s actual job is to unmount the overlay, which `MNT_DETACH` already accomplished by that point.\n\nPreviously, if the rename failed (e.g. EBUSY from a stale `DCACHE_MOUNTED` flag on the dentry), `Put()` returned an error. In CRI-O this manifests as a failed `KillPodSandbox` that retries indefinitely — pods stuck Terminating for weeks.\n\nDon't fail `Put()` when the rename fails. Clean up the temp dir and return success.\n\nFixes #737\n",
+    "comments": [
+        {
+            "user": "packit-as-a-service[bot]",
+            "body": "Packit jobs failed. @containers/packit-build please check."
+        },
+        {
+            "user": "trilamsr",
+            "body": "Note: this is hard to unit test because reproducing the EBUSY requires a separate mount namespace holding a shared mount reference (Bidirectional propagation). A simple bind mount in a single namespace gets detached by `MNT_DETACH` and doesn't trigger the race. Happy to write an integration test using `unshare(CLONE_NEWNS)` if needed."
+        },
+        {
+            "user": "giuseppe",
+            "body": "> After `MNT_DETACH`, the kernel defers unmount until all references are released. With shared mounts (e.g. `mountPropagation: Bidirectional` from a CSI driver), another namespace holds a reference, so `rename(2)` on the mountpoint fails with EBUSY:\n\nthat looks like an error in the way this mount is managed.  You are likely using `skip_mount_home` but in this case you shouldn't be leaking private mounts around and make them unmountable.\n\nI don't understand how this patch could address that though.  You are just removing the tmpMountpoint and ignoring the error."
+        },
+        {
+            "user": "trilamsr",
+            "body": "Hey Giuseppe, thanks for the pointer — I dug into this on our nodes.\n\n`skip_mount_home` isn't set. `MakePrivate(home)` runs and works — current overlay mounts are private. The 18 stale shared mounts are from before the current CRI-O instance, and we traced them through the kernel to understand the EBUSY.\n\nThe shared overlay mounts were detached by a previous `MNT_DETACH` — confirmed via `stat -f` on `merged/` returning ext4 (not overlay), and `strace` showing `umount2(path, MNT_DETACH) = -1 EINVAL`. The EINVAL comes from `can_umount()` → `check_mnt()` because `umount_tree()` already set `mnt_ns = NULL` on the previous detach.\n\nBut `DCACHE_MOUNTED` is still set on the `merged/` dentry — `put_mountpoint()` only clears it when `m_count` reaches 0 (line 788 of `fs/namespace.c`), and the shared peer group keeps `m_count > 0`. So `rename()` checks `d_mountpoint()`, sees the flag, returns EBUSY.\n\nVerified on the live node:\n- `umount2` with any flags → EINVAL (mount already detached)\n- `rmdir merged/` → EBUSY (`d_mountpoint`)\n- `mount --make-private merged/` → EINVAL (kernel rejects on overlay)\n- `crictl stopp` / `crictl rmp -f` → both fail with same EBUSY\n- Only a node reboot clears these\n\nThe current code in `Put()` hits this EBUSY on the rename and returns an error. CRI-O treats that as a failed `KillPodSandbox` and retries forever — pods stuck Terminating indefinitely (42 days, 500k+ events in our case). The patch returns success instead, which is correct because the mount is already detached and the container is dead. The rename is just the `merged/` directory replacement optimization — `DeferredRemove` handles the actual layer cleanup later.\n\nSame pattern reported in [moby/moby#34948](https://github.com/moby/moby/pull/34948) and [containers/podman#18831](https://github.com/containers/podman/issues/18831)."
+        },
+        {
+            "user": "giuseppe",
+            "body": "https://github.com/containers/podman/issues/18831 is a years old issue that was actually fixed.\n\nIf `skip_mount_home` is not used, how did a different namespace manage to grab a reference to this mount point?\n\nDo you have a mountpoint on `/var/lib/containers/storage/overlay`?"
+        },
+        {
+            "user": "trilamsr",
+            "body": "Good questions. Yes, there's a private bind on `/var/lib/containers/storage/overlay` from `MakePrivate`:\n\n```\n14282 30 8:1 ... /var/lib/containers/storage/overlay ... - ext4 /dev/sda1 rw\n```\n\nPrivate, no shared tag. New overlay mounts correctly get parent 14282.\n\nWe have two affected nodes with different stories:\n\n**Node A (58 shared overlays):** These are under `/mnt/nvme7/containers/storage/overlay` — a separate NVMe storage path that `MakePrivate` doesn't cover. The NVMe device is mounted shared by our infra DaemonSet. This is our bug and we're fixing it downstream.\n\n**Node B (18 shared overlays):** These are under `/var/lib/containers/storage/overlay` with parent 30 (`/`) instead of 14282. We can't fully explain this one — `MakePrivate` ran, the bind exists, and current test mounts correctly get parent 14282. Layer directories predate the current CRI-O process so something went wrong during the transition, but logs are rotated and we can't reproduce it.\n\nRe #18831 — understood it's fixed. The NVMe case is a different path and we're handling it on our side. The 18 unexplained mounts on the other node are what motivated the defensive EBUSY handling here — whatever caused them, the pods shouldn't be stuck forever."
+        },
+        {
+            "user": "trilamsr",
+            "body": "Gentle ping — any thoughts on the updated approach? Happy to adjust if needed."
+        },
+        {
+            "user": "trilamsr",
+            "body": "Closing this. After more thorough testing we confirmed the shared overlay mounts work correctly through the full `Put()` path (MNT_DETACH + rename both succeed, `crictl stopp` completes cleanly). The original error was a transient condition we can't reproduce. We also fixed the root cause on our side (NVMe mounts were created with shared propagation, now private), and it's been clean for 8 days.\n\nThanks for the thorough review. The back and forth on mount propagation, `is_local_mountpoint`, and the kernel `vfs_rmdir` / `vfs_rename` paths was genuinely helpful in understanding what was actually going on."
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "container-libs",
+            "number": 737
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "container-libs",
+            "number": 100
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "container-libs",
+            "number": 784
+        }
+    ]
+}

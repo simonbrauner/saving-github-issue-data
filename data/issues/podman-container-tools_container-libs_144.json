@@ -1,0 +1,265 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "container-libs",
+    "number": 144,
+    "type": "issue",
+    "title": "reflink by default (if possible) when copying between containers-storage: instances",
+    "state": "open",
+    "labels": [
+        "enhancement",
+        "storage",
+        "jira"
+    ],
+    "user": "cgwalters",
+    "body": "Editing this older issue to make clear it's about a more general problem. Today when doing a `skopeo copy` or a `podman push` between two different `containers-storage:` instances, we end up with full physical copies of all of the files, even if the two storages are on the same physical filesystem.\n\nThe [copy code](https://github.com/containers/container-libs/blob/e89fca27d6aff5973077f5e5b66e8b943974b9b3/image/copy/copy.go#L199) is generic and operates in terms of tarballs.\n\n(Note this issue also relates to https://github.com/containers/container-libs/issues/197 and it may make sense really to fix both of them at once)\n\nNow this was originally an issue about copying between a root-owned containers-storage and a rootful which is I think something we also want.\n\nIn the truly general case, we likely want to handle having different *configurations* for each `containers-storage:` instance (e.g. one might be set up with zstd:chunked, another not).\n\nOn the implementation side given all of these things it may make sense to handle this via two communicating processes. Basically we'd have an RPC API that's a bit of a variant of something like https://github.com/containers/skopeo/blob/main/docs-experimental/skopeo-experimental-image-proxy.1.md but that allows accessing the underlying objects directly va fd passing too (cc https://github.com/containers/container-libs/issues/98 ).\n\n\n## Original issue follows\n\n---\n\n(Sorry if this is a duplicate, I tried to search here and didn't find it...tried to search in podman issues but there are soooo many issues and these are generic search terms.  Maybe someday github will have an LLM integrated for search instead)\n\nAn rpm-ostree user wanted to copy an image built in their rootless podman storage to the host root storage, doing\n\n```\n$ rpm-ostree rebase ostree-unverified-image:containers-storage:[/home/swick/.local/share/containers/storage]localhost/my-silverblue-toolbox-image:latest\n```\n\nAnd reported\n\n> one more thing: it creates the directory ~/.local/share/containers/storage/overlay/l/ owned by root, making podman images fail to chown it.\n\nI think in general the c/image stack would need to learn to do one of a few options here:\n\n- Fork into two processes, where the process operating on the unprivileged store calls setuid() to the owner of that directory\n- `setfsuid` - but this one being process global just heavily conflicts with goroutine threads and seems like a nonstarter\n- Just avoid any writes to the target directory at all (no locking) and accepting the possibility of race conditions\n\n",
+    "comments": [
+        {
+            "user": "cgwalters",
+            "body": "> Fork into two processes,\n\nTangentially related to this, I think a mechanism that would make sense for copying here would be quite similar conceptually to what landed in the `skopeo experimental-image-proxy`; basically, an in-band primary channel for metadata, but instead of passing tarballs over a pipe, we pass readonly file descriptors for filesystem objects.  In the case of a privileged caller copying from an unprivileged store, this would allow us to use reflinks (if available) which would be a giant speed and disk space improvement."
+        },
+        {
+            "user": "cgwalters",
+            "body": ".oO(thinking more) - maybe we should think of this like a \"composefs clone\" operation really, with support for extra metadata (tar-split stuff)."
+        },
+        {
+            "user": "cgwalters",
+            "body": "cc https://github.com/ostreedev/ostree-rs-ext/pull/642 which definitely wants a better interface to c/storage than passing tarballs around.\n\nAnd really the more I think about things like this, the more strongly I feel that composefs is the right core to things. For example, when copying a container image from rootful podman to rootless (or vice versa), because fsverity is implemented in the kernel (a common shared trust domain) and enforces read-only state for content we can *efficiently* provide a file descriptor opened from a user's home directory and reflink (or copy if we have to) into the rootful container storage, while knowing that:\n\n- There's no possibility that the user could concurrently mutate the file contents\n- We don't need to inefficiently recalculate the checksum for files\n"
+        },
+        {
+            "user": "cgwalters",
+            "body": "This one is a soft blocker for https://github.com/bootc-dev/bootc/issues/20"
+        },
+        {
+            "user": "cgwalters",
+            "body": "> Tangentially related to this, I think a mechanism that would make sense for copying here would be quite similar conceptually to what landed in the skopeo experimental-image-proxy; basically, an in-band primary channel for metadata, but instead of passing tarballs over a pipe, we pass readonly file descriptors for filesystem objects. \n\nYes, I just got bit by https://github.com/containers/container-libs/blob/92222dcd3da49d1dcf684561f18c8b0022fc2f7e/image/storage/storage_src.go#L156\nbecause in some tooling I'm writing we're spawning an ephemeral VM for installation, and this requires it to have memory proportional to the largest layer.\n\nI'm not sure it's the right tradeoff to copy an entire layer to a complete temporary tarball to shave off locking time.\n\nBut in any case having tar in the middle breaks all kinds of optimizations here, from reflinks to parallelism to more fine grained locking."
+        },
+        {
+            "user": "mtrmac",
+            "body": "> Yes, I just got bit by\n> \n> [container-libs/image/storage/storage_src.go](https://github.com/containers/container-libs/blob/92222dcd3da49d1dcf684561f18c8b0022fc2f7e/image/storage/storage_src.go#L156)\n> \n> because in some tooling I'm writing we're spawning an ephemeral VM for installation, and this requires it to have memory proportional to the largest layer.\n\nThat code is already invoking the `temporaryDirectoryForBigFiles` logic that tries to place data on disk, not in RAM, by default on `/var/tmp`, outside of `/tmp`. If the caller’s environment chooses the destination of `temporaryDirectoryForBigFiles` to be a `tmpfs`, there’s only so many heuristics c/image can do.\n\n> I'm not sure it's the right tradeoff to copy an entire layer to a complete temporary tarball to shave off locking time.\n\nUsers don’t like it when `podman push` blocks concurrent `podman images` / `podman ps`. Also, IIRC this temporary file was originally added for commits during builds, where it is just impossible to stream from a locked c/storage to a locked c/storage; there must be a copy in the middle — that might be relevant to your use cases. [Well, we _are_ working on staging layer additions without holding locks, but, at least in the initial version, not in a way that would completely eliminate the need for this temporary copy.]\n\n> But in any case having tar in the middle breaks all kinds of optimizations here\n\nI don’t think _specifically `tar`_ is really the primary blocker here; if the goal is to copy across two c/storage locations, each with its own user namespaces and ID mapping, without serializing everything through a byte stream IPC of _some_ kind, AFAICS we are _necessarily_ looking at a _completely specialized_ c/storage-to-c/storage copy/clone code that manages the namespace switching. A byte stream IPC allows conceptually isolating the producer and the consumer, e.g. running them in two different permission contexts; if the two need to be directly integrated, that integration must manage permissions directly and explicitly all of the time. Alternatively, obtaining file descriptors for c/storage-managed raw files is clearly a c/storage-specialized implementation."
+        },
+        {
+            "user": "cgwalters",
+            "body": "> I don’t think specifically tar is really the primary blocker here; if the goal is to copy across two c/storage locations, each with its own user namespaces and ID mapping, without serializing everything through a byte stream IPC of some kind, AFAICS we are necessarily looking at a completely specialized c/storage-to-c/storage copy/clone code that manages the namespace switching. \n\nUltimately userns/idmapping just affect metadata and shouldn't block us being able to use `copy_file_range` between two file descriptors, so no, we should not need a byte stream.\n"
+        },
+        {
+            "user": "cgwalters",
+            "body": "> That code is already invoking the temporaryDirectoryForBigFiles logic that tries to place data on disk, not in RAM, by default on /var/tmp, outside of /tmp. If the caller’s environment chooses the destination of temporaryDirectoryForBigFiles to be a tmpfs, there’s only so many heuristics c/image can do.\n\nYeah I'm going to work around this in my tooling by making `/var/tmp` always spool to a disk. But aside from the bare *requirement* of needing to do that, the speed hit from doing this tar serialization is really quite bad. It's especially noticeable with single large layers obviously (i.e. not chunked, or just including a lot of content).\n\nEspecially if we go to fetching layers in parallel here, it causes potentially large transient disk space spikes.\n\nThe current architecture in this codebase (in bootc-kit, will publish soon) is we have an ephemeral VM that mounts the host's container storage via virtiofs and sets it up as a read-only AIS - this is obviously cheating on the locking. I guess what would be *really* nice in all of this is to basically have a guarantee that any non-GC operations won't break a concurrent fetch, i.e. obviously trying to remove the image while this is going on would break, but ideally just fetching/writing new images wouldn't.\n\nWe could detect when the layer comes from a read-only store and basically omit this layer copy, right?"
+        },
+        {
+            "user": "mtrmac",
+            "body": "> I guess what would be _really_ nice in all of this is to basically have a guarantee that any non-GC operations won't break a concurrent fetch\n\nThe `.Diff` API can also be used to read the container’s RW layer …\n\n> We could detect when the layer comes from a read-only store and basically omit this layer copy, right?\n\n… and, with some graph drivers, and some overlay configurations (including composefs!), `.Diff()` requires a mount+umount — that’s AFAICS a stateful operation, and needs locking at _unmount_ time = after everything is done.\n\nI’m not at all saying that what we have is the best possible implementation, but we are looking either at a very narrow special case, or a fairly deep redesign.\n"
+        },
+        {
+            "user": "cgwalters",
+            "body": "> … and, with some graph drivers, and some overlay configurations (including composefs!), .Diff() requires a mount+umount\n\nYeah, this is a whole interesting topic that gets into the question of sharing mounts of layers between concurrent processes in a non-daemon architecture. IOW it's an architectural choice to get that sharing via the global mountns; with the new mount API it's trivial to get \"mount as file descriptor\" that one reads via openat() etc. that is then cleanly unmounted when the fd is closed i.e. when the process dies, no need to `umount` it - but then yes, no sharing of the mounts unless there's something caching layer -> fd (e.g. a systemd service dedicated to that).\n\n> I’m not at all saying that what we have is the best possible implementation, but we are looking either at a very narrow special case, or a fairly deep redesign.\n\nI think a special cased \".Diff(no_global_mounts: true, readonly: true)\" that avoids the temporary tarball would be a huge efficiency gain for the case of \"install/update a bootc image from a containers-storage\" which is an important part my inner loop. It would also help https://github.com/cgwalters/cstor-dist\n\nIs that a narrow special case? Yes, but it would *also* help with every copy between containers-storage instances even without getting reflinks.\n\nBut for the deeper redesign, yeah I think it needs something like https://github.com/containers/container-libs/issues/98 (which also in the case of copying layers would want access to the tar-split data alongside all the objects).\n"
+        },
+        {
+            "user": "giuseppe",
+            "body": "@mtrmac the way we implemented partial pulls (zstd:chunked) is like a shortcut inside the `Diff()/ApplyDiff()` mechanism.\n\nCould we extend that to support this case as well and let the storage backend decide whether it can optimize the copy?"
+        },
+        {
+            "user": "cgwalters",
+            "body": "Yeah zstd:chunked is basically another way of saying \"copying data via tar is suboptimal\" in that we need distinct metadata and data channels at a high level. Now clicking down a level there's \"ok wait how do we identify data\" (blob chunks, whole files, classic sha256 vs fsverity, etc.).\n\nThe messy thing here of course is by default we only have zstd:chunked metadata if the image was originally fetched that way right now; i.e. this issue kind of snowballs fast into having c-storage maintain metadata about individual content by default in the general case.\n\nBut we can clearly have an API that starts from the tar-split metadata and supports clients requesting file descriptors for paths from it.\n\n"
+        },
+        {
+            "user": "mtrmac",
+            "body": "\\*shrug\\* sure, we can always add one more code path to create layers. Will it be maintained, tested, reliable? (And I would remember my, I’m sure very infuriating, policy of not reviewing PRs that add options or code paths to `drivers/overlay`.)\n\nIf it is a specialized c/storage code path that allows creating layers in an unusual way, would that mean a specialized caller that creates the image itself, or some kind of c/image + Podman integration? If we are talking about copying from c/storage root to another c/storage root, with different ID namespaces or privilege levels, that _special-case_ complexity needs to live _somewhere_."
+        },
+        {
+            "user": "cgwalters",
+            "body": "OK things related to this are going to quickly become a near blocker for us doing more interesting things on the bootc side, among others.\n\nI created https://github.com/cgwalters/cstor-rs which was 80% AI driven (as the README.md) says but I think demonstrates well at least PoC level approach for how I think things should work here.\n\nThe baseline question here I think is:\n\n- Should we try to rework this codebase to support such things, and try to add non-Go bindings on top via e.g. RPC?\n- Or should we commit to our storage formats and add non-Go readers (and potentially writers)?\n\nThere's quite a lot of stuff involved here, *especially* things like handling all of `storage.conf` and especially additional image stores and the like. For my immediate use cases, I don't care about most of what can be configured there - the main interesting thing is additional image stores, but actually for the cases I want this I'd really just want to be explicitly reading from a single instance I think."
+        },
+        {
+            "user": "mtrmac",
+            "body": "I’m not sure what that PoC is supposed to demonstrate and I’m not going to read ~1500 lines to find out.\n\nI don’t know which one is “this codebase”, which “such things” should be supported or how that differs from “commit to our storage formats”.\n\n---\n\nEither way I think the primary complexity is not in shuffling _file contents_ around. Sure, I can imagine that. It’s maintaining all of the metadata and invariants:\n>  If we are talking about copying from c/storage root to another c/storage root, with different ID namespaces or privilege levels, that special-case complexity needs to live somewhere.\n\nand there’s enough conditionals and options in those code paths that I am pretty skeptical about building that _inside_ c/storage, let alone outside.\n\nOr maybe none of that is relevant for the imagined narrow use case… but then that means narrow applicability."
+        },
+        {
+            "user": "mtrmac",
+            "body": "> and there’s enough conditionals and options in those code paths\n\n… and of course the ID mapping is currently happening _in_ the tar creation / extraction code. So we are talking a surgery to pretty much the _whole_ c/storage call stack; and in most levels of the call stack there are some ways to leave the happy path (like AIS, ALS, zstd:chunked, VFS graph driver). It’s not _impossible_ but it’s invasive."
+        },
+        {
+            "user": "cgwalters",
+            "body": "Hi, thanks for your response.\n\n> I’m not sure what that PoC is supposed to demonstrate and I’m not going to read ~1500 lines to find out.\n\nThat's fine, I don't think reading the whole codebase is required, there's just two paragraphs in the overview:\n\nhttps://github.com/cgwalters/cstor-rs?tab=readme-ov-file#overview\n\nThe core concept is basically first separating metadata from data (like composefs and zstd:chunked and estar gz and basically almost anything that's not a tarball).\n\nThen \"data\" is file descriptors which can be reflinked (but assume distinct inodes and can hence have different owners/permissions/selinux labels etc). The \"reflinked but with different selinux labels\" is actually a *very* important use case for bootc.\n\n\n\n"
+        },
+        {
+            "user": "cgwalters",
+            "body": "OK https://github.com/containers/composefs-rs/pull/218 now includes the work from that repo, and successfully optimizing reflinked copies from containers-storage *to* composefs.\n\nThere's a few key levels to the design: https://github.com/containers/composefs-rs/pull/218/changes/74e08141f4911124ed13f4b189867895a03e88e4 introduces a simple data format that allow us to send the tar data (or in general any binary data) with file descriptors for non-inline content.\n\nI'd like to propose this \"splitfdstream\" as that data interchange mechanism - and container-libs would learn about it too. I can PoC that as well.\n\nThere's a Rust readonly implementation of the containers-storage format which we use - but in theory e.g. in the future this could also go into the skopeo proxy (or maybe even this could be an extension HTTP method exposed via podman over unix domain sockets...right now the higher level is using [jsonrpc-fdpass](https://github.com/cgwalters/jsonrpc-fdpass) but I think we could probably do something analogous for http. Or we just negotiate an extra jsonrpc-fd socket over http)\n\nThe write support is obviously another bigger task, especially ensuring the locking, partial recovery etc. all works.\n\nIn a nutshell where I'd like to get to is where I can do something like `podman save | sudo podman load` (e.g. copy from rootless podman to rootful) but the two processes negotiate a unix socket and do this reflink copy (if possible) over that - as well as use cases like copying between containers-storage etc.\n\n> … and of course the ID mapping is currently happening in the tar creation / extraction code.\n\nI may be missing something here but my understanding is that the idmapping we use to save the files is not important for this use case. The tar data is canonical - we only need the tar-split and the *contents* (not metadata attached to the inode) of regular files. This concept is enshrined in splitfdstream."
+        },
+        {
+            "user": "mtrmac",
+            "body": ">  my understanding is that the idmapping we use to save the files is not important for this use case\n\nConsider the “load” path. The original headers are stored in tar-split, sure, but _running containers_ don’t consult tar-split. The metadata needs to be written directly to the filesystem where overlay will find it, or to xattrs where FUSE-overlay will find it, c/storage options like `force_mask` need to be respected, and… and…"
+        },
+        {
+            "user": "giuseppe",
+            "body": "if the goal is to move images, the canonical representation in the tarball/tarsplit is the one to use no matter how we materialized the image in the storage for consumption.\n\nWhy would it matter how we decided to store them in the overlay driver?"
+        },
+        {
+            "user": "mtrmac",
+            "body": "It doesn’t matter for choosing the “transfer” format. I’m just saying that plumbing this (across pkg/chrootarchive and pkg/archive and pkg/idtools. and …) is extremely invasive to the _implementation_."
+        },
+        {
+            "user": "cgwalters",
+            "body": "> It doesn’t matter for choosing the “transfer” format. I’m just saying that plumbing this (across pkg/chrootarchive and pkg/archive and pkg/idtools. and …) is extremely invasive to the implementation.\n\nYeah, I can imagine this. However, I think we'd get immediate value out of supporting splitfdstream as an export format first - it would avoid needing to have another codebase reading the containers-storage: on-disk layout, and I think that should be significantly easier, right?\n\n\n"
+        },
+        {
+            "user": "mtrmac",
+            "body": "Same order of magnitude — IIRC there are 3 or 4 independent tarring implementations involved, _and_ this needs to be safe against a malicious concurrently running container."
+        },
+        {
+            "user": "giuseppe",
+            "body": "> Same order of magnitude — IIRC there are 3 or 4 independent tarring implementations involved, _and_ this needs to be safe against a malicious concurrently running container.\n\nhow can a container affect the read-only access to an image?\n\nLet's look at the task incrementally to make some progress, first it could be implemented to retrieve an existing layer (for overlay and vfs only), and be consumed outside.\n\nWhat I'd like to discuss rather if this is the way we want to move forward.  Do we want to stick to a tarball (even if augmented)?  One potential issue I see is that the stream must be consumed sequentially"
+        },
+        {
+            "user": "mtrmac",
+            "body": "> how can a container affect the read-only access to an image?\n\nAFAIK the ~same code path is used for pushing images and for committing containers.\n\n---\n\n> Do we want to stick to a tarball (even if augmented)? One potential issue I see is that the stream must be consumed sequentially\n\nI agree this is an important concern … but then we are looking at a RPC API (“list files” / “get file”), ugh.\n\nI’m not sure … at a guess, we would still need to digest / identify files by contents in many plausible composefs scenarios, and it _might_ be the case that the digesting would take the majority of time."
+        },
+        {
+            "user": "cgwalters",
+            "body": "> and this needs to be safe against a malicious concurrently running container.\n...\n> how can a container affect the read-only access to an image?\n\nExactly, this is operating on the read-only layers, nothing writable by running containerized processes. Of course, actually *enforcing* that is a whole lot of the point of composefs (particularly the fsverity portion) and is why I think this is all actually just a stepping stone to cutting over podman/cri-o ultimately to something more like a composefs backend.\n\n> What I'd like to discuss rather if this is the way we want to move forward. Do we want to stick to a tarball (even if augmented)? One potential issue I see is that the stream must be consumed sequentially\n\nI think \"sequentially\" isn't a big problem - this is just O(metadata) remember.\n\n(Of course it would be nice perhaps to support something that allows lazily fetching objects not present already by digest - but IMO the case of \"common file shared between distinct container layers\" is actually pretty small assuming one is [building the container images sanely](https://github.com/jlebon/chunkah)).\n"
+        },
+        {
+            "user": "cgwalters",
+            "body": "> AFAIK the ~same code path is used for pushing images and for committing containers.\n\nBut committing a layer surely involves ensuring that the layer isn't writable by any process that had it mounted before?\n\nAnyways though on this point I do want to highlight: https://github.com/containers/composefs-rs/blob/main/doc/plans/oci-sealing-spec.md is what we have spec'd out so far and I have some WIP towards it - and it should allow replacing \"diffid\" for verification. And a key thing is that if e.g. buildah had a bug that allowed a process to somehow retain a writable fd to a layer directory, that corruption would be efficiently detectable.\n"
+        },
+        {
+            "user": "mtrmac",
+            "body": "> But committing a layer surely involves ensuring that the layer isn't writable by any process that had it mounted before?\n\nNo, and reportedly it’s important that it stays that way."
+        },
+        {
+            "user": "giuseppe",
+            "body": "\n> > What I'd like to discuss rather if this is the way we want to move forward. Do we want to stick to a tarball (even if augmented)? One potential issue I see is that the stream must be consumed sequentially\n> \n> I think \"sequentially\" isn't a big problem - this is just O(metadata) remember.\n> \n> (Of course it would be nice perhaps to support something that allows lazily fetching objects not present already by digest - but IMO the case of \"common file shared between distinct container layers\" is actually pretty small assuming one is [building the container images sanely](https://github.com/jlebon/chunkah)).\n\nthe shared files could be in different images, with a different base image, so they will still end up in different layers.  But this is not a problem as the deduplication should already happen in c/storage before it returns the stream.\n\n> > But committing a layer surely involves ensuring that the layer isn't writable by any process that had it mounted before?\n> \n> No, and reportedly it’s important that it stays that way.\n\nwe can limit this use case to read-only layers that are never modified, and I think we should otherwise we don't have the tarsplit data to reproduce always the same stream"
+        },
+        {
+            "user": "cgwalters",
+            "body": "> No, and reportedly it’s important that it stays that way.\n\nIs this why the defensive copying in e.g. https://github.com/containers/buildah/pull/5975#discussion_r1970069046 ?\n\nBut how is it not just completely undefined behavior to write back to the layer directory? "
+        },
+        {
+            "user": "mtrmac",
+            "body": "> Is this why the defensive copying in e.g. [containers/buildah#5975 (comment)](https://github.com/containers/buildah/pull/5975#discussion_r1970069046) ?\n\nNo, that’s another extremely frightening situation.\n\n> But how is it not just completely undefined behavior to write back to the layer directory?\n\nThis applies to commits = creating tars, not to extracting tars.\n\n"
+        },
+        {
+            "user": "giuseppe",
+            "body": "for a PoC, I've opened:\n\n- https://github.com/containers/container-libs/pull/651\n- https://github.com/containers/composefs-rs/pull/228\n\nThen we can do:\n\n```\n# storage/containers-storage json-rpc-server &\n# cfsctl oci import-layer --socket /run/containers/storage/json-rpc.sock --layer-id LAYER_ID LAYER\n```"
+        },
+        {
+            "user": "cgwalters",
+            "body": "> 6% of the code base for an extremely niche use case :/\n\nI wanted to reply to this point from the PR review. I do not agree with the PoV of this being \"extremely niche\". Beyond the  Copying between rootful and rootless container stores and composefs-rs and containers-storage are two.\n\nBut I have another which is suddenly also very important to me. I switched to having isolated devcontainer environments with nested containerization enabled (each inner devcontainer gets its own `/var/lib/containers`).\n\nAnd that means every `podman pull` of course duplicates storage. This \"local nested devcontainer\" is actually *the same* use case as \"nested Konflux builds\". Today every Konflux container build runs buildah in a pod, and each pod will have its own copy of the files from UBI etc. I think what we really want here is the ability to have e.g. `/run/containers-storage.sock` exposed from the host (this is closer to https://github.com/containers/container-libs/issues/98 of course - these two things are strongly related, but still distinct).\n\nIn my case the devcontainers have a volume mount for the container storage (to avoid overlay-on-overlay) so we should be able to reflink (or with composefs, hardlink!) between those just fine, while still having fully distinct `podman images` etc.\n"
+        },
+        {
+            "user": "mtrmac",
+            "body": "I’m extremely unclear on what is the _end state_, and what is the ultimate UI workflow.\n\n“Manually copy an image from one store to another” works for logically-bound bootc images, where it happens behind the scenes. For ~all other workflows, it’s a pretty high bar.\n\n> Today every Konflux container build runs buildah in a pod, and each pod will have its own copy of the files from UBI etc. \n\n“to build from `java-image:55334`, consult a hard-coded list somewhere [or an extra separately-maintained field in the build system database] to see that you should copy-up `UBI:442343` into the build root”?! That’s just _tedious_ for users [and ideally this should be O(1) or O(number of layers) work, not O(base image size) work].\n\n---\n\n> (this is closer to https://github.com/containers/container-libs/issues/98 of course - these two things are strongly related, but still distinct).\n\nYes so which one do we actually want to end up with? Do we _have_ pay the order-of-10%-of-the-codebase price for both?"
+        },
+        {
+            "user": "cgwalters",
+            "body": "> “to build from java-image:55334, consult a hard-coded list somewhere [or an extra separately-maintained field in the build system database] to see that you should copy-up UBI:442343 into the build root”?! That’s just tedious for users [and ideally this should be O(1) or O(number of layers) work, not O(base image size) work].\n\nNo, simplest way to think of this is an IPC protocol exposed by a socket that allows querying for layers and reflink-copying the content over splitfdstream. It should happen automatically with no configuration assuming a layer is already present on the host (or actually in the general case, in another devcontainer/build!).\n\nBut yes, there are other approaches for this \"nesting\" scenario - one could imagine a protocol that allows fetching an image from the host and we expose the host's storage as an AIS, and then a mechanism to \"lock\" a set of images from a lesser-privileged context. I think flatpak does something like that because it has a system pull helper, but runs apps as part of the user context by default.\n\nOTOH the bootc use case there's not a \"lesser privileged\" relationship, more peers.\n\n> Yes so which one do we actually want to end up with? Do we have pay the order-of-10%-of-the-codebase price for both?\n\n(Is that 10% in lines of code or binary size? And if the first, just in drivers/ ? or entire codebase? Can you clarify what we're optimizing for?)\n\nIn a nutshell though I hope this splitfdstream can be made small/noninvasive enough that that's not a major concern. I think what is a bigger portion of this is the \"IPC with fd passing\" as that's a much more consequential choice.\n"
+        },
+        {
+            "user": "mtrmac",
+            "body": "> Can you clarify what we're optimizing for?)\n\n_I_ am optimizing for not starting or encouraging large projects I don’t have capacity to help with, or where even _understanding_ the project and its place in the roadmap is a… project I don’t have capacity for. I did not mean to create the impression that there is a hard line count boundary."
+        },
+        {
+            "user": "cgwalters",
+            "body": "OK so moving things back over here from https://github.com/containers/buildah/pull/6675\n\nI propose we cut over https://github.com/containers/skopeo/blob/main/cmd/skopeo/proxy.go to have a \"jsonrpc-fdpass + grpc\" variant.\n\nSo for now, the IPC there would live in skopeo, and not this project (i.e. it seems buildah and podman will already start to expose different gRPC services (unless I guess podman vendors the buildah, which I guess it will) and skopeo will have a different variant.\n\n@giuseppe thoughts?"
+        },
+        {
+            "user": "giuseppe",
+            "body": "Given they will be anyway different endpoints, I am not sure we should care about grpc if it makes things harder for fd passing.  @mtrmac what do you think? "
+        },
+        {
+            "user": "cgwalters",
+            "body": "Yeah true. I don't know what the buildah path plans to expose, but I'd be surprised if it didn't include fetching and storing images. The needs for a low-level buildkit like thing would seem to require it.\n\nOTOH, it's probably not *that* much code duplication to wrap it in a different way in jsonrpc-fdpass. I don't have a strong opinion."
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "ostreedev",
+            "repository": "ostree-rs-ext",
+            "number": 642
+        },
+        {
+            "organization": "bootc-dev",
+            "repository": "bootc",
+            "number": 509
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "container-libs",
+            "number": 117
+        },
+        {
+            "organization": "containers",
+            "repository": "image",
+            "number": 2590
+        },
+        {
+            "organization": "bootc-dev",
+            "repository": "bootc",
+            "number": 436
+        },
+        {
+            "organization": "bootc-dev",
+            "repository": "bootc",
+            "number": 1197
+        },
+        {
+            "organization": "bootc-dev",
+            "repository": "bootc",
+            "number": 1214
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "skopeo",
+            "number": 2563
+        },
+        {
+            "organization": "bootc-dev",
+            "repository": "bootc",
+            "number": 20
+        },
+        {
+            "organization": "bootc-dev",
+            "repository": "bootc",
+            "number": 1601
+        },
+        {
+            "organization": "bootc-dev",
+            "repository": "bcvk",
+            "number": 47
+        },
+        {
+            "organization": "bootc-dev",
+            "repository": "bcvk",
+            "number": 166
+        },
+        {
+            "organization": "bootc-dev",
+            "repository": "bootc",
+            "number": 1884
+        },
+        {
+            "organization": "bootc-dev",
+            "repository": "bcvk",
+            "number": 189
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "container-libs",
+            "number": 98
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "buildah",
+            "number": 6675
+        },
+        {
+            "organization": "composefs",
+            "repository": "composefs-rs",
+            "number": 309
+        },
+        {
+            "organization": "bootc-dev",
+            "repository": "bootc",
+            "number": 2247
+        }
+    ]
+}

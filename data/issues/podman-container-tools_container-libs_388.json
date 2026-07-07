@@ -1,0 +1,73 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "container-libs",
+    "number": 388,
+    "type": "issue",
+    "title": "Support Sigstore bundle format",
+    "state": "open",
+    "labels": [],
+    "user": "p5",
+    "body": "Cosign recently released v3 of their CLI, which switches to a new signing bundle format by default.  skopeo, podman and rpm-ostree fail to verify to images with this new signature format.\n\n---\n\nxref https://github.com/ublue-os/main/issues/1477",
+    "comments": [
+        {
+            "user": "p5",
+            "body": "Apologies, I was in the incorrect tab.  Was meant to be in rpm-ostree"
+        },
+        {
+            "user": "mtrmac",
+            "body": "For the record, there is **EDIT no** support for the new bundle format in this codebase, and no work has been done on it yet."
+        },
+        {
+            "user": "p5",
+            "body": "I will reopen this as support is required in the libraries here before they will work in podman, rpm-ostree and bootc."
+        },
+        {
+            "user": "andrewdunndev",
+            "body": "I wanted to share some test results from trying to verify cosign keyless signatures via `policy.json` on CentOS Stream 10 (skopeo 1.22.0, containers-common 5.8).\n\n**Setup:** I maintain a small estate of bootc-based immutable OS images for a homelab — base images with ZFS and NVIDIA kernel modules, plus instance images for services. The images are signed in GitLab CI using cosign v2.6.2 with `--new-bundle-format=false` to produce legacy `.sig` tag attachments, and deployed to physical servers via `bootc upgrade`. The goal is host-side signature enforcement via `policy.json` so the servers only accept images from our pipeline. If you want to see the full picture of what we're building, the project is public at [dunn.dev/immutable](https://gitlab.com/dunn.dev/immutable). Thank you to Ben Breard ([@mrguitar](https://github.com/mrguitar)) whose blogging showed us this whole approach was possible.\n\n**What works:**\n- The `.sig` tags are present in the registry and discoverable\n- With `use-sigstore-attachments: true` in `registries.d`, `containers/image` finds the attachment manifest and fetches all signature layers\n\n**What doesn't work:**\n- Without `use-sigstore-attachments: true`, signature discovery silently falls back to a local filesystem path and reports \"no signature exists\" — this is a configuration gap that could be better documented\n- With attachments enabled, verification fails: `Required email \"...\" not found (got [])`\n\nThe root cause of the verification failure is that `fulcio.subjectEmail` in `policy.json` only matches SAN email entries in the Fulcio certificate. GitLab CI OIDC tokens (and GitHub Actions OIDC tokens) produce SAN URI entries as the subject — not email entries. There's no `subjectURI` or `subjectRegexp` option available.\n\nThis means that even with legacy `.sig` format signatures and attachment discovery working correctly, **no CI/CD keyless cosign signatures can be verified via `policy.json`** because the subject matching doesn't support URI-based Fulcio subjects.\n\nI realize the broader v3 bundle format support is the main focus of this issue, but I wanted to flag that adding SAN URI matching to the existing `sigstoreSigned` fulcio verification path would be a smaller, more targeted fix that would unblock CI/CD keyless signing verification for the current legacy format. It would benefit anyone using GitLab CI, GitHub Actions, or other OIDC providers that use URI subjects with Fulcio.\n\n**Test environment:** CentOS Stream 10, skopeo 1.22.0, podman 5.8.0, containers-common 5.8-2.el10, cosign v2.6.2 with `--new-bundle-format=false`, Sigstore public Fulcio CA + Rekor key.\n"
+        },
+        {
+            "user": "jlebon",
+            "body": "On this and more broadly \"cosign enablement\", I wonder if we should just add support in the policy for some kind of light plugin system where a PolicyRequirement actually just forks off a binary in e.g. `/usr/lib/containers/policy-plugins.d/` where it speaks over stdio to perform verification.\n\nThen one could have a cosign plugin which basically translates verification requests in cosign terms, either pulling in cosign libraries (or... just forking off `cosign`). It's generically useful of course as one may have policy requirements beyond what we may want to hardcode in container-libs."
+        },
+        {
+            "user": "andrewdunndev",
+            "body": "+1 from the operator side.\n\nThe use case: I want my bootc hosts to verify the OS image at `bootc install` and `bootc upgrade` so the system that boots is checked against the signature CI produced. `policy.json` is the right place to express that. It's where `containers/image` already converges trust decisions, and bootc honors it.\n\nThe in-tree Fulcio matcher path runs into a real design question that mtrmac framed clearly on [containers/image#2235](https://github.com/containers/image/pull/2235): \"what does the signature mean, and what information does the signature provide to consumers?\" That PR (Accept URI for Sigstore Signed Images) closed in August 2025 without merging, on those grounds. The underlying caution makes sense. The result is that operators outside the GitHub-Actions-keyless happy path don't have a clean way to express their trust requirements in `policy.json` today.\n\nOne structural constraint on the signing side, since it shapes the design space: CI providers fix their OIDC claim sets. For GitLab CI in our case ([id_token_authentication docs](https://docs.gitlab.com/ci/secrets/id_token_authentication/), with [custom claims still an open proposal in the unscheduled Backlog](https://gitlab.com/gitlab-org/gitlab/-/issues/462017)), operators control only `aud`. The trust narrowing has to live in the verifier; we can't reshape what Fulcio embeds.\n\nThe plugin direction addresses both sides of that. Operators express their trust as code in their own fleet, with whatever semantics make sense for their issuer and deployment surface. `containers/image` owns \"how to call a verifier and what it returns\" and keeps the in-tree matcher surface bounded.\n\n[PR #625](https://github.com/containers/container-libs/pull/625) (`buildSignerURI` matcher) would close our GitLab-specific case via Fulcio's OID 1.9, and I've left a comment there with the GitLab mapping data. The plugin path is complementary, it handles the long tail of issuers and operator-specific semantics that aren't worth (or shouldn't be) folded into the in-tree matchers.\n\nIf this direction moves, I can contribute as a real-world test bed:\n\n- A `cosign verify` wrapper plugin against a defined protocol.\n- Non-GitHub Fulcio fixtures (GitLab CI keyless, missing from the existing thread).\n- End-to-end testing through `bootc install` and `bootc upgrade` on real hardware.\n\nFor protocol shape, two existing implementations worth looking at:\n\n- [kubectl exec credential plugins](https://kubernetes.io/docs/reference/access-authn-authz/authentication/#client-go-credential-plugins) have already worked out a versioned API surface (`client.authentication.k8s.io/v1beta1` and `v1`) for a \"host needs an answer, plugin produces it\" shape over stdio.\n- [Notation's plugin spec](https://github.com/notaryproject/specifications/blob/main/specs/plugin-extensibility.md) is the same policy/crypto split working in practice, with separate-repo plugins for [AWS Signer](https://github.com/aws/aws-signer-notation-plugin) and [HashiCorp Vault](https://github.com/notaryproject/notation-hashicorp-vault).\n"
+        },
+        {
+            "user": "mtrmac",
+            "body": "I hear there are recent proposals to reshape Fulcio + Rekor (+Sigstore itself?) in a way where successful cryptographic verification would require the verifier to submit a _precise and complete_ set of expected key=value pairs that match what Fulcio saw when creating the signature.\n\nThat would mean absolutely no wildcard / prefix / … matching, and it would make any kind of plugin system moot.\n\nNow, that does not exist yet, and might not be built — but I want to highlight that designing downstream consumers for a model of “plugins with arbitrary logic” might run into a dead end in a few years."
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "coreos",
+            "repository": "rpm-ostree",
+            "number": 5509
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "container-libs",
+            "number": 567
+        },
+        {
+            "organization": "coreos",
+            "repository": "chunkah",
+            "number": 117
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "container-libs",
+            "number": 625
+        },
+        {
+            "organization": "nateinaction",
+            "repository": "stableOS",
+            "number": 28
+        },
+        {
+            "organization": "nateinaction",
+            "repository": "stableOS",
+            "number": 32
+        }
+    ]
+}

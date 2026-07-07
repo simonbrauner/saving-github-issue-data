@@ -1,0 +1,55 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "container-libs",
+    "number": 272,
+    "type": "issue",
+    "title": "Can not detect schema2-only registries, and can not convert from schema1 to schema2",
+    "state": "open",
+    "labels": [
+        "image"
+    ],
+    "user": "edsantiago",
+    "body": "Pushing *some* images to a local registry fails:\n```\n# podman run -d -p 5000:5000 --name reg registry:2\n80cd67110851f7a1691feb8f20434ccd8d87768d3fdd0d97926104597c08d7e8\n\n# skopeo copy docker://quay.io/libpod/alpine_labels:latest dir:/tmp/foo\nGetting image source signatures\nCopying blob 4fe2ade4980c done\nCopying blob a3ed95caeb02 done\nCopying blob a3ed95caeb02 skipped: already exists\nCopying blob a3ed95caeb02 skipped: already exists\nWriting manifest to image destination\nStoring signatures\n\n# skopeo copy --dest-tls-verify=false dir:/tmp/foo docker://localhost:5000/foo\nGetting image source signatures\nCopying blob 4fe2ade4980c done\nCopying blob a3ed95caeb02 done\nCopying blob a3ed95caeb02 skipped: already exists\nCopying blob a3ed95caeb02 skipped: already exists\nCopying blob a3ed95caeb02 skipped: already exists\nWriting manifest to image destination\nFATA[0000] Error writing manifest: Error uploading manifest latest to localhost:5000/foo: received unexpected HTTP status: 500 Internal Server Error \n```\nskopeo-0.1.36-6.dev.gitd93a581.fc30.x86_64\n\n--debug isn't terribly helpful, but here it is just in case:\n```\n...\nWriting manifest to image destination\nDEBU[0000] PUT http://localhost:5000/v2/foo/manifests/latest \nDEBU[0000] Writing manifest using preferred type application/vnd.docker.distribution.manifest.v1+prettyjws failed: Error writing manifest: Error uploading manifest latest to localhost:5000/foo: received unexpected HTTP status: 500 Internal Server Error \nFATA[0000] Error writing manifest: Error uploading manifest latest to localhost:5000/foo: received unexpected HTTP status: 500 Internal Server Error \n```",
+    "comments": [
+        {
+            "user": "edsantiago",
+            "body": "Simpler reproducer, without need for intermediate repository (still needs registry container running):\n```\n# skopeo copy --dest-tls-verify=false docker://quay.io/libpod/alpine_labels docker://localhost:5000/foo\nGetting image source signatures\nCopying blob a3ed95caeb02 done\nCopying blob a3ed95caeb02 done\nCopying blob a3ed95caeb02 done\nCopying blob 4fe2ade4980c done\nCopying blob a3ed95caeb02 done\nCopying blob a3ed95caeb02 done\nCopying blob a3ed95caeb02 skipped: already exists\nCopying blob a3ed95caeb02 skipped: already exists\nCopying blob a3ed95caeb02 skipped: already exists\nWriting manifest to image destination\nFATA[0001] Error writing manifest: Error uploading manifest latest to localhost:5000/foo: received unexpected HTTP status: 500 Internal Server Error \n```\nWorks fine with `docker://alpine` or `docker://busybox` instead of the quay.io alpine_labels image."
+        },
+        {
+            "user": "mtrmac",
+            "body": "Thanks for your report.\n\nThis seems to work for me (when running the `registry:latest` server in Docker).\n\nIs there anything interesting in the registry logs?"
+        },
+        {
+            "user": "edsantiago",
+            "body": "Fascinating. It doesn't work for me with `:latest` either, same symptom. Tail end of logs show:\n```\n10.88.0.1 - - [15/May/2019:21:08:40 +0000] \"HEAD /v2/foo/blobs/sha256:a3ed95caeb02ffe68cdd9fd84406680ae93d633cb16422d00e8a7c22955b46d4 HTTP/1.1\" 200 0 \"\" \"Go-http-client/1.1\"\ntime=\"2019-05-15T21:08:40.420395542Z\" level=error msg=\"response completed with error\" err.code=unknown err.detail=\"manifest schema v1 unsupported\" err.message=\"unknown error\" go.version=go1.11.2 http.request.contenttype=\"application/vnd.docker.distribution.manifest.v1+prettyjws\" http.request.host=\"localhost:5000\" http.request.id=62b2d3e7-cf95-4c22-ac62-ffb0b2dbe35c http.request.method=PUT http.request.remoteaddr=\"10.88.0.1:45588\" http.request.uri=\"/v2/foo/manifests/latest\" http.request.useragent=\"Go-http-client/1.1\" http.response.contenttype=\"application/json; charset=utf-8\" http.response.duration=2.382033ms http.response.status=500 http.response.written=70 vars.name=foo vars.reference=latest\n10.88.0.1 - - [15/May/2019:21:08:40 +0000] \"PUT /v2/foo/manifests/latest HTTP/1.1\" 500 70 \"\" \"Go-http-client/1.1\"                  \n```"
+        },
+        {
+            "user": "mtrmac",
+            "body": "Ah, thanks. It turns out my `:latest` is very old, this is very likely https://github.com/docker/distribution/pull/2474 ."
+        },
+        {
+            "user": "mtrmac",
+            "body": "Reproduced."
+        },
+        {
+            "user": "mtrmac",
+            "body": "Unfortunately, https://github.com/docker/distribution/issues/2925 .\n\nWe _really_ should be able to autodetect this and handle it automatically. OTOH, while doing that on all of 500/“unknown error” would be possible (\n```go\n               if _, ok := err.(*client.UnexpectedHTTPStatusError); ok {\n                       return true\n               }\n```\nin `isManifestInvalidError`), it would also be way too loose. I’m hoping that docker/distribution defines a more specific error that we can detect in the future… though we would still need to deal with the current releases, I suppose?\n\n---\n\nWorse, even after doing that, copies fail with\n```\nUpload of manifest type application/vnd.docker.distribution.manifest.v2+json failed: Can not convert image to application/vnd.docker.distribution.manifest.v2+json, preparing DiffIDs for this case is not supported \n```\nThis is a c/image matter; converting from s1 to s2 requires expensive decompression of the input, so we don’t do that by default, and the current code is not ready to try s1→s1 and fall back to s1→s2.  We can easily enough do this by always decompressing blobs on copies of s1 images, but that would be very expensive if not necessary; decompression only on the s1→s2 fallback would be a much more invasive code change.\n\n---\n\nRight now, `skopeo copy --format=v2s2` will work around both issues, but that’s not at all a satisfactory resolution."
+        },
+        {
+            "user": "rohammosalli",
+            "body": "I think your pv registry is full of space :) "
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "skopeo",
+            "number": 1087
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 11729
+        }
+    ]
+}

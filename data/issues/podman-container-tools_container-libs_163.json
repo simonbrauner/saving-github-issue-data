@@ -1,0 +1,47 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "container-libs",
+    "number": 163,
+    "type": "issue",
+    "title": "Confusing features, and locking semantics, of Mount/Unmount",
+    "state": "open",
+    "labels": [
+        "storage"
+    ],
+    "user": "mtrmac",
+    "body": "Currently, both `store.Mount` and `store.Unmount` only work with the primary layer store, and lock it for writing: https://github.com/containers/storage/blob/7de6744c9fdc616b44539703c5831ed0f328652c/store.go#L2745 https://github.com/containers/storage/blob/7de6744c9fdc616b44539703c5831ed0f328652c/store.go#L2850\nas of e84b2649927d339254fe80bf87aee0ec32a6a9d7 .\n\nMeanwhile, `Diff` reads all layer stores, and locks for reading: https://github.com/containers/storage/blob/7de6744c9fdc616b44539703c5831ed0f328652c/store.go#L2940 as of 68d65106a07f84b44d2dce24d9d9bfde7313832c .\n\nBut the two are related: `Diff` can trigger mounts/unmounts via https://github.com/containers/storage/blob/7de6744c9fdc616b44539703c5831ed0f328652c/layers.go#L1474 (although we don’t _usually_ see that, because several graph drivers, notably `overlay`, implement `DiffGetter`\n\n---\n\nNote that `Diff` is, AFAICS, the _only_ way to possibly trigger a mount/unmount from an additional layer store.\n\nMeanwhile, `Mount` and `Unmount` nowadays reject attempts to modify them from read-only (= additional) stores:\nhttps://github.com/containers/storage/blob/7de6744c9fdc616b44539703c5831ed0f328652c/layers.go#L950 https://github.com/containers/storage/blob/7de6744c9fdc616b44539703c5831ed0f328652c/layers.go#L1000 as of 0183a293dc01f22561b83448340c08e55f9b979b .\n\nMore curiously, `Mount` has an exception for read-only stores as of 0ef62eeea30955a62b543e11830257b3293c8ac5 , but \n- `Unmount` doesn’t have a corresponding exception\n- The only caller that could possibly benefit, `Diff`, does not set the “read-only” option, so it doesn’t fit that exception at all.\n\n---\n\n**Questions:**\n- Does mounting require the layer store to be locked read-only or read-write? Either `Diff` is incorrect, or `Mount`/`Unmount` is locking excessively. At least 0183a293dc01f22561b83448340c08e55f9b979b suggests that the intent was to make read-only layer store locks to be sufficient.\n- Can the “allow read-only mounts from read-only stores” exception be reached in the current codebase? And if not, is it desirable for it to be reachable?\n\n@nalind @vrothberg @rhatdan ?",
+    "comments": [
+        {
+            "user": "mtrmac",
+            "body": "Looking into this further, any mount/unmount call can modify `layerStore`-owned `Layer.MountCount`, which requires (per containers/storage#1332 ) an in-process write lock against other readers. So at least the _fully read-only_ access of `Diff` is insufficient (but it might be plausible to only hold an in-process exclusive lock, while keeping the filesystem locked for reading only)."
+        },
+        {
+            "user": "mtrmac",
+            "body": "Note, to self and others: _Carefully_ distinguish\n- read-only vs. read-write _stores_:`lockfile.IsReadWrite` is true for the primary layer store, false for additional stores. This is a constant (for the lifetime of the process, because the bit is stored in the per-process lock file… so at least for the lifetime of the part of the process that uses the same c/storage vendored codebase)\n- read-only vs. read-write _cross-process access_: Whether the lock file is _locked_ for reading or writing (always read-only for additional stores). Or perhaps whether the _mount_ lock file is locked for reading or writing.\n- read-only vs. read-write _in-process access_, governing data races when accessing memory.\n\nIt’s just way too much to keep track of, especially without explicit documentation and language help (#1389 )."
+        },
+        {
+            "user": "mtrmac",
+            "body": "> any mount/unmount call can modify `layerStore`-owned `Layer.MountCount`, which requires (per containers/storage#1332 ) an in-process write lock against other readers.\n\ncontainers/storage#1346 adds an in-process lock to synchronize these accesses (and eliminates some of the other accesses); but that doesn’t fix the `Diff` paths, which are insufficiently synchronized.\n\n(Nothing at all changes about the unclear ability to mount layers from additional stores.)"
+        },
+        {
+            "user": "rhatdan",
+            "body": "Podman mount and unmount are attempting to count how many times an image is mounted, thus the count.\nIf I run \n```\n# mnt=$(podman mount alpine)\n# podman run -d alpine sleep 200\n```\nThis should end up with 2 mounts of the image.\nWhen the sleep completes it will go to 1.\nand if I do\n```\n# podman unmount alpine\n```\nDown to zero. And the overlay mount can actually be unmounted.\nThis count can get out of whack if apps crash or the system crashes without decrementing the mount count to 0. (Unless the mount count is done on a tmpfs?)\n\nI don't believe this is a solved problem, and I think we have some flakes in podman CI system, caused by miscounting the mounts."
+        },
+        {
+            "user": "mtrmac",
+            "body": "I’m not at all arguing against the _existence_ of the mount count (and yes, it is stored in the “RunDir”).\n\nThis issue primarily about the ability / inability / correctness of mounting layers from additional stores, and the correctness of the concurrency implementation."
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "container-libs",
+            "number": 162
+        },
+        {
+            "organization": "containers",
+            "repository": "storage",
+            "number": 1346
+        }
+    ]
+}

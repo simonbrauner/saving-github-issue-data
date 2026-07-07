@@ -1,0 +1,126 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "container-libs",
+    "number": 176,
+    "type": "issue",
+    "title": "Being-saved images create errors up the stack",
+    "state": "open",
+    "labels": [
+        "storage"
+    ],
+    "user": "nalind",
+    "body": "Currently, to commit an image in the image library's `containers-storage` transport, we create and populate layers, create the image record, and then save the non-layers under the directory that matches that image record's ID.  The manifest and config blobs are among those non-layers.\n\nThis creates a small window where there's an image record without a manifest and/or config blob, and if another thread tries to read information about the image during that window, it will get unexpected errors, and those errors percolating up the stack is a problem.\n\nOption 1: add an `incomplete` flag that we use for screening out values that we'd otherwise return in an `Images()` list, and clean them up when we get a write lock, as we do for incomplete layers.  Won't work because we don't keep the lock during the commit operation, so things can get cleaned up from under us during the window.\nOption 2: screen out values from the `Images()` list if they don't include a manifest.  The commit logic doesn't need to be changed because it gets the ID when it creates the image record, and uses that ID to save the manifest for the image.  Downsides: if we crash, the phantom image record could stay there forever, since it would be filtered for everyone who didn't know its ID.  The screening would also need to check for a config blob, which requires knowledge that lives in containers/image (schema 1 images don't have them, and logic for determining what kind of manifest we have is in containers/image), which we can't use as a dependency.\nOption 3: if we fail to read an image's manifest, spin and try again.  Downside: hacky, and we can only guess how long we should spin before giving up and reporting an error.\nOption 4: expose a way to manipulate `Flags` in the image record, add a flag that containers/image will set on works in progress, and teach everyone to skip over images that have the flag set.  Downside: kind of sucks for everyone.\nOption 5: ???",
+    "comments": [
+        {
+            "user": "rhatdan",
+            "body": "@vrothberg @saschagrunert @mtrmac @giuseppe @TomSweeneyRedHat @baude @mheon  @mrunalp WDYT?"
+        },
+        {
+            "user": "TomSweeneyRedHat",
+            "body": "For option 1, could we add a lock to the commit operation to avoid the issue you're concerned about? "
+        },
+        {
+            "user": "mrunalp",
+            "body": "I like option 2. Can we run some kind of gc from daemons like CRI-O periodically to remove the phantom records?"
+        },
+        {
+            "user": "giuseppe",
+            "body": "could we write these files before the image is recorded?  We'd still need to have some kind of GC if these files are written but the image wasn't recorded.\n\nAnother option would be to use a staging area, similarly to OSTree, so we can write these files to a temporary (but guessable) location, e.g.: `/var/lib/containers/storage/overlay-images/staging/IMAGE-ID/manifest`\n\nWhen we lookup for the manifest, we'd need to check like:\n\n```\n_, err := os.Open(\"$STORAGE/overlay-images/$ID/manifest\")\nif err != nil && os.IsNotExist(err) {\n    _, err := os.Open(\"$STORAGE/overlay-images/staging/$ID/manifest\")\n    // We need to try again if the file was moved before opening the staging path\n    if err != nil && os.IsNotExist(err) {\n        _, err := os.Open(\"$STORAGE/overlay-images/$ID/manifest\")\n        if err != nil {\n            return err\n        }\n    }\n}\n```\nThe advantage is that at startup we could just `rm -rf $STORAGE/overlay-images/staging`"
+        },
+        {
+            "user": "vrothberg",
+            "body": "I wished we would not have this race window at all but I guess that's a natural part of sharing data across processes. I am not yet entirely hooked on the proposals, so I want to throw in another idea.\n\nThe problem reminds me of the block-copy detection mechanism we have been working on in c/image for a while. Mainly because we need to wait until processing data with a unique ID has been finished. As we have a unique ID, we can generate image-specific lockfiles ad-hoc. This somehow lets me wish for us being able to keep a lock for the image until we are finished committing and others can block on that. Our lockfile implementation allows for recursive locking, so we could wire that in without deadlocking ourselves.\n\nGarbage collection would work implicitly. Let's assume process P1 commits image Img. Process P2 runs `GetImage(...)` which blocks as process P1 owns the image-specific lock of Img. P1 dies for some reason and leaves Img in a state where the non-layer data (e.g., the manifest) is not committed to the storage. As soon as P1 dies, P2 will be unblocked and can access the image. P1 will find out that the manifest is missing. This (clearly) indicates that something went south while committing, and P2 can delete the image. It would be race free as P2 still owns the lock (and the API would use recursive-locking) so a process can call and lock multiple times.\n\nThe challenge would be that CreateImage had to return a handle to lock (or we wire that in via the options). The handle would then unlock the image-specific lock:\n\n```golang\nimg, handle, err := storage.NewImage(....)\ndefer handle.Unlock()\n```\n\nI may have overlooked a detail but it sounds sweet at the moment."
+        },
+        {
+            "user": "mtrmac",
+            "body": "> This creates a small window where there's an image record without a manifest and/or config blob, and if another thread tries to read information about the image during that window, it will get unexpected errors, and those errors percolating up the stack is a problem.\n\nDo I understand right that this is primarily problem for “list all images” users (and users who guess the ID in advance and use it directly)? For users that refer to a single image by name, we could easily enough defer the `SetNames` to only happen at the end when the image is complete, and until then the image might just as well not exist. But the “list all images” users need to know, and they tend to hard-code fairly high amount of knowledge about the storage structure.\n\n---\n\nOverall, I fairly strongly prefer “option 1”-like behavior, because leaving incomplete images that are not ever _automatically_ deleted around “kind of sucks for everyone”, things like `image {prune, tree,history}` — which do _need_ to include the incomplete images in the list, if only to account for the current storage use correctly.\n\nAs for the locking, is that so infeasible? It probably is with the current API, but a\n`CreateImageAtomically(expectedID, topLayer, bigData map[string][]byte], names []string)` seems plausible at a first glance."
+        },
+        {
+            "user": "giuseppe",
+            "body": "> As for the locking, is that so infeasible? It probably is with the current API, but a\n> `CreateImageAtomically(expectedID, topLayer, bigData map[string][]byte], names []string)` seems plausible at a first glance.\n\nif a new API is acceptable, I like this solution"
+        },
+        {
+            "user": "rhatdan",
+            "body": "@nalind @mtrmac @giuseppe @vrothberg @saschagrunert This Issue seems to have been dropped, we seemed to be coming to a decent solution, but then everyone went off into their own priorities and this was never fixed.\nDo we have concensus on a fix, in adding a new API call?  Can someone implement this new API Call?"
+        },
+        {
+            "user": "vrothberg",
+            "body": "`CreateImageAtomically(expectedID, topLayer, bigData map[string][]byte], names []string)` sounds good to me.\n\nAs for implementing, I suggest to create a card internally unless @saschagrunert has time to tackle it."
+        },
+        {
+            "user": "saschagrunert",
+            "body": "I think I can look into it in the next weeks, if someone else is faster than me then feel free to assign this one :) "
+        },
+        {
+            "user": "rhatdan",
+            "body": "@nalind @saschagrunert Any progress on this?"
+        },
+        {
+            "user": "saschagrunert",
+            "body": "Not until now unfortunately. "
+        },
+        {
+            "user": "rhatdan",
+            "body": "@nalind @saschagrunert Any progress on this?"
+        },
+        {
+            "user": "cevich",
+            "body": "Checking: We're not sure, but Miloslav suggested I may be seeing this issue when building multiarch images (using buildah) in Cirrus-cron jobs.  For whatever reason, it tends to happen once/twice a week on [the 'hello' image build like in this example.](https://cirrus-ci.com/task/6422680734793728).  Error message reported is:\n\n```\nloading manifest for target platform: reading manifest for image\ninstance \"sha256:481...a73\": error locating item named\n\"manifest-sha256:481...a73\" for image with ID \"713...24e\" (consider\nremoving the image to resolve the issue): file does not exist\n```\n\nDoes this seem related or do I need to go find another tree to bark at?"
+        },
+        {
+            "user": "mtrmac",
+            "body": "When pulling/importing images to named tags, we only add the tag after the image is “complete”.\n\nIn the meantime, though, it can still be looked up by manifest digest (after that manifest is recorded into store), or by image ID (even before any manifest is uploaded, and the image ID is deterministic for pulled images — not for built images).\n\nSo, it possible to:\n- refer to the image using a manifest digest of the top-level manifest list. This digest reference finds an image, even though it is (possibly not yet) tagged. The top-level manifest list is successfully read.\n- The top-level manifest list refers to a per-arch manifest (“reading manifest for image instance” points at this being the case).\n- The per-arch manifest might not _yet_ be recorded in c/storage, and reading it fails like the above.\n\nThe might be applicable _if_ there are two processes, one is pulling the image, and another is referring to it (using a known top-level digest?) and finds the not-yet-complete image.\n\nOne clearly problematic thing the `storageImageDestination.Commit` code is doing is that it first records the top-level manifest list, if any, and only afterwards it records the per-arch manifest. So, there’s a window where a second process could see the top-level manifest list but not the per-arch manifest.\n\nAll of this is somewhat a special case of the larger discussion — it would be easy to switch the two manifest writes (and we should do that), but similarly the image doesn’t yet have signatures recorded. In principle, all of this should be one locked write.\n\n----\n\nI don’t immediately see how this relates to the log, though — doesn’t this show the build completely succeeding, and then some larger, _non-parallel_ operation failing? I can’t trivially see the failing command or even attribute it to a specific script. But overall this looks a bit as if the parallel build just produced a broken image, somehow… and this failure is not racing against anything else running concurrently, is it?\n\nI’m afraid I’m not familiar with the Buildah/Podman multi-arch-manifest code."
+        },
+        {
+            "user": "cevich",
+            "body": "> The might be applicable if there are two processes, one is pulling the image, and another is referring to it (using a known top-level digest?) and finds the not-yet-complete image.\n\nFor instance, when building a multi-arch image, and giving the `--jobs` argument, eh?\n(I mention this, because it's precisely what we do in Cirrus to build these images).\n\nThis also strikes me as maybe related to https://github.com/containers/buildah/issues/3710 and/or https://github.com/containers/buildah/issues/3791"
+        },
+        {
+            "user": "cevich",
+            "body": "> I’m afraid I’m not familiar with the Buildah/Podman multi-arch-manifest code.\n\nThe scripts are more/less a wrapper around `buildah --layers --force-rm --jobs=\"$PARALLEL_JOBS\" --platform=\"$platforms\" --manifest=\"$_fqin\" \"$CONTEXT\"` with some extra validation to check that every arch is present in the final manifest list.  Assuming that is successful, there may/may-not be some additional tagging of the manifest list followed by pushing it up to a registry.\n\n> and this failure is not racing against anything else running concurrently, is it?\n\nNo, the only thing running on the machine with any intentional concurrency is the `buildah build...`, everything else is serial (except maybe the push?).  In any case, by my eye, the error I posted seems to appear right after the parallel build, but maybe before gluing together the manifest list?  Certainly before the scripts try to verify the contents and push."
+        },
+        {
+            "user": "mtrmac",
+            "body": "> For instance, when building a multi-arch image, and giving the `--jobs` argument, eh?\n\n\n(I don’t really know what I’m looking at) My reading of the log is that `buildah build` (completely) succeeded, then `Login Succeeded!` looks like another successful command from some script, and `Executing mod-command:  tag_version.sh` also suggests that something _after_ `buildah build` is happening. So this seems more likely to be something in the tagging or pushing step. (The cause is still pretty likely to be something about the build, but “a build successfully creates an inconsistent multi-arch image” and “we are concurrently seeing an in-progress partial image being pulled” are somewhat distinct, and this issue is more of the latter.)"
+        },
+        {
+            "user": "cevich",
+            "body": "Ahh, yes, comparing the output and my scripts, your analysis is correct.  That error in the logs appears to originate [from a `buildah  images` command](https://github.com/containers/automation/blob/main/build-push/bin/build-push.sh#L390), which seems really odd. But that's the only `buildah` command between build-completion, mod-command completion, and just prior to attempting a push.  Since it failed, an empty-string was returned and we get the \"No FQIN(s) to be pushed.\" message.   In any case, you're probably correct and this is either unrelated to this issue, or at best well after the build completed (for good or ill)"
+        },
+        {
+            "user": "mtrmac",
+            "body": "Looking at the multi-platform build, apart from almost-certainly-irrelevant https://github.com/containers/buildah/issues/4079 , the top-level manifest is being built synchronously after the individual instances, so that should not allow this kind of inconsistency. (OTOH I never read how Buildah/Podman deal with manifest list objects, and from what I’ve seen today I’m not sure how the failing instance lookup ever works, so I am _certainly_ missing something important about the code base.)\n\nSo I think it’s a different bug, or at least it’s likely enough to be different that it seems worthwhile discussing in a separate (initially Buildah) GitHub issue instead of here."
+        },
+        {
+            "user": "mtrmac",
+            "body": "After https://github.com/containers/image/pull/2067 , we _create_ images atomically, but if we pull an image that deduplicates to an existing one, the _addition_ of extra data (other manifests, signatures) does not happen atomically; and from a quick check, it seems that we might be adding that extra data in an order which exposes dangling references."
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "containers",
+            "repository": "storage",
+            "number": 1153
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "container-libs",
+            "number": 175
+        },
+        {
+            "organization": "containers",
+            "repository": "storage",
+            "number": 1483
+        },
+        {
+            "organization": "containers",
+            "repository": "image",
+            "number": 2067
+        },
+        {
+            "organization": "containers",
+            "repository": "image",
+            "number": 2636
+        }
+    ]
+}

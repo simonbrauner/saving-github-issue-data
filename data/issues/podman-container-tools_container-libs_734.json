@@ -1,0 +1,106 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "container-libs",
+    "number": 734,
+    "type": "pull_request",
+    "title": "storage: fix UID/GID map handling for shifting layers",
+    "state": "closed",
+    "labels": [
+        "storage"
+    ],
+    "user": "giuseppe",
+    "body": "when the driver supports shifting, set the rechown target to identity instead of the container's maps.\n\nCloses: https://redhat.atlassian.net/browse/RHEL-160859\nAssisted-by: Claude Opus 4.6\nSigned-off-by: Giuseppe Scrivano <gscrivan@redhat.com>",
+    "comments": [
+        {
+            "user": "mtrmac",
+            "body": "Note to self: Also #735."
+        },
+        {
+            "user": "TomSweeneyRedHat",
+            "body": "LGTM\nbut definitely want some other head nods"
+        },
+        {
+            "user": "giuseppe",
+            "body": "this is needed for a customer reported issue, can we move it forward?"
+        },
+        {
+            "user": "chaserhkj",
+            "body": "Just to add to the discussion since my PR is related:\n\n> https://github.com/containers/container-libs/pull/735 suggests that the ID mapping semantics of overlay differs between kernel’s overlay and fuse-overlayfs?! Is that the case?\n\nYes, but the difference is mostly in a slightly different but related scope. There are two scopes of question here, one is the layer creation scope where a chown on the layer file tree could happen to fix the layer permissions; the other one is the layer mount scope where a mount-time id map is performed to mount a view of the fs with a different set of ownership IDs then the underlying fs.\n\nThe difference between overlay and fuse-overlayfs is mainly in the mount time scope:\n- When using overlayfs, the driver performs [id-mapped mounts](https://docs.kernel.org/filesystems/idmappings.html) first before entering overlay mount procedure. This effectively adds a shim layer on top of all layers before the overlay is mounted. Thus right before performing the overlay mount the driver has a view of the fs that is *already mapped* onto the target ID space.\n- When using fuse-overlayfs, the driver use `-o uidmapping=` and `-o gidmapping=` provided by fuse-overlayfs to do the map and the overlay mount *in one go*. Thus right before performing the overlay mount the driver has a view of the fs that is *unmapped* yet.\n\n#735 mainly concerns a chown operation on the upper layer (`diff`) that happens right before the overlay mount is committed that assumes that the layer is already mapped to the target space. Thus with the second case it just breaks the permission on the diff layer.\n\nNote that this PR, although working in the creation scope instead of mounting scope, seems to tamper with the layerOptions of the diff layer as well (changes in `CreateContainer` function). This seems to be related to the behavior of how `UpdateLayerIDMap` is called. \n\nOn the other hand I dug into the code for a while on how the ID maps are being passed around, and I feel that a lot of the confusion around the handling of this just comes from the notion of \"layer id map\" itself. A layer is a storage object, it is not yet instantiated into a mount, but an ID map is associated with a mount and a userns, which is a runtime object. It feels very strange that a layer could have an attribute of IDMap. And it seems that at mount time the driver does not use layer id map to do the idmapped mount at all, the maps used there are passed down from the Container object's id map attributes, and there is no data path between the maps on the layer object and the maps on the Container object. \n\nAs far as I can tell, the layer ID maps seems to be only used to determine if UpdateLayerIDMap should be called to perform chown on the layers. But the purpose of this function seems very unclear to me, as well. I traced back the data path and it seems that all layer ID maps comes from library consumers. I can't really think of any legit practical case that this attribute can be used reasonably, as why is a chown needed in the first place? The linked jira ticket of this PR shows a podman failure related to this, but I feel that is just because podman called both container creation and layer creation methods with the id maps populated, it might just be fine if it does not fill the id maps for the layer creation.\n"
+        },
+        {
+            "user": "giuseppe",
+            "body": "the root problem is that I am not sure how I can fix the HostUIDMapping/HostGIDMapping vs UIDMap/GIDMap mess without breaking the API"
+        },
+        {
+            "user": "giuseppe",
+            "body": "I've splitted the type passed to layers.go in [bdab57a](https://github.com/containers/container-libs/pull/734/commits/bdab57a206cc922e37bd62c1f8eefe3be6b9a73b) so that we can use a different semantic without breaking the API"
+        },
+        {
+            "user": "mtrmac",
+            "body": "> how I can fix the HostUIDMapping/HostGIDMapping vs UIDMap/GIDMap mess\n\nWhich mess is that?"
+        },
+        {
+            "user": "giuseppe",
+            "body": "> > how I can fix the HostUIDMapping/HostGIDMapping vs UIDMap/GIDMap mess\n> \n> Which mess is that?\n\nthat setting HostUIDMapping/HostGIDMapping invalidates the value of UIDMap/GIDMap "
+        },
+        {
+            "user": "giuseppe",
+            "body": "can we move this forward?"
+        },
+        {
+            "user": "mtrmac",
+            "body": "I‘m still at https://github.com/containers/container-libs/pull/734#pullrequestreview-4078599369 : I don’t know what the intended semantics of the fields is, so I don’t know against what design to review this."
+        },
+        {
+            "user": "giuseppe",
+            "body": "the same type is used interchangeably to mean \"requested mapping\" and \"mapping on disk\".  I've added more documentation around that.  In layers.go it stores what mapping are used on disk, while in the other cases it is the desired mapping specified by the user and expected at mount time (no matter how it is achieved)."
+        },
+        {
+            "user": "packit-as-a-service[bot]",
+            "body": "Packit jobs failed. @containers/packit-build please check."
+        },
+        {
+            "user": "giuseppe",
+            "body": "@Luap99 would you mind taking a look at this one?"
+        },
+        {
+            "user": "giuseppe",
+            "body": "> As this was reported against podman build it might be good to do a test vendor in buildah and/or podman and also add a regression test based on the provided reproducer in the issue there to ensure everything passes as expected.\n\nsure, going to open a PR against Podman with a regression test"
+        },
+        {
+            "user": "giuseppe",
+            "body": "opened a PR for buildah: https://github.com/containers/buildah/pull/6832 wasted most of the time as I forgot of the `--layers=true` difference between `podman build` and `buildah bud`"
+        },
+        {
+            "user": "giuseppe",
+            "body": "and for podman: https://github.com/containers/podman/pull/28659"
+        },
+        {
+            "user": "giuseppe",
+            "body": "Tests are passing"
+        },
+        {
+            "user": "giuseppe",
+            "body": "@Luap99 Podman tests are passing, can we merge now?"
+        },
+        {
+            "user": "giuseppe",
+            "body": "fair, but this is addressing a customer bug and apparently it doesn't introduce regressions (as far as testing goes).  So at some point we need to get things moving"
+        },
+        {
+            "user": "mtrmac",
+            "body": "(I’m not ignoring this but I’m working on that other thing.)"
+        },
+        {
+            "user": "mheon",
+            "body": "LGTM for reference. We'll try and get an SME review on Monday. If we can't, we can merge."
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "container-libs",
+            "number": 735
+        }
+    ]
+}

@@ -1,0 +1,67 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "container-libs",
+    "number": 93,
+    "type": "issue",
+    "title": "skopeo copy --retry-times does not retry on i/o timeout",
+    "state": "open",
+    "labels": [
+        "common"
+    ],
+    "user": "rittneje",
+    "body": "We face intermittent networking issues copying an image from Artifactory to ECR. In order to mitigate these issues, we tried setting `--retry-times`, but it appears that it does not consider an i/o timeout to be retryable. This makes `--retry-times` useless, since now we have to surround it in our own retry logic.\n\nSeems like the root cause of this is the `isRetryable` helper function in github.com/container/common. For the purposes of `skopeo copy`, I would expect _all_ errors to be deemed retryable, since the operation is idempotent. Even auth failures should be retryable, since in the past we have observed oddities with Artifactory with spurious auth failures.\n\nOn a related note, `skopeo copy` seems to be using a 30 second timeout, or something like that. It's not clear to me where that is coming from. The docs mention a `--command-timeout` flag (which we are not using), but they do not make it clear whether that is the timeout of a single retry attempt, or the entire command. They also do not mention any default value. My expectation here is that the timeout should apply to a single retry, or else that again makes `--retry-times` useless in the face of sporadic network issues.",
+    "comments": [
+        {
+            "user": "mtrmac",
+            "body": "Thanks for your report.\n\n> We face intermittent networking issues copying an image from Artifactory to ECR. In order to mitigate these issues, we tried setting `--retry-times`, but it appears that it does not consider an i/o timeout to be retryable. This makes `--retry-times` useless, since now we have to surround it in our own retry logic.\n\nWhat is the _exact_ error that should be recognized?\n\n> Seems like the root cause of this is the `isRetryable` helper function in github.com/container/common.\n\nYes, moving this issue there.\n\n> For the purposes of `skopeo copy`, I would expect _all_ errors to be deemed retryable, since the operation is idempotent. Even auth failures should be retryable, since in the past we have observed oddities with Artifactory with spurious auth failures.\n\n“Source file not found”, or “destination filesystem running out of disk space” can’t be solved by just retrying, and in some cases can make things worse. Retrying on authentication failures is could easily lead to an account lockout.\n\n---\n\n> On a related note, `skopeo copy` seems to be using a 30 second timeout, or something like that. It's not clear to me where that is coming from. \n\nI don’t know about any default like that. Could that be your network infrastructure, e.g. some NAT/connection-tracking firewall?"
+        },
+        {
+            "user": "rittneje",
+            "body": "The specific error we got was an i/o timeout during dial.\n\n> time=\"2021-06-28T21:49:16Z\" level=fatal msg=\"Error writing blob: Patch \\\"https://[...]\\\": dial tcp 3.86.125.4:443: i/o timeout\"\n\n> Could that be your network infrastructure, e.g. some NAT/connection-tracking firewall?\n\nSince this is an i/o timeout in Go, it seems like this is coming from a context timeout or something to that effect. If it were the network I'd expect to see some TCP failure instead."
+        },
+        {
+            "user": "rittneje",
+            "body": "@mtrmac Just wanted to poke on this issue again. We continue to face sporadic networking issues. The latest failure was a TLS handshake timeout. (We believe this particular issue is due to some bug in our firewall.)\n\n> time=\"2021-07-13T15:52:34Z\" level=fatal msg=\"Error writing blob: Patch \\\"https://[...]\": net/http: TLS handshake timeout\"\n"
+        },
+        {
+            "user": "ashishth09",
+            "body": "Any updates on this issue?"
+        },
+        {
+            "user": "rittneje",
+            "body": "@mtrmac Following up on this again. I'm also hoping that details on how `--command-timeout` and `--retry-times` interact with each other can be added to the documentation."
+        },
+        {
+            "user": "mtrmac",
+            "body": "For the record, some of the timeout handling might be improved by https://github.com/containers/common/pull/1051 (but without a testable reproducer we can’t tell for certain)."
+        },
+        {
+            "user": "rittneje",
+            "body": "@mtrmac Based upon your comment [here](https://github.com/containers/common/pull/1051#issuecomment-1138862689), it sounds like `--command-timeout` is how long the entire command can take, and not how long each retry can take. So it doesn't sound like that alone will fix this issue. Either `--command-timeout` needs to be redefined to be the per-attempt timeout, or a new flag needs to be added (and `--command-timeout` possibly deprecated)."
+        },
+        {
+            "user": "mtrmac",
+            "body": "> it sounds like `--command-timeout` is how long the entire command can take, and not how long each retry can take\n\nYes.\n\n> or a new flag needs to be added \n\nI don’t see how that necessarily follows. The original issue is that I/O timeouts don’t cause a retry. We don’t have a reliable way to test that, but the linked containers/common#1051 should help with that, with no new flag being necessary.\n\n(It is plausible that a specific deployment might want to tune the timeout value that is being triggered, in principle; but that’s a different RFE and I somewhat struggle with the thought that every timeout everywhere throughout the stack should be individually controllable — the set of timeouts in a fairly large networking stack like a HTTP client is not even necessarily stable over time, as the implementation evolves.)\n\nOf course, giving more tunable knobs for the retry mechanism overall (affecting a per-attempt timeout, if any, a possible backoff growth, changes to that per-attempt timeout, and the like) is possible. I haven’t given much thought to which tunables are necessary and/or sustainably supportable. There well may be best practices I’m unaware of.\n\n---\n\n> On a related note, `skopeo copy` seems to be using a 30 second timeout, or something like that. It's not clear to me where that is coming from.\n\nIf the goal is to make this timeout _larger_, note that Skopeo is not, to my knowledge, explicitly defining any such timeout; so it’s not immediately obvious (without specifically determining what timeout is being hit) that there even is a mechanism to increase that timeout.\n\nLooking further, https://pkg.go.dev/net/http `DefaultTransport` does define two 30-second timeouts, and it does seem to be a reasonable guess that it’s one of these two that has been hit, especially for the `dial tcp 3.86.125.4:443: i/o timeout\"` error (referring to the same “dial” part of the process of making a request). That goes back to whether we should expose this particular tunable timeout (and a dozen others?) as a CLI flag (and, for this specific case of just setting up a TCP connection, if 30 seconds is not enough, what larger plausible value _is_ enough?)."
+        },
+        {
+            "user": "rittneje",
+            "body": "@mtrmac The problem with having a timeout for the whole command is that if it eats it up in a single attempt (because it gets stuck during TCP dial), then it won't be able to retry because the context has already expired. What we'd like to say is that an individual attempt should timeout in X seconds. Trying to time out the whole command is unmaintainable when retries and backoffs enter the mix.\n\n> and, for this specific case of just setting up a TCP connection, if 30 seconds is not enough, what larger plausible value is enough?\n\nFor us, it is a firewall bug that basically causes the TCP connection to disappear into the ether. It doesn't matter how long you wait, it will _never_ finish. The only way to fix it is to start a new TCP connection.\n\nIn short, we have no need to control the timeouts of the individual operations within an attempt. We just want the attempt as a whole to time out after X seconds. (Really in an ideal world we'd want to abort after X seconds without \"progress\" but I understand that could get very tricky to implement properly.)"
+        },
+        {
+            "user": "mtrmac",
+            "body": "> The problem with having a timeout for the whole command is that if it eats it up in a single attempt (because it gets stuck during TCP dial), then it won't be able to retry because the context has already expired.\n\nAh, that’s a very fair point, we probably do need to expose an overall single-attempt timeout.\n\n> We just want the attempt as a whole to time out after X seconds. (Really in an ideal world we'd want to abort after X seconds without \"progress\" but I understand that could get very tricky to implement properly.)\n\nThat does get tricky, because container images can be dozens of gigabytes large. So while I think that a 30-second timeout for just setting up a TCP connection is just _enough_ (how many times round the Earth is that, at speed of light?), with very slow but fairly reliable links there is probably no globally-applicable maximum _total_ operation time that would also fit users with smaller images and fast links.\n\nOf course, that does not prevent us from exposing a --retry-single-attempt-timeout option, it “only” makes it hard for users to choose a good value. But in many applications, where the total size of images, and properties of the infrastructure, are known, choosing a good value might well be possible."
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "buildah",
+            "number": 4018
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 14616
+        }
+    ]
+}

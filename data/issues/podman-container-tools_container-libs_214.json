@@ -1,0 +1,81 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "container-libs",
+    "number": 214,
+    "type": "issue",
+    "title": "Request for Sigstore signature verification enhancement and flexibility in cosign verify.",
+    "state": "open",
+    "labels": [
+        "image"
+    ],
+    "user": "zhaoyonghe",
+    "body": "Currently, we are able to verify container images with sigstore signatures using public key/Fulcio/Rekor, as described [here](https://access.redhat.com/documentation/en-us/red_hat_enterprise_linux/8/html/building_running_and_managing_containers/assembly_signing-container-images_building-running-and-managing-containers#proc_verifying-sigstore-image-signatures-using-a-public-key_assembly_signing-container-images). However, there are additional verifications supported by cosign, such as verifying signatures using non-Fulcio roots, as demonstrated in this [pull request](https://github.com/sigstore/cosign/pull/2845).\n\nAn example of the cosign command for verifying signatures using non-Fulcio roots is:\n\n```\nSIGSTORE_ROOT_FILE=\"certificate_bundle.pem\" cosign verify \\\n  --certificate-identity-regexp \"identity-.*\" \\\n  --certificate-oidc-issuer-regexp \".*\" \\\n  --timestamp-certificate-chain tsa_ca_chain.pem \\\n  \"${image}\"\n```\nIs it possible to add support for this functionality? Moreover, could we take a step further and match fields in /etc/containers/policy.json with the cosign verify parameters to enable the execution of all forms of cosign verify?\n\n/cc @mtrmac\nThank you for your attention to this matter.",
+    "comments": [
+        {
+            "user": "mtrmac",
+            "body": "Thanks for reaching out.\n\nWe are, for the foreseeable future, very unlikely to include _all_ of cosign features (that would essentially require including much of cosign codebase, and c/image is used in size-constrained tools like Podman).\n\nIndividual features can be added (and I expect more Fulcio-matching features in particular), but that would probably be on a feature-by-feature basis, if they are necessary and supportable.\n\nAs some random few comments\n- c/image does already support (in fact, it _requires_) providing Fulcio roots directly as a CA certificate. There is no code equivalent to Cosign’s `fulcio.GetRoots()`.\n- `--certificate-oidc-issuer-regexp \".*\"` seems to me to be such a bypass of the Fulcio design that adding the regexp option only for the purpose of it being used _that way_ seems quite ill-advised to me."
+        },
+        {
+            "user": "lkatalin",
+            "body": "It sounds like this request needs to be broken down into specific, individual feature requests that can be evaluated and implemented:\n\n- [ ] Functionality for passing in signing certificate identity on the CLI during verification with ` --certificate-identity-regexp`\n- [ ] Functionality for passing in OIDC issuer identity on the CLI during verification with ` --certificate-identity-regexp`\n- [ ] Functionality for passing in the timestamp authority (not necessarily tlog) certificate chain on the CLI during verification with `--timestamp-certificate-chain`\n- [ ] Functionality for passing in the signing certificate chain on the CLI during verification with `--signing-certificate-chain`\n\n@zhaoyonghe @dmitris Did I miss any?\n\n@mtrmac Would it be useful to file these as separate issues?\n"
+        },
+        {
+            "user": "zhaoyonghe",
+            "body": "Thanks @lkatalin for bringing up this issue again.\n\nWe use `cosign` internally, signing internal images without relying on public sigstore infrastructure to comply with company policies. To achieve keyless signing, we are inspired by Chainguard's [\"Keyless\" Code Signing Without Fulcio - Nathan Smith](https://youtu.be/d5vROySf1I8?si=CxITlSEucW6rYCvE&t=1332), which outlines setting up a private sigstore with three entities: \n1. Identity provider for signers\n2. Certificate authority\n3. Timestamp Authority\n\nWe use [Athenz](https://github.com/AthenZ/athenz) and [Crypki](https://github.com/theparanoids/crypki) (OIDC provider and CA infra already existed in our company) and the [sigstore timestamp authority](https://github.com/sigstore/timestamp-authority) to match this grocery list. Our [blog](https://www.yahooinc.com/paranoids/scaling-up-supply-chain-security-implementing-sigstore-for-seamless-container-image-signing) provides more details on our sigstore infra and cosign verify usage.\n\nIn general, it would be great to support the equivalent check as:\n```\nSIGSTORE_ROOT_FILE=codesigning.ca.cert.pem \\\ncosign verify \\\n--insecure-ignore-tlog \\\n--insecure-ignore-sct \\\n--certificate-identity-regexp \"^spiffe://screwdriver.proj/sa/sd.*$\" \\\n--certificate-oidc-issuer-regexp \"https://athenz.example.org\" \\\n--timestamp-certificate-chain tsa.ca.cert.pem  \\\n\"registry.example.org/myorg/myrepo@sha256:123456\"\n```\nThese five flags are essential from our perspective and can be separate requests!"
+        },
+        {
+            "user": "mtrmac",
+            "body": "> * [ ]  Functionality for passing in signing certificate identity on the CLI during verification with ` --certificate-identity-regexp`\n\nIt is a fairly strongly-held design decision of c/image that all verification configuration is set up in `policy.json`; that way we don’t have to add a few dozen/hundred individual options to the CLI of every single tool (e.g. `podman`/`buildah`/`skopeo`, and CLI options are outright impossible to use with Kubernetes Pods). Typically the policy should be the same throughout the relevant organization, so copy&pasting the arguments should be much less convenient and less maintainable.\n\nI am also still pretty skeptical about regexes, because they encourage imprecise identities. Compare the detailed design discussion and concerns in https://github.com/containers/image/pull/2235 .\n \n> * [ ]  Functionality for passing in OIDC issuer identity on the CLI during verification with ` --certificate-identity-regexp`\n\nSame here; that should be in `policy.json`. And I’d like to see a real use case documented (not `.*`, and not a match that doesn’t need to be a regex).\n\n> * [ ]  Functionality for passing in the timestamp authority (not necessarily tlog) certificate chain on the CLI during verification with `--timestamp-certificate-chain`\n\nAgain, not  a CLI option.\n\nSupporting a timestamp authority instead of Rekor does seem quite valuable to me, I don’t think most users actually benefit from the complexity of Rekor.\n\n> * [ ]  Functionality for passing in the signing certificate chain on the CLI during verification with `--signing-certificate-chain`\n\nA root of trust belongs in `policy.json`. Why would an image signature not contain all the intermediates required to accept that signature against the anticipated policy?\n\n> @mtrmac Would it be useful to file these as separate issues?\n\nThere seems to be a shared theme around `policy.json`, but other than that, yes, I’d prefer to track every feature/option separately.\n\n---\n\n> Our [blog](https://www.yahooinc.com/paranoids/scaling-up-supply-chain-security-implementing-sigstore-for-seamless-container-image-signing) provides more details on our sigstore infra and cosign verify usage.\n\n(Added to my reading list, but I didn’t read it yet; it’s possible that resolves some of my concerns.)\n"
+        },
+        {
+            "user": "mtrmac",
+            "body": "containers/image#2432 is working on supporting non-Fulcio PKIs."
+        },
+        {
+            "user": "dmitris",
+            "body": "> containers/image#2432 is working on supporting non-Fulcio PKIs.\n\n@mtrmac but that issue was [closed](https://github.com/containers/image/issues/2432#issuecomment-2173889337) as \"not planned\" - does it mean it was closed because of being a duplicate of this one (#2027)?"
+        },
+        {
+            "user": "mtrmac",
+            "body": "My mistake, https://github.com/containers/image/pull/2579 is where the work has started."
+        },
+        {
+            "user": "dmitris",
+            "body": "@mtrmac one related question, in the spirit of \"where the pack is going\" 😄:  the `cosign` tool and the underlying libraries such as [sigstore-go](https://github.com/sigstore/sigstore-go) are moving toward the [Trust Root](https://github.com/sigstore/cosign/issues/3700) mechanism for \"bundling\" all the necessary public keys (identity, timestamp server CAs etc.).  Should we consider supporting that format? "
+        },
+        {
+            "user": "mtrmac",
+            "body": "Currently c/image doesn’t have the ambition to support all options that exist in `cosign`, or that may be added in the future; so it’s not _immediately_ applicable.\n\nConversely, the `policy.json` file exists to describe different policies based on various namespace scopes, which seems not possible in that trust bundle format.\n\nAlso c/image has a strong opinion that the signed image identity critically matters, unlike cosign — so the two tools would, often enough, not evaluate “the same” policy the same way.\n\nIt would be possible to add a `policy.json` option to specify some options by that trust root file, rejecting any files with unknown options… there’s _some_ value in that (e.g. system configuration tools would only specify/update the policy once), but it would have significant limitations, and users would have to test the two tools’ handling of the updated policy separately, in either case. So I’m not sure this would be all that helpful, a bit of convenience bundled with a risk of several unwelcome surprises."
+        },
+        {
+            "user": "dmitris",
+            "body": "@mtrmac it's great to see the BYOPKI changes advancing and soon being released in containers/image#2579, thanks a lot to you and everyone involved! 💯 \n\nIt seems to me that to be able to fully use a non-Fulcio BYOPKI, one would need (or at least \"we would need\" 😄 ) the support for passing the TSA CA Roots.  The TSA certificate should be \"packaged together\" with the image signature, but without the TSA CA root certificates, it won't be possible to verify the TSA assertion.  Would it be possible to \"take up\" the following item from the [list](https://github.com/containers/container-libs/issues/214) above (Feb. 5, 2024):\n\n> [ ]  Functionality for passing in the timestamp authority (not necessarily tlog) certificate chain on the CLI during verification with `--timestamp-certificate-chain`\n\nDo I understand it correctly that it would require adding an equivalent of cosign's [CheckOpts.TSARootCertificates](https://pkg.go.dev/github.com/sigstore/cosign/v2/pkg/cosign#CheckOpts.TSARootCertificates) (and possibly also the [UseSignedTimestamps](https://pkg.go.dev/github.com/sigstore/cosign/v2/pkg/cosign#CheckOpts.UseSignedTimestamps) boolean flag)?  Should we create a separate issue for the TSA CA Roots support?  If I could help with any work on it (implementation, testing etc.), I'd be more than happy to contribute!  This seems to be on the critical path for us to allow our users to `podman pull` or `podman run` and automatically have the sigstore signature validation performed as a precondition 🙏 🙏  - that would be so incredibly **_awesome_**! \n\nAlso if you could create an item on https://issues.redhat.com/ under the [BYOPKI](https://issues.redhat.com/browse/OCPNODE-2269) Epic, that would be helpful - I'll definitely vote for that, and get all my friends to do the same 😄 🤞🤞🤞\n\n\n\n"
+        },
+        {
+            "user": "mtrmac",
+            "body": "> It seems to me that to be able to fully use a non-Fulcio BYOPKI, one would need (or at least \"we would need\" 😄 ) the support for passing the TSA CA Roots. \n\nI think the two are pretty independent. Certificates default to being verified against the current time; using a TSA is a separate new feature.  (Compare https://github.com/containers/image/pull/2579#discussion_r1955380101 ).\n\nCode contributions would certainly be welcome.\n\nhttps://issues.redhat.com/projects/OCPNODE/ tracks Red Hat’s OpenShift product features and product prioritization; if you want to advocate for a new feature there, please use Red Hat’s customer support channels, possibly starting with https://access.redhat.com .\n"
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "blue-build",
+            "repository": "cli",
+            "number": 84
+        },
+        {
+            "organization": "samhclark",
+            "repository": "custom-silverblue",
+            "number": 15
+        },
+        {
+            "organization": "containers",
+            "repository": "image",
+            "number": 2579
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "container-libs",
+            "number": 34
+        }
+    ]
+}

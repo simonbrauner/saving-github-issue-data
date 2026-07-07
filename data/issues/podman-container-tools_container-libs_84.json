@@ -1,0 +1,38 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "container-libs",
+    "number": 84,
+    "type": "issue",
+    "title": "libimage: Save() should accept io.Writer instead of file path",
+    "state": "open",
+    "labels": [
+        "common"
+    ],
+    "user": "Luap99",
+    "body": "When calling Save() from the podman API using file paths as parameter requires us to write a temporary file, this is bad since the API then needs to read it again and write it to the api caller socket. It would be much more performant to just pass the io.Writer down the stack and let libimage write directly to it. This also saves the host from needing extra storage space for the tmp file.\n\nsee https://github.com/containers/podman/pull/16888 for an example implementation with export in podman\n\nAssuming we do not want to break the API we can either:\na) create a new function, maybe called `SaveToWriter()` that accepts the same params except that the path string is replaced with an io.Writer interface.\nb) allow to pass the io.Writer in `SaveOptions{}` and use it when `path` == `\"\"`\n\n\nLooking at the code it seems that even c/image is using paths so fixing this would require changesthere as well, I don't know how complicated that would be\n\nAlso we can save as `oci-dir` or `docker-dir` in which case the path is a directory, in this case it shoudl also just return a tar stream  and let the caller extract it. This is what the podman APi is doing btw\nhttps://github.com/containers/podman/blob/56982a9236da77a138c21c30ad578e991b3f3b50/pkg/api/handlers/libpod/images.go#L218-L228\nSo overall this is quite ugly and expensive with bigger images.\n\nI don't think this is a high priority since this extra tmp file hack only effects the podman service but it still looks like a nice improvement.\n",
+    "comments": [
+        {
+            "user": "Luap99",
+            "body": "cc @vrothberg "
+        },
+        {
+            "user": "vrothberg",
+            "body": "cc @mtrmac "
+        },
+        {
+            "user": "mtrmac",
+            "body": "What could work right now (assuming the underlying implementation can actually write to non-seekable files) is to use a kernel-visible pipe (`pipe(2)`, not `io.Writer`), and then use a `/dev/fd/`_i_ path to refer to it.\n\n---\n\nYeah, this is a fundamental fallout of the c/image decision to have `types.ImageReference` always representable as text (i.e. possible to input in a CLI, and express as text in error messages); text can’t refer to in-process-memory objects like that.\n\nThat fundamental design decision has been, to an extent, compromised with things like `docker/archive.Writer`, which allows creating “ordinary-looking” references that nevertheless internally point at shared state. (And there’s similar work on `oci/archive.Writer` as a pending PR.)\n\nSo I can, kind of, imagine expanding on that with something like `NewWriterToStream`: the _writing_ implementation would be fairly transparent, at least for the transports that create tar files instead of directories, we could just stream to the `io.Writer` instead of to a local file; we could continue to use the existing implementation approach to have `types.ImageReference` values that refer to an existing `archive.Writer` state. The design question would be what format to use for the _text format_ of the created `types.ImageReference` values; the text format could not be round-tripped back to a value that writes to the stream, but still we need to output _some_ text and that text should ideally match the documented syntax.\n\nWith `/dev/fd/`_i_, we can have things like `docker-archive:/dev/fd/`_i_`:busybox`, which are not all that round-trippable (they only work within a single process) but match the syntax. Streaming directly to an `io.Writer`, we would need to invent a path name that clearly doesn’t match anything else… `docker-archive:/dev/null/this/is/invalid/io.Writer_at_`_address_`:busybox`? There are few “reserved” path names (maybe paths started `//`, but they are reserved to the OS, not to individual processes to define semantics)."
+        },
+        {
+            "user": "Luap99",
+            "body": "For the podman system service it makes the most sense to use an `io.Writer`, first using a pipe requires us also read/write twice so we only gain that we do not need the full space on disk. Also passing down the actual fd for the client tcp socket will not work since we still have to write valid HTTP. The `io.Writer` from the http client ensures that it will write the HTTP headers on the first write call.\n"
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 24211
+        }
+    ]
+}

@@ -1,0 +1,88 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "container-libs",
+    "number": 259,
+    "type": "issue",
+    "title": "skopeo login, with no XDG_RUNTIME_DIR, fails in a bad way",
+    "state": "open",
+    "labels": [
+        "image"
+    ],
+    "user": "edsantiago",
+    "body": "Similar to containers/skopeo#923 \n\n```console\n$ skopeo login quay.io\nUsername: myusername\nPassword:\nFATA[0021] mkdir /run/containers/1000: permission denied\n$ id -u\n1000\n```\n`podman login`, however, works just fine:\n```console\n$ podman login quay.io\nUsername: myusername\nPassword:\nLogin Succeeded!\n```\nIf I `export XDG_RUNTIME_DIR=/run/user/1000`, skopeo can use the credentials written by podman. I kind of expected skopeo and podman to assume the same defaults in an XDG-less environment.\n\nTL;DR podman has a reasonable default for XDG_RUNTIME_DIR; skopeo should too.",
+    "comments": [
+        {
+            "user": "mtrmac",
+            "body": "Minimal summary:\n- Why is XDG_RUNTIME_DIR empty?\n- Either we fall back to the home directory (which @rhatdan intentionally wanted us to move away from), or there is nothing that works.\n\n---\n\n\nPhilosophically, just for basic cross-application consistency reasons, it’s wrong for an end-user application that is not in charge of setting up the session, to override XDG_* environment variable values (or alternatively, it’s wrong for a library inside such an application to read XDG_* environment variable values, I guess; but more the former).\n\nIt just doesn’t work to have to keep N statically-linked executables that embed undocumented defaults in sync (when these defaults even change over time! see https://github.com/containers/podman/pull/8241 ).\n\nPodman kind of has to set the variable because it manipulates user namespaces, but that doesn’t make it a viable feature.\n\nSo Skopeo just _can’t_ be consistent with Podman’s fallback shen^W…strategies as they change over time.\n\n---\n\n> If I `export XDG_RUNTIME_DIR=/run/user/1000`\n\nNote that both `/run` and `/run/user` are (or better be) 0755 root:root ; so we can’t just default to those paths without some root-owned process creating those paths for us; and then my question would be why doesn’t that root-owned process set up the session to contain a valid `XDG_RUNTIME_DIR` (and there can be, in turn, some some complex answers that, incl. https://bugzilla.redhat.com/show_bug.cgi?id=753882 leading to sad things like https://cgit.freedesktop.org/polkit/commit/?id=8635ffc16aeff6a07d675f861fe0dea03ea81d7e )\n\nThere isn’t any default value that can be used; https://specifications.freedesktop.org/basedir-spec/basedir-spec-latest.html  basically shrugs and says “find some other place”.\n\n---\n\nApart from XDG_RUNTIME_DIR, focusing on credential storage, this is _kind of_ intentional: There was an intentional decision not to store credentials in the home directory — and, well, without the home directory we have nothing to fall back on, per the above.\n\nLots of history:\n- https://github.com/containers/image/pull/424#pullrequestreview-101703066\n- https://github.com/containers/image/pull/729\n- https://github.com/containers/podman/issues/427#issuecomment-371221658\n- https://github.com/containers/storage/pull/568\n\ntl;dr the long-term hope was that we are going to migrate users to credential helpers, rather than default to home directories. That hasn’t happened yet (and for the contemplated user running in a stripped-down environment where not even XDG_* environment variables are set, it seems dubious to assume that credential helpers will be available)."
+        },
+        {
+            "user": "edsantiago",
+            "body": "`XDG_*` are empty because this is a session created via `su - $user`. This is not uncommon. The `/run/user/1000` directory exists because I have run (as root) `loginctl enable-linger $user`; this is a prerequisite for being able to use podman. \n\nI accept that there are unclear standards about XDG; and I'm an old neckbeard who doesn't understand or use or want any of these newfangled complications anyway (but that battle is lost). All I'm saying is: podman has one default, skopeo has another. The skopeo one is clearly wrong, because it throws an error. It would be nice if the skopeo default was the same as the podman one. (And yes, universal consensus that the default should not be $HOME)."
+        },
+        {
+            "user": "mtrmac",
+            "body": "Looking again, I’ve been a bit too harsh on Podman: its first fallback is `/run/user/$UID`, which makes much more sense than the other two.\n\n----\n\n> All I'm saying is: podman has one default, skopeo has another. The skopeo one is clearly wrong, because it throws an error. \n\nThe Podman one is less clearly wrong… see elsewhere.\n\n> It would be nice if the skopeo default was the same as the podman one.\n\nI mean, yes, and we’ve been through a similar exercise with `--authfile`: the way to do that is to move the default inside the c/image library (and that default right now is the Skopeo one that fails, sure, and that probably needs fixing), and for Podman not to set a Podman-private override, let alone an override _that changes over time_.\n\n---\n\nPragmatically, the `systemd` vs. `su` vs. `XDG_RUNTIME_DIR` situation will probably never improve, but it will also not _change_, so it might well make sense to (break existing login sessions once and) change the default path in c/image (_not_ Skopeo) to `/run/user/$EUID` from `/run/containers/$EUID` (except for `root`??), i.e. basically to assume systemd is managing the sessions, and we “only” lost `XDG_RUNTIME_DIR`.\n\nThat would allow `skopeo login`+`skopeo copy` to work in such environments by default (i.e. a host with systemd running). And that’s what Podman happens to do in such environments AFAICS.\n\nIn the other environments where Podman falls back from `/run/user` to other paths… (notably rootless use inside a container), the previous comment applies: I don’t know of any other good place with the required properties, and of a maintainable way to keep up with Podman changes.\n\n---\n\nI’ll move this to c/image, I don’t think Skopeo should be in that business (OTOH c/image shouldn’t be creating directories in unexpected places, so that move might be premature — we can move back if necessary)."
+        },
+        {
+            "user": "mtrmac",
+            "body": "Trying to summarize.\n\n# Things we want\n\n- **Consistency**: Store credentials in a way that `{podman,buildah,skopeo} login`, and any third-party callers of c/image, all use the same data.\n- **Ephemeral**: Credentials should not be stored on disk; they should go away with a reboot, at least.\n- **Unprivileged**: Credential storage must be possible for an unprivileged user (this does not mean just Podman’s “rootless” with user namespaces, but includes any unprivileged use)\n- **No dependencies**: This should work without systemd, or in minimal containers with no infrastructure at all\n- **Availability**: This should work even with malicious other users on the system, and preserve all of confidentiality/integrity/availability (the attacker can’t read or modify other users’ credentials, and can’t prevent them from storing/reading their own credentials). [Confidentiality/integrity is presumed because we never make mistakes :), so focusing on availability.]\n\n# Constraints\n\n- We can’t rely on a presence of a cooperating daemon or the like; filesystem only (No dependencies)\n- The only ephemeral location defined by FHS is `/run` (Ephemeral)\n- The only widespread user-writeable directories on the filesystem are `/run/user/$UID`, `$HOME`, and `/tmp` (Unprivileged)\n- `/run` is typically not user-writable, and requires something else to create a per-user directory (like systemd-provided `/run/user/$UID ). (Unprivileged, No dependencies)\n- `$HOME` is almost always persistent. (Ephemeral)\n- `$HOME` may not be set, or writable, in bare containers (is this true?) (No dependencies)\n- `/tmp` is a shared namespace, where any chosen naming scheme lets an attacker, at the very least, prevent use by using the name first (Availability)\n- Podman relies on `XDG_RUNTIME_DIR` being set, so it creates one in some cases. c/image can’t prescribe a specific value of `XDG_RUNTIME_DIR` or any other environment variable, nor set that value process-wide for an unaware caller. (Consistency)\n\n# Options\n\n- `$XDG_RUNTIME_DIR`:\n  - Great if it works, but it often enough isn’t set. (No dependencies)\n  - If it is not set in the environment, but Podman creates a directory sets it for itself, it’s hard for other tools to be consistent (Consistency)\n  - Also might point at an incorrect directory with use of `su`: https://github.com/containers/podman/issues/427#issuecomment-371221658 (Security, Consistency)\n- `/run/user/$UID`, regardless of `$XDG_RUNTIME_DIR`\n  - An unprivileged user can’t create this. (Unprivileged, No dependencies)\n  - Root can create this, but systemd, or something else (elogind?) can remove it at unwanted times: https://github.com/containers/podman/issues/427#issuecomment-371221658 https://github.com/containers/storage/pull/568\n- `/run/containers/$UID`: An unprivileged user can’t create this. (Unprivileged)\n- `/tmp/$something-$UID`: \n  - Any other unprivileged user on the system (_if any_) can prevent its use. (Availability)\n  - May be persistent (Ephemeral)\n- `$HOME`:\n  - May be unavailable (No dependencies)\n  - Is persistent (Ephemeral)\n- Credential helpers: Usually not available inside a container (No dependencies)\n- Kernel keyring: ?? Not available because of system call filters?\n\n(For all $UID references, there’s another dimension to the discussion: real UID vs. effective UID vs. “rootless EUID” from the environment variable.)\n\n# Compromises\n\nWe can’t very well completely give up on “no dependencies” (= can be run inside a container) and hardly on “unprivileged” (though we _do_ right now). So the possible knobs to give up on, in the last fallback case, are “consistency”, “ephemeral” and “availability”, though ideally we would like to give up none of them."
+        },
+        {
+            "user": "mtrmac",
+            "body": "# Current Implementation\n\nWe use the first one that applies:\n\n- Caller’s explicit option\n- On non-Linux, `$HOME/.config/containers/auth.json`.\n- If `$XDG_RUNTIME_DIR` is set, `$XDG_RUNTIME_DIR/containers/auth.json` (and hard-fail the entire operation if `$XDG_RUNTIME_DIR` is set but does not exist)\n- `/run/containers/$uid/auth.json`\n\n---\n\n# Tentative Prioritization Proposal\n\nWe almost certainly don’t want that many alternatives and conditions; for now I’m just trying to sort them in order of preference.\n\nUse the first one that applies:\n- Caller’s explicit option\n- On non-Linux, let’s not even talk about this here.\n- If `$XDG_RUNTIME_DIR` is set _from the outside environment_, `$XDG_RUNTIME_DIR/containers/auth.json`. There seems to be no downside.\n  - If `$XDG_RUNTIME_DIR` is set by Podman, ignore that and continue as if it were not set? We’d need to figure out how to tell the difference. Or we can not care, and give up on “Consistency”.\n- ??? If `/run/user/$UID` exists (with the right permissions??) and `/proc/1/comm` is `systemd`, `/run/user/$UID/containers/auth.json`.\n  - The `systemd` condition comes from https://github.com/containers/storage/pull/568 ; but that also excludes all in-container runs.\n  - Note that this seems to fail in https://github.com/containers/podman/issues/10782 for an unknown reason.\n- If the user is root (?? is that real or effective UID?) and `/run` already exists (do we care to check? or even “is the right filesystem type”?), `/run/containers/0/auth.json`. (Better than `/run/user/0/…`, see the two links about this directory.)\n- If `/tmp/containers-auth-$UID` (?? is that real or effective UID?) can be owned, `/tmp/containers-auth-$UID/auth.json`.\n  - Warn if `/tmp` is not a `tmpfs`? OTOH users in containers might not care that much.\n- If $HOME is writable, `$HOME/.config/containers/auth.json`.\n  - Warn about using this? OTOH, again, users in containers.\n\nWhat this ~boils down to is:\n- `$XDG_RUNTIME_DIR` on ordinary systemd workstations\n- `/run/containers/0`, or `/tmp/…$UID`, in for root inside containers (??? do containers have working `/run`??)\n- `/tmp/…$UID` for unprivileged users inside containers. Presumably insides of a container are not multi-tenant with users attacking each other, so, good enough for “availability” but not “ephemeral”. (??? do containers have working `/run`??)\n- More of a mess in other cases.\n  - Unprivileged services without `$XDG_RUNTIME_DIR` would probably prefer `$HOME` to `/tmp`… but I’d rather say they shouldn’t be doing a `login` in the first place – just consume a credential configuration (Is that incorrect?)\n  - For unprivileged users on non-systemd systems, it seems hard to guess which one of `/run`, `/tmp` and `$HOME` is preferable; there is one downside to each."
+        },
+        {
+            "user": "cevich",
+            "body": "Idea re: workaround non-ephemeral `$HOME` (or `$TEMPDIR`): Would it make sense to somehow apply an 'expiration date/time' to the files?\n\nAnother idea: Somehow systemd/journald know when the system has been rebooted.  Copy this method, and when the system has been rebooted, wipe the runtime dir. contents before starting again fresh.  Since this would be costly (time-wise), maybe only enable this check if we detect we're in fall-back mode (no `$XDG_RUNTIME_DIR` is set)."
+        },
+        {
+            "user": "mtrmac",
+            "body": "> Idea re: workaround non-ephemeral `$HOME` (or `$TEMPDIR`): Would it make sense to somehow apply an 'expiration date/time' to the files?\n\nThe thing we want to achieve is “credentials are not written to the disk in ~plaintext”, not “force users to log in periodically”; the latter is, if anything, an unwanted side-effect of using `$XDG_RUNTIME_DIR` or `/run/`, not a benefit that we would want to emulate."
+        },
+        {
+            "user": "cevich",
+            "body": "Right...so maybe having potentially \"stale\" runtime things persist on disk is something we need to live with?\n\nIn my mind, having the library check if the system has rebooted upon every access to the runtime-temp dir, would be a big performance-negative :disappointed: \n\nIt's quite bit of a hack, but what about abusing the `/dev/shm` directory (as a fallback option)?"
+        },
+        {
+            "user": "mtrmac",
+            "body": "> Right...so maybe having potentially \"stale\" runtime things persist on disk is something we need to live with?\n\nOnce it appears on the disk, it’s likely enough to remain readable to whoever the threat actor is (e.g. the physical disk block might not be zeroed on deallocation); in this threat scenario it doesn’t matter _that much_ whether it’s been on the disk for a second, hour, day, or year. (We could argue how much this threat scenario matters, sure.)\n\n---\n\n> It's quite bit of a hack, but what about abusing the `/dev/shm` directory (as a fallback option)?\n\nThat’s very interesting, `/dev/shm` has similar availability risks to `/tmp`, but it is much more likely to be ephemeral, and seems to be available in containers by default. It’s not in the FHS; is it widely available / are there any risks to using it?"
+        },
+        {
+            "user": "cevich",
+            "body": "> any risks to using it?\n\nThat filesystem is intended for coordinating share-memory access between processes.  So security risks are mostly bound by standard unix file-access permissions.  However, using it to persist temporary runtime details is certainly an abuse.  There's risk it won't be portable across platforms (like Mac) and/or abuse of it completely breaks in the future due to some new kernel feature or restrictions.  Though it would probably work for us, others may have even stronger opinions about abusing it in this way."
+        },
+        {
+            "user": "cevich",
+            "body": "> mostly bound by\n\nClarification: When this filesystem is used as intended...both parties to the shared memory file have it's name pre-defined in some way.  So as long as we don't accidentally pick a name used by something else, and visa versa, we'd be okay."
+        },
+        {
+            "user": "ggeorgiev-gitlab",
+            "body": "FYI as of now using the image ` quay.io/skopeo/stable:v1.12.0` the `auth.json` file goes to `/tmp`"
+        },
+        {
+            "user": "mtrmac",
+            "body": "Yes, the container image explicitly sets `$REGISTRY_AUTH_FILE`; that works locally as a workaround."
+        },
+        {
+            "user": "ktdreyer",
+            "body": "Looks like `oc` has this same problem. `podman` will fall back to `/run/user/{uid}/containers/auth.json` when `XDG_RUNTIME_DIR` is unset. `skopeo` and `oc` do not do that, and we have to set `XDG_RUNTIME_DIR` or `REGISTRY_AUTH_FILE`."
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "containers",
+            "repository": "image",
+            "number": 1125
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "skopeo",
+            "number": 1654
+        },
+        {
+            "organization": "NilsIrl",
+            "repository": "dockerc",
+            "number": 37
+        }
+    ]
+}

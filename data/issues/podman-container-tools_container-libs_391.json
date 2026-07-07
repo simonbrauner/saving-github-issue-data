@@ -1,0 +1,22 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "container-libs",
+    "number": 391,
+    "type": "issue",
+    "title": "Incorrect diffID when using zstd:chunked compression causing failed image pulls (incorrect checksums in images)",
+    "state": "open",
+    "labels": [],
+    "user": "crogre",
+    "body": "### Issue Description\n\nWhen using `zstd:chunked` compression, `convertTarToZstdChunked` calculates the layer diffID from the input tar stream before the zstd:chunked writer adds trailing tar padding. This causes a mismatch between the config's `diff_ids` and the actual decompressed layer content when the input tar has truncated padding.\n\nThis results in images that cannot be pulled, with errors like:\n```\nError: writing blob: layer 0 (blob \"sha256:3d5c668b...\") does not match config's DiffID \"sha256:1d46119d...\"\n```\n\n\n### Steps to reproduce the issue\n\n\n1. Build an image with `--compression-format=zstd:chunked`\n2. Push to a registry (e.g., ECR)\n3. Attempt to pull the image by digest\n4. Pull fails with diffID mismatch error\n\nPlease find two unit tests, one failing and one working, attached.\n\n[diffid_test.go.txt](https://github.com/user-attachments/files/22908108/diffid_test.go.txt)\n\n### Describe the results you received\n\nOne of the supplied unit test fail, one work.\n\n### Describe the results you expected\n\nBoth unit tests should work, since we should calculate checksums on the actual data used for creating the tarball. I think this is due to\n\nThe diffID is calculated at line 181 of `storage_linux.go`:\n```go\nconvertedOutputDigester := digest.Canonical.Digester()\ncopied, err := io.CopyBuffer(io.MultiWriter(chunked, convertedOutputDigester.Hash()), diff, c.copyBuffer)\n```\n\nThe digester hashes data as it flows through, but the `chunked` writer (via `writeZstdChunkedStream` in `compressor.go` line 401) adds trailing tar padding **after** this copy completes:\n```go\n// make sure the entire tarball is flushed to the output as it might contain\n// some trailing zeros that affect the checksum.\nif _, err := io.Copy(zstdWriter, its); err != nil {\n```\n\nThe digester never sees these trailing zeros, resulting in an incorrect diffID.\n\n## Root cause\n\nIn `vendor/go.podman.io/storage/pkg/chunked/storage_linux.go:159-192`, the function `convertTarToZstdChunked`:\n1. Decompresses the input layer\n2. Pipes it through `compressor.NoCompression` which calls `makeZstdChunkedWriter`\n3. Calculates diffID via `io.MultiWriter(chunked, convertedOutputDigester.Hash())`\n4. The `chunked` writer adds tar padding in `writeZstdChunkedStream` after the MultiWriter completes\n5. The returned diffID reflects the input, not the padded output\n\n\n### buildah version output\n\n```yaml\n❯ podman version\nClient:       Podman Engine\nVersion:      5.4.0\nAPI Version:  5.4.0\nGo Version:   go1.24.6 (Red Hat 1.24.6-1.el9_6)\nBuilt:        Wed Sep 10 13:11:52 2025\nOS/Arch:      linux/amd64\n\nBut the issue can be produced with the supplied unit test on today's main branch, commit id ac90794c94e1658562423c8892734a67c631fdd0\n```\n\n### buildah info output\n\n```yaml\nNA\n```\n\n### Provide your storage.conf\n\n```toml\nNA\n```\n\n### Upstream Latest Release\n\nNo\n\n### Additional environment details\n\n❯ git log -1\ncommit ac90794c94e1658562423c8892734a67c631fdd0 (HEAD -> main, origin/main, origin/HEAD)\n\n(rhel9 amd64 environment)\n\n### Additional information\n\nAdditional information like issue happens only occasionally or issue happens with a particular architecture or on a particular setting",
+    "comments": [
+        {
+            "user": "nalind",
+            "body": "Transferring this to container-lib, where the code that would be patched lives."
+        },
+        {
+            "user": "Luap99",
+            "body": "cc @mtrmac @giuseppe "
+        }
+    ],
+    "cross_references": []
+}

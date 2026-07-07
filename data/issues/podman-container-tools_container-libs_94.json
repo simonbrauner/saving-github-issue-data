@@ -1,0 +1,40 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "container-libs",
+    "number": 94,
+    "type": "issue",
+    "title": "Misleading messages when login/logout with docker-credential-pass",
+    "state": "open",
+    "labels": [
+        "common"
+    ],
+    "user": "damienrg",
+    "body": "The messages printed when using `podman login/logout` are misleading.\n\n**Steps to reproduce**:\n\nThe following steps assume that `docker-credential-pass` from https://github.com/docker/docker-credential-helpers is installed:\n\n1. create `~/.config/containers/auth.json` containing:\n```\n{\n    \"credHelpers\": {\n        \"foo.io\": \"pass\"\n    }\n}\n```\n2. add credential to `pass` with `docker-credential-pass`:\n```shell\n$ docker-credential-pass store # press enter\n{\"ServerURL\":\"foo.io\",\"Username\":\"your_username\",\"Secret\":\"your_secret\"} # press ctrl+d\n```\n3. then login with:\n\n```shell\n$ podman login foo.io\nAuthenticating with existing credentials...\nExisting credentials are valid. Already logged in to foo.io\n```\n\n4. then logout with:\n```shell\n$ podman logout foo.io\nNot logged into foo.io with current tool. Existing credentials were established via docker login. Please use docker logout instead.\n```\n\n**Expected results**\n\nMessages `3.` and `4.` should be less specific or the logic should handle when credential helpers are in use.\n\nIn fact when we use `docker-credential-pass` with `podman` we do not have to login/logout. We only need to unlock `pass database`.\n\n\n---\n**Notes:**\n\nIf you have the following error at step `3.`:\n\n```shell\n $ podman login foo.io\nError: error reading auth file: 1 error occurred:\n        * error getting credentials - err: exit status 1, out: `exit status 2: gpg: decryption failed: No secret key`\n```\nto be able to enter the passphrase to unlock `pass database` you have to do:\n```shell\nexport GPG_TTY=$(tty)\n```",
+    "comments": [
+        {
+            "user": "rhatdan",
+            "body": "Interested in opening a PR to make this work better?"
+        },
+        {
+            "user": "damienrg",
+            "body": "Yes I can open one and at the same time I need to know what result you expect.\n\nTo compare `docker` and `podman` I have used `~/.docker/config.json` with:\n\n```json\n{\n    \"credHelpers\": {\n        \"foo.io\": \"pass\"\n    }\n}\n```\n\n**Actual behavior:**\n\nWith `docker`:\n\n```shell\n$ docker-credential-pass list\n{}\n\n$ docker login foo.io # docker asks for username and password\nUsername: my_username\nPassword:\nLogin Succeeded # docker stores credential in pass database\n\n$ docker-credential-pass list\n{\"foo.io\":\"my_username\"}\n\n$ docker login foo.io\nAuthenticating with existing credentials...\nLogin Succeeded\n\n$ docker logout foo.io\nRemoving login credentials for foo.io # docker removes credential in pass database\n\n$ docker-credential-pass list\n{}\n```\n\nWith `podman`:\n\n ```shell\n$ docker-credential-pass list\n{}\n\n$ podman login foo.io # podman asks for username and password\nUsername: my_username\nPassword:\nLogin Succeeded # podman stores credential in base64 in `/run/user/uid/containers/auth.json`\n\n$ docker-credential-pass list\n{}\n\n$ podman logout foo.io\nRemoved login credentials for foo.io\n\n$ docker-credential-pass store\n{\"ServerURL\":\"foo.io\",\"Username\":\"my_username\",\"Secret\":\"my_secret\"}\n\n$ docker-credential-pass list\n{\"foo.io\":\"my_username\"}\n\n$ podman login foo.io\nAuthenticating with existing credentials...\nExisting credentials are valid. Already logged in to foo.io\n\n$ podman logout foo.io\nNot logged into foo.io with current tool. Existing credentials were established via docker login. Please use docker logout instead.\n\n$ docker-credential-pass list\n{\"foo.io\":\"my_username\"}\n```\n\nTo sum up `docker` stores the password in pass on login if not already present and delete the password in pass on logout while `podman` retrieves credentials with pass if present and fallback to base64 if not and `podman` never updates pass database.\n\n\n**Side note:**\n\nIn my tests I had to specify  `export GPG_TTY=$(tty)` to be able to enter my passphrase with `podman` because it starts a specific `gpg-agent` and does not use the global one:\n\n```shell\n# before any podman commands that need access to registry\n\n$ ps -fp \"$(pgrep -d, -x gpg-agent)\"\nUID                  PID    PPID  C STIME TTY          TIME CMD\nmy_username         4010    2420  0 08:39 ?        00:00:05 /usr/bin/gpg-agent --supervised\n\n# after a podman command that needs access to registry\n\n$ ps -fp \"$(pgrep -d, -x gpg-agent)\"\nUID                  PID    PPID  C STIME TTY          TIME CMD\nmy_username         4010    2420  0 08:39 ?        00:00:05 /usr/bin/gpg-agent --supervised\nmy_username        33240    2420  1 09:31 ?        00:00:00 gpg-agent --homedir /home/my_username/.gnupg --use-standard-socket --daemon\n```\n\n**Proposal:**\n\nFor me, `docker/podman login/logout` should not be used when used with `pass` (this assumes that people use a passphrase) or only as a simpler alternative to `docker-credential-pass store/erase`.\n\nIdeally it is not only messages that should change, I propose to:\n\n- document that `login/logout` actually store and delete credentials and that they may not be necessary when the password is stored with pass\n- only use the credentials helper specified for a registry and triggers an error if not possible (ie no fallback)\n- let `podman` use global `gpg-agent` and not a specific one\n- change `podman login/logout` (behavior and messages) to match `docker` as you want to be compatible"
+        },
+        {
+            "user": "rhatdan",
+            "body": "Podman will not use the dockerfile location by default.\n\nYou need to either set DOCKER_HOST or use --auth-file to point at the config.\n\npodman login --auth-file ~/.docker/config.json foo.io"
+        },
+        {
+            "user": "damienrg",
+            "body": "> Podman will not use the dockerfile location by default.\n\nYou mean to store credentials in the authentication file or to read authentication file? If the latter, \nbased on my tests and the code I would say that `podman` fallbacks by default.  [Login()](https://github.com/containers/common/blob/6c933f226ed44491d082d6d52cbe31ae6fe0e76f/pkg/auth/auth.go#L68) calls [config.GetCredentials()](https://github.com/containers/image/blob/de5d9f71401cf1e26197bbe1c9c80fc3481bc9bc/pkg/docker/config/config.go#L216) that explicitly states:\n\n> GetCredentials returns the registry credentials stored in the\n   registry-specific credential helpers or in the default global credentials\n   helpers with falling back to using either auth.json\n   file or .docker/config.json, including support for OAuth2 and IdentityToken.\n   If an entry is not found, an empty struct is returned."
+        },
+        {
+            "user": "rhatdan",
+            "body": "Are you seeing the expected behaviour?"
+        },
+        {
+            "user": "damienrg",
+            "body": "I do not get it. If you talk about `~/.docker/config.json` yes `podman` uses it as fallbacks, if you talk about the issue then no, there was no replies about my proposal."
+        }
+    ],
+    "cross_references": []
+}

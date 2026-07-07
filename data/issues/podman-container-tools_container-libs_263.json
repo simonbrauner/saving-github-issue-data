@@ -1,0 +1,38 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "container-libs",
+    "number": 263,
+    "type": "issue",
+    "title": "Race condition when \"skopeo copy\" multiple tags into the same oci:directory at the same time",
+    "state": "open",
+    "labels": [
+        "image"
+    ],
+    "user": "majek",
+    "body": "I'm not sure what guarantees does skopeo give with regard to races. See:\n```\nmarek@mrnew:/tmp$ (skopeo copy docker://registry.fedoraproject.org/fedora:30 oci:image:30  &); (skopeo copy docker://registry.fedoraproject.org/fedora:32 oci:image:32 &); (skopeo copy docker://registry.fedoraproject.org/fedora:33 oci:image:33)\n\n... wait for them to finish...\n\nmarek@mrnew:/tmp$ jq . < image/index.json |grep name\n        \"org.opencontainers.image.ref.name\": \"latest\"\n        \"org.opencontainers.image.ref.name\": \"31\"\n        \"org.opencontainers.image.ref.name\": \"33\"\n```\n\nI would expect to see the tag \"32\" there as well, but I presume it raced with other downloads. Is it expected? Is it okay to run multiple \"skopeo copy\" into \"oci:dir\" at the same time?",
+    "comments": [
+        {
+            "user": "mtrmac",
+            "body": "Thanks for your report.\n\nHandling concurrent writes hasn’t been an explicit design goal so far, and is non-obvious to achieve _in general_ on Linux (mandatory file locking is not available, advisory file locking is up to individual implementations, the usual temp file + rename trick breaks even that).\n\nBasically c/image would have to invent its own private locking schema for `oci:` directories, and hope that there isn’t any _other_ concurrent writer.\n\nWorse, there’s a design dichotomy between locking for the full duration of an operation (in which case the above series of copies would get no speed-up to speak of) and locking only for individual file writes (which would work for a group of add-only writers but could break pretty badly once something like containers/image#993 is added — blobs could be removed before an image is finished being written). There’s probably a way to design locking / in-progress state to support both fast concurrent writers and safety against concurrent deletes — but is that complexity really worth it?\n\nSo, at this point, I’d recommend serializing the Skopeo invocations; or maybe, if the goal is to transfer images using a file system, run a temporary docker/distribution server, copy images there, and transfer the backing storage of the server. That would ~avoid the concurrent delete problem (because there isn’t a single index to serialize, and deletes are not enabled there either :) ) and more importantly preserve the original representation+digests of the images, not forcing a conversion to OCI."
+        },
+        {
+            "user": "majek",
+            "body": "Git is a great example of concurrent access, synced by disk, done right - so it is possible. \"temporary distribution server\" -> suggestions?"
+        },
+        {
+            "user": "mtrmac",
+            "body": "`podman run -p 5000:5000 registry:2` with an appropriate storage volume, or the out-of-container equivalent."
+        },
+        {
+            "user": "mtrmac",
+            "body": "> Worse, there’s a design dichotomy …  could break pretty badly once something like containers/image#993 is added\n\nAfter https://github.com/containers/image/pull/2003 , we do now support deleting images from an `oci:` destination. So any implementation would need to handle that."
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "skopeo",
+            "number": 2184
+        }
+    ]
+}

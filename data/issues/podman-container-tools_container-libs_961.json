@@ -1,0 +1,52 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "container-libs",
+    "number": 961,
+    "type": "pull_request",
+    "title": "Add overlay driver reflink support detection",
+    "state": "open",
+    "labels": [
+        "storage"
+    ],
+    "user": "ngopalak-redhat",
+    "body": "We are working with a customer who requires dedup but not sure if the filesystem that's used supports it. In the tests we observed that calling dedup will first process the images directory and then on first attempt if it fails will throw an error. This is an unnecessary delay each time we start cri-o/containerd. \n\nThe alternative here is the do this check in the caller, but that required understanding of the filesystem. The fileutils available here in the storage layer needs to be reused is the alternative.\n\nThe best solution is to ask this storage layer for ref-links support. If available we can tell the customer if the dedup will be supported.\n\nIf we plan to include deduping during system start-up, this function helps determine if it will work.\n\nNote on AI usage: \n- I wrote the source code for storage/drivers/overlay/reflink_check_linux.go\n- I have used AI for unit tests. \n- Manually tested with unit tests run on a linux system. \n\nImplementation:\nAdd checkSupportsReflinks() function to detect if the filesystem supports reflink/CoW file cloning via FICLONE ioctl. This allows storage consumers (CRI-O, containerd) to inform users whether deduplication will work on their filesystem.\n\nThe detection result is cached and exposed via the Status() output as \"Supports reflinks: true/false\". Reflinks are supported on Btrfs, XFS (with reflink=1), and OCFS2.\n\ncc: @haircommander @asahay19\n\n<!--- Please read the [contributing guidelines](https://github.com/containers/container-libs/blob/main/CONTRIBUTING.md) before proceeding --->\n",
+    "comments": [
+        {
+            "user": "ngopalak-redhat",
+            "body": "> > We are working with a customer who requires dedup but not sure if the filesystem that's used supports it. In the tests we observed that calling dedup will first process the images directory and then on first attempt if it fails will throw an error. This is an unnecessary delay each time we start cri-o/containerd.\n> \n> > The alternative here is the do this check in the caller, but that required understanding of the filesystem. The fileutils available here in the storage layer needs to be reused is the alternative.\n> \n> The approach taken feels backwards, why should the caller know this and must call and parse a type unsafe field from status?\n> \n> If the goal is to stop the directory walk move the supports reflink check into Dedup() as first thing it does which needs no extra awareness of callers.\n> \n> Also overall this is not limited to overlayfs, if we would add such a check it needs to be added to all drivers that support this debug which also includes vfs\n> \n> cc @giuseppe @mtrmac\n\n@Luap99 Thanks for the review, At layer above container-d/cri-o we'd like to know if the dedupping is possible. If yes, we'd like the customer to choose if they need it or not. Moving the check into the Dedup() itself will mean that we attempted the Dedup without a user consent.\nWithout this functionality, the user might choose to dedup without the filesystem supporting it. Happy to fix the other comment you have given. But do you agree that we need this functionality. Happy to explore other alternatives too."
+        },
+        {
+            "user": "giuseppe",
+            "body": "why can't you just call `Dedup()` and ignore the error when the operation is not supported?\n\nThe caller can cache that result.\n\nIf we don't report a proper error in this case, then we need to fix it"
+        },
+        {
+            "user": "ngopalak-redhat",
+            "body": "> why can't you just call `Dedup()` and ignore the error when the operation is not supported?\n> \n> The caller can cache that result.\n> \n> If we don't report a proper error in this case, then we need to fix it\n\nThanks @giuseppe , I'm actually caught between two ends :) \n- Customer needs to know if they can dedup or not prior to choosing that option\n- In container storage layer there's no way to tell until the real dedup is attempted\n\nThe only blocker I see is the filesystem support for Dedupping. It better to tell the customer if its possible to dedup by checking the ref links support. Hence this PR :)"
+        },
+        {
+            "user": "giuseppe",
+            "body": "> * Customer needs to know if they can dedup or not prior to choosing that option\n\nwhy?  Why wouldn't they enable it in any case and make sure we ignore the error when it is not supported by the underlying filesystem?\n\nThey know where the overlay file system is located, so that can be checked directly on the file system with a simple `cp --reflink=always` test"
+        },
+        {
+            "user": "ngopalak-redhat",
+            "body": "> > * Customer needs to know if they can dedup or not prior to choosing that option\n> \n> why? Why wouldn't they enable it in any case and make sure we ignore the error when it is not supported by the underlying filesystem?\n> \n> They know where the overlay file system is located, so that can be checked directly on the file system with a simple `cp --reflink=always` test\n\nThe Dedup operation takes several minutes for 100 GB of images. So the user needs to plan it. The `cp --reflink=always` approach would require exposing the directory names all the way up and making sure that the permissions for write and correctly handled. The test file should also be cleaned up. Eaiser to have one layer do it, that is the container storage."
+        },
+        {
+            "user": "giuseppe",
+            "body": "So the issue is that `Dedup` is slow when it can't deduplicate. Maybe we can add a check before doing any other work and give up if the file system has no reflinks\n"
+        },
+        {
+            "user": "ngopalak-redhat",
+            "body": "> So the issue is that `Dedup` is slow when it can't deduplicate. Maybe we can add a check before doing any other work and give up if the file system has no reflinks\n\n@giuseppe Not exactly the issue. Dedup does happen. It does take time and works. All that we want is to tell the user is to run it while in maintenance and not while workloads are running in parallel using those files. This PR is a check to make sure if the the user (or the directory that's involved) is eligible for dedupping or not."
+        },
+        {
+            "user": "giuseppe",
+            "body": "that part is clear, we are trying to figure out if it is better to expose this information to the caller, or just call `Dedup()` that also checks if it is possible.\n\nWhat is not clear is why you need to know this before you call `Dedup()`?  If the intention is to call `Dedup()`, just call it; otherwise don't.  What am I missing?"
+        },
+        {
+            "user": "Luap99",
+            "body": "There are two issues here discussed, first the PR description says the walking is expensive so the obvious fix is move that check at the start of dedup().\n\nSecond, they want to know if the fs supports reflink or not and expose it to the end user. Exposing this in status can be done for this but then it should be done consistently for all graph drivers.\nWith that crio or whatever UI you have can tell the user dedup is not supported on the backing fs.\n\nIMO the simple thing is to do both.\n\nNote however currently this feature check uses a different ioctl from the dedup code FIDEDUPERANGE vs FICLONE so if a fs supports one but the other this could cause incorrect results as well? Not sure if this is a concern in practise."
+        }
+    ],
+    "cross_references": []
+}

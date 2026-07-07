@@ -1,0 +1,72 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "container-libs",
+    "number": 260,
+    "type": "issue",
+    "title": "[FEAT] Catch EOF on `skopeo copy` when one side or the other disconnects and log more information.",
+    "state": "open",
+    "labels": [
+        "image"
+    ],
+    "user": "robbmanes",
+    "body": "Opening an issue for a feature request that would make life a lot easier for debugging issues with `skopeo copy` operations, and ultimately needs to land in containers/image.\n\nWhen performing a `skopeo copy` with large images, a lot of container registries have protection against HTTP clients that dawdle on uploading data, and are silent for excessive periods of time.  If not the registry itself, firewalls and proxies often have timeout values for HTTP/S connections and will not tolerate things like TCP-ZeroWindows as a side effect of a slow client.  It is possible that during a `skopeo copy`, this can be triggered and cause skopeo to fail.\n\nThere is a possibility when you have a slow connection to one registry, and a fast one to the other, that delays in transferring to/from the slow registry will trigger the delay-in-data-transfer timeout on the faster registry, which leaves skopeo dangling as a middleman unable to complete the copy transaction.\n\nSkopeo itself doesn't care or concern itself with these time limitations, but as an HTTP server the container registry often does, and will hard-reset via TCP or shut down the connection via other methods to clients that appear \"hung\" so as to avoid orphaned connections in their connection pool.  Specifically, if the source image registry is slow, skopeo can only operate as fast as it can in uploading data, which may mean large periods of silence for the destination image registry, which if there is a timeout value may cause the destination to abort the connection (or possibly vice versa, with a slow upload and fast download).  The end result to skopeo is one side hangs up unexpectedly during the transfer, and we see something like this:\n\n```\n$ skopeo --log-level=debug copy docker:mycoolregistry/mycoolimage docker:evencoolerregistry/mycoolimage\n- - - - 8< - - - -\nCopying blob 12345678abcd done\nDEBU[0066] Error uploading layer chunked, response (*http.Response)(nil)\nFATA[0066] Error writing blob: Patch https://mycoolregistry/v2/mycoolimage/blobs/uploads/12345678abcd/SOMETHING: EOF\n```\n\nThis really isn't a problem in https://github.com/containers/skopeo or https://github.com/containers/image but, should we catch the dangling I/O pipe left by this disonnect, we could better provide an error message beyond just \"Error: EOF\" with something like \"The source registry during transfer appears to have disconnected\".  This would have to be done in https://github.com/containers/image and will require modifying how we handle managing `io.Reader` errors, so I am not sure how trivial it is.\n\nI'm setting up a producer of a super-slow registry as a source and a super-fast registry as a destination to reliably reproduce this, and then I'll take a crack at a PR myself, but appreciate feedback on this line of thinking or if there's anything I haven't taken into consideration regarding the above.\n\nIf someone randomly stumbles across this issue, and are encountering an error like the above, it's highly recommended you check if the pathing to your source or destination registries are slow or disconnecting clients.  Another telltale sign you're hitting this issue is if you issue `podman pull` and `podman push` as a workaround instead of just doing straight `skopeo copy`, it will work, as skopeo will tolerate the slow connection on one end, cache the data locally wherever skopeo is running after the `pull` operation completes, and then will operate super fast during the `push` operation.  So that's a valid workaround you can take in most cases provided this is the problem you're hitting.  This issue is just for logging this better from a `skopeo copy` perspective if such things can be done, as I haven't seen the above message (`Error uploading layer chunked, response (*http.Response)(nil)` for anything other than what I described above.  Furthermore, the key is the `(*http.Response)(nil)`, which generally indicates one side hung up during the `copy` operation.\n\nEDIT: Changed `skopeo push` and `skopeo pull` to `podman push` and `podman pull`",
+    "comments": [
+        {
+            "user": "robbmanes",
+            "body": "TL;DR: Let's try to catch `io.Reader` errors about `EOF` or maybe whenever we get a `nil` response of `http.Response` and tell the user during `skopeo copy` operations that one side or the other hung up on skopeo."
+        },
+        {
+            "user": "robbmanes",
+            "body": "It also appears that, depending on when and which side terminates the connection we *might not* see a the `http.Response` as nil, as that's a server-side behavior we can't necessarily account for, but I will make a reproducer and try a few things."
+        },
+        {
+            "user": "mtrmac",
+            "body": "A very minimal note for now, I’ll return to this later: After https://github.com/containers/image/pull/1073 the “read failure during write” errors should be annotated. There’s probably more that can be done."
+        },
+        {
+            "user": "robbmanes",
+            "body": "Just noting we saw a new occurrence of this on the server-side; specifically we suspect TCP-KeepAlive was not tolerated by an AWS ELB so it gracefully shut down the TCP connection, which left the HTTP portion of the stream dangling, giving us the same kind of error:\n```\nError: Error copying image to the remote destination: Error writing blob: Patch https://mycoolregistry/v2/mycoolimage/blobs/uploads/12345678abcd/SOMETHING: EOF\n```\n\nThis is a bit different and it gives us a better definition of the problem as it is `copying image to the remote destination`, so I'm not sure if this specific message should/could be improved.  But just another caveat to this.  I agree https://github.com/containers/image/pull/1073 could very much help here in general too."
+        },
+        {
+            "user": "mtrmac",
+            "body": "> Another telltale sign you're hitting this issue is if you issue `podman pull` and `podman push` as a workaround instead of just doing straight `skopeo copy`, it will work, as skopeo will tolerate the slow connection on one end, cache the data locally wherever skopeo is running after the `pull` operation completes, and then will operate super fast during the `push` operation. So that's a valid workaround you can take in most cases provided this is the problem you're hitting.\n\n(BTW I’d recommend `skopeo copy docker://$source dir:$tmp; skopeo copy dir:$tmp docker://$dest; rm -rf $tmp` instead, because it does not uncompress and re-compress the data unnecessarily. (“pull+push to copy is a bad habit and rarely necessary”). But for the purposes of this bug, either works fine.\n\n> This issue is just for logging this better from a `skopeo copy` perspective if such things can be done, as I haven't seen the above message (`Error uploading layer chunked, response (*http.Response)(nil)` for anything other than what I described above. Furthermore, the key is the `(*http.Response)(nil)`, which generally indicates one side hung up during the `copy` operation.\n\nNote that this error message should have been improved by https://github.com/containers/image/pull/907 — but now it would just say “Error uploading layer chunked EOF”, not any more helpful overall.\n\n---\n\nNote to self: There’s a RH-private https://bugzilla.redhat.com/show_bug.cgi?id=1862631 with a lot of history; the issue description correctly captures the outcome of all those attempts to track the bug down, the history is mostly just confusing."
+        },
+        {
+            "user": "mtrmac",
+            "body": "> ```\n> Error: Error copying image to the remote destination: Error writing blob: Patch https://mycoolregistry/v2/mycoolimage/blobs/uploads/12345678abcd/SOMETHING: EOF\n> ```\n\nBTW this is not quite expected; the earlier reports had an “unexpected EOF” error, and that’s not a trivial difference in wording, those are different Go values (`io.EOF` vs. `io.ErrUnexpectedEOF`) and the `io.EOF` value should basically never show up in user-visible error reports, it indicates some kind of logic error somewhere.\n\nSo it would be very interesting to be able to reproduce this and track down how exactly this happens ; there might be a real bug somewhere (in the HTTP stack?) that should be fixed — even if that fix just ended up causing some other error message to be reported."
+        },
+        {
+            "user": "mtrmac",
+            "body": "> ```\n> Error: Error copying image to the remote destination: Error writing blob: Patch https://mycoolregistry/v2/mycoolimage/blobs/uploads/12345678abcd/SOMETHING: EOF\n> ```\n> \n> This is a bit different and it gives us a better definition of the problem as it is `copying image to the remote destination`\n\nIs that _really_ the same thing, with a slow/fast pipe difference?\n\nSearching, that string AFAICS means “you have used (podman push), not (skopeo copy)”, `error copying image to the remote destination` (OTOH with a lowercase leading `e`) is a string (podman push) ~always prefixes to failures of the copy operation. And ordinary (podman push) pushes from local storage, so there shouldn’t be any second pipe to be too fast/too slow.\n\nThat might perhaps be an entirely different root cause.\n\nIt’s up to you whether to use this issue to track the “unexpected EOF due to different pipe speeds”, the “(not unexpected) EOF to different pipe speeds”, or the “EOF on push” problem; tracking all three in a single issue might end up very confusing. (Or maybe you have experimental data that strongly indicates they are all the same thing, I have made barely any experiments.)"
+        },
+        {
+            "user": "robbmanes",
+            "body": "> It’s up to you whether to use this issue to track the “unexpected EOF due to different pipe speeds”, the “(not unexpected) EOF to different pipe speeds”, or the “EOF on push” problem\n\nAgreed, and I think this issue should **only** track the sender and receiver difference in pipe speed problem when doing `skopeo copy`, and each individual case should be handled different as they can potentially have many root causes.  Thanks!"
+        },
+        {
+            "user": "mtrmac",
+            "body": "Linking a possibly-related: containers/container-libs#254, make sure to read the linked istio bug."
+        },
+        {
+            "user": "mtrmac",
+            "body": "For the record, one possible path where the `net/http` stack can return `io.EOF` and not an “unexpected EOF” is if the server reads the request, and cleanly closes the connection without producing any response header. Reported as https://github.com/golang/go/issues/53472 ."
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "container-libs",
+            "number": 254
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "container-libs",
+            "number": 245
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "skopeo",
+            "number": 1627
+        }
+    ]
+}

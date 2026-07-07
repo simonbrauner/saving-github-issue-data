@@ -1,0 +1,70 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "container-libs",
+    "number": 271,
+    "type": "issue",
+    "title": "dockerClient can't handle registry which is requires authorization and using HTTP redirection.",
+    "state": "open",
+    "labels": [
+        "image"
+    ],
+    "user": "nikitych",
+    "body": "Registry could use HTTP redirects by 3xx status code for example for load balancing. If such registry requires authorization at the same time dockerClient is fails to work with it. It's successfully get auth token but fails to deliver it to the endpoint.\nBecause of golang http Client which is blocking \"Authorization\" header when following redirects.\nhttps://golang.org/pkg/net/http/#Client",
+    "comments": [
+        {
+            "user": "mtrmac",
+            "body": "Thanks for your report.\n\nCould you list all the individual HTTP requests and what exactly goes wrong, in detail, please? Maybe add https://github.com/mtrmac/image/tree/http-dump and collect the debug-level output of the failing operation (taking care to remove credentials!)."
+        },
+        {
+            "user": "nikitych",
+            "body": "```\n$ ./skopeo -v\nskopeo version 0.1.37-dev commit: 96be1bb155dc73dead48a1e0f218b7a88db7c63c\n$ git diff\ndiff --git a/vendor/github.com/containers/image/docker/docker_client.go b/vendor/github.com/containers/image/docker/docker_client.go\nindex 81a43e0..1c95453 100644\n--- a/vendor/github.com/containers/image/docker/docker_client.go\n+++ b/vendor/github.com/containers/image/docker/docker_client.go\n@@ -443,6 +443,7 @@ func (c *dockerClient) makeRequestToResolvedURL(ctx context.Context, method, url\n        if err != nil {\n                return nil, err\n        }\n+       logrus.Debugf(\"res.Request.Header %v\", res.Request.Header)\n        return res, nil\n }\n$ ./skopeo --debug inspect docker://container-registry.oracle.com/os/oraclelinux:7\n...\nDEBU[0000] GET https://container-registry.oracle.com/v2/ \nDEBU[0001] res.Request.Header map[Docker-Distribution-Api-Version:[registry/2.0] Referer:[https://container-registry.oracle.com/v2/]] \nDEBU[0001] Ping https://container-registry.oracle.com/v2/ status 401 \nDEBU[0001] GET https://container-registry.oracle.com/auth?account=valid.account&scope=repository%3Aos%2Foraclelinux%3Apull&service=Oracle+Registry \nDEBU[0002] Increasing token expiration to: 60 seconds   \nDEBU[0002] GET https://container-registry.oracle.com/v2/os/oraclelinux/manifests/7 \nDEBU[0003] res.Request.Header map[Accept:[application/vnd.oci.image.manifest.v1+json application/vnd.docker.distribution.manifest.v2+json application/vnd.docker.distribution.manifest.v1+prettyjws application/vnd.docker.distribution.manifest.v1+json application/vnd.docker.distribution.manifest.list.v2+json] Docker-Distribution-Api-Version:[registry/2.0] Referer:[https://container-registry.oracle.com/v2/os/oraclelinux/manifests/7]] \nFATA[0003] Error reading manifest 7 in container-registry.oracle.com/os/oraclelinux: unauthorized: authentication required \n```\nbut\n```\n$ ./skopeo --debug inspect docker://container-registry-phx.oracle.com/os/oraclelinux:7\n...\nDEBU[0000] GET https://container-registry-phx.oracle.com/v2/ \nDEBU[0000] res.Request.Header map[Docker-Distribution-Api-Version:[registry/2.0]] \nDEBU[0000] Ping https://container-registry-phx.oracle.com/v2/ status 401 \nDEBU[0000] GET https://container-registry.oracle.com/auth?account=valid.account&scope=repository%3Aos%2Foraclelinux%3Apull&service=Oracle+Registry \nDEBU[0001] Increasing token expiration to: 60 seconds   \nDEBU[0001] GET https://container-registry-phx.oracle.com/v2/os/oraclelinux/manifests/7 \nDEBU[0002] res.Request.Header map[Accept:[application/vnd.oci.image.manifest.v1+json application/vnd.docker.distribution.manifest.v2+json application/vnd.docker.distribution.manifest.v1+prettyjws application/vnd.docker.distribution.manifest.v1+json application/vnd.docker.distribution.manifest.list.v2+json] Authorization:[Bearer <long_JWT_token>] Docker-Distribution-Api-Version:[registry/2.0]] \nDEBU[0002] Downloading /v2/os/oraclelinux/blobs/sha256:200d4182a980204b33368b16d7c011e1d11a4ef462d000b40249536f8ef32b93 \nDEBU[0002] GET https://container-registry-phx.oracle.com/v2/os/oraclelinux/blobs/sha256:200d4182a980204b33368b16d7c011e1d11a4ef462d000b40249536f8ef32b93 \nDEBU[0002] res.Request.Header map[Authorization:[Bearer <long_JWT_token>] Docker-Distribution-Api-Version:[registry/2.0]] \nDEBU[0002] Using registries.d directory /etc/containers/registries.d for sigstore configuration \n...\n```\n`https://container-registry.oracle.com/v2/` redirect to another domain so when client try `GET https://container-registry.oracle.com/v2/os/oraclelinux/manifests/7 ` it's filter \"Authorization\" header from second in chain request to `https://container-registry-phx.oracle.com/v2/os/oraclelinux/manifests/7`"
+        },
+        {
+            "user": "kgangerlm",
+            "body": "Is there any plan to fix this?  We have a use case where our container registry returns 301 to get users to the closest healthy container registry (geographically).  Basically all the open container tools fail with the redirect due to this issue.   "
+        },
+        {
+            "user": "mscherer",
+            "body": "With recent Docker Hub changes, some people (me included) are starting to look at having redirections for their registries ( for example, as [described here](https://httptoolkit.com/blog/docker-image-registry-facade/)). \n\nI fear the visibility of this bug will only increase :/ \n\n\n\n"
+        },
+        {
+            "user": "justinsb",
+            "body": "Found this issue when I was checking if we had documented this behaviour.  Personally I would consider it a bug if the header _was_ passed across a redirect.\n\nIf it's a redirect to the same host, that seems harmless; but if it's to a different host that sounds like a security issue in the making.  The attack would be that a blob-server administrator could take the token and impersonate the user.  Today, the security requirements on blob-servers are relatively light, because they only store sha256-checked content.  A lot of production registries use S3 or GCS or CDNs to serve blobs.\n\nThe documentation for http.Client indicates that this is the reasoning for not including these headers:\n> When following redirects, the Client will forward all headers set on the initial Request except:\n>\n> • when forwarding sensitive headers like \"Authorization\", \"WWW-Authenticate\", and \"Cookie\" to untrusted targets. \n\n\nIf a registry wants to avoid making the blobs public, it could include a signed short-duration token in the query parameters of the redirect URL.  I believe this is commonly done when redirecting to S3.\n\n\nEdit: I found that docker explicitly said this [here](https://github.com/docker/cli/issues/865#issuecomment-368147523).\n"
+        },
+        {
+            "user": "mscherer",
+            "body": "So I agree that we should not send Authorization to another host. \n\nHowever, here, what happen (in my test) with podman-4.3.1-1.fc37.x86_64. \nI have a site A that redirect all https traffic to a registry on site B (Docker Hub, Github, Quay). \n\nUsing podman on the client, and with the help of mitmproxy (and copious use of tls non verification), I see the following exchange:\n\n- client contact site A\n- site A redirect to site B\n- site B request client to get a token to B/token or B/auth, using a 401 http code\n- client go to B/token or B/auth, get a token\n- client contact again site A, send the token in Authorization header\n- site A redirect again to site B\n- site B say \"unauthorized\", because the token is not sent by the client\n\nAnd so, to me, the 1st issue is that we take token from site B and send it to site A (which I also think is a bug, as you said). Not a big problem as the token life is short, but still a problem IMHO, even if there is maybe cases where it is justified to do so. \n\nBut then, the 2nd issue is that the client do not send it back to site B after redirection, while it should in theory be the only location where it could be safely sent (as that's where it comes from).\n\nI tested with ghcr.io (github one), but also with Quay.io and DockerHub, they all request a token.\n\nAnd well, I do not want to be that guy again, but \"It work on docker\". I spawned a Ubuntu VM, did the same test using Docker, and it worked. It also worked for the author of the blog post I linked, again using Docker.\n\nI guess we can also see tomorrow/today how it goes once k8s.gcr.io is turned [into a redirect server](https://kubernetes.io/blog/2023/03/10/image-registry-redirect/)."
+        },
+        {
+            "user": "mtrmac",
+            "body": "> Using podman on the client, and with the help of mitmproxy (and copious use of tls non verification), I see the following exchange:\n\nYes; in particular the critical point of Docker’s behavior seems to be that the client contacts `/v2/` (specifically that URL, during the initial “ping”), and it uses the host name of the _redirected response_ as the one where tokens are added (using a custom `http.RoundTripper`, i.e. affecting, or not, individual requests made by `http.Client` as the `http.Client` processes redirects.)"
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "containers",
+            "repository": "image",
+            "number": 645
+        },
+        {
+            "organization": "crazy-max",
+            "repository": "diun",
+            "number": 5
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 15187
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "container-libs",
+            "number": 216
+        },
+        {
+            "organization": "fossas",
+            "repository": "fossa-cli",
+            "number": 1308
+        }
+    ]
+}

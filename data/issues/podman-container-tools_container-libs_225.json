@@ -1,0 +1,120 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "container-libs",
+    "number": 225,
+    "type": "issue",
+    "title": "Support Docker image references with tag and digest",
+    "state": "closed",
+    "labels": [
+        "image"
+    ],
+    "user": "zregvart",
+    "body": "Currently Docker image references with tag and digest are [not supported](https://github.com/containers/image/blob/d372f0e440d35c6041de39023b0b6eb131fba54b/docker/docker_transport.go#L79-L81).\nThis leads to failure when trying to invoke tools that depend on `containers/image`, like `skopeo`:\n```\n$ skopeo inspect docker://repository.io/repository/image:14d68911e6d941f997e8693bc6a5d92c@sha256:902ed9a2410e9b58dfe7b0259af41e13193310b2bd82b848a21f128fa701db52 \nFATA[0000] Error parsing image name \"docker://repository.io/repository/image:14d68911e6d941f997e8693bc6a5d92c@sha256:902ed9a2410e9b58dfe7b0259af41e13193310b2bd82b848a21f128fa701db52\": Docker references with both a tag and digest are currently not supported \n```",
+    "comments": [
+        {
+            "user": "mtrmac",
+            "body": "Thanks for your report.\n\nYes, and that’s mostly intentional.\n\nThe historical reasoning is https://github.com/containers/buildah/issues/1407#issuecomment-472575647 .\n\nSince then, https://github.com/moby/moby/releases/tag/v20.10.20 has changed again to the older and less problematic “require both the tag and digest to match” behavior; so that at least removes the strongest reason to completely and strictly reject such input.\n\n\nStill, now we have to worry about c/image users assuming that valid references only have one of (tag, digest), being broken if c/image starts accepting both. That’s just a worry, not a complete show-stopper.\n\nBut then the benefit of accepting the `:tag@digest` syntax, in the first place, is unclear — in which situations does the consumer, which has a specific digest pinned, _really care_ that the tag still exists and points to that tag? Would the consumer not be better off removing the tag from the input, and keeping the deployment/build process working even if the tag is moved?\n\nSo… I think it’s definitely worth discussing, but it’s not obvious to me that it’s worth the risk and review effort."
+        },
+        {
+            "user": "zregvart",
+            "body": "I see tags carrying classifying information, tagging an image with `production` vs `staging` makes a difference. For floating tags I still wish to distinguish between two different versions of an image tagged with the same tag. Seeing the tag alone doesn't give me tracking, and not seeing the tag doesn't give me the classifier. Having both I can reason about an image that is classified for `production` being of certain version via the hash. Seeing that in an image reference I can be sure that the right image gets deployed to the right environment with the expected version.\n\nI don't really care how this is handled internally as outlined in the two different ways Docker handles it on the [comment](https://github.com/containers/buildah/issues/1407#issuecomment-472575647) you linked. I'd like to use that :tag@digest syntax and I'd like to propagate it throughout all the tools I use, skopeo being one of them and the issue of skopeo not supporting this syntax originates from containers/images.\n\nSeems to me like the second option of, disregarding the tag if the digest is specified would not be difficult to implement, if that's something the project is willing to accept I'd be happy to contribute a pull request."
+        },
+        {
+            "user": "mtrmac",
+            "body": "Are you saying that you want to _intentionally_, _simultaneously_, use `image:production@digest1` and `image:production@digest2`?\n\nThat’s seems so disconnected from how the registries actually operate that I think that should be strictly rejected. The tag field is not a general-purpose comment storage space."
+        },
+        {
+            "user": "zregvart",
+            "body": "I don't care how registries operate, I care how the tools are used. I want to be certain that an image tagged with `production` of a certain digest is the one I'm operating on. Not given that opportunity I'll need to resort to using digests or tags alone. Given tags or digests alone I can't tell looking at the image reference if the image in question is for `production` _and_ the correct version.\nI outlined the second option as easy to implement from the [comment](https://github.com/containers/buildah/issues/1407#issuecomment-472575647), I also offer to provide a pull request for the first option. Again, I'm happy to contribute this if there is a consensus in which direction the implementation should be heading.\nSeems to me the trade-off is between correctness and compatibility, and one of those needs to give."
+        },
+        {
+            "user": "mtrmac",
+            "body": "> I don't care how registries operate, I care how the tools are used. I want to be certain that an image tagged with `production` of a certain digest is the one I'm operating on.\n\nAFAICS that makes the rolling `production` tag contradictory: it can’t be updated it to a newer digest because it would break production deployments. It _just doesn’t work_ at the scale where deployments are automated and automatically re-started. Hence my “not a comment storage space” description. The deployment configuration _must_ choose between deploying the tag, whichever digest it points to, and deploying the digest, whether or not the tag points to — or the practical certainty of downtime that could be avoided either of the two other choices.\n\n\n> Seems to me the trade-off is between correctness and compatibility, and one of those needs to give.\n\nThere are actually more layers to this: https://github.com/containers/common/issues/1248 at a _caller_ of c/image. c/common values compatibility more; but as the lower infrastructure, c/image is primarily in the business of reliably and correctly doing what the caller asks it to do, or refusing to do it if it can’t be done.\n\nThat c/common issue _might_ end up requiring the c/image feature to be implemented, purely for compatibility. But it will remain a bad idea to use in production, IMHO."
+        },
+        {
+            "user": "zregvart",
+            "body": "Thank you for raising https://github.com/containers/common/issues/1248, I'm looking forward to the conclusion there."
+        },
+        {
+            "user": "eero-t",
+            "body": "> AFAICS that makes the rolling `production` tag contradictory: it can’t be updated it to a newer digest because it would break production deployments. It _just doesn’t work_ at the scale where deployments are automated and automatically re-started.\n\nUsing digests to verify floating tags does have a use-case.   You run test for a floating tag with digest, and if image passes tests, add non-floating tag for that digest.  After which the floating tag can be updated.   Digest is extra safety to make sure test results match the final tag.\n\nAlternatives, and why they would be worse:\n* Adding non-floating tag beforehand: a version/date tag is typically an indication of some extra testing being passed, so adding it beforehand and removing it later on if tests do not pass, is violation of that expectation\n* Using just digest for testing: with a tag, it's much easier to see from e.g. logs which of the image variant is being tested and potentially causing trouble\n\n(I assume it's obvious why digest for _non-floating_ tags is desirable.)"
+        },
+        {
+            "user": "jhmartin",
+            "body": "Image tags nicely map to build-job ids (main-25) or git tags (1.20.5) and are human-readable. The digest is good for avoiding surprises in what actually gets run.  Yes the VCS / build tag could be put in annotations, but the image name is much more readily available."
+        },
+        {
+            "user": "davidxia",
+            "body": "Let me know if this isn't the relevant issue to comment on.\n\nI want to use some Golang library to parse container image names. Specifically, I want this library to parse an image reference string into its name, tag (if it exists), and digest (if it exists). I'd like the library to be able to handle an image reference with both tag and digest so I can do something like this.\n\n```golang\nimageWithTagAndDigest = \"docker.io/library/ubuntu:v1@sha256:cc8ce713f3b4be3c72cca1f63ee78e3733bc7283472ecae367b47a128f7e4478\"\n\nref, _ := Parse(imageWithTagAndDigest)\n\nfmt.Println(ref.Name()) // docker.io/library/ubuntu\nfmt.Println(ref.Tag()) // v1\nfmt.Println(ref.Digest()) // sha256:cc8ce713f3b4be3c72cca1f63ee78e3733bc7283472ecae367b47a128f7e4478\n```\n\n```golang\nimageWithTagOnly = \"docker.io/library/ubuntu:v1\"\n\nref, _ := Parse(imageWithTagOnly)\n\nfmt.Println(ref.Name()) // docker.io/library/ubuntu\nfmt.Println(ref.Tag()) // v1\nfmt.Println(ref.Digest()) // \"\" or nil\n```\n\n```golang\nimageWithDigestOnly = \"docker.io/library/ubuntu@sha256:cc8ce713f3b4be3c72cca1f63ee78e3733bc7283472ecae367b47a128f7e4478\"\n\nref, _ := Parse(imageWithDigestOnly)\n\nfmt.Println(ref.Name()) // docker.io/library/ubuntu\nfmt.Println(ref.Tag()) // \"\" or nil\nfmt.Println(ref.Digest()) // sha256:cc8ce713f3b4be3c72cca1f63ee78e3733bc7283472ecae367b47a128f7e4478\n```\n\nIs there an official library that does this already? If not and this is the official library where this functionality would be added, is there any update on this issue or are contributions welcome for this change?"
+        },
+        {
+            "user": "mtrmac",
+            "body": "> Let me know if this isn't the relevant issue to comment on.\n\nIt isn’t, default to separate topics, please. It’s easier to combine than to disentangle.\n\n> I want to use some Golang library to parse container image names.\n\n`containers/image/v5/docker/reference`."
+        },
+        {
+            "user": "kevinkt1",
+            "body": "The tag is useful for human-readable versioning whereas the digest is useful for security purposes. As a tool developer, it doesn't make sense to limit how the tool can be used unless your only market is yourself. There are thousands and thousands of users ranging from personal users to corporate users who value tool flexibility because they are solving problems with certain constraints and cannot change vendors. Knowing that you are already able to provide the product as-is, you could simply ignore nuanced improvements, or you could take this feedback from multiple people and make the tool for the user."
+        },
+        {
+            "user": "mtrmac",
+            "body": "I am _routinely_ asked to relax signature verification in a way that breaks security. Responsively delivering software used in security settings includes designing the software to encourage users to use secure workflows.\n\n`container-libs/image` is a library, and callers always have the option to use a different `ImageReference` value that matches the desired “pull by digest” semantics, or the desired “pull by tag” semantics, by providing an appropriate input to the library. (And if the users want a “pull by tag semantics and enforce that the result matches a digest” — noting that almost everyone in this ticket _doesn’t want_ this semantics — then they can provide a name:tag@digest reference _and correctly see that fail_ because it is not implemented.)\n\nAFAICT the library exposes the full range of semantics in its API, and handles it correctly in all respects.\n\nBuilding a nice build system workflow and UI on top is not in scope of this library, other than being _reliable_ in handling inputs from the caller. In that sense, accepting and ignoring a tag is not “reliable”; it is maybe a quick convenient hack that allows carrying a (limited-syntax) string as payload in fields not intended to carry any such string, but that hack doesn’t scale to any more than one such string."
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "xelalexv",
+            "repository": "dregsy",
+            "number": 86
+        },
+        {
+            "organization": "AliyunContainerService",
+            "repository": "image-syncer",
+            "number": 132
+        },
+        {
+            "organization": "konflux-ci",
+            "repository": "rpm-lockfile-prototype",
+            "number": 15
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "skopeo",
+            "number": 2367
+        },
+        {
+            "organization": "openshift",
+            "repository": "trustee-operator",
+            "number": 43
+        },
+        {
+            "organization": "cri-o",
+            "repository": "cri-o",
+            "number": 8603
+        },
+        {
+            "organization": "cilium",
+            "repository": "cilium",
+            "number": 34891
+        },
+        {
+            "organization": "flightctl",
+            "repository": "flightctl",
+            "number": 542
+        },
+        {
+            "organization": "novln",
+            "repository": "docker-parser",
+            "number": 3
+        },
+        {
+            "organization": "containers",
+            "repository": "image",
+            "number": 2704
+        },
+        {
+            "organization": "bootc-dev",
+            "repository": "bootc",
+            "number": 1165
+        }
+    ]
+}

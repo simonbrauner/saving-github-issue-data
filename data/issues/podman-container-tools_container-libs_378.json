@@ -1,0 +1,117 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "container-libs",
+    "number": 378,
+    "type": "pull_request",
+    "title": "Staged layer creation",
+    "state": "closed",
+    "labels": [
+        "storage"
+    ],
+    "user": "Luap99",
+    "body": "<!--- Please read the [contributing guidelines](https://github.com/containers/container-libs/blob/main/CONTRIBUTING.md) before proceeding --->\n",
+    "comments": [
+        {
+            "user": "podmanbot",
+            "body": "✅ A new PR has been created in buildah to vendor these changes: **https://github.com/containers/buildah/pull/6414**"
+        },
+        {
+            "user": "Luap99",
+            "body": "Podman PR https://github.com/containers/podman/pull/27251 and the buildah test PR https://github.com/containers/buildah/pull/6414 from the bot both look good so that means we can remove the special case from ApplyDiff() in overlay I think, ref https://github.com/containers/podman/issues/25862#issuecomment-3361659429\n\nI still need to work on the actual feature here though to extract while the store in unlocked.\n"
+        },
+        {
+            "user": "Luap99",
+            "body": "@mtrmac FYI I have not really addressed most of your comments yet, I am just trying to push things to see how much things break. Still seeing plenty of test failures.\n\nIssue 1 I see is that I just use the 700 permission from the tmpdir due the rename instead of the proper diff dir creation permissions that are in the driver.create() code\n```\n\tdiff := path.Join(dir, \"diff\")\n\tif err := idtools.MkdirAs(diff, forcedSt.Mode, forcedSt.IDs.UID, forcedSt.IDs.GID); err != nil {\n\t\treturn err\n\t}\n\n\tif d.options.forceMask != nil {\n\t\tst.Mode |= os.ModeDir\n\t\tif err := idtools.SetContainersOverrideXattr(diff, st); err != nil {\n\t\t\treturn err\n\t\t}\n\t}\n```\n\nNot sure if I should expose that into the tmpdir creation logic, I guess that makes the most sense since only the dirver should now the exact permission that should be used?\n\n\n---\n\nSecond problem I see are timeouts (in parallel running tests) which I guess mean I added a deadlock situation?\nhttps://api.cirrus-ci.com/v1/artifact/task/5906611702595584/html/sys-podman-debian-13-rootless-host-sqlite.log.html\n\nI guess looking at the code this unlock/lock again thing I did is indeed completely broken and unsafe due ABBA deadlock, i.e. in putlayer we also hold the containerStore lock so only unlocking the layer store makes it possible that another process can get the layer lock and then blocks on the still gold container store thus both process handing forever.\nI haven't checked all the code paths but I guess with the locking order requirements what I did is basically impossible to achieve anyway and I have to indeed move this out to before we get the lock?\n\n\n\n \n"
+        },
+        {
+            "user": "mtrmac",
+            "body": "> Issue 1 I see is that I just use the 700 permission from the tmpdir due the rename instead of the proper diff dir creation permissions that are in the driver.create() code\n\n> Not sure if I should expose that into the tmpdir creation logic, I guess that makes the most sense since only the dirver should now the exact permission that should be used?\n\nI think that could work.\n\nI was thinking `StageAddition` does not actually need to _create_ (`os.Create`/`os.Mkdir`) the `tmpAddPath` at all. All of that happens inside a lock-protected `td.tempDirPath`, so there is ~nothing special, that I can see, about populating `tmpAddPath` — the provided `callback` can create the staged item without any help. (That could also mean `StageDirectoryAddition` and `StageFileAddition` could be consolidated into one. And I’m not immediately sure we _need_ a `callback` — `StageAddition` could return a `newStagingPathToPopulate` — but I also didn’t now carefully re-read the `tempdir` package.)\n\n---\n\n> I haven't checked all the code paths but I guess with the locking order requirements what I did is basically impossible to achieve anyway and I have to indeed move this out to before we get the lock?\n\nPer the locking hierarchy documented at the top of `store`, I think you’re right here."
+        },
+        {
+            "user": "Luap99",
+            "body": "> And I’m not immediately sure we need a callback — StageAddition could return a newStagingPathToPopulate — but I also didn’t now carefully re-read the tempdir package.)\n\nYeah my thinking was that the callback provides a \"lifetime\" of when the path is safe to use, if I return a string/struct with the path then the caller can cleanup/commit and then still use the path afterwards. This is really where I start to hate go because in rust this would be trivial to enforce so that there could only ever be one call to commit and then render the object useless afterwards.\n\nBut yes usage wise this callback is indeed getting quite ugly to the point where just returning the path is much simpler and well how go works in general. I do like the suggestion of just returning the path to consolidate both tmpdir functions into one so I will go with that."
+        },
+        {
+            "user": "Luap99",
+            "body": "@mtrmac I will push this into podman and run more tests tomorrow but I think like this it should be workable now. I fix the minor lint issues here of course on the next push. Let me know if this approach seem right to you, I guess the code could need some more better comments/function names likely. "
+        },
+        {
+            "user": "Luap99",
+            "body": "Ok last issue noticed in podman the idmapping logic cannot be implemented unlocked I fear.\n\nWe have this code in putLayer()\n```go\n\tif options.HostUIDMapping {\n\t\toptions.UIDMap = nil\n\t}\n\tif options.HostGIDMapping {\n\t\toptions.GIDMap = nil\n\t}\n\tuidMap := options.UIDMap\n\tgidMap := options.GIDMap\n\tif parent != \"\" {\n\t\tvar ilayer *Layer\n\t\tfor _, l := range append([]roLayerStore{rlstore}, rlstores...) {\n\t\t\tlstore := l\n\t\t\tif lstore != rlstore {\n\t\t\t\tif err := lstore.startReading(); err != nil {\n\t\t\t\t\treturn nil, -1, err\n\t\t\t\t}\n\t\t\t\tdefer lstore.stopReading()\n\t\t\t}\n\t\t\tif l, err := lstore.Get(parent); err == nil && l != nil {\n\t\t\t\tilayer = l\n\t\t\t\tparent = ilayer.ID\n\t\t\t\tbreak\n\t\t\t}\n\t\t}\n\t\tif ilayer == nil {\n\t\t\treturn nil, -1, ErrLayerUnknown\n\t\t}\n\t\tparentLayer = ilayer\n\n\t\tif err := s.containerStore.startWriting(); err != nil {\n\t\t\treturn nil, -1, err\n\t\t}\n\t\tdefer s.containerStore.stopWriting()\n\t\tcontainers, err := s.containerStore.Containers()\n\t\tif err != nil {\n\t\t\treturn nil, -1, err\n\t\t}\n\t\tfor _, container := range containers {\n\t\t\tif container.LayerID == parent {\n\t\t\t\treturn nil, -1, ErrParentIsContainer\n\t\t\t}\n\t\t}\n\t\tif !options.HostUIDMapping && len(options.UIDMap) == 0 {\n\t\t\tuidMap = ilayer.UIDMap\n\t\t}\n\t\tif !options.HostGIDMapping && len(options.GIDMap) == 0 {\n\t\t\tgidMap = ilayer.GIDMap\n\t\t}\n\t} else {\n\t\t// FIXME? It’s unclear why we are holding containerStore locked here at all\n\t\t// (and because we are not modifying it, why it is a write lock, not a read lock).\n\t\tif err := s.containerStore.startWriting(); err != nil {\n\t\t\treturn nil, -1, err\n\t\t}\n\t\tdefer s.containerStore.stopWriting()\n\n\t\tif !options.HostUIDMapping && len(options.UIDMap) == 0 {\n\t\t\tuidMap = s.uidMap\n\t\t}\n\t\tif !options.HostGIDMapping && len(options.GIDMap) == 0 {\n\t\t\tgidMap = s.gidMap\n\t\t}\n\t}\n\tif s.canUseShifting(uidMap, gidMap) {\n\t\toptions.IDMappingOptions = types.IDMappingOptions{HostUIDMapping: true, HostGIDMapping: true, UIDMap: nil, GIDMap: nil}\n\t} else {\n\t\toptions.IDMappingOptions = types.IDMappingOptions{\n\t\t\tHostUIDMapping: options.HostUIDMapping,\n\t\t\tHostGIDMapping: options.HostGIDMapping,\n\t\t\tUIDMap:         copySlicePreferringNil(uidMap),\n\t\t\tGIDMap:         copySlicePreferringNil(gidMap),\n\t\t}\n\t}\n```\n\nHowever we extract the layer with the caller specified `layerOptions.UIDMap`, `layerOptions.GIDMap` in stageWithUnlockedStore() before this code can get run.\n\nI guess the s.uidMap case could be done without a lock but not the parent lookups? So I guess the simple solution would be to only use the unlocked extract path when options.HostGIDMapping is true."
+        },
+        {
+            "user": "mtrmac",
+            "body": "(I didn’t look at the current code in this PR yet.) AFAICS `layer.[UG]IDMap` never changes once the layer is created, so it should be safe to look up the parent, read these values, and then unlock.\n\nIIRC the plan was to start layer creation with an ID lookup (so that we don’t start expensively staging it if it already exists), so the parent lookup could be done within the same lock scope."
+        },
+        {
+            "user": "Luap99",
+            "body": "```shell\n#!/usr/bin/env bpftrace\n\nkfunc:fcntl_setlk\n{\n  $lockname = str(args->filp->f_path.dentry->d_name.name);\n\n  if ($lockname == \"storage.lock\" || $lockname == \"layers.lock\" ||\n      $lockname == \"images.lock\" || $lockname == \"containers.lock\" ) {\n\n    @blockedTime[tid, $lockname] = nsecs;\n  }\n}\n\nkretfunc:fcntl_setlk\n{\n  $lockname = str(args->filp->f_path.dentry->d_name.name);\n\n  if ($lockname == \"storage.lock\" || $lockname == \"layers.lock\" ||\n      $lockname == \"images.lock\" || $lockname == \"containers.lock\" ) {\n\n    // lock duration in msec\n    $lock_duration = (nsecs - @blockedTime[tid, $lockname])/1000000;\n    if ($lock_duration) {\n      printf(\"blocked %s time: %lld msec\\n\", $lockname, $lock_duration);\n    }\n    delete(@blockedTime[tid, $lockname]);\n    @lockholdTime[pid, args->fd] = (nsecs, $lockname);\n  }\n}\n\ntracepoint:syscalls:sys_enter_close\n{\n  $a = @lockholdTime[pid, args->fd];\n  if ($a.0) {\n    // lock duration in msec\n    $lock_duration = (nsecs - $a.0)/1000000;\n    if ($lock_duration) {\n      printf(\"lock %s time: %lld msec\\n\", $a.1, $lock_duration);\n    }\n    delete(@lockholdTime[pid, args->fd]);\n  }\n}\n```\n\nFYI this is the script I used to measure lock times during my demo last week, not sure if there is a decent place to store this. I guess it could be helpful in the future to find more lock contention, should I add it under hack/ maybe?"
+        },
+        {
+            "user": "Luap99",
+            "body": "Podman/buildah tests seems to be passing (minus unrelated flakes AFAICT) \nhttps://github.com/containers/podman/pull/27251 https://github.com/containers/buildah/pull/6414\n\nThis should be good to review again. I think I addressed the comments."
+        },
+        {
+            "user": "podmanbot",
+            "body": "✅ A new PR has been created in buildah to vendor these changes: **https://github.com/containers/buildah/pull/6508**"
+        },
+        {
+            "user": "podmanbot",
+            "body": "✅ A new PR has been created in buildah to vendor these changes: **https://github.com/containers/buildah/pull/6518**"
+        },
+        {
+            "user": "Luap99",
+            "body": "@mtrmac I addressed all your comments now. Podman is also happy in https://github.com/containers/podman/pull/27251 (modulo some unrelated flakes)"
+        },
+        {
+            "user": "Luap99",
+            "body": "```\n#!/usr/bin/env bpftrace\n\nkfunc:fcntl_setlk\n{\n  $lockname = str(args->filp->f_path.dentry->d_name.name);\n\n  if ($lockname == \"storage.lock\" || $lockname == \"layers.lock\" ||\n      $lockname == \"images.lock\" || $lockname == \"containers.lock\" ) {\n\n    @blockedTime[tid, $lockname] = nsecs;\n  }\n}\n\nkretfunc:fcntl_setlk\n{\n  $lockname = str(args->filp->f_path.dentry->d_name.name);\n\n  if ($lockname == \"storage.lock\" || $lockname == \"layers.lock\" ||\n      $lockname == \"images.lock\" || $lockname == \"containers.lock\" ) {\n\n    // lock duration in msec\n    $lock_duration = (nsecs - @blockedTime[tid, $lockname])/1000000;\n    if ($lock_duration) {\n      printf(\"blocked %s time: %lld msec\\n\", $lockname, $lock_duration);\n    }\n\n    // store max and create histogram that get printed on bpftrace exit\n    @block_max[$lockname] = max($lock_duration);\n    @block_duration[$lockname] = hist($lock_duration);\n\n    delete(@blockedTime[tid, $lockname]);\n    @lockholdTime[pid, args->fd] = (nsecs, $lockname);\n  }\n}\n\ntracepoint:syscalls:sys_enter_close\n{\n  $a = @lockholdTime[pid, args->fd];\n  if ($a.0) {\n    // lock duration in msec\n    $lock_duration = (nsecs - $a.0)/1000000;\n    if ($lock_duration) {\n      printf(\"lock %s time: %lld msec\\n\", $a.1, $lock_duration);\n    }\n\n    // store max and create histogram that get printed on bpftrace exit\n    @lock_max[$a.1] = max($lock_duration);\n    @lock_duration[$a.1] = hist($lock_duration);\n\n    delete(@lockholdTime[pid, args->fd]);\n  }\n}\n```\n\nUpdated test script which prints some nice histograms and the max time values on exit for each lock file. It could be useful to measure other code parts as well. Let me know if you like me to commit this."
+        },
+        {
+            "user": "mtrmac",
+            "body": "Maybe into `storage/contrib`? It’s valuable right now, it could be useful as a starting point for a similar analysis of something else in the future, but I don’t think we’d want to commit to _maintaining_ this script. I don’t have a strong preference."
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "buildah",
+            "number": 6414
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "buildah",
+            "number": 6508
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "buildah",
+            "number": 6518
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "container-libs",
+            "number": 506
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "container-libs",
+            "number": 518
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "container-libs",
+            "number": 599
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "container-libs",
+            "number": 177
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 25862
+        }
+    ]
+}

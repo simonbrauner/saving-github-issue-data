@@ -1,0 +1,104 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "container-libs",
+    "number": 273,
+    "type": "issue",
+    "title": "Follow up on registry mirror implementation",
+    "state": "open",
+    "labels": [
+        "image"
+    ],
+    "user": "saschagrunert",
+    "body": "This issue collects all follow-ups of containers/image#564. Dear maintainers, feel free to edit this list as well.\n\n---\n\n- [ ] Improve registry mirror documentation regarding: \nhttps://github.com/containers/image/pull/564#discussion_r272715032 https://github.com/containers/image/pull/564#discussion_r272721534 https://github.com/containers/image/pull/564#discussion_r272721831 https://github.com/containers/image/pull/564#discussion_r274162846\n    - [ ] Improve overall documentation in `containers-registries.conf.5.md`\n    - [ ] Improve/move documentation block above `newImageSource`\n- [ ] Handle registry rewrite failures: https://github.com/containers/image/pull/564#discussion_r272716034\n    - [ ] The prefixes could be validated by sysregistriesv2 on `GetRegistries`\n    - [ ] Every corner case in failing `endpoint.RewriteReference()` needs to be\n      documented\n- [x] Consider adding an additional `searchRegistries` to solve issues with the\n  order dependent registries.conf entries: https://github.com/containers/image/pull/564#pullrequestreview-223485761 containers/image#635\n- [x] @mtrmac to follow up on https://github.com/containers/image/pull/564#pullrequestreview-229897123\n- [x] containers/image#625 don’t send credentials for the primary endpoint to mirrors",
+    "comments": [
+        {
+            "user": "vrothberg",
+            "body": "Thanks a lot for condensing the issues :pray: \n\n>  Consider adding an additional searchRegistries to solve issues with the\norder dependent registries.conf entries: containers/image#564 (review)\n\nI don't (yet) see why this should be needed as I fear this will add more complexity instead of reducing it. We still had to lookup the config of each registry and I think it's valid to assume that users want search registries to be mirrored as well, which is now happening transparently. Adding special cases for such options will require us to do some magic which is hard to explain to users. In the current state, it's pretty straight forward:\n* We can specify mirrors for pulling.\n* A registry can be configured to be a searchRegistry when pulling unqualified images.\n* The searchRegistries will be contacted in their specified order (just as we do for the list of mirrors).\n* Mirrors will contacted for any kind of pull operation (search and \"normal\")."
+        },
+        {
+            "user": "mtrmac",
+            "body": "WRT `searchRegistries`, copying from containers/image#564.\n\n> > The Search boolean makes the registry entries order-dependent, and forces us to contemplate questions like “what does search + mirrors + sub-hostname namespace prefix values mean?”. Could we instead have an explicit searchRegistries list, the way v1 does?\n> \n> Although the searchRegistries add another complex layer on top, I don't (yet) see why we need to change that after this PR is merged.  If a user configures a given registry to be mirrored, I don't see why there should be a special treatment for searchRegistries?\n\n1. You can say (`prefix`: `docker.io/foo/bar`, `location`: `mirror.example.com/notfoo/notbar`, `unqualified-search`: `true`). What does that mean?\n    - Existing code is not really ready for “search” entires that are not domains. Sure, we can add an extra validation rule, but that’s extra complexity and extra rule for users to understand.\n    - (buildah currently uses the `location` value, but it logically should use the `prefix` one, so that mirrors and `insecure` from _that entry that was just used_ apply to using this entry for search. Yet, using the `URL` (as it was named) seems very reasonable at a first glance.)\n2. The order of _all_ entries suddenly matters:\n    - You can’t order _all of_ `registries.conf` in anyway you like  (e.g. by mirror’s `location`, or maybe building it from a set of templates which support “include” of sub-templates)\n    - _Every writer_ must be order-aware; e.g. a trivial implementation of a registries.conf editor/update could do “load data; delete existing entry for `prefix`, if any; add an updated entry for `prefix` at the end; save”, but that would reorder entries and break search.\n    - Similarly, an update request to “replace the current search order with $input” requires a wholesale re-ordering of the input config file.\n3. It’s non-trivial to find out the search order; you have to search all of the file for `unqualified-search` and then look up the corresponding `prefix` value; i.e. you need a full TOML parser _and_ a bit of code / a query language.\n4. The “unqualified-search” boolean is not logically a “property of the registry”, neither the registry nor or its administrator care; it’s more accurately a reflection of the set of users using this machine. It would conceptually be well possible for two hosts to have exactly the same config entry for one registry (everyone should use the same TLS configuration and can use the same mirrors) — except that they differ in the default search path. (Admittedly, I do hope that in practice most companies will have a single company-wide search configuration.)\n\n\nSure, none of this is _insurmountable_ but I can’t really see any advantage to doing it the current way. \n\n---\n\nFurther, to address the comment above, note that this does not propose that `searchRegistries` use an _entirely separate_ mechanism (no `insecure`, no `mirror`s,  no `location`); all of that would continue to exist. The only change would be removing the `unqualified-search` boolean from all entries, and adding a global `unqualified-search-registries` array. The consumer of the configuration would read the array, iterate through the entries, and for each one: 1) form a fully-qualified name, and 2) submit that to `c/image/docker.NewReference.NewImageSource`, which causes ordinary `Prefix` matching, and `Location`/`Mirrors`/`Insecure` semantics handling, exactly as if the fully-qualified name was user-specified:\n\n```toml\nunqualified-search-registries = ['private.example.com', 'registry.access.redhat.com', 'docker.io']\n\n[[registry]]\nlocation = 'private.example.com'\ninsecure = true\nmirror = [/*…*/]\n```"
+        },
+        {
+            "user": "mtrmac",
+            "body": "Two more RFCs:\n\n---\n\nCurrently `location` is mandatory, and `prefix` is optional, defaults to `location`. This makes it very awkward to describe the matching semantics (it’s logical to start by describing which `[[registry]]` entry is used, i.e. with `prefix`, and introduce `location` only later; this requires an awkward forward reference to `location`, and it makes the description complex).  Also, _most_ entries will be non-rewriting with `location` set (to the logical location) and `prefix` missing, and the few rewriting entries will have `prefix` set to the logical location, and `location` to the physical location. That’s inconsistent, and makes searching for the relevant longest-prefix option more difficult than it needs to be.\n\nCan we switch this around, to make `prefix` mandatory, and `location` optional, defaulting to `prefix`, and only set if the user wants to rewrite the reference?\n\n---\n\nWas the naming of the `registry.mirror` array intentionally singular?  Sure, it is consistent with the `[[registry]]`  “array of tables” syntax, but the example in the documentation now says\n```toml\nmirror = [\n     { location = \"example-mirror-0.local/bar\", insecure = false },\n     { location = \"example-mirror-1.local/bar\", insecure = true },\n]\n```\nwhich is pretty awkward. The Go field is also named `Mirrors`.\n\nCan we rename the TOML field to `mirrors`? Or should we modify the documentation to use the `[[registry.mirror]]` syntax instead?"
+        },
+        {
+            "user": "mtrmac",
+            "body": "@saschagrunert @vrothberg RFC ^^^"
+        },
+        {
+            "user": "vrothberg",
+            "body": "> Further, to address the comment above, note that this does not propose that searchRegistries use an entirely separate mechanism (no insecure, no mirrors, no location); all of that would continue to exist. The only change would be removing the unqualified-search boolean from all entries, and adding a global unqualified-search-registries array. The consumer of the configuration would read the array, iterate through the entries, and for each one: 1) form a fully-qualified name, and 2) submit that to c/image/docker.NewReference.NewImageSource, which causes ordinary Prefix matching, and Location/Mirrors/Insecure semantics handling, exactly as if the fully-qualified name was user-specified:\n\nSounds good to me :+1: \n\nI think the arguments against the current state mostly relate to bloated `registries.conf` files with many entries, which I think are rare but I like the idea of making the unqualified search semantics an orthogonal extension to the registries rather than being an integral part.\n\n> Can we switch this around, to make prefix mandatory, and location optional, defaulting to prefix, and only set if the user wants to rewrite the reference?\n\nFrom a user perspective, I find `location` (which I prefer to call endpoint :-) more intuitive than `prefix`. Knowing the code and the mechanism, I see beauty in the proposal to change the semantics but I find it less user friendly. Maybe restructuring the description in the man page (see https://github.com/containers/image/pull/617#discussion_r278010497) can help?\n\n> Can we rename the TOML field to mirrors? Or should we modify the documentation to use the [[registry.mirror]] syntax instead?\n\nI am okay with renaming and advertising the inline table; it seems easier to read. Note that we should change the configs in the unit tests as well to be sure."
+        },
+        {
+            "user": "saschagrunert",
+            "body": "> Currently `location` is mandatory, and `prefix` is optional, defaults to `location`. This makes it very awkward to describe the matching semantics (it’s logical to start by describing which `[[registry]]` entry is used, i.e. with `prefix`, and introduce `location` only later; this requires an awkward forward reference to `location`, and it makes the description complex).\n> [...]\n> Can we switch this around, to make `prefix` mandatory, and `location` optional, defaulting to `prefix`, and only set if the user wants to rewrite the reference?\n\nI personally understood the feature better when initially omitting the prefix semantics and introducing it later on. I think we could switch it around if we find a more descriptive name for \"prefix\".\n\n> Can we rename the TOML field to `mirrors`?\n\nSure, but I would rename `registry` to `registries` too.\n\n"
+        },
+        {
+            "user": "vrothberg",
+            "body": "One thing that does not yet work is pull-through caches (see https://docs.docker.com/registry/recipes/mirror/#run-a-registry-as-a-pull-through-cache). The problem here is that we're rewriting the reference but shouldn't.\n\nGiven we're already talking about renaming the fields, I am tempted by renaming `mirror[s]` to `endpoint[s]`:\n* an additional `pull-through` attribute will avoid rewriting the reference\n* it gives us the flexibility to support `push` endpoints in the future (e.g., adding a `push` attribute)"
+        },
+        {
+            "user": "vrothberg",
+            "body": "Consider the following suggestion:\n\n```\n[[registry]]\nprefix=\"docker.io\"\nblocked = false\n\nendpoints = [\n{\n   location = \"docker.io\"\n},\n{\n   location = \"mirror.local\"\n   insecure = true\n   pull-through = true\n},\n{\n   location = \"registry.rewrite.me\"\n   insecure = true\n}\n]\n```\n\nThe prefix stays as is and is *mandatory*. The top-level registry can also be blocked, nothing more. Unqualified registries are specified as suggested above.\n\nThe `endpoints` table contains *all* possible registry and does not distinguish between the \"main\" one or a \"mirror\". If no endpoint is specified we could add the `prefix` as a default one for lazy users such as I am."
+        },
+        {
+            "user": "saschagrunert",
+            "body": "@vrothberg I lika and appreciate your suggestions. From my point of view I'd prefer to not change the API this heavily again (for now). I'm wondering at which point we want to release the next version of containers/image? I see that we have containers/image#617 out and from my side that could be enough for it to be released.\n\nMy main motivation is right now that I have to gather feedback from customers to widen my perspective in questions regarding further API changes. I need this feature in the next couple of weeks and would like to avoid a manual backport. WDYT?"
+        },
+        {
+            "user": "vrothberg",
+            "body": "> My main motivation is right now that I have to gather feedback from customers to widen my perspective in questions regarding further API changes. I need this feature in the next couple of weeks and would like to avoid a manual backport. WDYT?\n\nThat's pretty much what I would like to avoid. We can't change the API once customers rely on it. We already renamed identifiers and it's not released, which is **the** moment to still do it.\n\n>  I'm wondering at which point we want to release the next version of containers/image? \n\nI think we need containers/image#617 to be merged and we need to address the pull-through issue.\n\n@mtrmac WDYT?"
+        },
+        {
+            "user": "vrothberg",
+            "body": "Here's a small patch (no tests, no docs) how pull-through mirrors *could* be supported.\n\n[Update] That's actually not needed, we just need to make sure that the prefix and the mirror location point to the same repository/namespace.\n\nI checked with @mtrmac. containers/image#617 can be merged soon and we can declare the documentation (incl. man pages) a moving target and keep this issue here open until we're all happy."
+        },
+        {
+            "user": "vrothberg",
+            "body": "After some discussions with internal stakeholders, there are use cases where a mirror should only serve as a backup which requires another order.\n\nhttps://github.com/containers/container-libs/issues/273 or something similar seems more and more appealing to me."
+        },
+        {
+            "user": "mtrmac",
+            "body": "I find it inelegant to _have_ to include the original in the mirror list for a partial mirror to work, especially for the `docker.io` case.\n\nOTOH I would be fine with _allowing_ the `registry.location` to be included in the mirror list (which would cause the code not to implicitly use it as the last option."
+        },
+        {
+            "user": "vrothberg",
+            "body": "> I find it inelegant to have to include the original in the mirror list for a partial mirror to work, especially for the docker.io case.\n\nI agree that it would be inelegant if we continue referring to it as a `mirror` which is why I suggest in https://github.com/containers/container-libs/issues/273 to rename it to `endpoints`. This way, we treat any kind of endpoint equally and conceptually would not special-case any which I find elegant.\n\n> OTOH I would be fine with allowing the registry.location to be included in the mirror list (which would cause the code not to implicitly use it as the last option.\n\nThat would work but it would turn into a duplicate item in the endpoint list which brings up the question if there isn't another way of treating them - making me like an `endpoints = []` even more :^)\n\nI *think* it would reduce complexity from the documentation as well."
+        },
+        {
+            "user": "mtrmac",
+            "body": "Note to self: the `endpoints` conversation is ongoing — the forced redundancy (having to include the original) vs. fairly high likelihood of the `endpoints` design being easier to explain."
+        },
+        {
+            "user": "saschagrunert",
+            "body": "It would be incredibly awesome if we could push containers/image 2.0.0 out before Kubernetes 1.15, so we will have native registry mirror support in CRI-O 1.15 (surely including surrounding tools).\n\nSo what can I do? \n\nIf we agree on @vrothberg proposed further API changes I see no reason not to implement it. Documentation is also another big part, which should start afterwards, right?"
+        },
+        {
+            "user": "vrothberg",
+            "body": "The endpoints discussion is actually over and has settled on not changing it. Sorry for not dropping a comment here! Regarding documentation: I feel that's a moving target which can be bikeshedded for a long time. https://github.com/containers/image/pull/617 makes valuable improvements but at some point we need to cut a release."
+        },
+        {
+            "user": "vrothberg",
+            "body": "Ping. I think we can revive this issue and finish up remaining work. I did not check yet which items have already been addressed."
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "containers",
+            "repository": "image",
+            "number": 564
+        },
+        {
+            "organization": "containers",
+            "repository": "image",
+            "number": 635
+        },
+        {
+            "organization": "cri-o",
+            "repository": "cri-o",
+            "number": 2439
+        }
+    ]
+}

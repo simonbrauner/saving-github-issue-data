@@ -1,0 +1,116 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "container-libs",
+    "number": 784,
+    "type": "pull_request",
+    "title": "Recover stale temp dirs before `MakePrivate`",
+    "state": "closed",
+    "labels": [
+        "storage"
+    ],
+    "user": "Honny1",
+    "body": "<!--- Please read the [contributing guidelines](https://github.com/containers/container-libs/blob/main/CONTRIBUTING.md) before proceeding --->\nCall `RecoverStaleDirs` before `MakePrivate` in overlay `Init()` so that any stale mounts under the tempdirs are still reachable by path and can be unmounted by `EnsureRemoveAll`'s `RecursiveUnmount` logic. When home is already a mountpoint, the early call is harmless.\n\nAdditionally, while auditing the removal code paths for silently dropped errors:\n- Remove duplicate `tempdir.Cleanup` registration in `internalDelete`\n- Upgrade silent Debug logs to Warn on cleanup failures (`RecursiveUnmount`, link removal), so they're visible at default log levels\n- Fix inverted error check in `DeleteLayer` (`err != nil` -> `err == nil`)\n- Fix misplaced log in `Repair` (was inside the error branch, claiming success on failure)\n- Fix log placement in `GarbageCollect` (move before the error check, where it was meant to announce the action)\n\nFixes: https://redhat.atlassian.net/browse/RHEL-155513\nFixes: https://github.com/containers/podman/issues/27830\nFixes: https://github.com/containers/podman/issues/27035\n    ",
+    "comments": [
+        {
+            "user": "packit-as-a-service[bot]",
+            "body": "Packit jobs failed. @containers/packit-build please check."
+        },
+        {
+            "user": "Honny1",
+            "body": "/packit rebuild-failed"
+        },
+        {
+            "user": "Honny1",
+            "body": "/packit rebuild-failed"
+        },
+        {
+            "user": "mtrmac",
+            "body": "> Just a quick note: something similar came up recently in https://github.com/containers/container-libs/pull/738 \n\nCc: @giuseppe "
+        },
+        {
+            "user": "Honny1",
+            "body": "I will check that related issue and pr. Thanks for referencing that. "
+        },
+        {
+            "user": "mtrmac",
+            "body": "> the mount can survive in the kernel attached to a merged/ directory inside a staging tempdir.\n\nHow does that mount happen?!\n\nIf the layer is staging, it’s either being created, or it is being deleted. In neither case there should be any mount: `StartStagingDiffToApply` does not create one, and deletion should only be allowed on unmounted layers.\n\n---\n\nI’m _not_ saying that this is impossible… apparently some users like to have periodic `rm -rf` on subsets of the c/storage data, and at that point all bets are off. Just that I can’t see a _legitimate_ mechanism.\n\nThen again, that doesn’t mean we can’t be resilient to surprises… as long as we are not doing any harm."
+        },
+        {
+            "user": "mtrmac",
+            "body": "https://github.com/containers/podman/issues/27035#issuecomment-3280287252 is suggestive (_if_ that system doesn’t tamper with c/storage) … I don’t _see_ a plausible mechanism but that hints at some incorrect error handling / invariant enforcement in our code.\n\n---\n\nI’m also curious about the reports that the error message says “$layerTopDir not empty” while the cause (reportedly, unconfirmed?) is “$layerTopDir/merged is busy”. I would expect the latter to be reported as a cause.\n\n… `EnsureRemoveAll`’s `RecursiveUnmount` failing causes only a debug log. That is not ideal."
+        },
+        {
+            "user": "mtrmac",
+            "body": "(I have incorrectly edited an earlier comment, here is the original content:)\n\nJust a quick note: something similar came up recently in https://github.com/containers/container-libs/pull/738 , and there I found https://github.com/torvalds/linux/commit/8ed936b5671bfb33d89bc60bdcc7cf0470ba52fe .\n\n> rmdir(merged/) fails with EBUSY because the kernel's global d_mountpoint() check sees the mount regardless of namespace.\n\nPer https://github.com/torvalds/linux/commit/8ed936b5671bfb33d89bc60bdcc7cf0470ba52fe (12 years ago!) `d_mountpoint` does not exist in `rmdir`.\n\nYet, this was claimed in 2 different PRs, so it’s probably not a complete nonsense. What am I missing?\n\n(Ultimately, if we have a deterministic test case, that should be convincing. But I think it’s worth asking, if only just for my education.)"
+        },
+        {
+            "user": "Luap99",
+            "body": "> On the next startup, overlay Init() calls MakePrivate(home) which bind-mounts the home directory onto itself with MS_PRIVATE propagation. This bind mount hides any pre-existing submounts from path resolution.\n\nWould the simple answer here be just make sure we bind mount recursive to keep all mounts?\n\n\n\n> A similar failure occurs when different podman invocations run in separate mount namespaces (e.g. systemd services, ansible)\n\nJust to be clear this is 100% unsupported. All podman commands must be run from the same mount namespace as it will lead to all sorts for problems when some mounts are missing so whoever does that must be told they are doing things incorrect.\n\n\n\n\n\n\n"
+        },
+        {
+            "user": "Luap99",
+            "body": "\n\n\n> > the mount can survive in the kernel attached to a merged/ directory inside a staging tempdir.\n> \n> How does that mount happen?!\n> \n> If the layer is staging, it’s either being created, or it is being deleted. In neither case there should be any mount: `StartStagingDiffToApply` does not create one, and deletion should only be allowed on unmounted layers.\n\nI guess the only thing would be a logic bug so we rename the dir while the merged dir while was still mounted. Not sure where/how that would happen though"
+        },
+        {
+            "user": "Honny1",
+            "body": "To be transparent, I was not able to reproduce the reported issues through normal podman operations. I traced all the relevant code paths and could not find a legitimate sequence that creates a mount inside a tempdir. The reporters confirm the state exists (https://github.com/containers/podman/issues/27830): \"Device or resource busy\" on merged/), but I cannot identify the exact cause. Given this, I chose to reproduce the symptoms by manually creating a mount in the tempdir, as done in the test."
+        },
+        {
+            "user": "Honny1",
+            "body": "I checked one more with AI and found a possible cause, but it is hard to reproduce. IMHO If a process is killed between the overlay mount syscall in `driver.Get()` and `saveMounts()` persisting `MountCount` to disk, the kernel mount survives, but `MountCount` stays `0`. When a later Podman invocation exits cleanly, `Cleanup()` removes `MakePrivate` (since all tracked counts are `0`), the next `Init()` creates a fresh `MakePrivate` that hides the stale mount, and any subsequent deletion renames the still-mounted directory into a `tempdir` where `RecoverStaleDirs` can never clean it."
+        },
+        {
+            "user": "mtrmac",
+            "body": "> > > the mount can survive in the kernel attached to a merged/ directory inside a staging tempdir.\n> > \n> > \n> > How does that mount happen?!\n> > If the layer is staging, it’s either being created, or it is being deleted. In neither case there should be any mount: `StartStagingDiffToApply` does not create one, and deletion should only be allowed on unmounted layers.\n> \n> I guess the only thing would be a logic bug so we rename the dir while the merged dir while was still mounted.\n\nCan users trigger this explicitly, by running a privileged container, perhaps with `-v /:/host`, and then creating further mounts or other mount namespaces?\n\n---\n\n> If a process is killed between the overlay mount syscall in `driver.Get()` and `saveMounts()` persisting `MountCount` to disk\n\nthat’s a great point, the lock state vs. lock count are not transactional in face of `SIGKILL` (and that can happen with `TimeoutStartSec`). Fixing that would be some work (we’d need to add an “indeterminate” state to the mount counts I guess.) But I agree that _should_ be hard to hit in general…\n\n… well here’s a theory: In https://github.com/containers/podman/issues/27035 , `\"Supports shifting: \"false\"`, and `UserNS=keep-id` is set. In such a situation (smarter people than me say in that issue), creating a container triggers creating an ID-mapped version of a layer. That\n- happens in `overlay.Driver.UpdateLayerIDMap`\n- mounts the layer!\n- it never updates the mount counts at all because `layers.go` is higher in the call stack, and unaware of this mount\n- happens while the layer has `incompleteFlag`\n- now, _assume_ that the timeout triggers and the process is killed. Unlike most code paths, this one can take a long time, so that seems plausible.\n- on next start, `layerStore.load` finds the incomplete layer and triggers `internalDelete`. [`internalDelete` doesn’t even check any mount counts anyway, so even if we did have `MountCount` value, it wouldn’t matter]\n\nThat would explain how a mount exists. \n\n---\n\nEven in all of those cases, it’s unclear to me why `RecursiveUnmount` is failing and why kernel wouldn’t allow us to delete the mount (per the kernel commit in https://github.com/containers/container-libs/pull/784#issuecomment-4306576418 ). Are we re-joining the one mount namespace that did create the mount, and thus legitimately receiving EBUSY _within that namespace_?"
+        },
+        {
+            "user": "mtrmac",
+            "body": "> … well here’s a theory:\n\nTo be transparent I didn’t try reproducing any of this."
+        },
+        {
+            "user": "mtrmac",
+            "body": "@Honny1 Whether we find a cause or not, I’d recommend reviewing the relevant removal code, and ensuring no error is _silently_ dropped. Either we can automatically and fully resolve it, or it should be returned to the user, or logged _at least_ at a warning level (not “debug”). And that applies to _all_ errors, e.g. `RecursiveUnmount` now only returns the last one.\n\nPerhaps that is overzealous, we can scale it back again. But we should never be seeing a “directory not empty” without a more specific cause of why we were not able to make it empty.\n\n"
+        },
+        {
+            "user": "Honny1",
+            "body": "I have addressed comments. Also, during the search for silent ignoring of layer removal errors, I found some small bugs. \n\nPTAL @mtrmac "
+        },
+        {
+            "user": "giuseppe",
+            "body": "I am not sure the first patch is correct.\n\n`MakePrivate` doesn't create a new bind mount if the target is already a mountpoint (it uses `github.com/moby/sys/mountinfo/mountinfo.go`)"
+        },
+        {
+            "user": "giuseppe",
+            "body": "> I am not sure the first patch is correct.\n> \n> `MakePrivate` doesn't create a new bind mount if the target is already a mountpoint (it uses `github.com/moby/sys/mountinfo/mountinfo.go`)\n\none thing to investigate to just reuse the home mount point when it exists for any reason is to attempt directly `mount(MS_PRIVATE, target)` and only do the bind mount if it fails with `EINVAL`, so we also avoid the potential slow check for the mount point.  @kolyshkin what do you think?\n\n```go\nfunc ensureMountedAs(mnt string, flags int) error {\n        mounted, err := Mounted(mnt)\n        if err != nil {\n                return err\n        }\n\n        if !mounted {\n                if err := mount(mnt, mnt, \"none\", uintptr(BIND), \"\"); err != nil {\n                        return err\n                }\n        }\n\n        return mount(\"\", mnt, \"none\", uintptr(flags), \"\")\n}\n```\n\nshould become something like (completely untested): \n\n```go\nfunc ensureMountedAs(mnt string, flags int) error {\n        err := mount(\"\", mnt, \"none\", uintptr(flags), \"\") \n        if err == nil {\n            return nil\n        }\n\n         if !errors.Is(err, syscall.EINVAL) {\n             return err\n         }\n\n        // mnt is not a mountpoint, create a bind mount on itself\n        if err := mount(mnt, mnt, \"none\", uintptr(BIND), \"\"); err != nil {\n            return err\n        }\n\n        return mount(\"\", mnt, \"none\", uintptr(flags), \"\")\n}\n```"
+        },
+        {
+            "user": "Honny1",
+            "body": "@giuseppe Should I create a separate PR for that, or add it to this one after @kolyshkin replies?"
+        },
+        {
+            "user": "giuseppe",
+            "body": "that can be a separate PR.\n\nCan you please fix the commit message for the first patch?"
+        },
+        {
+            "user": "Honny1",
+            "body": "> that can be a separate PR.\n> \n> \n> \n> Can you please fix the commit message for the first patch?\n\nSure "
+        },
+        {
+            "user": "Honny1",
+            "body": "PTAL @mtrmac @giuseppe "
+        },
+        {
+            "user": "giuseppe",
+            "body": "are we sure though about this being the fix for the linked bug?  Should we close it?"
+        },
+        {
+            "user": "giuseppe",
+            "body": "the fixes make sense, so let's merge them.  I am only not sure about marking the ticket as closed, but perhaps we can let the user try that out since we have no reproducer."
+        },
+        {
+            "user": "Honny1",
+            "body": "Thanks @mtrmac and @giuseppe. I think we can merge. Who will hit the merge button?\n\nPS: @giuseppe, will you create a PR with the improvement that you proposed, or should I?\n"
+        }
+    ],
+    "cross_references": []
+}
