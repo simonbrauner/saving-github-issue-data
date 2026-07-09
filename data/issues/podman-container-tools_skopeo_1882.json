@@ -1,0 +1,53 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "skopeo",
+    "number": 1882,
+    "type": "issue",
+    "title": "sync: dry-run option does not check existence of tags",
+    "state": "open",
+    "labels": [
+        "kind/feature",
+        "stale-issue"
+    ],
+    "user": "mfriedenhagen",
+    "body": "Hi,\n\nGIVEN a YAML file `telepresence-local.yml` with fixed versions where one of which does not exist (`5000`)\n```yaml\n---\nregistry-1.docker.io:\n  images:\n    datawire/telepresence-local:\n    - '0.90'\n    - '5000'\n```\nWHEN I execute \n```\nskopeo --override-os linux sync  --src=yaml --dest=dir --dry-run telepresence-local.yml destdir\n```\nTHEN this succeeds\n```\nINFO[0000] Processing repo                               registry=registry-1.docker.io repo=datawire/telepresence-local\nWARN[0000] Running in dry-run mode                      \nINFO[0000] Would have copied image ref 1/2               from=\"docker://registry-1.docker.io/datawire/telepresence-local:0.90\" to=\"dir:skopeo/destdir/telepresence-local:0.90\"\nINFO[0000] Would have copied image ref 2/2               from=\"docker://registry-1.docker.io/datawire/telepresence-local:5000\" to=\"dir:destdir/telepresence-local:5000\"\nINFO[0000] Would have synced 2 images from 1 sources    \n```\n\nBut when I remove the dry-run option the command fails:\n```\n skopeo --override-os linux sync  --src=yaml --dest=dir skopeo/registry-1.docker.io/datawire/telepresence-local.yml destdir \nINFO[0000] Processing repo                               registry=registry-1.docker.io repo=datawire/telepresence-local\nINFO[0000] Copying image ref 1/2                         from=\"docker://registry-1.docker.io/datawire/telepresence-local:0.90\" to=\"dir:skopeo/destdir/telepresence-local:0.90\"\nGetting image source signatures\n...\nStoring signatures\nINFO[0008] Copying image ref 2/2                         from=\"docker://registry-1.docker.io/datawire/telepresence-local:5000\" to=\"dir:skopeo/destdir/telepresence-local:5000\"\nFATA[0009] Error copying ref \"docker://registry-1.docker.io/datawire/telepresence-local:5000\": initializing source docker://registry-1.docker.io/datawire/telepresence-local:5000: reading manifest 5000 in registry-1.docker.io/datawire/telepresence-local: manifest unknown: manifest unknown \n```\n\nI would have expected that `skopeo` at least checks the existence of a source tag when using the `--dry-run` option. When using regexes it does contact the source registry but for fixed versions it just seems to fall back on syntax checking somehow.",
+    "comments": [
+        {
+            "user": "mtrmac",
+            "body": "Thanks for your report.\n\nI can see the appeal of that, and it’s a reasonable interpretation of the description of the option.\n\nAs for the intent of the feature, `--dry-run` basically exists to demonstrate the outcomes of the regexp lookup, and name mapping, logic, in a _non-destructive_ way. The most important reason is to allow users to can identify broken / dangerous configurations before affecting the _destination_ registry. A missing image on the source registry is not nearly as pressing a concern, that can be determined by just running `skopeo sync` for the first time.\n\nDuring a non-`--dry-run` copy, the code also uses the `:5000` tag from the configuration without any further existence checking. There is no existence check code that we could trivially “turn on”. Admittedly it would not be difficult to add that existence check for that case, however that immediately raises a question of “where does this stop”. If the `:5000` image did exist on the registry, but one of the layers (or one of the per-arch variants) were missing, and therefore it were ultimately impossible for a sync to succeed based on that fact, would `skopeo sync` be responsible for individually checking that every per-arch variant layer exists on the source, also using some extra specialized code? I don’t think it makes any sense to add _that much_ extra complexity and code that is not used anywhere else to make such a determination, and if we don’t do _all of that_, then I don’t really see that checking for tag presence would result in a coherent easily explainable feature."
+        },
+        {
+            "user": "jimmypw",
+            "body": "I came across this same issue on Friday. Our situation is the same, we would like to be able to verify that the tags requested exist. We would like this feature so that we have a mechanism to fail early in our pipelines.\n\nThe example I have is that a developer omitted a 'v' prefixing a tag. The pre-merge (--dry-run) pipeline ran successfully only to get confused when the post-merge (the sync) pipeline failed.  In this case the failure was within our control due to the requested tag not existing. I appreciate what you are saying that there may still be errors even if the tag was valid. I would consider such errors (i.e. errors provided a valid registry, image and tag) to be outside of our control and download / sync errors would be appropriate. \n\nI also agree that such a feature falls outside the scope of a --dry-run that should be restricted to the internals of the application and not make unnecessary calls externally."
+        },
+        {
+            "user": "mfriedenhagen",
+            "body": "Our usecase is similar to the one of @jimmypw: we copy images to our internal Artifactory based on a git repository, where people may add new versions resp. tag definitions via a PR. \n\nThe definitions are \"enhanced\" with the information who is using the image and a bit of metadata in comments. \n\nSometimes people just add a typo in the version and then the actual sync fails *after* the PR was merged into main, so another PR has to be created, reviewed and merged, which is kind of annoying.\n\nI already thought about parsing the YAML, extract all fixed versions and create a bash script calling 'skopeo inspect' additionally but to me it looks like skopeo could already do something similar itself while doing a dry-run.\n"
+        },
+        {
+            "user": "mtrmac",
+            "body": "> we copy images to our internal Artifactory based on a git repository, where people may add new versions resp. tag definitions via a PR.\n\nThanks, that’s a quite compelling use case.\n\n---\n\nI’m not at all sure that checking existence of source tags should happen _by default_ in `--dry-run`, but either way we can add one extra option easily enough (something like `--check-individual-sources`? there’s probably a better name to be found).\n\nThat option presumably wouldn’t apply to the “all tags” and “all tags matching a regexp” case for those we would expect the registry to be internally consistent between the tags it reports and tags that can actually be pulled."
+        },
+        {
+            "user": "mfriedenhagen",
+            "body": "@mtrmac what about just checking whether the fixed versions do exist in the tag list? You would fetch that one for regexes anyways, so just adding the \"fixed\" versions to the pattern matches like `^v1.2$` could be an easy way here. We quite often have cases like `7\\.(35|37)\\.\\d+` and maybe sth. additionally like `alpine` or `latest` (the later most of the times exists of course :-)). "
+        },
+        {
+            "user": "mtrmac",
+            "body": "> @mtrmac what about just checking whether the fixed versions do exist in the tag list? You would fetch that one for regexes anyways\n\nThe two are actually not related in the current implementation; a literal tag would not trigger listing tags, and a regexp does not interfere with literal tags (in particular, a single tag could end up being synced twice). But reorganizing it so that they have _more_ in common seems worthwhile."
+        },
+        {
+            "user": "mfriedenhagen",
+            "body": "It could be even a good idea to use a distinct union of pattern based and literal tags to avoid duplicate syncs, could it not?"
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        }
+    ],
+    "cross_references": []
+}

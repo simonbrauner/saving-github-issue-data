@@ -1,0 +1,79 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "skopeo",
+    "number": 1078,
+    "type": "issue",
+    "title": "skopeo v1.1.1 image uses deprecated v2 schema 1",
+    "state": "closed",
+    "labels": [
+        "locked - please file new issue/PR"
+    ],
+    "user": "rittneje",
+    "body": "It seems the v1.1.1 image hosted on quay.io is using the deprecated v2 schema 1, whereas all the other images (including the previous v1.1.0 image) are using v2 schema 2. This is causing issues for us. Can you re-publish the v1.1.1 image using the newer schema?",
+    "comments": [
+        {
+            "user": "TomSweeneyRedHat",
+            "body": "I'll try to update that, but honestly, I don't know how or why the v1.1.1 image is using the older schema as the build process remains the same...."
+        },
+        {
+            "user": "TomSweeneyRedHat",
+            "body": "@rittneje just to make sure we're looking at the same thing, are you determining the schema by looking at the ManifestType field of the image.  For those two images I'm seeing:\n```\ntemp1.0.0.txt:        \"ManifestType\": \"application/vnd.docker.distribution.manifest.v2+json\",\ntemp1.1.1.txt:        \"ManifestType\": \"application/vnd.docker.distribution.manifest.v1+prettyjws\",\n```\n@nalind any thoughts why the manifest type might have reverted?  My only thought is perhaps my test vm had an older version of podman when I built the images?"
+        },
+        {
+            "user": "rittneje",
+            "body": "```\n$ docker manifest inspect quay.io/skopeo/stable:v1.1.1\nunsupported manifest media type and no default available: application/vnd.docker.distribution.manifest.v1+prettyjws\n```\n\nAccording to https://docs.docker.com/registry/spec/manifest-v2-1/ that media type is for a signed version 2 schema 1 manifest."
+        },
+        {
+            "user": "nalind",
+            "body": "How did the images we're talking about get built and pushed?  Was it all done using quay's built-in triggers and builder, or was there an external builder that built the images and pushed them to the registry?  If it's built-in, then we don't have any control over it, but if it's external, then we should try to find out why we couldn't push using the newer format."
+        },
+        {
+            "user": "TomSweeneyRedHat",
+            "body": "@nalind I'm using: https://github.com/containers/common/blob/31126ac086063e9c7142365f238d98c0f6a4dc78/tools/rebuild_quay_ctr_images.sh to bulid them on my local VM that I use for most of my development.  It's running in a cron job once a day.  This script hasn't changed since July 1, 2020.  Under the covers, it's doing this:\n```\npodman build --no-cache -t quay.io/containers/${PROJECT}:latest -f https://raw.githubusercontent.com/containers/${GITHUBPROJECT}/master/contrib/${PROJECT}image/stable/Dockerfile .\npodman push --authfile ${AUTHFILE} quay.io/containers/${PROJECT}:latest\n```"
+        },
+        {
+            "user": "nalind",
+            "body": "Can you run it again, and run the `push` step with `--log-level=debug` to let us see if the client's attempting to convert the format of the manifest while it's pushing the images?  If it is, then it's in response to the registry rejecting the original format, which I think is OCI.  If not, then the registry would appear to be quietly rewriting things on its end."
+        },
+        {
+            "user": "nalind",
+            "body": "Trying `podman build --no-cache -f https://raw.githubusercontent.com/containers/skopeo/master/contrib/skopeoimage/stable/Dockerfile .` here, the debug output included this:\n```\nWriting manifest to image destination\nDEBU[0045] PUT https://quay.io/v2/nalind/testing/manifests/podman \nDEBU[0045] Writing manifest using preferred type application/vnd.oci.image.manifest.v1+json failed: Error writing manifest: Error uploading manifest podman to quay.io/nalind/testing: manifest invalid: manifest invalid \nDEBU[0045] Trying to use manifest type application/vnd.docker.distribution.manifest.v2+json… \n```\nand the image was successfully pushed in the v2s2 format.\n\nWhen I built with `--format docker`, though, the push included this in the debug log:\n```\nWriting manifest to image destination\nDEBU[0015] PUT https://quay.io/v2/nalind/testing/manifests/podman \nDEBU[0015] Writing manifest using preferred type application/vnd.docker.distribution.manifest.v2+json failed: Error writing manifest: Error uploading manifest podman to quay.io/nalind/testing: manifest invalid: manifest invalid \nDEBU[0015] Trying to use manifest type application/vnd.docker.distribution.manifest.v1+prettyjws… \n```\nwhich is not what was supposed to happen.  It looks like the Docker-format manifest we generate is being rejected, but when we let the image library convert an OCI format image that we generate into the Docker format while pushing, the result is not rejected.  Going to have to dig into this."
+        },
+        {
+            "user": "nalind",
+            "body": "@TomSweeneyRedHat can you re-run the build step again, but before pushing, remove either `~/.local/share/containers/storage/cache/blob-info-cache-v1.boltdb` if you're running as an unprivileged user, or `/var/lib/containers/storage/cache/blob-info-cache-v1.boltdb` if you're root, and then try pushing the image to the registry?\n\nIf pushing with debugging enabled doesn't indicate that the manifest needed to be converted to a different format, and when you then `skopeo inspect --raw` the `quay.io/containers/${PROJECT}:latest` image, you get the v2s2 manifest, then I think @mtrmac is right about this being https://github.com/containers/image/issues/733."
+        },
+        {
+            "user": "TomSweeneyRedHat",
+            "body": "@nalind, will give it a whirl, thanks for the look sees."
+        },
+        {
+            "user": "TomSweeneyRedHat",
+            "body": "After running the script with the additional rm as noted above added, then pulling the image, I'm seeing:\n\n```\n# skopeo inspect --raw docker://quay.io/skopeo/stable:latest\n{\"schemaVersion\":2,\"mediaType\":\"application/vnd.docker.distribution.manifest.v2+json\",\"config\":{\"mediaType\":\"application/vnd.docker.container.image.v1+json\",\"size\":2221,\"digest\":\"sha256:8348c8725610881151f9bb4f2e65e28dbaf045bc2eb6069b74a8d4f8ae9302fa\"},\"layers\":[{\"mediaType\":\"application/vnd.docker.image.rootfs.diff.tar.gzip\",\"size\":77790700,\"digest\":\"sha256:3cc10b44f9e95524b0ed2d2b2f5f563faf78a5081052578cc6bbe4c64f02256f\"},{\"mediaType\":\"application/vnd.docker.image.rootfs.diff.tar.gzip\",\"size\":17440438,\"digest\":\"sha256:4d5dcf596192b0d141e6a6804a9b729ba5b733be3d797382ea230875b04f5f91\"},{\"mediaType\":\"application/vnd.docker.image.rootfs.diff.tar.gzip\",\"size\":2592,\"digest\":\"sha256:2daf33ef2474a4830787c627d810dcb84856f6418439b00c4f177571389295f1\"},{\"mediaType\":\"application/vnd.docker.image.rootfs.diff.tar.gzip\",\"size\":237,\"digest\":\"sha256:06f8a4889c641fcea3bd51db023c20059bef3d45a798ee4eb45e27858d2f04a7\"},{\"mediaType\":\"application/vnd.docker.image.rootfs.diff.tar.gzip\",\"size\":164,\"digest\":\"sha256:2bba2df6545859dfcae7c137ab31ea25693d8416357db0a006d7fce728985db5\"},{\"mediaType\":\"application/vnd.docker.image.rootfs.diff.tar.gzip\",\"size\":164,\"digest\":\"sha256:199a6d2b3c9e8b9d862a6d83576fe5409a0ceedcf1e3c79bcd0c0ee6d7493f1c\"}]}\n```\nand from Podman:\n\n```\n# podman inspect  docker://quay.io/skopeo/stable:latest | grep manifest\n          \"ManifestType\": \"application/vnd.docker.distribution.manifest.v2+json\",\n```\n\nSo it looks like containers/image#733 right?  If I go ahead and do the rm before each push, I should be GTG in the short term?"
+        },
+        {
+            "user": "nalind",
+            "body": "Yeah, I think that's what's happening here.  Doing that as a rule would cause us to extract and recompress each layer on each push, which would interfere with our ability to reuse layers from the base image that were pushed as part of pushing an earlier build.  This is going to use up more disk space at the registry, which is not ideal."
+        },
+        {
+            "user": "TomSweeneyRedHat",
+            "body": "I've just pushed the `quay.io/skopeo/stable:v1.2.0` and `quay.io/containers/skopeo:v1.2.0` they have the right manifests.  Working on the v1.1.1 variant now."
+        },
+        {
+            "user": "TomSweeneyRedHat",
+            "body": "I've just completed the v1.1.1 variant too on quay.io.  That part was a bit more time consuming that expected.  I'm going to close this now, please reopen if you find further issues there."
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "buildah",
+            "number": 2594
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 8206
+        }
+    ]
+}

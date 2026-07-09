@@ -1,0 +1,50 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "skopeo",
+    "number": 532,
+    "type": "issue",
+    "title": "skopeo copy containers-storage:... docker:... should deduplicate layers",
+    "state": "closed",
+    "labels": [
+        "locked - please file new issue/PR"
+    ],
+    "user": "steveb",
+    "body": "This issue is intended to track deduplication for copying containers-storage->registry, which is a more specific case for the general RFE #395. My hope is that the required compressed and uncompressed hashes are available in containers-storage to enable deduplication for the same image, and for images which share layers.\n\n**Steps to reproduce the issue:**\n\n1. Install and run docker-distribution locally:\n```\ndnf install docker-distribution\nsystemctl start docker-distribution\n```\n\n3. Copy in some multi-layer images which have common layers:\n```\nskopeo copy docker://docker.io/tripleomaster/centos-binary-heat-engine:current-tripleo containers-storage:docker.io/tripleomaster/centos-binary-heat-engine:current-tripleo\nskopeo copy docker://docker.io/tripleomaster/centos-binary-heat-api:current-tripleo containers-storage:docker.io/tripleomaster/centos-binary-heat-api:current-tripleo\n\n```\n\n4. Push to the local repository (duplicate copy is deliberate)\n```\nskopeo copy --dest-tls-verify=false containers-storage:tripleomaster/centos-binary-heat-api:current-tripleo docker://localhost:5000/tripleomaster/centos-binary-heat-api:current-tripleo\nskopeo copy --dest-tls-verify=false containers-storage:tripleomaster/centos-binary-heat-api:current-tripleo docker://localhost:5000/tripleomaster/centos-binary-heat-api:current-tripleo\nskopeo copy --dest-tls-verify=false containers-storage:tripleomaster/centos-binary-heat-engine:current-tripleo docker://localhost:5000/tripleomaster/centos-binary-heat-engine:current-tripleo\n```\n\n**Describe the results you received:**\nEvery layer was pushed again each time \"skopeo copy\" was run\n\n**Describe the results you expected:**\nThe second push of centos-binary-heat-api should have skipped pushing every layer. The copy of centos-binary-heat-engine should have skipped most layers, just like it did for copying from docker.io to containers-storage",
+    "comments": [
+        {
+            "user": "mtrmac",
+            "body": "The general case is, I guess https://github.com/containers/image/issues/475 : we need to record a mapping between DiffIDs, compressed layer digests, _and their locations_.\n\ncontainers/storage does record compressed layer digests, but not the locations; so we don’t know whether the layer is available in the repository (and can be reused directly), somewhere else on the same registry (and can be mounted), or on an entirely different server.\n\nIt would be, in principle, possible to use the data anyway, and just hope that the digests apply to the current repository directly, but that’s pretty likely to be wasteful.  I’d rather implement (only) recording and usage of the full mapping."
+        },
+        {
+            "user": "steveb",
+            "body": "For the simple case of copying the same image twice, isn't there a much simpler fix of doing a HEAD call and only copying the layer if the response is a 404?\ndocker:// -> docker:// copying seems to do this"
+        },
+        {
+            "user": "steveb",
+            "body": "OK, reading the code and watching skopeo copy --debug I see it is doing a HasBlob check, but for different hashes, which I think means the remote layer is compressed and the local one is uncompressed, so the hashes differ. This sounds like 2. which you mentioned in https://github.com/projectatomic/libpod/issues/1233#issuecomment-411569730\n\nDoes this mean HasBlob can be called *again* after \"Compressing blob on the fly\" but before pushing the layer? We'll have the time penalty of compressing, but not of the network transfer.\n"
+        },
+        {
+            "user": "steveb",
+            "body": "Never mind, I see now how the computedDigest is extracted after the upload"
+        },
+        {
+            "user": "mtrmac",
+            "body": "> Does this mean HasBlob can be called again after \"Compressing blob on the fly\" but before pushing the layer? We'll have the time penalty of compressing, but not of the network transfer.\n\nCurrently the compression and the upload happen in parallel.  We could, in principle, do them serially, to make such a check possible — but that would make the ”layer not present” case slower, because it would have to take extra time to do the upload afterwards, and there would be an extra disk write+read.\n\nhttps://github.com/containers/image/issues/475#issuecomment-403939228 shows that for compression and writing _to a local disk_, the compression is surprisingly slow, _by far_ the most time-consuming part.  I haven’t seen a thorough benchmark of what this looks like when writing to remote `docker://` destinations, but I wouldn’t be surprised if the compression time dominated the overall time in such cases as well."
+        },
+        {
+            "user": "giuseppe",
+            "body": "> `[Don't copy duplicate layers from containers-storage to compressed tar…](/steveb/image/commit/71b31cb9ac2f1eb2cd16205dad940223e0418aa4) `\n\n@steveb are you still using these patches  Would it be worth to open a PR and discuss them for upstream inclusion?"
+        },
+        {
+            "user": "mtrmac",
+            "body": "The caching of compressed/uncompressed relationship mapping, and remote locations, has been implemented in https://github.com/containers/image/pull/536 ; in the original test case, the second push now completes immediately and the third one only copies the few differing layers."
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "containers",
+            "repository": "image",
+            "number": 526
+        }
+    ]
+}

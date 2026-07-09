@@ -1,0 +1,153 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "skopeo",
+    "number": 1283,
+    "type": "issue",
+    "title": "Skopeo inspect: provide --top-level about included architectures",
+    "state": "open",
+    "labels": [
+        "kind/feature"
+    ],
+    "user": "pombredanne",
+    "body": "I would expect that `inspect` could return data from images even though they do not match my current OS/arch and without me first knowing about the image OS/Arch.\nTo me the whole purpose of inspect is that It should not require to know anything about the image OS or arch in the first place. \n\nI have integrated skopeo here to fetch images https://github.com/nexB/scancode.io/blob/62911d1fe692327a23af85fa9668344deb5b9ebd/scanpipe/pipes/fetch.py#L132 but I cannot get inspect to get me data on arbitrary docker:// references unless I use `inspect --raw` first to find out about the architecture and OS.\n\nUsing the latest 1.2.3 version from Linux, I cannot get inspect to work when running this:\n```\n$ skopeo inspect docker://mcr.microsoft.com/windows:20H2\nFATA[0000] Error parsing manifest for image: Error choosing image instance: \nno image found in manifest list for architecture amd64, variant \"\", OS linux\n```\n\nYet things work with `--override-os=windows`:\n```\n$ skopeo inspect  --override-os=windows docker://mcr.microsoft.com/windows:20H2 \n{\n    \"Name\": \"mcr.microsoft.com/windows\",\n    \"Digest\": \"sha256:c52e2549de5fbd32a83b6f4f43e471b79a111432ec3fcd2f605f2a1c0653bd29\",\n    \"RepoTags\": [\n        \"10.0.17763.1039\",\n        \"10.0.17763.1039-amd64\",\n        \"10.0.17763.1040\",\n        \"10.0.17763.1040-amd64\",\n        \"10.0.17763.1098\",\n        \"10.0.17763.1098-amd64\",\n        \"10.0.17763.1158\",\n```\n\nand this:\n```\n$ skopeo inspect  --raw docker://mcr.microsoft.com/windows:20H2 \n{\n   \"schemaVersion\": 2,\n   \"mediaType\": \"application/vnd.docker.distribution.manifest.list.v2+json\",\n   \"manifests\": [\n      {\n         \"mediaType\": \"application/vnd.docker.distribution.manifest.v2+json\",\n         \"size\": 865,\n         \"digest\": \"sha256:01eaaa20c1ea39b30c5cbf0e24a528d02d7a23d0de316b0fc462cb6af029297f\",\n         \"platform\": {\n            \"architecture\": \"amd64\",\n            \"os\": \"windows\",\n            \"os.version\": \"10.0.19042.985\"\n         }\n      }\n   ]\n}\n```\n\n",
+    "comments": [
+        {
+            "user": "vrothberg",
+            "body": "Thanks for reaching out!\n\nSome background on the behavior:\nWhen looking at a manifest list or OCI index (in OCI terminology), Skopeo has to pick _one_ image instance.  Unless a specific image is selected via `@digest`, Skopeo (and other tools using c/image) will attempt to select the instance matching the current platform.\n\nIn your specific case, there is only one item in the list, so I can sympathize with the desire to just inspect this one image.\n\n@nalind @mtrmac @rhatdan WDYT?"
+        },
+        {
+            "user": "rhatdan",
+            "body": "Is it possible to descover the image easily in code, then I would think this makes sense.  But I will wait for @mtrmac and/or @nalind opinion."
+        },
+        {
+            "user": "mtrmac",
+            "body": "It’s overall awkward that `skopeo inspect`’s interface was designed before multi-arch, and that it mixes the manifest list data (like digest) and the data for a single architecture.  That’s confused quite a few people (especially WRT the digest field), and I sympathize with the wish that it did something else.\n\nI don’t think the right design is to dig in further and add even more magic that guesses about what the user meant. By now there may well be users that rely on `skopeo inspect` to fail if the image is not appropriate for the current architecture. And if the user doesn’t even know what architectures the image (with a specific name!) targets, it’s rather unclear to me what most of the values in the inspect output are going to be good for. So why guess?\n\n---\n\nTo propose an alternative starting point, it would probably make sense to provide an inspect-manifest (or `skopeo inspect --top-level` or whatever) that provides information _only_ about the name:tag-designated manifest (e.g. finally remove the tags list, don’t show any data that may differ between architectures, and clearly tell if it is a single-arch image (do we even show what architecture for, if so?), or if it is multi-arch and, if so, for what architectures).\n\nThat would get us closer to fixing the “inspect mixes data about different objects” problem, and still allow scripting whatever introspection is necessary — better than what we have now, and much more robust than any kind of guessing.\n\nAnd eventually, in some vague future, we might have an `inspect --only-architecture= --only-os` (or whatever, I’m bad at naming) that clearly shows that some data is per-arch and may differ across architectures, and users then may choose not to care and assume that it is going to be consistent across the multi-arch image, but they will also be empowered to choose to deal with those corner cases with full knowledge.\n\n---\n\nLooking at the code, the code doesn’t seem to actually _use_ any of the per-architecture data returned by Skopeo inspect anyway; the only thing it does do is extract the platform so that it can do a single-architecture `skopeo copy --override-… docker://… docker-archive:…`. [Is ignoring all other architectures even the right thing to do for “automating software composition analysis”??]\n\nSo, an inspect-manifest that provides precisely that kind of data would AFAICS be sufficient, abstract the caller from schema2/OCI/future format differences (unlike using `inspect --raw`), and it would allow the application do apply whatever logic it chooses to choose the relevant architecture — or to integrate through all of them; guessing and transparently providing data about a single-mismatched-architecture images by `inspect` wouldn’t enable any new use cases."
+        },
+        {
+            "user": "pombredanne",
+            "body": "Here is my use case: reliably fetch a whole image and then analyze its composition. For this for now the input to this is a `docker://` reference (and in the future we will support https://github.com/package-url too).\n\nIn the short term, there is no provision for multi-architectures yet (since a `docker://` reference cannot point to an os/arch/variant) but a Package URL would allow these alright. \n\nSo ideally my flow could be either one of these:\n1. when there is only one possible image given a `docker://image` or `docker://image:tag` then use that one\n2. otherwise, return descriptive structured message with options including:\n- if the image exists, but not the tag: a listing of available tags and for each listing os/arch/var possibilities\n- if the image:tag exists, but there are multiple os/arch/var possibilities, listing  them \n\nWith this I can then have these user flows:\n1. user settings to pick a default(s) or preferred os/arch/var\n2. user request some os/arch/var with a Package URL or extended docker:// syntax\n3. user be presented with message of options listed above on errors "
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "jdoylei",
+            "body": "@mtrmac, the `--top-level` option you describe above sounds really helpful.\n\nMy use case is that I am writing a process that should verify a tag and digest supplied by a developer, because the digest will be used to copy the image to a private registry, where the copied image will be retagged with the supplied original tag.  If the tag is not in fact pointing to the image referenced by the digest, my process should reject the tag and digest supplied by the developer, because continuing to use that tag internally would be inaccurate.\n\nMy approach is to try and use `skopeo inspect` with the tag, and get back the actual digest.  Manifest lists are a wrinkle, because you could pull either the manifest list digest or a specific image manifest digest and get the same image.  So what I wanted to find from `skopeo inspect` is the list of digests - both the manifest list digest and the specific image manifest digests.  Right now I'd have to do that in two steps.\n\n1. `skopeo inspect --raw` and then get the manifests[].digest if mediaType is manifest.list\n2. `skopeo inspect --format '{{.Digest}}'` - either the manifest list digest or a specific image manifest digest\n\nBeing able to just do one `skopeo inspect` command and select this information in one shot would be great.\n\nThanks!"
+        },
+        {
+            "user": "mtrmac",
+            "body": "Compare #1933 — we need to _somehow_ account for OCI artifacts. Probably the vaguely contemplated `--top-level` should start with a \"type\" field that distinguishes individual images, OCI artifacts, image indices (and multi-arch images as special kinds of image collections that have no name annotations??), or something like that.\n\nOr, maybe, have a `skopeo inspect --type …` and then `skopeo inspect --multi-arch`??"
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "pombredanne",
+            "body": "@mtrmac Thanks for reopening! Do not let the bots rule us! :P"
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "containers",
+            "repository": "image",
+            "number": 1226
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 13199
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "skopeo",
+            "number": 1617
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "skopeo",
+            "number": 1693
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "skopeo",
+            "number": 1794
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "skopeo",
+            "number": 1867
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "skopeo",
+            "number": 1914
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "skopeo",
+            "number": 1930
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "skopeo",
+            "number": 1933
+        },
+        {
+            "organization": "osbuild",
+            "repository": "osbuild",
+            "number": 1252
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "skopeo",
+            "number": 1974
+        },
+        {
+            "organization": "nlewo",
+            "repository": "nix2container",
+            "number": 77
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "skopeo",
+            "number": 2070
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "skopeo",
+            "number": 2180
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "skopeo",
+            "number": 2531
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "skopeo",
+            "number": 2545
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "buildah",
+            "number": 6096
+        },
+        {
+            "organization": "containers",
+            "repository": "image",
+            "number": 2843
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "skopeo",
+            "number": 2600
+        },
+        {
+            "organization": "konflux-ci",
+            "repository": "build-definitions",
+            "number": 2332
+        }
+    ]
+}

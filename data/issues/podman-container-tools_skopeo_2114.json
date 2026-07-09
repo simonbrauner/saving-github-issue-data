@@ -1,0 +1,111 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "skopeo",
+    "number": 2114,
+    "type": "pull_request",
+    "title": "proxy: Make `OpenImageOptional` work with `oci-archive:`",
+    "state": "closed",
+    "labels": [
+        "kind/feature",
+        "stale-pr",
+        "locked - please file new issue/PR"
+    ],
+    "user": "cgwalters",
+    "body": "By adding the standard ENOENT to our list of errors.\n\nI hit this while working on\nhttps://github.com/coreos/rpm-ostree/pull/4598\nwhich is a tool that builds base images and wants to query if the image exists beforehand.",
+    "comments": [
+        {
+            "user": "cgwalters",
+            "body": "> Maybe a different way to ask this: Would we be expected to similarly return 0 for docker://nxdomain.invalid/something?) If not, what’s the difference?\n> Right now the documentation of OpenImageOptional says “If the image does not exist, zero\nis returned.”.\n> What is the criteria for classifying errors as “image does not exist” vs. “other error opening an image”? \n\nFor registries, it's really that the server returns HTTP 404 and that's how it works now.  Giving something that doesn't expose the registry API (for example) we correctly error out:\n\n```\n$ sudo env rpm-ostree compose image --initialize-mode if-not-exists --format=registry  fedora-tier-1.yaml example.com/blah\nerror: Failed to invoke skopeo proxy method OpenImageOptional: remote error: pinging container registry example.com: StatusCode: 404, <!doctype html>\n<html>\n<head>\n    <title>Example D...\n```\n\nOther cases like failure to make a TCP connection, DNS doesn't resolve all should error out.  Only the \"HTTP server returned 404\" or semantically equivalent should return (in Rust terms) `Ok(None)`.\n\n> This is not all that precise — e.g. I think it matches if /var/tmp does not exist.\n\nYes, agree.  In this scenario, that's suboptimal but still okay.  The case I care about most are registry and `oci` (which actually has a distinct bug).\n\n\n"
+        },
+        {
+            "user": "cgwalters",
+            "body": "How about this variant instead?  (requires a patch to c/image)\n\n```\nFrom 63f4e4665b74e2d0d7b58e4fffa7fe665b85590f Mon Sep 17 00:00:00 2001\nFrom: Colin Walters <walters@verbum.org>\nDate: Fri, 15 Sep 2023 08:53:45 -0400\nSubject: [PATCH] proxy: Make `OpenImageOptional` work with `oci-archive:`\n\nBy adding the standard ENOENT to our list of errors.\n\nI hit this while working on\nhttps://github.com/coreos/rpm-ostree/pull/4598\nwhich is a tool that builds base images and wants to query\nif the image exists beforehand.\n\nSigned-off-by: Colin Walters <walters@verbum.org>\n---\n cmd/skopeo/proxy.go                                  | 12 +++++++++++-\n integration/proxy_test.go                            |  7 +++++++\n .../containers/image/v5/oci/archive/oci_src.go       |  7 ++++++-\n 3 files changed, 24 insertions(+), 2 deletions(-)\n\ndiff --git a/cmd/skopeo/proxy.go b/cmd/skopeo/proxy.go\nindex aab85365..40c8e85f 100644\n--- a/cmd/skopeo/proxy.go\n+++ b/cmd/skopeo/proxy.go\n@@ -73,6 +73,7 @@ import (\n \n \t\"github.com/containers/image/v5/image\"\n \t\"github.com/containers/image/v5/manifest\"\n+\tociarchive \"github.com/containers/image/v5/oci/archive\"\n \tocilayout \"github.com/containers/image/v5/oci/layout\"\n \t\"github.com/containers/image/v5/pkg/blobinfocache\"\n \t\"github.com/containers/image/v5/transports\"\n@@ -229,13 +230,22 @@ func isDockerManifestUnknownError(err error) bool {\n \treturn ec.ErrorCode() == dockerdistributionapi.ErrorCodeManifestUnknown\n }\n \n+func isOciImageNotFound(err error) bool {\n+\tvar lerr ocilayout.ImageNotFoundError\n+\tif errors.As(err, &lerr) {\n+\t\treturn true\n+\t}\n+\tvar aerr ociarchive.ImageNotFoundError\n+\treturn errors.As(err, &aerr)\n+}\n+\n // isNotFoundImageError heuristically attempts to determine whether an error\n // is saying the remote source couldn't find the image (as opposed to an\n // authentication error, an I/O error etc.)\n // TODO drive this into containers/image properly\n func isNotFoundImageError(err error) bool {\n \treturn isDockerManifestUnknownError(err) ||\n-\t\terrors.Is(err, ocilayout.ImageNotFoundError{})\n+\t\tisOciImageNotFound(err)\n }\n \n func (h *proxyHandler) openImageImpl(args []any, allowNotFound bool) (retReplyBuf replyBuf, retErr error) {\ndiff --git a/integration/proxy_test.go b/integration/proxy_test.go\nindex 826128da..28949eff 100644\n--- a/integration/proxy_test.go\n+++ b/integration/proxy_test.go\n@@ -354,4 +354,11 @@ func (s *proxySuite) TestProxy() {\n \t\terr = fmt.Errorf(\"Testing optional image %s: %v\", knownNotExtantImage, err)\n \t}\n \tassert.NoError(t, err)\n+\n+\tnonExistentArchive := \"oci-archive:/enoent\"\n+\terr = runTestOpenImageOptionalNotFound(p, nonExistentArchive)\n+\tif err != nil {\n+\t\terr = fmt.Errorf(\"Testing optional image %s: %v\", nonExistentArchive, err)\n+\t}\n+\tassert.NoError(t, err)\n }\ndiff --git a/vendor/github.com/containers/image/v5/oci/archive/oci_src.go b/vendor/github.com/containers/image/v5/oci/archive/oci_src.go\nindex 6c9ee334..819659e7 100644\n--- a/vendor/github.com/containers/image/v5/oci/archive/oci_src.go\n+++ b/vendor/github.com/containers/image/v5/oci/archive/oci_src.go\n@@ -5,6 +5,7 @@ import (\n \t\"errors\"\n \t\"fmt\"\n \t\"io\"\n+\t\"io/fs\"\n \n \t\"github.com/containers/image/v5/internal/imagesource\"\n \t\"github.com/containers/image/v5/internal/imagesource/impl\"\n@@ -41,7 +42,11 @@ type ociArchiveImageSource struct {\n func newImageSource(ctx context.Context, sys *types.SystemContext, ref ociArchiveReference) (private.ImageSource, error) {\n \ttempDirRef, err := createUntarTempDir(sys, ref)\n \tif err != nil {\n-\t\treturn nil, fmt.Errorf(\"creating temp directory: %w\", err)\n+\t\tif errors.Is(err, fs.ErrNotExist) {\n+\t\t\treturn nil, ImageNotFoundError{ref: ref}\n+\t\t} else {\n+\t\t\treturn nil, fmt.Errorf(\"creating temp directory: %w\", err)\n+\t\t}\n \t}\n \n \tunpackedSrc, err := tempDirRef.ociRefExtracted.NewImageSource(ctx, sys)\n-- \n2.40.1\n\n```\n\n"
+        },
+        {
+            "user": "cgwalters",
+            "body": "(not going to lie, it took me *at least* 20 minutes of confusion to realize that there's *two* copies of `ImageNotFoundError` in c/image and that the previous code was always buggy and also needed to use `errors.As`)"
+        },
+        {
+            "user": "cgwalters",
+            "body": "Tangential to this of course is my very strong opinion that downcasting and parsing errors should be an *extremely rare* event in code, and in e.g. languages like Rust the right thing to do is exactly how we [model this API in the Rust bindings](https://github.com/containers/containers-image-proxy-rs/blob/d641f5074cbb2c17a92c6a490bb22148a033ba74/src/imageproxy.rs#L404): \n\n> `fn open_image_optional(&self, imgref: &str) -> Result<Option<OpenedImage>> `\n\nThe common \"not found\" case is the `Option` - it's not an error!   More on this in e.g. https://users.rust-lang.org/t/why-i-use-anyhow-error-even-in-libraries/68592\n\n"
+        },
+        {
+            "user": "cgwalters",
+            "body": "> But rpm-ostree compose image seems to have its own format=oci option, so the transport:image value is not user-provided.\n\nYes, they are distinct options *but* they are very much intended to exactly map to the c/image transports and work the same way from a user PoV.  (I just take the liberty to add a nicer `registry` alias instead of `docker://` which just looks weird/legacy IMO)"
+        },
+        {
+            "user": "mtrmac",
+            "body": "> How about this variant instead? (requires a patch to c/image)\n\n- Still https://github.com/containers/skopeo/pull/2114#discussion_r1327313108 . Introducing a _new_ error type would maintain the existing API. (And introducing a new precisely-targeted error is, I think, the cleanest solution.)\n\n> ```patch\n> @@ -41,7 +42,11 @@ type ociArchiveImageSource struct {\n>  func newImageSource(ctx context.Context, sys *types.SystemContext, ref ociArchiveReference) (private.ImageSource, error) {\n>  \ttempDirRef, err := createUntarTempDir(sys, ref)\n>  \tif err != nil {\n> -\t\treturn nil, fmt.Errorf(\"creating temp directory: %w\", err)\n> +\t\tif errors.Is(err, fs.ErrNotExist) {\n> +\t\t\treturn nil, ImageNotFoundError{ref: ref}\n> +\t\t} else {\n> +\t\t\treturn nil, fmt.Errorf(\"creating temp directory: %w\", err)\n> +\t\t}\n> ```\n\nThis still matches the `/var/tmp` case; pushing the detection code down inside `createUntarTempDir` would allow precisely targeting the right `os.Open`."
+        },
+        {
+            "user": "cgwalters",
+            "body": ">  Introducing a new error type would maintain the existing API. (And introducing a new precisely-targeted error is, I think the cleanest solution.)\n\nHmm.  So with `oci:` transports, we can distinguish between \"oci directory exists, has `index.json` etc.\" and \"oci directory doesn't exist\".  But with `oci-archive` there's no such thing...either the file exists, or it doesn't - and ISTM that for `oci-archive`, this does semantically map to `ImageNotFoundError`.  Right?\n\n\n"
+        },
+        {
+            "user": "mtrmac",
+            "body": "> The common \"not found\" case is the `Option` - it's not an error!\n\n(Many things in Go are awkward and unsafe, with no sum types, no optionality… The complete lack of compiler support for errors, and things like `errors.Is` vs. `errors.As`, with no compile-time checking, is also just _sad_.)\n\nI think that works for a frequent expected cause of a specific operation; the c/image “transport” abstraction makes this harder (in a sense, that’s exactly what this PR is hitting — after abstracting to the `NewImageSource` interface method we can no longer discuss what exactly failed / how exactly it failed, without talking about concepts specific to a particular transport).\n\nc/image can just about manage to provide a common `types.ImageReference` / `transport.ImageName` concept, but I think providing a common “image container” that can deal with registries, c/storage, `oci-archive` (a filesystem of `dir:` subdirectories?) is just not feasible. And “image not found in a container” vs “container not found at all” is that kind of a situation.\n\nUltimately, API stability does not allow us to change `NewImageSource` return values anyway…"
+        },
+        {
+            "user": "mtrmac",
+            "body": "> Hmm. So with `oci:` transports, we can distinguish between \"oci directory exists, has `index.json` etc.\" and \"oci directory doesn't exist\". But with `oci-archive` there's no such thing...either the file exists, or it doesn't\n\nNo, `oci-archive` can also contain multiple images. So, `oci-archive:existing-path:non-matching-reference` is the current `ImageNotFoundError`, and `oci-archive:/dev/null/this/does/not/exist:whatever` is a different failure mode."
+        },
+        {
+            "user": "cgwalters",
+            "body": "> No, oci-archive can also contain multiple images. So, oci-archive:existing-path:non-matching-reference is the current ImageNotFoundError, and oci-archive:/dev/null/this/does/not/exist:whatever is a different failure mode.\n\nThanks, I didn't know that.  But...I guess then I'm arguing that at least for all use cases I can think of, I really do want to treat \"oci-archive file doesn't exist\" here the same as `ImageNotFoundError`.\n\nUnlike `oci` directories which *require* initialization, to me kind of the point of `oci-archive` is that it's just a single file that you can just...manage as a file.  Requiring users of `rpm-ostree compose image` to create an \"empty\" oci-archive file would just be weird and defeat the purpose of the ergonomics here.\n"
+        },
+        {
+            "user": "cgwalters",
+            "body": "I've updated the main PR here so far to:\n\nIn c/image:\n\n- Move the error check further down\n- Necessarily reorder the open invocation first\n\nIn skopeo:\n\n- Add a test case for the \"parent directory doesn't exist\" correctly erroring\n"
+        },
+        {
+            "user": "cgwalters",
+            "body": "Moved the c/image changes to https://github.com/containers/image/pull/2123"
+        },
+        {
+            "user": "mtrmac",
+            "body": "> Requiring users of `rpm-ostree compose image` to create an \"empty\" oci-archive file would just be weird and defeat the purpose of the ergonomics here.\n\n(The archives are not editable that way — they can either be read or written. But I do think that when reading a multi-image archive, differentiating the two failures should be possible.)"
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this PR had no activity for 30 days."
+        },
+        {
+            "user": "mtrmac",
+            "body": "@cgwalters the c/image error type PR has merged; do you want to update this?"
+        },
+        {
+            "user": "mtrmac",
+            "body": "@cgwalters ping"
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this PR had no activity for 30 days."
+        },
+        {
+            "user": "mtrmac",
+            "body": "#2613 should make `OpenImageOptional` recognize missing tags in `oci-archive:` (and, now, also for `oci:`).\n\nFor `oci-archive:`, it only recognizes `ImageNotFoundError`, not `ArchiveFileNotFoundError`. Given this stale PR, I assume it doesn’t matter either way."
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "coreos",
+            "repository": "rpm-ostree",
+            "number": 4598
+        },
+        {
+            "organization": "containers",
+            "repository": "image",
+            "number": 2123
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "skopeo",
+            "number": 2236
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "skopeo",
+            "number": 2613
+        }
+    ]
+}

@@ -1,0 +1,121 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "skopeo",
+    "number": 2601,
+    "type": "pull_request",
+    "title": "proxy: Add GetRawBlob",
+    "state": "closed",
+    "labels": [
+        "locked - please file new issue/PR"
+    ],
+    "user": "cgwalters",
+    "body": "The original model the idea here is the proxy centralizes verification of things like digest. However in practice, this causes reading to be seriously awkward; ref\nhttps://github.com/containers/containers-image-proxy-rs/issues/79\n\nAlso, I have a project to implement a registry frontend to `containers-storage:` and a core problem with `GetBlob` right now is it *requires* the blob size up front even though the underlying Go logic doesn't.\n\nMoving to a \"raw\" interface solves that.",
+    "comments": [
+        {
+            "user": "cgwalters",
+            "body": "Draft since this works well for me, but needs tests"
+        },
+        {
+            "user": "cgwalters",
+            "body": "Forgot to mention in this PR but this is a dependency of https://github.com/cgwalters/cstor-dist which you may also be interested in"
+        },
+        {
+            "user": "cgwalters",
+            "body": "> It seems to me that the Rust client side can trivially call FinishPipe at the place where it would do the digest verification, \n\nSorry the issue with more real discussion is https://github.com/containers/containers-image-proxy-rs/issues/80 which TL;DR is that it's a problem that `FinishPipe` blocks the control channel.\n\nWhich we could definitely also fix without `GetBlobRaw` indeed.\n\n> If nothing else, after removing the error reporting mechanism a consumer won’t be able to differentiate between a (retryable) network error and a digest validation error.\n\nYes it'd be really nice to handle that indeed. I guess a possible design here would be `GetBlobFramed` which returns\n```\n#[derive(Serialize)]\nenum Message {\n  Data(&[u8])\n  Error(...)\n}\n```\nor so? (Framed in something like [bincode](https://github.com/bincode-org/bincode) since json is pretty suboptimal for binary data)\n\nI guess this whole thing quickly goes back to less-ad-hoc IPC frameworks.\n\n\n\n"
+        },
+        {
+            "user": "mtrmac",
+            "body": "> [containers/containers-image-proxy-rs#80](https://github.com/containers/containers-image-proxy-rs/issues/80) which TL;DR is that it's a problem that `FinishPipe` blocks the control channel.\n\nDo I understand it correctly that there is thread A consuming the blob, and thread B calling `FinishPipe` _before_ thread A is done reading? Yes, that would stall for a potentially very long time, but, also, _if_ that is the design, why doesn’t A call `FinishPipe` itself? Having B receive the digest verification / network error and then somehow communicate it back to A looks needlessly complicated to me.\n\nAfter A finishes consuming data, `FinishPipe` should be a metadata operation. Sure, there is some context switching and it’s probably a few $something thousand instructions, but it should be trivial compared to any network or disk cost.\n\n(Even with a design where the proxy is all “owned” by a single proxy client thread, making it undesirable for thread A to make requests directly, having A communicate to the proxy client and block on a reply might not be that much worse? It does serialize everything at the proxy client, but that would be ~equivalent in effect to the serialization that happens in the proxy server anyway.)\n\n---\n\nThere is a potentially real issue here in that `FinishPipe` serializes against some other thread C’s `GetBlob` _initiating_ a download, i.e. network round-trips required to set up TLS and do a `GET` request, before the body starts arriving. That would be _some_ delay but, on the whole, I would also expect it to not be significant — this is not interactive UI with a 50 ms deadline, and the critical path will probably include this thread C with its slow `GET` as well as consuming all of that blob afterwards: before C gets to `FinishPipe`, A will have ample opportunity to perform its own `FinishPipe`, so A is not the slowest part.\n \n---\n\n> Yes it'd be really nice to handle that indeed. I guess a possible design here would be `GetBlobFramed`\n\nYes.\n\n> I guess this whole thing quickly goes back to less-ad-hoc IPC frameworks.\n\nAnd that too.\n\n"
+        },
+        {
+            "user": "cgwalters",
+            "body": "> It seems to me that the Rust client side can trivially call FinishPipe at the place where it would do the digest verification, what’s the difficulty?! Some kind of Rust-related reference counting making it hard to hold on to a proxy handle at that time?\n\nYeah I think you're right. We could probably just automatically handle this in the rust client code. So it's not a strong argument for `GetBlobRaw` in and of itself.\n\n> And if FinishPipe remained, I don’t see much of a reason to prefer the digest verification happening at one side or the other, \n\nNote for the use case of cstor-dist we're going:\n`containers-storage:` -> `cstor-dist` (registry) -> `containers-storage:|ostree|composefs-rs`\n\nAnd it'd be silly to have cstor-dist also do checksum verification because we know the client is going to do it. So probably regardless IMO some sort of `GetBlobRaw` makes sense right?\n\n> except perhaps that sha512 digests are coming, and that will be transparently handled with the Go code as is.\n\nI think any nontrivial consumer of the proxy is going to be parsing the manifest digests and doing things with them. The ostree and composefs-rs projects definitely are and so there's no magic adaptation.\n\n"
+        },
+        {
+            "user": "cgwalters",
+            "body": "Anyways though, the other option is to just cut the size requirement for `GetBlob`, that would be a pretty straightforward patch too. I may look at that."
+        },
+        {
+            "user": "mtrmac",
+            "body": "> And it'd be silly to have cstor-dist also do checksum verification because we know the client is going to do it. So probably regardless IMO some sort of `GetBlobRaw` makes sense right?\n\nYes, that’s a good enough reason.\n\n---\n\n> Anyways though, the other option is to just cut the size requirement for `GetBlob`, that would be a pretty straightforward patch too. I may look at that.\n\nYes, allowing -1 through should work fine."
+        },
+        {
+            "user": "mtrmac",
+            "body": "> > And it'd be silly to have cstor-dist also do checksum verification because we know the client is going to do it. So probably regardless IMO some sort of `GetBlobRaw` makes sense right?\n> \n> Yes, that’s a good enough reason.\n\n… to allow the client to opt out of digest verification, _somehow_. I’m not too convinced about removing the error handling entirely."
+        },
+        {
+            "user": "cgwalters",
+            "body": "> I’m not too convinced about removing the error handling entirely.\n\nBut in the raw case the error handling is literally just whether or not the proxy successfully wrote to the pipe, right? Which, most often is actually an `EPIPE` because the client closed the pipe because it found some other error, but that then boomerangs back to the client! We have some hacks here https://github.com/bootc-dev/bootc/blob/c1d67aa07c3408694b46b74deb7be10587b70fe7/ostree-ext/src/container/unencapsulate.rs#L151\n\nWhich, the only way to fix that sanely I think is to have a new API creatively called `GetBlob2`. So putting several things together:\n\n- Add GetBlob2 DIGEST [verify: bool]\n\nIt returns...umm, I am vacillating on what the format should be. I tried hard so far to only make this thing about JSON and `pipe()` but it's tricky to keep doing it. I guess one option is that it returns *two* pipe read fds, one which returns JSON only in the case of error, and the other which is the raw data stream? The other option is BSON or again going into a bigger RPC framework like capn'proto or whatever but for now I think my preference is continuing to avoid that.\n\nSo what gets sent over the error fd would be at most one of:\n\n```\nstruct Error {\n  code: String,\n  message: String\n}\n```\n\nBut we'd need to bikeshed how `code` appears, I am actually unfamiliar with the best practices here. Error mapping cross-language IPC is in my experience a hard problem. One possibility is to squash everything into one of say four cases:\n\n- `network`\n- `EPIPE`\n- `checksum`\n- `other`\n\n(And yes we should probably emit an error if we get `EPIPE`, but the client can know to safely ignore it)\n\n\n "
+        },
+        {
+            "user": "mtrmac",
+            "body": "Just a note on this part for now:\n\n> > I’m not too convinced about removing the error handling entirely.\n> \n> But in the raw case the error handling is literally just whether or not the proxy successfully wrote to the pipe, right?\n\nOn an error reading from the registry, it’s the full information the Go server side has: “connection reset / unexpected EOF / `Transfer-Encoding: Chunked` framing invalid / timed out / completely unexpected EPERM / whatever”. _Maybe_ the ~expected network errors should be handled / retried automatically. I think it would be very valuable for the 100% unexpected errors to be propagated to the Rust client and ultimately to a human. For that, we need, at the very least, to transfer an error string.\n\n`EPIPE` is an interesting case that needs special handling, sure, but I don’t think it’s the only one.\n\n---\n\n> It returns...umm, I am vacillating on what the format should be. I tried hard so far to only make this thing about JSON and `pipe()` but it's tricky to keep doing it. I guess one option is that it returns _two_ pipe read fds, one which returns JSON only in the case of error, and the other which is the raw data stream?\n\nNote to self: Return here. We’ve had `GetBlobAt` returning a separate data stream and an error stream, and it was very inconvenient to consume — but that might not be applicable here.\n\n---\n\n> ```\n> struct Error {\n>   code: String,\n>   message: String\n> }\n> ```\n> \n> But we'd need to bikeshed how `code` appears, I am actually unfamiliar with the best practices here.\n\n> Error mapping cross-language IPC is in my experience a hard problem.\n\nIt’s hard, in the corner cases, even within a single-language process :)\n\nThere’s ample space to over-engineer. I think the above is a good start, and we can always add `code`-specific fields (turning this into an ~tagged union).\n\nThe extreme is to adopt something like https://github.com/kubernetes/community/blob/master/contributors/devel/sig-architecture/api-conventions.md#typical-status-properties , where the error can have an open-ended list of _non-exclusive_ bools (“network-related”? “retryable”? “timeout”? All 3 could be true simultaneously). I think that’s overkill.\n\n---\n\nI think it would be convenient to use the same error mechanism for the current `reply`. Not blocking, but it might simplify consumers."
+        },
+        {
+            "user": "mtrmac",
+            "body": "> > It returns...umm, I am vacillating on what the format should be. I tried hard so far to only make this thing about JSON and `pipe()` but it's tricky to keep doing it. I guess one option is that it returns _two_ pipe read fds, one which returns JSON only in the case of error, and the other which is the raw data stream?\n> \n> Note to self: Return here. We’ve had `GetBlobAt` returning a separate data stream and an error stream, and it was very inconvenient to consume — but that might not be applicable here.\n\nRef. https://github.com/containers/storage/pull/2162 : If there is a `dataFD` and `errorFD`, and the producer writes an error to `errorFD` and closes both, the consumer must, after seeing EOF on `dataFD`, _still_ read `errorFD`, because the kernel does not guarantee a `poll` or similar will see the error incoming on `errorFD` before the EOF on `dataFD` (and user-space poll / event loop abstractions probably don’t guarantee ordering either).\n\nA single pipe is easier to consume and reason about."
+        },
+        {
+            "user": "mtrmac",
+            "body": "One _possible_ way to think about this is that consuming two pipes requires the caller to always read the error pipe until EOF; that’s probably not any easier than, in the current API, calling `FinishPipe` after reaching EOF on the data stream."
+        },
+        {
+            "user": "cgwalters",
+            "body": "> Ref. https://github.com/containers/storage/pull/2162 : If there is a dataFD and errorFD, and the producer writes an error to errorFD and closes both, the consumer must, after seeing EOF on dataFD, still read errorFD, because the kernel does not guarantee a poll or similar will see the error incoming on errorFD before the EOF on dataFD (and user-space poll / event loop abstractions probably don’t guarantee ordering either).\n\nRight, but that's easy? I mean at least in Rust I'd map this as two futures which both need to be joined, not a `select` as happened in that c/storage code originally. This is only a little tangential but probably interesting nonetheless; `tokio::select!` in Rust has a [giant trap](https://tomaka.medium.com/a-look-back-at-asynchronous-rust-d54d63934a1c) and always needs careful auditing and people talk about \"cancel safety\" because of this. (TL;DR Go uses stackful coroutines, Rust's futures are stackless and precisely sized, but the lack of stack means you can get burned by cancellation).\n\n> One possible way to think about this is that consuming two pipes requires the caller to always read the error pipe until EOF; that’s probably not any easier than, in the current API, calling FinishPipe after reaching EOF on the data stream.\n\nMmmmm...except the problem again with today's API is that the client *doesn't get EOF* until it calls `FinishPipe`. The rationale for that is it forces callers to invoke `FinishPipe` (to check for errors), and the workaround we did for this is basically \"read only up until the known blob size\" which is viable but definitely not ergonomic or obvious at all for callers.\n\n\n"
+        },
+        {
+            "user": "mtrmac",
+            "body": "> Mmmmm...except the problem again with today's API is that the client _doesn't get EOF_ until it calls `FinishPipe`.\n\nOops, I have _completely missed_ that when discussing this PR. That makes many of the things I suggested above, thinking that they are simple, rather less practical.\n\n> the workaround we did for this is basically \"read only up until the known blob size\" which is viable \n\n[`GetBlob` is allowed to return -1 as blob size, and that happens sometimes.]\n\n… does error reporting work _at all_ if there is a network error in the middle of a blob? The goroutine in `GetBlob` will see an error, and terminate, but the write end of the pipe will be kept open. The client will be stuck in `read` on a pipe, never see an EOF, and it will never have a reason to call `FinishPipe`.\n\nAm I missing something again? If it does fail this way, then yes, we definitely need a new `GetBlob` (and everything else that uses pipes??)."
+        },
+        {
+            "user": "cgwalters",
+            "body": "> [GetBlob is allowed to return -1 as blob size, and that happens sometimes.]\n\nThat doesn't matter though because we always know the expected size from the manifest descriptor and that's what clients should use, right?\n\n> … does error reporting work at all if there is a network error in the middle of a blob? The goroutine in GetBlob will see an error, and terminate, but the write end of the pipe will be kept open. The client will be stuck in read on a pipe, never see an EOF, and it will never have a reason to call FinishPipe.\n\nWell, the way this is working right now is that the calling process in Rust creates two futures, one doing the read/processing and one calling `FinishPipe`. So in the case of network error we'll get an error from the latter. But that brings the concurrency problem that Allison was talking about where any `FinishPipe` blocks metadata stream and so...yeah it's a huge pain in the butt to in practice use this to do concurrent fetches, even though it was designed to do so.\n\nIt'd be really quite ugly but I suspect a viable hack for the status quo would be to only queue the FinishPipe on a timeout if we stop getting data from the pipe or so (and that happens before the expected size)\n"
+        },
+        {
+            "user": "mtrmac",
+            "body": "> we always know the expected size from the manifest descriptor \n\nschema1 manifests don’t have sizes. (OTOH at least Docker has been working for years to disable schema1 manifests, e.g. `distribution/distribution` only accepts them with an opt-in.)"
+        },
+        {
+            "user": "cgwalters",
+            "body": "> schema1 manifests don’t have sizes. \n\n[We hard error on that case](https://github.com/containers/skopeo/blob/a4770636501c2dfe76a8ec503511260f79979261/cmd/skopeo/proxy.go#L441) today already.\n\nI honestly would actually like to add a `Open` method that hard requires OCI even - for the use cases I care about in bootc, there's simply no reason to continue to support v2s2.\n"
+        },
+        {
+            "user": "cgwalters",
+            "body": "OK I reworked this per discussion and also updated the example consumer in https://github.com/containers/containers-image-proxy-rs/pull/83 - just got as far as verifying the example client there works. Could still use tests here etc."
+        },
+        {
+            "user": "packit-as-a-service[bot]",
+            "body": "Tests failed. @containers/packit-build please check."
+        },
+        {
+            "user": "packit-as-a-service[bot]",
+            "body": "Ephemeral COPR build failed. @containers/packit-build please check."
+        },
+        {
+            "user": "cgwalters",
+            "body": "(It'd sure be nice if github had a \"commit as fixup\" button)"
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "bootc-dev",
+            "repository": "containers-image-proxy-rs",
+            "number": 83
+        },
+        {
+            "organization": "cgwalters",
+            "repository": "cstor-dist",
+            "number": 2
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "skopeo",
+            "number": 2605
+        },
+        {
+            "organization": "bootc-dev",
+            "repository": "bootc",
+            "number": 1407
+        }
+    ]
+}

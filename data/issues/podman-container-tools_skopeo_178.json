@@ -1,0 +1,104 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "skopeo",
+    "number": 178,
+    "type": "issue",
+    "title": "HTTP Proxy support",
+    "state": "closed",
+    "labels": [
+        "locked - please file new issue/PR"
+    ],
+    "user": "mjgkeele",
+    "body": "I've been experimenting with CentOS Atomic Host and Fedora Atomic Host recently, and when looking at system containers and installation using the atomic command, I've hit a snag. These boxes don't get web access except via a proxy, and even though I've set HTTP_PROXY and HTTPS_PROXY environment variables, I'm still not able to pull images. Looking through the python code, I noticed that atomic calls skopeo, and on testing skopeo independently, it seems skopeo is not using the http(s) proxy environment variables.\n\nThe command I'm running is:\nHTTPS_PROXY=http://wwwcache.keele.ac.uk:8080 HTTP_PROXY=http://wwwcache.keele.ac.uk:8080 skopeo --debug inspect docker://docker.io/fedora\n\nThe output I receive is:\nDEBU[0254] Ping https://registry-1.docker.io/v2/ err &url.Error{Op:\"Get\", URL:\"https://registry-1.docker.io/v2/\", Err:(_net.OpError)(0xc820278b90)} \nDEBU[0572] Ping http://registry-1.docker.io/v2/ err &url.Error{Op:\"Get\", URL:\"http://registry-1.docker.io/v2/\", Err:(_net.OpError)(0xc820278d70)} \nFATA[0572] Get http://registry-1.docker.io/v2/: dial tcp 54.175.214.89:80: getsockopt: connection timed out \n\nAdditionally, running tcpdump shows no traffic heading to the web proxy, instead direct connection attempts are made to servers hosted in AWS, which fail.\n\nShould this be working? If not, are there any plans to support operating over a web proxy?\n",
+    "comments": [
+        {
+            "user": "runcom",
+            "body": "We should support those env variables for proxies, sure.\n\nOne headache we had talking with @mtrmac is that we need to better understand who's in charge of reading those vars. Is it skopeo or atomic? One point I'm sure of is that it should not be containers/image as it should just receive those at last (@mtrmac ...)\n\n@mtrmac wdyt?\n"
+        },
+        {
+            "user": "mjgkeele",
+            "body": "@runcom Now you've pointed me in that direction, I'm thinking maybe it's because of the implementation of http.Transport that's used in docker_client.go. Go's DefaultTransport has support for those env vars baked in, this seems not to, or am I barking up the wrong tree?\n"
+        },
+        {
+            "user": "runcom",
+            "body": "> Go's DefaultTransport has support for those env vars baked in, this seems not to, or am I barking up the wrong tree?\n\nnot sure I have to take a closer look at the code in containers/image - though, in docker_client.go there's at least one code path which isn't using DefaultTransport (again, I'm not sure w/o looking at the code closer)\n\n(we could need to play with https://golang.org/pkg/net/http/#ProxyFromEnvironment probably)\n"
+        },
+        {
+            "user": "mtrmac",
+            "body": "(I agree that supporting proxies as usual is desirable.)\n\n> One headache we had talking with @mtrmac is that we need to better understand who's in charge of reading those vars. Is it skopeo or atomic? One point I'm sure of is that it should not be containers/image as it should just receive those at last (@mtrmac ...)\n\n@runcom You’ll find that in https://github.com/containers/image/pull/52 I am proposing that containers/image will read the `ATOMIC_CONF` environment variable without an explicit opt-in from skopeo :) I am not at all sure that this is the right thing to do (it is clearly a convenient default for the common uses, but it is fairly inconvenient for someone wanting to do a specific operation unaffected by the outside environment).\n\nIt would be somewhat awkward to banish all environment variable processing from containers/image and to force every caller to set up the `SystemContext` with each environment variable individually; and it would be even more awkward if `SystemContext` contained properly typed data and every caller had to parse the environment variables. Perhaps `types.SystemContext` could contain a `[]string Environment`, which would be `nil` by default, but it would be trivial to opt in to using the environment using `Environment: os.Environ()`, or perhaps with a `types.SystemContextUsingUsersOrdinarySettings()` helper [yeah, I am universally and reliably horrible at naming].\n\nAlso, it is _very_ easy to get hopelessly lost in how the various overrides in `SystemContext` do and don’t interact, combine or override each other. ISTM to me that `atomicConfPath` in https://github.com/containers/image/pull/52 is roughly the limit of still berable complexity (which would be about the same with `SystemContext.Environment` and a `getenv` helper). Or perhaps this is already too much and should be simplified…\n\nI expect that https://github.com/containers/image/pull/52 will be where the philosophy of `types.SystemContext` will need to be decided, at least unless someone implements the proxy support even sooner.\n"
+        },
+        {
+            "user": "runcom",
+            "body": "> (I agree that supporting proxies as usual is desirable.)\n> \n> One headache we had talking with @mtrmac is that we need to better understand who's in charge of reading those vars. Is it skopeo or atomic? One point I'm sure of is that it should not be containers/image as it should just receive those at last (@mtrmac ...)\n> @runcom You’ll find that in containers/image#52 I am proposing that containers/image will read the ATOMIC_CONF environment variable without an explicit opt-in from skopeo :) I am not at all sure that this is the right thing to do (it is clearly a convenient default for the common uses, but it is fairly inconvenient for someone wanting to do a specific operation unaffected by the outside environment).\n> \n> It would be somewhat awkward to banish all environment variable processing from containers/image and to force every caller to set up the SystemContext with each environment variable individually; and it would be even more awkward if SystemContext contained properly typed data and every caller had to parse the environment variables. Perhaps types.SystemContext could contain a []string Environment, which would be nil by default, but it would be trivial to opt in to using the environment using Environment: os.Environ(), or perhaps with a types.SystemContextUsingUsersOrdinarySettings() helper [yeah, I am universally and reliably horrible at naming].\n\nI'm not sure at containers/image should read `ATOMIC_CONF` env - it does seem super awkward to me. containers/image is a wrapper to docker registry API and our signing/other stuff library yes, but I would not clutter it making it read var from other tools...\n\nInstead, what you're proposing about system context & an env slice sounds better to me (even if, I wouldn't do any of this, and as ugly as it may sound leave implementors to deal with environment variables).\n\nAn example of what I'm talking about is https://github.com/opencontainers/runc/blob/master/utils_linux.go#L117 which isn't letting `libcontainer` (the library) to deal with Env variables, but it's `runc` (which uses `libcontainer`) to get the env first.\n\nSo again, I'm more lean toward having a complex system context (hopefully fully documented) rather that cluttering containers/image with envs reads.\n\n> Also, it is very easy to get hopelessly lost in how the various overrides in SystemContext do and don’t interact, combine or override each other. ISTM to me that atomicConfPath in containers/image#52 is roughly the limit of still berable complexity (which would be about the same with SystemContext.Environment and a getenv helper). Or perhaps this is already too much and should be simplified…\n> \n> I expect that containers/image#52 will be where the philosophy of types.SystemContext will need to be decided, at least unless someone implements the proxy support even sooner.\n"
+        },
+        {
+            "user": "mtrmac",
+            "body": "> even if, I wouldn't do any of this, and as ugly as it may sound leave implementors to deal with environment variables\n\nThe flip side is that if the callers needed to care about individual environment variables explicitly, we wouldn’t be able to transparently add new transports to containers/image simply by listing them in `transports.KnownTransports`.\n"
+        },
+        {
+            "user": "runcom",
+            "body": "> we wouldn’t be able to transparently add new transports to containers/image simply by listing them in transports.KnownTransports.\n\nI'm probably missing why :( could you make me an example? if the only moving part is the system context (which may have new fields that can be omitted), how couldn't we add more `transports.KnownTransports` transparently?\n"
+        },
+        {
+            "user": "mtrmac",
+            "body": "> if the only moving part is the system context (which may have new fields that can be omitted), how couldn't we add more transports.KnownTransports transparently?\n\nIf we added a new transport, or new functionality to an existing transport (like `ATOMIC_CONF` in #170 or `HTTP_PROXY` in here), and we prohibited containers/image from knowing about these environment variables and using them, then every caller would need to add explicit support for them, and adding the functionality would not be “transparent”.\n\nOTOH if containers/image just called `os.LookupEnv`, the callers would have no way to prevent that.\n\nSo, the `SystemContext.Environment` approach is a middle ground I think: `containers/image` hard-codes names and semantics of the variables without consulting the callers, and calls `os.LookupEnv` by default, but the callers can use their own environment in the context with only the values they want, or opt out entirely by setting an empty but non-`nil` `Environment`.\n"
+        },
+        {
+            "user": "runcom",
+            "body": "> So, the SystemContext.Environment approach is a middle ground I think: containers/image hard-codes names and semantics of the variables without consulting the callers, and calls os.LookupEnv by default, but the callers can use their own environment in the context with only the values they want, or opt out entirely by setting an empty but non-nil Environment.\n\nsounds good to me \n"
+        },
+        {
+            "user": "mtrmac",
+            "body": "*sigh*, note that `SystemContext.Environment` et all would not allow use to use `http.ProxyFromEnvironment` (and actually `openshift` is reading the environment directly already in a few cases, including this). Not sure what, if anything, to do about this.\n"
+        },
+        {
+            "user": "rhatdan",
+            "body": "I definitely do not think containers/image should know anything about ATOMIC (ATOMIC_CONF).  We need to keep it agnostic.\n"
+        },
+        {
+            "user": "runcom",
+            "body": "Right, we should split up what's in ATOMIC_CONF  and be able to inject the vars contained in the conf  as options to the system context \n"
+        },
+        {
+            "user": "runcom",
+            "body": "it seems the ATOMIC_CONF subset which skopeo reads is https://github.com/mtrmac/skopeo/blob/e25d93fe391364602267d451b7f931c1f4c5d0c8/integration/fixtures/atomic.conf\n\ntalked to @mtrmac briefly on IRC, it seems now we could have a struct which configures containers image with data from https://github.com/mtrmac/skopeo/blob/e25d93fe391364602267d451b7f931c1f4c5d0c8/integration/fixtures/atomic.conf (he had another idea about this conf file but let's not diverge too much for now).\nThis struct will be used then instead of reading the conf file from within containers/image itself.\n\nSomething like this probably:\n\n```\ntype SigStore map[string]string\n\ntype conf struct {\n  Registries map[string][]SigStore\n}\n```\n"
+        },
+        {
+            "user": "mtrmac",
+            "body": "> I definitely do not think containers/image should know anything about ATOMIC (ATOMIC_CONF). We need to keep it agnostic.\n\nThe thing is, merely keeping the filename out of containers/image does not make it agnostic; there would still remain most of https://github.com/mtrmac/image/blob/docker-lookaside/docker/lookaside.go with knowledge of the file format.\n\nThere are various options to deal with these kinds of issues, on a spectrum:\n- Have `containers/image` look into the environment for `ATOMIC_CONF` and hard-code `/etc/atomic.conf`, include `atomic.conf` parsing, from whatever source, in `containers/image`\n- (Have `ATOMIC_CONF` lookup, and perhaps the hard-coded `/etc/atomic.conf` path, in `skopeo` and other callers, but still parse `atomic.conf` in `containers/image`.)\n- Move locating of `atomic.conf` into `skopeo` and other callers, pass the parsed contents (as @runcom shows above) via `types.SystemContext` into `containers/image`, which doesn’t know the actual format of `atomic.conf` but still includes the semantics of the relevant subset.\n- Move all of `lookaside.go` into `skopeo` and other callers, pass a `GetSigstoreURLForReference` callback to `containers/image` through `types.SystemContext`.\n\nThe further down we move on this list, the less `containers/image` knows about the particular file format or environment, but also the less it is useful, and the more duplication and fragmentation happens between various callers of `containers/image` and various distributions of these callers.\n"
+        },
+        {
+            "user": "mtrmac",
+            "body": "Or see #183 for another way to deal with the “`atomic.conf` is not vendor-neutral” concern, so that we don’t clutter this issue so much.\n"
+        },
+        {
+            "user": "mtrmac",
+            "body": "@runcom https://trello.com/c/tIQfpA5o/352-skopeo-support-for-http-https-proxy-env-vars says that we do now support the variables. If that is accurrate, this can be closed I guess?"
+        },
+        {
+            "user": "bcg62",
+            "body": "is this actually working? debug output doesn't tell me if its attempting to use a proxy and or what proxy address.\n\nI can access internal urls (no_proxy) but am seeing 401's to external urls."
+        },
+        {
+            "user": "mtrmac",
+            "body": "@bcg62 Please file a separate issue, and _in there_, describe _precisely_ what command you are running and what is the relevant environment.  There are several uses of HTTP in `skopeo` and it may well be the case that one of the paths is broken, or never worked.\n\nFWIW a quick `http_proxy=http://thisdoesnotexist ./skopeo --override-os linux inspect docker://alpine` at least demonstrates that the variable is not ignored entirely."
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "containers",
+            "repository": "image",
+            "number": 52
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "skopeo",
+            "number": 588
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "skopeo",
+            "number": 1433
+        }
+    ]
+}

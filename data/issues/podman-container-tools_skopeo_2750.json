@@ -1,0 +1,86 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "skopeo",
+    "number": 2750,
+    "type": "issue",
+    "title": "`containers-storage:` transport doesn't support `sha256:` prefix",
+    "state": "closed",
+    "labels": [
+        "stale-issue",
+        "locked - please file new issue/PR"
+    ],
+    "user": "allisonkarlitskaya",
+    "body": "Most interactions with `podman` (and friends) can refer to a container by an identifier like `sha256:417a368e464b22dd60e872395529385d04bfa05b0f8200c7673ff9f98cddd7ee`:\n - that's the default output format when you use `podman build --iidfile=`\n - you can `podman run` the identifier directly\n - you can use `FROM sha256:417a368e464b22dd60e872395529385d04bfa05b0f8200c7673ff9f98cddd7ee` in a `Containerfile`\n - `buildah` also accepts this format for commands on its cli\n\nUnfortunately this doesn't work with skopeo's `containers-storage:` transport: you need to strip the `sha256:` first.  This is also a problem when using [containers/containers-image-proxy-rs](https://github.com/containers/containers-image-proxy-rs).\n\nSo simple ask: make it possible to do `skopeo copy` or an `OpenImage` on the proxy via a name starting with `containers-storage:sha256:`.",
+    "comments": [
+        {
+            "user": "mtrmac",
+            "body": "Thanks for reaching out.\n\nI don’t think we want to commit, _at this point_, to IDs being `sha256`, or digest-shaped at all. And if that were to happen, we’d want an unambiguous syntax. More in https://github.com/containers/skopeo/pull/2751#pullrequestreview-3478268225 ."
+        },
+        {
+            "user": "allisonkarlitskaya",
+            "body": "So for me the issue is that if I do something like:\n\n```sh\npodman build --iidfile=image-id .\nskopeo copy container-storage:\"$(cat image-id)\" oci:dir\n```\n\nthen I specifically need to make sure to strip the `sha256:` prefix off that podman is returning to me as part of its image ID.  Right now I'm doing that by saying something like\n\n```sh\nID=\"$(cat tmp/base.iid)\"\nskopeo copy \"containers-storage:${ID#sha256:}\" oci:dir\n```\n\nso I specifically need to know about the `sha256:` to strip it.  That's my issue: I'm also trying to avoid hardcoding knowledge of sha256, but this is part of the ID that podman hands me and it's part of the filename that ends up in the output `blobs/` directory (albeit with `:` replaced with a `/`).\n\nAnd this ID (with `sha256:` at the start) works with every other container tool in the podman/buildah/etc ecosystem that I've tried.  skopeo is the odd one out.  So it's not like we'd be adding some new made-up format here..."
+        },
+        {
+            "user": "mtrmac",
+            "body": "I think that’s sort of a peculiarity of `podman build`. Compare `podman pull`, which outputs IDs without `sha256`. (OTOH, the motivation seems to be https://github.com/containers/podman/issues/9260 .)\n\n(Cc: @lsm5) `podman build` is doing https://github.com/containers/podman/blob/7cd9b81b43947828f5bbeb0728a11d0a1a01fffc/cmd/podman/images/build.go#L125 , at the top CLI level, adding a hard-coded string on top of the “image ID” abstraction. Something will need to change about that for the sha512 effort: if we decided to add algorithm names to the image ID values, `podman build`, as is, would print something like `sha256:sha512…` or `sha256:sha256…`.\n\nNot that it makes the job of _consumers_ any easier… should they hard-code `sha256:` stripping now? If redefined image IDs to truly, internally, start with an algorithm specifier similar to the `podman build --iidfile` output, stripping would break if we did add a `sha256:` prefix to IDs.\n\nI think a cleaner design would be to add a `podman build --raw-iidfile` option where that CLI stays out of the algorithm inclusion / syntax business.\n\n---\n\n> and it's part of the filename that ends up in the output blobs/ directory (albeit with : replaced with a /).\n\n#2751 has a fair bit of discussion about how we don’t want to make a _forward-looking_ commitment that to the semantics that image IDs == config digests, at least before we commit to a design for how sha512 is going to work in c/storage. Are there other missing features?\n\nIf that refers to an `oci:` format structure, as a guess now I’d recommend naming that object in the OCI store, and looking it up in `index.json`, instead of the shortcut of directly computing “original image ID → blob path”, but that might be not applicable to the use case or incorrect."
+        },
+        {
+            "user": "mtrmac",
+            "body": "> Are there other missing features?\n\nI mean, do we, maybe, need to add something to `podman image inspect` to expose the actual config digest for users who know an image ID? (Right now I’m not at all sure that’s necessary, but just as an example of a thing that we might need to add if we change the image ID semantics.)"
+        },
+        {
+            "user": "lsm5",
+            "body": "> I think a cleaner design would be to add a `podman build --raw-iidfile` option where that CLI stays out of the algorithm inclusion / syntax business.\n\n@mtrmac are we good to include that change right away? Something for podman v5.8 itself, or do you see that as a podman 6 change? "
+        },
+        {
+            "user": "mtrmac",
+            "body": "I think that can be added any time."
+        },
+        {
+            "user": "mtrmac",
+            "body": "> ```\n> ID=\"$(cat tmp/base.iid)\"\n> skopeo copy \"containers-storage:${ID#sha256:}\" oci:dir\n> ```\n\nFWIW I’d recommend `container-storage:@${ID…}`, to explicitly disambiguate from the repo:tag syntax. (That wouldn’t help with the `sha256:` prefix acceptance, though.)"
+        },
+        {
+            "user": "allisonkarlitskaya",
+            "body": "So my usecase here is storing OCI configs and layers in content-addressed storage for composefs.  I need a unique content identifier and prefixing the hash seemed pretty natural to me — it's also what we do for fs-verity hashes (depending on if they're sha256 or sha512).\n\nOf course between sha256 and sha512 there's the very obvious length difference.\n\nBut what if we discover tomorrow that sha256 (or the entire sha2 family) has a fatal flaw in it that necessitates us replacing it with some other family like blake3 or so, and we decide to go with a 256 bit hash again.  How would I differentiate those?  I'd definitely want a way to specify that this particular 256bit value refers to a blake3 hash, not a broken sha-family hash... because if the problem is that sha256 is suddenly insecure against preimage, then it doesn't help me at all if I checksum my containers with blake3 if my users can be tricked with a sha256-hashed container that comes to the same set of bits...\n\nThe thing that's really nice about the `sha256:xxx` format is that this is the thing that's found in the manifest, as per the OCI image/distribution spec to refer to the config.  It's also used int he config to refer to the layers (as \"diffid\")..."
+        },
+        {
+            "user": "mtrmac",
+            "body": "I agree that in the redesign to add algorithm agility, there should be explicit algorithm identifiers, and not guesses based on lengths. But that’s for the future designs to define.\n\n> The thing that's really nice about the sha256:xxx format is that this is the thing that's found in the manifest, as per the OCI image/distribution spec to refer to the config. It's also used int he config to refer to the layers (as \"diffid\")...\n\nKind of? It might be worth thinking _very precisely_ about the relationship of manifests and configs, and what happens if manifest points at layers that don’t match the layers in the config’s RootFS.DiffIDs; and, in the future, what happens if “the same” config is referenced from two different manifests using different digest algorithms, and what happens in images where (manifest digest, config digest in manifest, layer digest in manifest, layer DiffID in configs) are inconsistently using various <s>manifest</s> digest algorithms.\n\nRegistries, and “generic” image/artifact copy implementations, have no reason to read or validate RootFS.DiffID. I’d generally assume RootFS.DiffIDs can point to data not contained in the manifest unless there is known code to specifically enforce validity of those links.\n\nTraditionally, _pulled_ images are deduplicated by config digest (making image ID = config digest). But Podman, until ~last year, did not enforce that RootFS.DiffID matches the pulled layers (but it _would_ eventually notice a conflict and refuse to pull conflicting images). And containerd is, as far as I understand it, now deduplicating by manifest, not by config digest.\n\nIn the future, I can ~easily imagine someone deciding to take a sha256-linked image, and re-publishing it using a manifest that contains sha512 digests of the config+layers, _withing_ rebuilding the config to change RootFS.DiffIDs to sha512, _intentionally_, wanting the sha256-manifest and the sha512-manifest versions to be deduplicated after pulling. And, well, should we deduplicate them, especially in configurations where the user wants a sha512 level of collision resistance on pulls / image deduplication / consumption.\n\n_I don’t know the answers yet_; but I think it would be a safer design not to discard the manifest entirely: when copying to `oci:`, invent some unique `org.opencontainers.image.ref.name` for the copied image’s entry in `index.json`, and do a full lookup from that unique name through fully parsing the manifest to config+layers.\n\nBut then again, ~avoiding the manifest data structure entirely, and explicitly consuming only the config + RootFS.DiffIDs would be a way to get the risk of “layer list in manifest vs. layer list in config” inconsistencies out of the picture.\n\nAnyway, TL;DR: At this point I don’t want to make any promises that the “image ID in c/storage can be used to find the config anywhere outside of c/storage” property will continue to hold for non-entirely-sha256 systems."
+        },
+        {
+            "user": "allisonkarlitskaya",
+            "body": "> Kind of? It might be worth thinking very precisely about the relationship of manifests and configs, and what happens if manifest points at layers that don’t match the layers in the config’s RootFS.DiffIDs; and, in the future, what happens if “the same” config is referenced from two different manifests using different digest algorithms, and what happens in images where (manifest digest, config digest in manifest, layer digest in manifest, layer DiffID in configs) are inconsistently using various manifest digest algorithms.\n\nSo for me, I've always considered manifests to be a bit of an artifact of the distribution mechanics... ie: the config *is* the container.  As per spec, if a manifest refers to a config which doesn't have the same layers *in the same order* as the result of decompressing the file described by the descriptors in the manifest, the manifest is by definition faulty.  That's a fairly well-defined mechanic, and a good implementation will absolutely be verifying the sha256 of the uncompressed layer tar as per the diffid in the config (or whatever digest is used in the future).\n\nHere's the spec reference on that \"same layers in the same order claim\":\n\n> When the config.mediaType is set to application/vnd.oci.image.config.v1+json, the following additional restrictions apply:\n>\n>    The array MUST have the base layer at index 0.\n>    Subsequent layers MUST then follow in stack order (i.e. from layers[0] to layers[len(layers)-1]).\n\n-- https://github.com/opencontainers/image-spec/blob/main/manifest.md\n\nThat said, there is absolutely nothing to indicate that the digest algorithms used to specify layer blobs in the descriptors in the manifests need to be the same as the digest algorithm used to specify diff IDs and I imagine that in the future if/when new algorithms get added, such a restriction would not necessarily be sensible...\n\nThe point you raise about deduplication with being able to notice that we already have the same layer is an interesting one... even if we didn't know it by that digest the first time we saw it.  That obviously involves extra work on the client side to build that table, though...\n\nI think, for me, in reading the specs again, I've managed to convince myself that `sha256:xyz` is the way to go for my purposes, so I'm gonna stick with it.  It's what's listed in descriptors and in diffids and I can't imagine a future sha512 (or whatever) won't be implemented by simply changing out the `sha256:` part from the front for whatever the next algorithm is.  Of course, that doesn't mean that I can expect to use that \"name\" with `skopeo` or `containers-image-proxy-rs`...\n\nIt would be nice if there was some API that let me fetch objects by that \"name\", but to be completely honest, this is a pretty theoretical/academic concern at this point.  We're current in a world where sha256 is the only algorithm, so if I see a string with `containers-storage:sha256:` at the front, and 64 hex characters following it, I can be pretty confident that just getting rid of the `sha256:` part will do exactly what I want...\n\nThanks!"
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "mtrmac",
+            "body": "Per other conversations, I don’t think we want to add any more support for algorithm identifiers where that is ambiguous with the repo:tag syntax.\n\nFor the originally motivating use case, https://github.com/containers/buildah/pull/6521 will eventually allow users of buildah to drop the code that needs to manually strip `sha256:` from the returned ID."
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "skopeo",
+            "number": 2751
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "buildah",
+            "number": 6521
+        },
+        {
+            "organization": "composefs",
+            "repository": "composefs-rs",
+            "number": 185
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "container-libs",
+            "number": 519
+        }
+    ]
+}

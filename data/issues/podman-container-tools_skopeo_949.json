@@ -1,0 +1,32 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "skopeo",
+    "number": 949,
+    "type": "issue",
+    "title": "inspect: different digests for the same docker and docker-archive image",
+    "state": "closed",
+    "labels": [
+        "locked - please file new issue/PR"
+    ],
+    "user": "misuzu",
+    "body": "Take a look at `Digest` and `Layers` fields: they are different for the same image.\nIs this normal behavior? I would like to check `Digest` fields to ensure that image on registry is up to date to avoid pushing when not needed.\n```bash\n$ skopeo copy --insecure-policy docker://alpine:latest docker-archive:alpine.tar\nGetting image source signatures\nCopying blob df20fa9351a1 done\nCopying config a24bb40132 done\nWriting manifest to image destination\nStoring signatures\n$ skopeo inspect docker-archive:alpine.tar\n{\n    \"Digest\": \"sha256:0fe895ba713b184489c17550d67464dd67fade3f92f3f0c1904dc8df6750d609\",\n    \"RepoTags\": [],\n    \"Created\": \"2020-05-29T21:19:46.363518345Z\",\n    \"DockerVersion\": \"18.09.7\",\n    \"Labels\": null,\n    \"Architecture\": \"amd64\",\n    \"Os\": \"linux\",\n    \"Layers\": [\n        \"sha256:50644c29ef5a27c9a40c393a73ece2479de78325cae7d762ef3cdc19bf42dd0a\"\n    ],\n    \"Env\": [\n        \"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin\"\n    ]\n}\n$ skopeo inspect docker://alpine:latest\n{\n    \"Name\": \"docker.io/library/alpine\",\n    \"Digest\": \"sha256:185518070891758909c9f839cf4ca393ee977ac378609f700f60a771a2dfe321\",\n    \"RepoTags\": [\n        \"2.6\",\n        \"2.7\",\n        \"20190228\",\n        \"20190408\",\n        \"20190508\",\n        \"20190707\",\n        \"20190809\",\n        \"20190925\",\n        \"20191114\",\n        \"20191219\",\n        \"20200122\",\n        \"20200319\",\n        \"20200428\",\n        \"3.1\",\n        \"3.10.0\",\n        \"3.10.1\",\n        \"3.10.2\",\n        \"3.10.3\",\n        \"3.10.4\",\n        \"3.10.5\",\n        \"3.10\",\n        \"3.11.0\",\n        \"3.11.2\",\n        \"3.11.3\",\n        \"3.11.5\",\n        \"3.11.6\",\n        \"3.11\",\n        \"3.12.0\",\n        \"3.12\",\n        \"3.2\",\n        \"3.3\",\n        \"3.4\",\n        \"3.5\",\n        \"3.6.5\",\n        \"3.6\",\n        \"3.7.3\",\n        \"3.7\",\n        \"3.8.4\",\n        \"3.8.5\",\n        \"3.8\",\n        \"3.9.2\",\n        \"3.9.3\",\n        \"3.9.4\",\n        \"3.9.5\",\n        \"3.9.6\",\n        \"3.9\",\n        \"3\",\n        \"edge\",\n        \"latest\"\n    ],\n    \"Created\": \"2020-05-29T21:19:46.363518345Z\",\n    \"DockerVersion\": \"18.09.7\",\n    \"Labels\": null,\n    \"Architecture\": \"amd64\",\n    \"Os\": \"linux\",\n    \"Layers\": [\n        \"sha256:df20fa9351a15782c64e6dddb2d4a6f50bf6d3688060a34c4014b0d9a752eb4c\"\n    ],\n    \"Env\": [\n        \"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin\"\n    ]\n}\n```",
+    "comments": [
+        {
+            "user": "misuzu",
+            "body": "With `--raw` i get what i need. Weird.\nThis code is working as expected:\n```bash\npath_digest=$(skopeo inspect docker-archive:$path --raw | jq -rM '.config.digest')\nremote_digest=$(skopeo inspect docker://$remote --raw 2> /dev/null | jq -rM '.config.digest')\n\nif [ \"$path_digest\" == \"$remote_digest\" ]; then\n  echo \"Up-to-date $remote\"\nelse\n  echo \"Pushing $remote\"\n  skopeo copy -q --insecure-policy docker-archive:$path docker://$remote\n  echo \"Pushing $remote success\"\nfi\n```\nIs there a reason `skopeo` does not have this feature? This would speed up things significantly. "
+        },
+        {
+            "user": "mtrmac",
+            "body": "> Take a look at `Digest` and `Layers` fields: they are different for the same image.\n> Is this normal behavior?\n\nYes. The manifest digest and layer blob digests are artifacts of the _representation_ of the image, and `docker://` and `docker-archive:` use different representations. (In this particular case, layers in `docker://` are typically compressed and layers in `docker-archive:` are uncompressed; and the `docker-archive:` format does not even _have_ a manifest, so the value reported by `skopeo inspect` as a manifest digest is an entirely artificial outcome of how `docker-archive:` is implemented).\n\n> I would like to check `Digest` fields to ensure that image on registry is up to date to avoid pushing when not needed.\n\nMy primary recommendation would be not to use `docker-archive:`; it is quite slow both to create and access. Ideally, just use a docker/distribution registry server.\n\nThat said, I would expect a repeated `skopeo copy docker-archive:… docker:…` to be quite fast, basically a metadata check (+ a cheap upload of config+manifest), as long as the blob info cache is persisted between the two invocations. So doing a manual check should not be necessary unless you really need to know whether the image has already been uploaded.\n\n\n> With `--raw` i get what i need. Weird.\n\nIt’s not really `--raw`, it’s that you are now comparing the config digest instead of the manifest digest. Sure, that will work, except that schema1 images don’t _have_ a config digest.\n\n> Is there a reason `skopeo` does not have this feature?\n\nI guess you could use `skopeo inspect --config --raw …` to read the configs, and compare them. But…\n\n> This would speed up things significantly.\n\n… I’d recommend to (not use `docker-archive:` at all, if you can help it, and) just use `skopeo copy` and let it detect pre-existing blobs."
+        },
+        {
+            "user": "misuzu",
+            "body": "> My primary recommendation would be not to use `docker-archive:`; it is quite slow both to create and access. Ideally, just use a docker/distribution registry server.\n\nI'm using [`nix`](https://grahamc.com/blog/nix-and-layered-docker-images) to build `tar` images so docker is not involved at all and `docker load` + `docker push` is much slower than `skopeo copy`. Doing `skopeo inspect` on local and remote image is faster than just `skopeo copy` when image is already up-to-date, but if it isn't - extra unpack is required (`inspect` and then `copy`) which is not that great.\n\nMy issue is solved via `--raw` command argument so i'm closing this."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@misuzu if you wanted to write a quick blog about using Skopeo over using Docker, that would be appreciated..."
+        }
+    ],
+    "cross_references": []
+}

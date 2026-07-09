@@ -1,0 +1,78 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "skopeo",
+    "number": 636,
+    "type": "issue",
+    "title": "Error when using fully-qualified hostname for https_proxy",
+    "state": "closed",
+    "labels": [
+        "locked - please file new issue/PR"
+    ],
+    "user": "ananace",
+    "body": "As tested here in a container running in our Kubernetes cluster that lacks direct internet access;\n\n```\n/ # /skopeo --version\nskopeo version 0.1.36-dev commit: d93a581fb833932252b3068c3e2e7ea90ef12f20\n/ # https_proxy=http://squid-proxy.kube-system.svc.cluster.local.:3128/ /skopeo inspect docker://centos:latest\nFATA[0000] pinging docker registry returned: Get https://registry-1.docker.io/v2/: proxyconnect tcp: dial tcp: lookup squid-proxy.kube-system.svc.cluster.local.: device or resource busy \n/ # https_proxy=http://squid-proxy.kube-system.svc:3128/ /skopeo inspect docker://centos:latest\n{\n    \"Name\": \"docker.io/library/centos\",\n    ...\n}\n/ # busybox nslookup squid-proxy.kube-system.svc\nName:      squid-proxy.kube-system.svc\nAddress 1: 10.64.174.114 squid-proxy.kube-system.svc.cluster.local\n/ # busybox nslookup squid-proxy.kube-system.svc.cluster.local.\nName:      squid-proxy.kube-system.svc.cluster.local.\nAddress 1: 10.64.174.114 squid-proxy.kube-system.svc.cluster.local\n```",
+    "comments": [
+        {
+            "user": "mtrmac",
+            "body": "Thanks for your report. FWIW, the code is using Go’s ordinary `net/http.ProxyFromEnvironment`, so I would expect the code to behave just like any other Go HTTP client."
+        },
+        {
+            "user": "rhatdan",
+            "body": "Does this mean golang has a bug or that @ananace is mistaken in his assumptions."
+        },
+        {
+            "user": "mtrmac",
+            "body": "No idea."
+        },
+        {
+            "user": "ananace",
+            "body": "It's probably worth mentioning that libcurl handles fully qualified proxy hostnames perfectly fine, and so we've been favouring fully qualified names for our proxy variables, due to some other DNS specificities in our environment.\nI am unsure if we're using any other go software that requires direct internet connectivity, but if you have a good suggestion of something to try, I'm more than happy to verify if it happens to other applications as well."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@vbatts Any ideas?"
+        },
+        {
+            "user": "mtrmac",
+            "body": "@ananace I would expect skopeo and the following test program to behave the same:\n```go\npackage main\n\nimport (\n\t\"fmt\"\n\t\"net/http\"\n)\n\nfunc main() {\n\t_, err := http.Get(\"https://www.google.com/\")\n\tif err != nil {\n\t\tfmt.Printf(\"Failed: %s\\n\", err)\n\t} else {\n\t\tfmt.Println(\"Succeeded\")\n\t}\n}\n```\n\n(Run using `go run nameOfFileWithThoseContents`)."
+        },
+        {
+            "user": "ananace",
+            "body": "@mtrmac\n\n```\n[root@teststuff-6f7fc8bc46-lctcb tmp]# go version\ngo version go1.10.3 linux/amd64\n[root@teststuff-6f7fc8bc46-lctcb tmp]# go run test.go \nFailed: Get https://www.google.com/: dial tcp 172.217.22.164:443: i/o timeout\n[root@teststuff-6f7fc8bc46-lctcb tmp]# https_proxy=http://squid-proxy.kube-system.svc:3128/ go run test.go \nSucceeded\n[root@teststuff-6f7fc8bc46-lctcb tmp]# https_proxy=http://squid-proxy.kube-system.svc.cluster.local:3128/ go run test.go \nSucceeded\n[root@teststuff-6f7fc8bc46-lctcb tmp]# https_proxy=http://squid-proxy.kube-system.svc.cluster.local.:3128/ go run test.go \nSucceeded\n```\n\nI'm going to check over the container build I've got of skopeo, in case it happens to be using an older version of go\n\n**Edit**: Go 1.10.4 in there, so it really shouldn't differ much, but I'll do some more local testing once I have the time tomorrow"
+        },
+        {
+            "user": "ananace",
+            "body": "Well, I just built up a new Skopeo instance in the build container, and also built the test binary beside it.\nApparently the current master segfaults badly when given a fully-qualified proxy url.\n[output.txt](https://github.com/containers/skopeo/files/3120653/output.txt)\n\n"
+        },
+        {
+            "user": "mtrmac",
+            "body": "Hum. Just guessing, is it possible that this is a statically-linked build, and the build container and the environment in which you are running the `skopeo` binary use different glibc versions, or differently-compiled glibc (e.g. different distributions)?\n\nIn general I would recommend building skopeo using `make binary-local`, and using the resulting binary in a binary-compatible environment."
+        },
+        {
+            "user": "ananace",
+            "body": "With the output log, it's running Skopeo just after building it, in the same container.\nI'm going to have a check on the older commit that didn't segfault, maybe it'll have a different result. Though clearly Skopeo is doing *something* different, considering the minimal example works as intended.\n\nNot sure if I'll have an update for you until after the weekend though"
+        },
+        {
+            "user": "vbatts",
+            "body": "okay, let's see here.\nI just stood up a squid container on one host, and tried `http_proxy=http://<redacted>:3128/ skopeo inspect docker://centos` from another host, it works fine (with and without the http_proxy= env).\n```shell\n~$ skopeo --version\nskopeo version 0.1.35\n```\nNow let me try from master..."
+        },
+        {
+            "user": "vbatts",
+            "body": "now with master:\n```shell\n~$ http_proxy=http://<redacted>:3128/ skopeo inspect docker://centos\n{   \n    \"Name\": \"docker.io/library/centos\",\n    \"Digest\": \"sha256:8d487d68857f5bc9595793279b33d082b03713341ddec91054382641d14db861\",\n    \"RepoTags\": [\n        \"5.11\",\n        \"5\",\n        \"6.10\",\n        \"6.6\",\n        \"6.7\",\n        \"6.8\",\n        \"6.9\",\n        \"6\",\n        \"7.0.1406\",\n        \"7.1.1503\",\n        \"7.2.1511\",\n        \"7.3.1611\",\n        \"7.4.1708\",\n        \"7.5.1804\",\n        \"7.6.1810\",\n        \"7\",\n        \"centos5.11\",\n        \"centos5\",\n        \"centos6.10\",\n        \"centos6.6\",\n        \"centos6.7\",\n        \"centos6.8\",\n        \"centos6.9\",\n        \"centos6\",\n        \"centos7.0.1406\",\n        \"centos7.1.1503\",\n        \"centos7.2.1511\",\n        \"centos7.3.1611\",\n        \"centos7.4.1708\",\n        \"centos7.5.1804\",\n        \"centos7.6.1810\",\n        \"centos7\",\n        \"latest\"\n    ],\n    \"Created\": \"2019-03-14T21:19:53.361167852Z\",\n    \"DockerVersion\": \"18.06.1-ce\",\n    \"Labels\": {\n        \"org.label-schema.build-date\": \"20190305\",\n        \"org.label-schema.license\": \"GPLv2\",\n        \"org.label-schema.name\": \"CentOS Base Image\",\n        \"org.label-schema.schema-version\": \"1.0\",\n        \"org.label-schema.vendor\": \"CentOS\"\n    },\n    \"Architecture\": \"amd64\",\n    \"Os\": \"linux\",\n    \"Layers\": [\n        \"sha256:8ba884070f611d31cb2c42eddb691319dc9facf5e0ec67672fcfa135181ab3df\"\n    ]\n}\n~$ skopeo --version\nskopeo version 0.1.36-dev commit: 0a2a62ac202f115cf29c71ddb60c1e12767b971d\n~$ go version\ngo version go1.12 linux/amd64\n~$ which go\n~/go1.12/bin/go\n```\n(looks like i could update my compiler, but still)\n\nthe logs from the squid proxy show it pass through:\n```shell\n\n\n1556288413.190    128 10.13.137.163 TCP_TUNNEL/200 5849 CONNECT registry-1.docker.io:443 - HIER_DIRECT/54.88.231.116 -\n1556288413.285     93 10.13.137.163 TCP_TUNNEL/200 9808 CONNECT auth.docker.io:443 - HIER_DIRECT/54.88.231.116 -\n1556288413.415    127 10.13.137.163 TCP_TUNNEL/200 7586 CONNECT registry-1.docker.io:443 - HIER_DIRECT/54.88.231.116 -\n1556288413.549    132 10.13.137.163 TCP_TUNNEL/200 6388 CONNECT registry-1.docker.io:443 - HIER_DIRECT/54.88.231.116 -\n1556288413.685    133 10.13.137.163 TCP_TUNNEL/200 6130 CONNECT registry-1.docker.io:443 - HIER_DIRECT/54.88.231.116 -\n1556288413.856    168 10.13.137.163 TCP_TUNNEL/200 6998 CONNECT production.cloudflare.docker.com:443 - HIER_DIRECT/104.18.121.25 -\n1556288413.950     91 10.13.137.163 TCP_TUNNEL/200 5849 CONNECT registry-1.docker.io:443 - HIER_DIRECT/54.88.231.116 -\n1556288414.058    107 10.13.137.163 TCP_TUNNEL/200 9808 CONNECT auth.docker.io:443 - HIER_DIRECT/54.88.231.116 -\n1556288414.175    114 10.13.137.163 TCP_TUNNEL/200 6055 CONNECT registry-1.docker.io:443 - HIER_DIRECT/54.88.231.116 -\n```"
+        },
+        {
+            "user": "mtrmac",
+            "body": "@ananace does the problem still manifest?"
+        },
+        {
+            "user": "ananace",
+            "body": "I am unable to replicate the problem any more on our setup.\n\n```shellsession\n# https_proxy=http://squid-proxy.kube-system.svc.cluster.local.:3128/ /skopeo inspect docker://centos\n{\n    \"Name\": \"docker.io/library/centos\",\n    \"Digest\": \"sha256:4062bbdd1bb0801b0aa38e0f83dece70fb7a5e9bce223423a68de2d8b784b43b\",\n    \"RepoTags\": [\n        \"5.11\",\n        \"5\",\n        \"6.10\",\n        \"6.6\",\n        \"6.7\",\n        \"6.8\",\n        \"6.9\",\n        \"6\",\n        \"7.0.1406\",\n        \"7.1.1503\",\n        \"7.2.1511\",\n        \"7.3.1611\",\n        \"7.4.1708\",\n        \"7.5.1804\",\n        \"7.6.1810\",\n        \"7.7.1908\",\n        \"7.8.2003\",\n        \"7\",\n        \"8.1.1911\",\n        \"8.2.2004\",\n        \"8\",\n        \"centos5.11\",\n        \"centos5\",\n        \"centos6.10\",\n        \"centos6.6\",\n        \"centos6.7\",\n        \"centos6.8\",\n        \"centos6.9\",\n        \"centos6\",\n        \"centos7.0.1406\",\n        \"centos7.1.1503\",\n        \"centos7.2.1511\",\n        \"centos7.3.1611\",\n        \"centos7.4.1708\",\n        \"centos7.5.1804\",\n        \"centos7.6.1810\",\n        \"centos7.7.1908\",\n        \"centos7.8.2003\",\n        \"centos7\",\n        \"centos8.1.1911\",\n        \"centos8.2.2004\",\n        \"centos8\",\n        \"latest\"\n    ],\n    \"Created\": \"2020-06-17T00:22:25.47282687Z\",\n    \"DockerVersion\": \"18.09.7\",\n    \"Labels\": {\n        \"org.label-schema.build-date\": \"20200611\",\n        \"org.label-schema.license\": \"GPLv2\",\n        \"org.label-schema.name\": \"CentOS Base Image\",\n        \"org.label-schema.schema-version\": \"1.0\",\n        \"org.label-schema.vendor\": \"CentOS\"\n    },\n    \"Architecture\": \"amd64\",\n    \"Os\": \"linux\",\n    \"Layers\": [\n        \"sha256:6910e5a164f725142d77994b247ba20040477fbab49a721bdbe8d61cf855ac23\"\n    ],\n    \"Env\": [\n        \"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin\"\n    ]\n}\n# /skopeo -v\nskopeo version 0.2.0\n```"
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "camptocamp",
+            "repository": "terraboard",
+            "number": 118
+        }
+    ]
+}

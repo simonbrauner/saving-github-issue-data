@@ -1,0 +1,83 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "skopeo",
+    "number": 1700,
+    "type": "issue",
+    "title": "clean up static binary handling",
+    "state": "closed",
+    "labels": [
+        "stale-issue",
+        "locked - please file new issue/PR"
+    ],
+    "user": "rittneje",
+    "body": "While I understand it is not officially supported, the documentation and Makefile implementation surrounding the generation of a static binary is rather confusing right now.\n\ninstall.md says to do this:\n```\ndocker run -v $PWD:/src -w /src -e CGO_ENABLED=0 golang \\\nmake BUILDTAGS=containers_image_openpgp GO_DYN_FLAGS=\n```\n\nHowever, the Makefile makes reference to some non-standard `DISABLE_CGO` environment variable, as well as some additional build tags not mentioned in install.md.\nhttps://github.com/containers/skopeo/blob/1add7a81d769e734d7419e7e9f3f38d1ac746987/Makefile#L112-L114\n\nInstead, it would be a lot more helpful if the files in question used a `//go:build !cgo` (or `// +build !cgo`) build constraint rather than forcing people to also pass these additional build tags. At the very least, the Makefile should reference `go env CGO_ENABLED` instead of defining its own similarly named variable.\n\nSimilarly, it is unclear if clearing `GO_DYN_FLAGS` is really necessary, but it is certainly suspicious given that the Makefile itself sets it. As best I can tell this is a non-standard variable that skopeo made up, so probably the Makefile should just be fixed to calculate it correctly. (But first we should confirm whether `-buildmode=pie` is actually a problem with `CGO_ENABLED=0` or not.)\nhttps://github.com/containers/skopeo/blob/1add7a81d769e734d7419e7e9f3f38d1ac746987/Makefile#L55-L59",
+    "comments": [
+        {
+            "user": "rhatdan",
+            "body": "Please open PRs to make this clearer."
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "rittneje",
+            "body": "not stale"
+        },
+        {
+            "user": "rhatdan",
+            "body": "@rittneje are you going to open a PR to make it clearer?"
+        },
+        {
+            "user": "rittneje",
+            "body": "When I have time."
+        },
+        {
+            "user": "mtrmac",
+            "body": "The static build, and documentation, could definitely use more love.\n\n> Instead, it would be a lot more helpful if the files in question used a `//go:build !cgo` (or `// +build !cgo`) build constraint rather than forcing people to also pass these additional build tags.\n\nFWIW, at least for the `containers_image_openpgp`, that’s not desirable. That’s a notable reduction in both features (no way to sign images), and security (no key material isolation), and should only happen with _some_ opt-in. I’ll grant you that `DISABLE_CGO` is not a meaningful opt-in into _those_ properties either — I’m just saying that in c/image, where the OpenPGP option is defined, I wouldn’t accept an “automatically enable without CGo” modification."
+        },
+        {
+            "user": "rittneje",
+            "body": "@mtrmac I can understand why you want c/image itself to have an explicit opt-in for that kind of situation. Would you find it acceptable to just fix skopeo's Makefile to evaluate `go env CGO_ENABLED` instead of relying on `DISABLE_CGO`? It already seems to rely on calculating such build tags implicitly via the hack scripts."
+        },
+        {
+            "user": "mtrmac",
+            "body": "I’m, in general, unhappy with autodetecting the signing backend choice or tying it to an unrelated choice, but we are already doing that in the Skopeo repo, so I guess I don’t much care _how_ we are autodetecting it.\n\nIf changing that made for a notably better static build logic or documentation, sure, why not.\n\nThe limit to that argument is that the option should be very likely to be an intentional choice _for the Skopeo build in question_; not a property of the environment that is likely to be enabled for the whole session. (In particular, we don’t set `containers_image_openpgp` just because the header files are not installed, like we do for btrfs.) I guess `go env CGO_ENABLED` still fits within that limit, though it’s getting close.\n\n---\n\nNote to self: Historically `DISABLE_CGO` was introduced in https://github.com/containers/skopeo/pull/522 ."
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "rittneje",
+            "body": "not stale"
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "rittneje",
+            "body": "not stale\none day I'll have time to work on this..."
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "mtrmac",
+            "body": "So there are multiple dimensions of complexity to this:\n- `CGO_ENABLED=0` is _not_ a way to build “statically-linked executables”. On macOS, the output is still dynamically-linked  , just to fewer libraries (only the platform ones, presumably). It changes _what_ is linked with Skopeo (external libraries vs. no external libraries), not really _how_ it is linked (statically vs. dynamically).\n- On a recent system, at least per `ldd`, both with and without `GO_DYN_FLAGS` the binary is reported as “statically linked”, and both depend on no dynamic libraries. But there are differences: the PIE one requires an ELF interpreter (a dynamic linker, e.g. `/lib64/ld-linux-x86-64.so.2`), while the non-PIE one is _truly_ static (i.e. only needs the kernel to run that one file). That’s visible in `file`, but “visible in `file`” is hardly a reason to decide one way or the other.\n  - And there are even more alternatives: https://github.com/containers/skopeo/pull/1483#discussion_r731780828 \n  - Note that the decision whether to use PIE or not is basically unrelated to the decision to use external dependencies or not. It can’t be automatically decided from `CGO_ENABLED`.\n\nSo the first thing is to carefully consider what are the wanted properties of the resulting executable. Whether the default logic of `GO_DYN_FLAGS` is a “problem” really depends on the task being solved.\n\n---\n\nSeparately, from the end-user point of view, `DISABLE_CGO` was, for a time, documented in Skopeo’s install instructions. It’s now not been  documented for 2 years, and I don’t see any reason to consider its logic when making any other decisions. (I wouldn’t fight too hard against just dropping that undocumented variable, but I’m also a bit averse to taking extra effort to possibly break existing users, when there isn’t any identified benefit to any other users.)\n\n---\n\nOverall, I now think the three-step instructions in `install.md` are basically correct. At least the `CGO_ENABLED` and `openpgp` parts refer to two necessary end-user visible decisions, and document them correctly. Automatically enabling the `openpgp` tag based on `CGO_ENABLED` is possible but not all _that_ attractive.\n\nThe `GO_DYN_FLAGS` item is technically correct but quite opaque about what that decision does and why it could matter, (although that might be sufficient for users who actually know enough about static linking to want it). It’s, also, unrelated enough to static linking, that I wouldn’t feel strongly about just removing that item to simplify — under the assumption that users care about lack of external dependencies, and not static linking as such."
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "skopeo",
+            "number": 1980
+        }
+    ]
+}

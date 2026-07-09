@@ -1,0 +1,44 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "skopeo",
+    "number": 2549,
+    "type": "issue",
+    "title": "skopeo emits warnings/fails when copying in a container build",
+    "state": "open",
+    "labels": [
+        "stale-issue"
+    ],
+    "user": "vrothberg",
+    "body": "```Dockerfile\nFROM quay.io/fedora/fedora-bootc:41\n\nRUN podman pull busybox\nRUN skopeo copy docker://busybox containers-storage:busybox\n```\n\nWhile `podman pull` works just fine with a small warnings of `/` not being a shared mount, `skopeo copy` instruction emits the following warnings:\n> time=\"2025-03-17T12:33:25Z\" level=warning msg=\"Reading allowed ID mappings: reading subuid mappings for user \\\"root\\\" and subgid mappings for group \\\"root\\\": no subuid ranges found for user \\\"root\\\" in /etc/subuid\"\ntime=\"2025-03-17T12:33:25Z\" level=warning msg=\"Found no UID ranges set aside for user \\\"root\\\" in /etc/subuid.\"\ntime=\"2025-03-17T12:33:25Z\" level=warning msg=\"Found no GID ranges set aside for user \\\"root\\\" in /etc/subgid.\"",
+    "comments": [
+        {
+            "user": "vrothberg",
+            "body": "It fails when using `registry.stage.redhat.io/rhel9/rhel-bootc:9.6` as the base image."
+        },
+        {
+            "user": "mtrmac",
+            "body": "I didn’t look into the details, but, in just as a first impression, I’m not too surprised — Podman does quite a bit to set up the environment, on top of the code in c/storage."
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "mtrmac",
+            "body": "This is not _purely_ a Skopeo issue, within a similar Containerfile:\n```\nSTEP 6/8: RUN dnf install -y buildah && buildah unshare true\n…\nComplete!\ntime=\"2025-05-29T22:54:39Z\" level=warning msg=\"Reading allowed ID mappings: reading subuid mappings for user \\\"root\\\" and subgid mappings for group \\\"root\\\": no subuid ranges found for user \\\"root\\\" in /etc/subuid\"\ntime=\"2025-05-29T22:54:39Z\" level=warning msg=\"Found no UID ranges set aside for user \\\"root\\\" in /etc/subuid.\"\ntime=\"2025-05-29T22:54:39Z\" level=warning msg=\"Found no GID ranges set aside for user \\\"root\\\" in /etc/subgid.\"\n(repeats 11 more times?!)\nmemfd_create(): Invalid argument\n```\n\n(but `buildah pull busybox` inside an image build does succeed, with no warnings.)\n\n---\n\n@giuseppe PTAL\n\nI don’t know what _should_ be happening. Is there a simple set of rules that should be followed? The `pkg/unshare` and `pkg/rootless` implementations (pointers below) have quite some amount of logic and conditions.\n\nFor this report, the container build’s environment (when running `buildah bud` as root) is:\n```\nSTEP 2/8: RUN id -a\nuid=0(root) gid=0(root) groups=0(root)\nSTEP 3/8: RUN getpcaps $$\n1: cap_chown,cap_dac_override,cap_fowner,cap_fsetid,cap_kill,cap_setgid,cap_setuid,cap_setpcap,cap_net_bind_service,cap_sys_chroot,cap_setfcap=ep\n```\n\nMy naive understanding of the situation:\n- Purely unprivileged users, who rely on set-UID `newuidmap`/`newgidmap`, ~must have an allowed range set up in `/etc/subuid`/`/etc/subgid`. Warning (or a failure??) is entirely appropriate.\n- Full root (EUID 0, CAP_SYS_ADMIN) does not _need_ to enter a namespace. Is the rule that it _never should_, and that `/etc/sub[ug]id` should not even be consulted? Naively, that would make sense to me to ensure consistency, but I know nothing about this. And if we didn’t care about the contents of the config files, we should not be warning about them, and I guess not reading them at all would be ideal.\n- The current situation (EUID 0, but insufficient capabilities)?? I don’t know whether it’s closer to unprivileged or to full root.\n\n---\n\nCode pointers:\n\nSkopeo triggers this via https://github.com/containers/storage/blob/78f4258b2bd9abb338a407e6799cf99565eabb10/pkg/unshare/unshare_linux.go#L511 .\n\nPodman has a different code path, ultimately the same warning in https://github.com/containers/podman/blob/23ded8bcee73082a4cbf487f873e230327b98bda/pkg/rootless/rootless_linux.go#L188 . The primary difference is the extra code to tone it down to a debug level when running as root, originally added in https://github.com/containers/podman/pull/10079 . (And, well… later, if I’m reading it correctly, Podman _ignores_ the configured mappings anyway when running as root and direct writes to `/uid_map` are possible. Similar logic exists in c/storage/pkg/unshare, but in that case the code reading the configuration and applying the configuration seems to use consistent conditions.)\n\n"
+        },
+        {
+            "user": "giuseppe",
+            "body": "I believe the difference is the one you've pointed out where Podman tries to create the user namespace copying the current mapping, that is possible when the process is running with CAP_SETUID/CAP_SETGID.\n\nI'd prefer we do not duplicate the logic here, and try to consolidate the code in Podman and c/storage/pkg/unshare more.\n\nSaid so, there are currently two workarounds to avoid the issue:\n\n1.\n```\n# echo root:1:4294967294 >> /etc/subuid\n# echo root:1:4294967294 >> /etc/subgid\n```\n\n2.\nGive the container enough capabilities: `--cap-add sys_admin,chown,dac_override,fowner,fsetid,mknod,setfcap`\n\nBy the way, the list in:\n\n```go\nvar neededCapabilities = []capability.Cap{\n\tcapability.CAP_CHOWN,\n\tcapability.CAP_DAC_OVERRIDE,\n\tcapability.CAP_FOWNER,\n\tcapability.CAP_FSETID,\n\tcapability.CAP_MKNOD,\n\tcapability.CAP_SETFCAP,\n}\n```\n\nseems wrong to me, we need CAP_SYS_ADMIN too to be able to create the storage mount"
+        },
+        {
+            "user": "giuseppe",
+            "body": "opened a PR to add `CAP_SYS_ADMIN`: https://github.com/containers/skopeo/pull/2616"
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        }
+    ],
+    "cross_references": []
+}

@@ -1,0 +1,56 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "skopeo",
+    "number": 1692,
+    "type": "issue",
+    "title": "oci scheme changes the mediaTypes",
+    "state": "closed",
+    "labels": [
+        "locked - please file new issue/PR"
+    ],
+    "user": "developer-guy",
+    "body": "We (w/@dentrax) noticed that while copying a Docker-typed image to a directory by using the `oci` scheme, the mediaTypes of the image are changed from `vnd.docker..` to `vnd.oci..`, and it's leading to a change the digest of an image. But in the `crane` tool, mediaTypes remains the same for the same operation. So we wanted to open an issue to discuss which type of operation is correct or makes sense.\n\nTo reproduce the issue, we can consider using `alpine:3.16` image:\n\n```shell\n$ skopeo inspect docker://alpine:3.16 --raw | jq \".manifests | map(select(.platform.architecture == \"amd64\" and .platform.os == \"linux\") )\" | jq -r '.[0].digest'\nsha256:4ff3ca91275773af45cb4b0834e12b7eb47d1c18f770a0b151381cd227f4c253\n$ skopeo copy --override-os linux  docker://docker.io/library/alpine:3.16 oci:oci-layout\n$ skopeo copy --override-os linux oci:oci-layout docker://devopps/alpine:3.16\n$ skopeo inspect docker://devopps/alpine:3.16 | jq -r '.Digest'\nsha256:1db22e12238c94042b930c0e3559a8b283473b989d621f2c145ebe72829cef25 \n```\n\n@mtrmac @imjasonh @jonjohnsonjr ",
+    "comments": [
+        {
+            "user": "vrothberg",
+            "body": "@developer-guy is the assumption that converting between OCI and Docker format preserves the digest?\n\nThe digests will change since the media types are different.  A Docker manifest does not comply with the OCI image spec, so it must be changed during conversion."
+        },
+        {
+            "user": "mtrmac",
+            "body": "Yes, the OCI image spec (which the `oci:` and `oci-archive:` aim to implement) only supports OCI-formatted images: compare https://github.com/opencontainers/image-spec/blob/main/image-index.md#image-index-property-descriptions . Storing something else is not _strictly prohibited_ but it is not interoperable (“An encountered `mediaType` that is unknown to the implementation MUST be ignored.”)\n\nIf you don’t care about OCI compliance and interoperability, use something else; either the c/image-private `dir:` format (which doesn’t quite have a format stability promise, to be fair), or maybe a temporary local registry server run from a container."
+        },
+        {
+            "user": "jonjohnsonjr",
+            "body": "> the OCI image spec (which the oci: and oci-archive: aim to implement) only supports OCI-formatted images\n\nI think there's enough wiggle room in the spec that you could read this either way. I don't see anything that _forbids_ an OCI image layout from containing a docker image (e.g. see [this example](https://github.com/opencontainers/image-spec/blob/7b36cea86235157d78528944cb94c3323ee0905c/image-layout.md#index-example) which has a non-OCI entry in `index.json`), and most of the wording in the index/image specs leave room for backward compatibility. I wouldn't argue that skopeo's behavior is necessarily _incorrect_, but I don't think it would be wrong _not_ to convert them to OCI (especially if you care about preserving the content-addressable bits)."
+        },
+        {
+            "user": "mtrmac",
+            "body": "I agree it’s possible to store images that way.\n\nI do think that the _default_ behavior needs to be to convert, so that they can be read back by another implementation with high confidence. It might make sense to store unconverted images _with an opt-in_.\n\nThe current implementation of c/image transports has the concept of “supported” manifest formats, where an image in a format supported by a destination is stored there without a format conversion (while `oci:` returns only the OCI format as supported, triggering a conversion if necessary). We’d probably need a concept of “supported opt-in only”, so that a v2s2 image is ever automatically stored as v2s2 in `oci:`, but users could explicitly opt-in via `skopeo copy --format v2s2` to have the image stored in OCI using a v2s2 format. That’s plausible (and eventually we might want to do something similar to stop automatically converting to v2s1 when pushing to registries[1]).\n\nLooking a bit more at use cases, the extra valuable feature of OCI unavailable in `dir:` is the ability to store multiple images in a single directory, sharing storage. That’s true at at medium scale, of >1 image but probably not hundreds; for hundreds, a real registry (with individual repos that can be updated concurrently, without contention/races on the index file, while still allowing data reuse across the whole set of images) is probably better. So… there’s some value to supporting non-OCI formats in OCI, but it’s fairly limited. #1237 would hypothetically be another way to address the major use case.\n\n---\n\n[1] Surprisingly, v2s1 happens to be the only format that works, from time to time, typically if due to c/image implementation bugs, or strict registry validation, OCI and v2s2 is rejected. It’s not always 100% clear whether converting and things transparently mostly-working, or cleanly failing, is the better behavior."
+        },
+        {
+            "user": "Dentrax",
+            "body": "> @developer-guy is the assumption that converting between OCI and Docker format preserves the digest?\n\n@vrothberg Since skopeo mutate all `mediaType`s (since we're exporting as oci), digests changes for sure. In the current use-case, I couldn't able to trust official image since its digest changed. But it is also obvious that is the official image since we did not mutate anything expect media types.\n\n```\n# digest of docker://foo1\nsha256:4ff3ca91275773af45cb4b0834e12b7eb47d1c18f770a0b151381cd227f4c253\n$ skopeo copy docker://foo1 oci:foo2\n$ skopeo copy oci:foo2 docker://foo2\n# new digest of docker://foo2\nsha256:1db22e12238c94042b930c0e3559a8b283473b989d621f2c145ebe72829cef25 \n```\n\nOne workaround is to traverse all JSONs and replace all media types to `vnd.docker` and push the upstream. But it doesn't seem a good solution in the first place and sounds wrong to me.\n\nWhat's the best and right way to copy the image by respecting the digest? `upstream -> local -> upstream`"
+        },
+        {
+            "user": "mtrmac",
+            "body": "> One workaround is to traverse all JSONs and replace all media types to vnd.docker and push the upstream.\n\nThat’s not going to work in general; the digest detects format modification of any kind, including change in whitespace. There is no relationship between the whitespace of the input manifest and of the manifest produced by Skopeo when converting, so modifying Skopeo’s output that way is not typically going to reproduce the original manifest.\n\n---\n\nWhat's the best and right way to copy the image by respecting the digest? upstream -> local -> upstream\n\n- `dir:`, for a single image or a small number.\n- For a large set, run a registry in a container with a volume for the registry’s storage location, copy images to that registry, move the directory backing the volume, run a registry in a container again, copy images from that registry\n\nSure, the latter recommendation is a bit of a hassle … the thing is, a production-level registry implements most of the desirable features already.\n\nIn both cases you should probably use `skopeo {copy,sync} --preserve-digests` to get failures instead of digest changes."
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "google",
+            "repository": "go-containerregistry",
+            "number": 1398
+        },
+        {
+            "organization": "bpfman",
+            "repository": "bpfman",
+            "number": 178
+        },
+        {
+            "organization": "GoogleContainerTools",
+            "repository": "kaniko",
+            "number": 1836
+        }
+    ]
+}

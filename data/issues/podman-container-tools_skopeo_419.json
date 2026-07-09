@@ -1,0 +1,76 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "skopeo",
+    "number": 419,
+    "type": "issue",
+    "title": "docker registry support broken",
+    "state": "closed",
+    "labels": [
+        "locked - please file new issue/PR"
+    ],
+    "user": "hallyn",
+    "body": "Hi,\n\nskopeo copy docker://fedora:24 dir:fedora-24\nskopeo copy docker://ubuntu loci:ubuntu:latest\n\nno longer work.  @cyphar found this is due to the new 'multiple architecture image' support in the docker registry.",
+    "comments": [
+        {
+            "user": "cyphar",
+            "body": "Effectively the larger issue is that we need to figure out how we're going to handle multi-arch. If we just do a full conversion to OCI there's a overhead of downloading the layers for every arch, and `umoci` currently doesn't support saying \"extract the `amd64` image under this multi-arch tag\" -- mainly because multi-arch doesn't actually make a lot of sense in the first place. I can work on the `umoci` problems but this runs into the generic problem of \"what are we meant to do when filtering the ManifestList tree\"."
+        },
+        {
+            "user": "runcom",
+            "body": "@cyphar @hallyn we're working on this /cc @mtrmac "
+        },
+        {
+            "user": "mtrmac",
+            "body": "This is worked around in `master` (#417), I’m working on a larger fix.\n\n> Effectively the larger issue is that we need to figure out how we're going to handle multi-arch.\n\nYeah.  Several of the c/image transports are incapable of multiple images (e.g. having a single manifest by definition, or being tied to the current architecture, like `docker-daemon:`); it’s conceptually easy enough to just choose a single manifest out of a the manifest list, and then copy that image instance. I’m working on that now.\n\nIf a destination does support manifest lists or something similar, it seems plausible that `copy.Image` would by default just copy all instances (probably allowing callers to opt for a single instance), and also upload a manifest list (the original, or a necessarily updated copy), taking care to only copy the shared blobs once. With a reasonably careful implementation the `copy.Image` can copy a manifest list wholesale without necessarily understanding anything about the architecture/platform qualifications (e.g. the scary OCI capabilities are not a blocker).\n\nThat doesn’t really say what to do in with OCI indexes… tentatively:\n- We are not going to support signing manifest lists, at least not initially, only the individual manifest instances. That will allow copying a single instance out of the list elsewhere with matching signatures, and it will also let us freely edit the manifest list when copying the image.\n- The current `oci/layout` implementation supports either a single-image index, or a multi-image index in which case the `…ref.name` annotation must be specified by the consumer. In that model, it seems simple enough to pretend that all images with the same `…ref.name` annotations represent a “manifest list” within a “repository”, and copy these images as a set. (I have no idea what the code should do if there are nested indexes or something like that, and I’ll be happy to leave worrying about that to someone else; as long as the code can handle a simple flat list, that’s good enough as far as I am concerned.)\n\nDoes that make sense?"
+        },
+        {
+            "user": "cyphar",
+            "body": "@mtrmac \n\nYeah, that mostly makes sense. If we just opt for \"copy a single architecture for now\" that is probably good enough in my mind. Just one other comment:\n\n> ... In that model, it seems simple enough to pretend that all images with the same …ref.name annotations represent a “manifest list” within a “repository”, and copy these images as a set.\n\nWhat you would want is to use a nested manifest IMO. While duplicates are not disallowed by the OCI image spec, this just gets more ugly in my opinion for other implementations. But it's up to you, I'll have to handle it in `umoci` either way (and I think that on paper the multiple-tags problem has been solved in `umoci` `master` but I still need to write the architecture matching code).\n\n> (I have no idea what the code should do if there are nested indexes or something like that, and I’ll be happy to leave worrying about that to someone else; as long as the code can handle a simple flat list, that’s good enough as far as I am concerned.)\n\n`umoci` has a package that handles this for you, and we really should think about switching `containers/image`'s implementation to using `umoci`'s `oci/cas` and `oci/casext` packages."
+        },
+        {
+            "user": "runcom",
+            "body": "> umoci has a package that handles this for you, and we really should think about switching containers/image's implementation to using umoci's oci/cas and oci/casext packages.\n\nWhy not contributing those pkgs in c/image though :angel:"
+        },
+        {
+            "user": "cyphar",
+            "body": "> Why not contributing those pkgs in c/image though :angel:\n\nBecause only two of them would make sense in `c/image`, and I was hoping all the packages will end up in OCI (hell, I'm still hoping the whole of `umoci` will become an OCI project). At the moment I'm just keeping them in `umoci`, but I'm encouraging you to vendor them."
+        },
+        {
+            "user": "mtrmac",
+            "body": "> > ... In that model, it seems simple enough to pretend that all images with the same …ref.name annotations represent a “manifest list” within a “repository”, and copy these images as a set.\n>\n> What you would want is to use a nested manifest IMO.\n\nI’m sorry, I was really focused only on how the generic copy pipeline would deal with the OCI indexes, and the point was primarily that the ability to present a subset of the index / a modified version of it to the generic copy pipeline means that the generic pipeline does not restrict OCI from implementing anything. Whether OCI ends up using a nested manifest or not was secondary to me; you’re right that a nested manifest looks cleaner.\n\n> we really should think about switching `containers/image`'s implementation to using `umoci`'s `oci/cas` and `oci/casext` packages.\n\nYeah, maximizing code reuse and common interpretation of the spec would be great; I guess the contributors so far have found it easier to implement a small subset of the index reading/writing behavior from scratch, or didn’t know about `umoci`."
+        },
+        {
+            "user": "purefn",
+            "body": "Running into this trying to pull an alpine image. It looks like #420 has a possible fix for this, but hasn't gotten much attention. In the meantime, is there a workaround?"
+        },
+        {
+            "user": "cyphar",
+            "body": "#417 has a hotfix that should improve this -- the latest release (`0.1.24`) should contain that fix."
+        },
+        {
+            "user": "purefn",
+            "body": "I'm confused then. That looks like it explicitly does not support this. And I did try to use it and got the same error when trying to pull alpine:3.6."
+        },
+        {
+            "user": "mtrmac",
+            "body": "> That looks like it explicitly does not support this. \n\nWhich “this” precisely do you mean?\n\n> And I did try to use it and got the same error when trying to pull alpine:3.6.\n\nWhat “same” error? On current master, `./skopeo --policy default-policy.json copy docker://alpine:3.6 dir:t` seems to work well enough. Please provide exact steps to reproduce and expected behavior."
+        },
+        {
+            "user": "purefn",
+            "body": "Aha, ok, that command does work. But this one \n\n```\nskopeo copy docker://ubuntu@sha256:506e2d5852de1d7c90d538c5332bd3cc33b9cbd26f6\nca653875899c505c82687 docker-archive://h:ubuntu:latest\n```\n\ngives the error message\n\n```\ncan not copy docker://ubuntu@sha256:506e2d5852de1d7c90d538c5332bd3cc33b9cbd26f6ca653875899c505c82687: manifest contains multiple images \n```\n"
+        },
+        {
+            "user": "mtrmac",
+            "body": "Ah, right. That indeed needs #420 . The only workaround in the meantime would be to use the `@sha256:` digest of the relevant architecture-specific manifest instead of the digest of the manifest list."
+        },
+        {
+            "user": "rhatdan",
+            "body": "Since this was merged a while ago, I assume this issue is fixed."
+        },
+        {
+            "user": "mtrmac",
+            "body": "Well, ultimately this was talking about https://github.com/containers/image/issues/400 as the 100% fix, but we don’t quite need a skopeo pointer to it that also deals with the urgent situation at that time."
+        }
+    ],
+    "cross_references": []
+}

@@ -1,0 +1,62 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "skopeo",
+    "number": 1011,
+    "type": "pull_request",
+    "title": "fix #1009 do not fail on single image copy error",
+    "state": "closed",
+    "labels": [
+        "locked - please file new issue/PR"
+    ],
+    "user": "yannh",
+    "body": "This is a WIP - log & skip tags on error, + displays at the end the number of errors. I would be interested in feedback about what behaviour would be appropriate.",
+    "comments": [
+        {
+            "user": "mtrmac",
+            "body": "Thanks for the PR.\n\nI imagine `skopeo sync` is _mostly_ used non-interactively; so, it’s rather undesirable to change behavior in a way that makes existing scripts suddenly “succeed” without doing what they were expected to do.\n\nIt could well make sense as an opt-in option — but in that case I expect callers might want to obtain the list of failures in a machine-consumable way. After all, if an image _consistently_ fails to mirror, _eventually_ the automation should report a failure and tell a human, shouldn’t it? The progress output already goes to `stdout`, so I imagine the list of failures would have to be a separate file.\n\nTo the extent the goal is to just retry pulling a few times before alerting a human, wouldn’t using `--retry-times $N` be a more direct way to obtain that, without having an “ignore failure” option at all?"
+        },
+        {
+            "user": "yannh",
+            "body": "Hi @mtrmac , thank you for your feedback! In case of the failures I was getting because of the 5xx errors from Dockerhub - I suspect it might not be detected as \"retryable\" (or maybe it failed on retry.. I ll be sure to capture the log next time). Making it retry-able might be a better way to go.\n\nInterestingly - some errors do happen without interrupting the process. Try for example:\n`./bin/skopeo sync  --src docker --dest dir registry.hub.docker.com/kbudde/rabbitmq-exporter .  `\n\nThis fails on a tag \"v1.0\" - which is interesting since it can not be found using Dockerhub's search: https://hub.docker.com/r/kbudde/rabbitmq-exporter/tags?page=1&name=v1.0\n```\nINFO[0192] Copying image tag 40/41                       from=\"docker://registry.hub.docker.com/kbudde/rabbitmq-exporter:v1.0\" to=\"dir:rabbitmq-exporter:v1.0\"\nERRO[0193] Error copying tag \"docker://registry.hub.docker.com/kbudde/rabbitmq-exporter:v1.0\": Error initializing source docker://registry.hub.docker.com/kbudde/rabbitmq-exporter:v1.0: Error reading manifest v1.0 in registry.hub.docker.com/kbudde/rabbitmq-exporter: manifest unknown: manifest unknown  from=\"docker://registry.hub.docker.com/kbudde/rabbitmq-exporter:v1.0\" to=\"dir:rabbitmq-exporter:v1.0\"\n```\n\nBut in this case, it actually runs to completion despite the failure:\n`INFO[0200] Synced 41 images from 1 sources`\n\nThis is an example of an error that, while consistent, does not stop the process.\n\nFinally, another problem I had was with the repository voucher/vouch-proxy - which contains images for arm. This failed syncing to AWS ECR. This also fails consistently, and does stop the process. \n\nTo summarize:\n * Some retryable issues (Dockerhub 5xx) currently do not seem to be detected as retryable and end the process (I will try to get logs for this use case). For this -> ensure 5xx are retried could be a way to go.\n * Some non-retryable issues (rabbitmq-exporter:v1.0) fail, but do not stop the process. They are logged as errors, but are not mentioned in the final INFO line. I find this an acceptable behaviour, though it might be worth reporting them in the final log line as well?\n * Other non-retryable isues (trying to upload arm images to EKS - again, will try to get better logs) fail, and do stop the process. Should we make an option to skip these errors too?"
+        },
+        {
+            "user": "mtrmac",
+            "body": "> ```\n> INFO[0192] Copying image tag 40/41                       from=\"docker://registry.hub.docker.com/kbudde/rabbitmq-exporter:v1.0\" to=\"dir:rabbitmq-exporter:v1.0\"\n> ERRO[0193] Error copying tag \"docker://registry.hub.docker.com/kbudde/rabbitmq-exporter:v1.0\": Error initializing source docker://registry.hub.docker.com/kbudde/rabbitmq-exporter:v1.0: Error reading manifest v1.0 in registry.hub.docker.com/kbudde/rabbitmq-exporter: manifest unknown: manifest unknown  from=\"docker://registry.hub.docker.com/kbudde/rabbitmq-exporter:v1.0\" to=\"dir:rabbitmq-exporter:v1.0\"\n> ```\n> \n> But in this case, it actually runs to completion despite the failure:\n> `INFO[0200] Synced 41 images from 1 sources`\n\nThat’s surprising; I can’t see how that could happen. Anyway I’m inclined to say it’s a bug, not a precedent.\n\n(Looking further, there _are_ some code paths where errors are currently only logged, not causing a failure, and from a quick look a few initially look like a mistake, where we indeed should fail instead.)\n\n---\n\nMy basic question is “how does the caller use this _reliably_?”. Adding an opt-in “do not abort on failures” flag is acceptable stand-alone (~by definition whatever behavior we document in a man page is “correct”), but the follow-up question of “well what is the caller going to do afterwards?” needs to be asked.\n\nIf the user didn’t care about images not syncing, why does the configuration set up to sync them? And if the user does care, well, the user must be able to tell that the sync failed, and what failed."
+        },
+        {
+            "user": "mtrmac",
+            "body": "> > ```\n> > INFO[0192] Copying image tag 40/41                       from=\"docker://registry.hub.docker.com/kbudde/rabbitmq-exporter:v1.0\" to=\"dir:rabbitmq-exporter:v1.0\"\n> > ERRO[0193] Error copying tag \"docker://registry.hub.docker.com/kbudde/rabbitmq-exporter:v1.0\": Error initializing source docker://registry.hub.docker.com/kbudde/rabbitmq-exporter:v1.0: Error reading manifest v1.0 in registry.hub.docker.com/kbudde/rabbitmq-exporter: manifest unknown: manifest unknown  from=\"docker://registry.hub.docker.com/kbudde/rabbitmq-exporter:v1.0\" to=\"dir:rabbitmq-exporter:v1.0\"\n> > ```\n> > \n> > \n> > But in this case, it actually runs to completion despite the failure:\n> > `INFO[0200] Synced 41 images from 1 sources`\n> \n> \n> That’s surprising; I can’t see how that could happen.\n\nBTW for me `skopeo sync` terminates after the `manifest unknown` line, there is no `Synced 41 images` line."
+        },
+        {
+            "user": "yannh",
+            "body": "Doh :( My apologies, I forgot to rebuild after switching back to master and accidentally ran an old build from my branch. I guess my branch works :trollface: Sorry!\n\nI need to think about this a bit more. Ignoring errors would also mean, for example, that you would get the same error over & over again for every tag/image if you have incorrectly set registry authentication,  rather than get an early exit.\n\nFor long-running syncs (hundreds/thousands of images) however it is quite painful to start a sync, wait a significant amount of time to see if fail on a specific tag - and wait again tens of minutes to see it fail on another repository. "
+        },
+        {
+            "user": "mtrmac",
+            "body": "Yeah, I get that — I think it could make sense to have a `--collect-all-errors=output.json` option that would cause errors to be written as members of that file (in… some stable format, which is non-trivial), so that a long-running operation could report them all, and then they could be acted upon in a more or less automated fashion."
+        },
+        {
+            "user": "yannh",
+            "body": "@mtrmac If that file could be a yaml of the same format that skopeo sync takes as input, that would be... practical :)"
+        },
+        {
+            "user": "mtrmac",
+            "body": "Yes :)"
+        },
+        {
+            "user": "rhatdan",
+            "body": "@yannh Still working on this?"
+        },
+        {
+            "user": "yannh",
+            "body": "No I think https://github.com/containers/common/pull/277  should do the trick :+1:  this would at least solve \"most\" of the errors I'm seeing and make this less critical."
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "skopeo",
+            "number": 1009
+        }
+    ]
+}

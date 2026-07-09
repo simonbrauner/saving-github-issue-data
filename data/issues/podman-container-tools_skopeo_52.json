@@ -1,0 +1,66 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "skopeo",
+    "number": 52,
+    "type": "pull_request",
+    "title": "move libraries to pkgs",
+    "state": "closed",
+    "labels": [
+        "locked - please file new issue/PR"
+    ],
+    "user": "runcom",
+    "body": "@mtrmac PTAL (I've also added some TODO)\n\nThis is just another small steps in defining a good API for sub pkgs (which could be later used by other pkgs, i.e. k8s)\nEventually I'd love to remove `docker/docker_image.go` and integrate relevand code either in img src or img dest. (@mtrmac please confirm this is your view also :smile: )\nThe major change (other then moving files around) is that I've strongly types `GetManifest()` to return an interface (with some methods just added) so it will work across implementation.\n\nAgain, this is still a WIP but I would like to have this merged and tested as we going forward with this (and also avoid having to review 10k LOC PRs :) :) :))\n\nThis code compiles right but I'd love if you could test it out (specifically for openshift related stuff and signing)\n\nSigned-off-by: Antonio Murdaca runcom@redhat.com\n",
+    "comments": [
+        {
+            "user": "mtrmac",
+            "body": "I am not sure about the direction of this; I was thinking of `ImageSource`/`ImageDestination` as fairly dumb storage layers, with manifest really being a (blob, MIME content type) pair only. You can get a manifest blob from any source you like, they are all parsed in the same way. \n\nBasically we need to very carefully think about which attributes are common to all storage mechanisms, and which are specific to Docker Registry / OCI bundles / ostree subtrees / … .\n\n(It might well turn out that the dumb storage abstraction is simply unworkable. But if so, we should not be using the “manifest” term referring to v2s[12] config+layer lists to mean “any container image in any format whatsoever”.)\n"
+        },
+        {
+            "user": "runcom",
+            "body": "@mtrmac I don't still know if Image[Source|Destination] will be good. However this PR is simply moving files around (and just adapting some code).\nI believe after we have moved everything to pkgs we can start concentrating at defining common things across the stuff we need to support.\n\nskopeo was born to just fetch and display manifest from registries at the beginning. However, I think it would be good trying to abstract a common template for manifests (as originally thought upstream also).\n\n> (It might well turn out that the dumb storage abstraction is simply unworkable. But if so, we should not be using the “manifest” term referring to v2s[12] config+layer lists to mean “any container image in any format whatsoever”.)\n\nwhen referring to _manifest_ I'm referring to `types.ImageManifest` which is an interface though (code probably doesn't refer to this everywhere)\n"
+        },
+        {
+            "user": "runcom",
+            "body": "I'm thinking for instance, that the storage layers you added (source|destination) can be very well suited _inside_ a top level object exposed in the API (thinking out loud)\n"
+        },
+        {
+            "user": "runcom",
+            "body": "> I am not sure about the direction of this; I was thinking of ImageSource/ImageDestination as fairly dumb storage layers, with manifest really being a (blob, MIME content type) pair only. You can get a manifest blob from any source you like, they are all parsed in the same way.\n\nI understand your concerns here though, let me rework this again so that those 2 interfaces just give out a blob\n"
+        },
+        {
+            "user": "mtrmac",
+            "body": "> However this PR is simply moving files around (and just adapting some code).\n\nI would agree with a simple move in a jiffy. The “adapting some code” here is changing the philosopy, and that will require more thought. You may well be right but I’d like to think about it a bit more.\n"
+        },
+        {
+            "user": "mtrmac",
+            "body": "> when referring to manifest I'm referring to `types.ImageManifest` which is an interface though (code probably doesn't refer to this everywhere\n\nThis is probably the root of the disconnect; I am thinking about the Docker Registry manifest concept, which does not know that much about containers or tags or anything.\n"
+        },
+        {
+            "user": "mtrmac",
+            "body": "> I'm thinking for instance, that the storage layers you added (source|destination) can be very well suited _inside_ a top level object exposed in the API (thinking out loud)\n\nYes, I am thinking along the same lines. If we separate the distribution aspect (the `ImageSource` and `ImageDestination` are really `DockerV2ImageSource` and `DockerV2ImageDestination` now) and the contents aspect, we could have a\n\n``` go\nfunc ParseDockerImage(types.ImageSource) (types.Image, error)\n```\n\nwhich would internally download the manifest blob, and then convert it into something much more useful to actual end users (e.g. list of layers, labels, configuration extracted from the manifest into nice fields, a method to convert that into a runc setup, whatever).\n\n(Yes, that is quite similar to the existing `docker_image` top layer; but the distribution of code between `dockerImage` and `dockerImageSource`, and especially between `dockerImage` and its CLI callers, might be different than it is now — the `ImageDestination` use in `dockerImage` really should not be there.)\n\n(`DockerV2`)`Image`{`Source`,`Destination`} would not be used by callers who want to _understand_ the image; it would be only for those who want to copy it and make sure that they don’t modify it (in particular that they don’t break signatures). Though it is unclear that the various transport methods have enough in common that they can be abstracted like this. (e.g. IIRC some versions of the `docker save` tarballs don’t preserve manifests?)\n"
+        },
+        {
+            "user": "rhatdan",
+            "body": "One other thing while you are doing this rework could you remove \"docker\" wherever possible and use oci, if applicable.  Since we will be pulling and pushing oci images as well as docker images.\n"
+        },
+        {
+            "user": "mtrmac",
+            "body": "> One other thing while you are doing this rework could you remove \"docker\" wherever possible and use oci, if applicable. Since we will be pulling and pushing oci images as well as docker images.\n\nAt the moment, this implements Docker Registry (for which there is no corresponding OCI specification) and Registry V2 “Schema 1” manifests (likewise; OCI standardizes “Schema 2”).\n\nThe top-level types are named generically, e.g. `ImageSource` (though they do assume a lot about a Docker-like structure at the moment).\n\nOther than that, throughout the code we refer to\n- “Docker manifest digest”, the `$algorithm:$value` hash of a Docker manifest. That one might be made more generic, OTOH OCI defines it by referring to the Docker Registry API doc…\n- “Docker reference”, the `[hostname/]namespace/repo` string format. Many parties may use strings with a similar form, so saying “Docker reference” as opposed to generic “URL-like string” makes sense to me. OTOH I _am_ uncertain about this, especially when using the “Docker reference” term in signatures to refer to OpenShift images (which can't be pulled using a plain `docker pull` with the string being signed). I would welcome independent review whether we should be using the “docker reference” format and naming for OpenShift.\n  \n  (Note: We do separate Docker and OpenShift in the UI, `docker://host/namespace/repo:tag` vs `atomic:host/namespace/imagestream:tag`; but both look the same, without the `docker://` / `atomic:` prefix, in signatures.)\n"
+        },
+        {
+            "user": "mtrmac",
+            "body": "> Other than that, throughout the code we refer to\n\n… and then there is the `dockerutils` subpackage, which is almost, but not completely, not specific to Docker.\n"
+        },
+        {
+            "user": "runcom",
+            "body": "closing this in favor of what @mtrmac is doing (though the conversation was interesting)\n"
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "skopeo",
+            "number": 79
+        }
+    ]
+}

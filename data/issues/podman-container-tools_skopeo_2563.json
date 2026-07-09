@@ -1,0 +1,69 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "skopeo",
+    "number": 2563,
+    "type": "issue",
+    "title": "`experimental-image-proxy` broken with `containers-storage:`",
+    "state": "closed",
+    "labels": [
+        "stale-issue",
+        "locked - please file new issue/PR"
+    ],
+    "user": "allisonkarlitskaya",
+    "body": "```\nskopeo version 1.18.0\nskopeo-1.18.0-1.fc42.x86_64\n```\n\nUsing `containers-image-proxy-rs`, if I attempt to pull an image from a `containers-storage:` URL I get this:\n\n```\nError: Opening image\n\nCaused by:\n    failed to invoke method OpenImage: failed to invoke method OpenImage: mount /var/home/lis/.local/share/containers/storage/overlay:/var/home/lis/.local/share/containers/storage/overlay, flags: 0x1000: operation not permitted\n```\n\nIt seems to be caused by a bug in `skopeo` itself: normally during a `skopeo copy` command trying to access a `containers-storage:` source, `skopeo` does the equivalent of `podman unshare` in order to gain access to the containers storage.  The `skopeo experimental-image-proxy` seems to \"forget\" to do the same and gets the permissions error.  In particular, the process that skopeo is running in does:\n\n```\nmount(\"/var/home/lis/.local/share/containers/storage/overlay\", \"/var/home/lis/.local/share/containers/storage/overlay\", 0xc000013c88, MS_BIND, NULL) = -1 EPERM (Operation not permitted)\n```\n\nwhich fails because it didn't call `unshare()` anywhere before that.\n\nYou can resolve the issue by adding a wrapper around `skopeo` in your `$PATH` which calls `podman unshare /usr/bin/skopeo` and then it will work.",
+    "comments": [
+        {
+            "user": "mtrmac",
+            "body": "Thanks! One concern is that we might not have any privileges to create a namespace, and at the time the proxy is starting, we don’t know whether a reexec is necessary at all\n\n@cgwalters how does this work for the primary proxy users?"
+        },
+        {
+            "user": "allisonkarlitskaya",
+            "body": "Maybe this is an interesting topic to discuss in more depth, because in my case, I'm actually using containers-image-proxy-rs inside of a toolbox (ie: already inside podman, as a non-root user), which means that skopeo doesn't work anyway, and can't do anything to \"fix\" itself.  I have an additional script which routes `skopeo` calls via `flatpak-spawn --host` to get back outside of the container, which is kinda annoying when the next thing that happens is that `skopeo` will immediately call `podman unshare`...\n\nAt the same time, I'm not sure what else it would do?  Run itself under sudo inside the toolbox?  That would actually produce the correct effect in my case, but it's pretty extremely weird...\n\nIn general it would be nice if podman commands, including skopeo, could notice that they were in a toolbox environment and tunnel out to the host, on their own.  I guess that's https://github.com/containers/toolbox/issues/145 though."
+        },
+        {
+            "user": "cgwalters",
+            "body": "That's a valid concern indeed. It'd be pretty awful but we *could* in theory do something where when we detect a `containers-storage:` source the first time we re-exec the current process and hand off the state but yeah...not serious about that.\n\nAs far as the use cases, for production ostree/bootc we default to operating with full privileges so there's zero concern. However, in the end we want exactly the same thing that `skopeo` supports - some of our unit tests definitely operate on `oci:` for example and in the fully general case I bet some of our CI runs operate in default `podman/docker run` where we don't have a userns setup and no privs to make namespaces.\n\nAnd there *are* non-ostree/bootc/comopsefs-rs use cases of this (though [none public](https://crates.io/crates/containers-image-proxy/reverse_dependencies)), I got pinged about using it to just read manifest data from registries.\n\n---\n\nPerhaps the simplest thing here would be to skip the reexec if we'd be unable to do so? Or a bit more sophisticated (this could apply to skopeo generally)\n\n- Try calling it at the start, unconditionally\n- If it fails, cache that error\n- If we try to open a `containers-storage:` instance, and the unshare failed, then emit the error at that time\n\n?\n\n"
+        },
+        {
+            "user": "mtrmac",
+            "body": "One fairly small downside is that it could add noise to audit logs.\n\nI think the “more sophisticated” variant might be ~the best we could do for the proxy. For other commands, we can currently be ~precise, so I’d prefer to leave the current logic as is."
+        },
+        {
+            "user": "cgwalters",
+            "body": "> mount(\"/var/home/lis/.local/share/containers/storage/overlay\", \"/var/home/lis/.local/share/containers/storage/overlay\" ...)\n\nAlthough, do we really need to do that? I mean in the end we're just asking to scrape out some JSON and serialize tarballs ([for now](https://github.com/containers/container-libs/issues/144)). "
+        },
+        {
+            "user": "mtrmac",
+            "body": "That information is lost over all the abstraction layers: c/storage does not have a concept of read-only operation."
+        },
+        {
+            "user": "allisonkarlitskaya",
+            "body": "I think I might approach this with a workaround in composefs-rs then: I know when I'm about to pull from a `containers-storage:` URL and I can set the `skopeo_cmd` in the config to wrap that in a call to `podman unshare`..."
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "mtrmac",
+            "body": "Given the `composefs-rs`-side workaround, and because it’s unclear how to fix this without downsides (audit noise, at least), closing for now. We might revisit if other use cases arise or if anyone can come up with a clean fix."
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "skopeo",
+            "number": 2564
+        },
+        {
+            "organization": "composefs",
+            "repository": "composefs-rs",
+            "number": 89
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "skopeo",
+            "number": 2617
+        }
+    ]
+}

@@ -1,0 +1,72 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "skopeo",
+    "number": 329,
+    "type": "issue",
+    "title": "skopeo copy from dir: to docker: causes failure",
+    "state": "closed",
+    "labels": [
+        "locked - please file new issue/PR"
+    ],
+    "user": "maxamillion",
+    "body": "```\n$ wget -c https://kojipkgs.fedoraproject.org//packages/Fedora-Docker-Base/25/20170420.1/images/Fedora-Docker-Base-25-20170420.1.x86_64.tar.xz\n\n$ mkdir fedora-docker-base\n\n$ tar -xvJf Fedora-Docker-Base-25-20170420.1.x86_64.tar.xz -C fedora-docker-base\n\n$ skopeo copy dir:/root/fedora-docker-base/ docker://localhost:5000/testingfedora\nFATA[0000] runtime error: invalid memory address or nil pointer dereference\n```\n",
+    "comments": [
+        {
+            "user": "runcom",
+            "body": "nice, let me try and reproduce and investigate"
+        },
+        {
+            "user": "maxamillion",
+            "body": "Now featuring debug output! :)\n\n```\n$ skopeo --debug copy dir:/root/fedora-docker-base/ docker://localhost:5000/testingfedora\nDEBU[0000] Using registries.d directory /etc/containers/registries.d for sigstore configuration\nDEBU[0000]  Using \"default-docker\" configuration\nDEBU[0000]   Using file:///var/lib/atomic/sigstore\nDEBU[0000] IsRunningImageAllowed for image dir:/root/fedora-docker-base\nDEBU[0000]  Using default policy section\nDEBU[0000]  Requirement 0: allowed\nDEBU[0000] Overall: allowed\nFATA[0000] runtime error: invalid memory address or nil pointer dereference\n```"
+        },
+        {
+            "user": "runcom",
+            "body": "@maxamillion which version of skopeo are you using?"
+        },
+        {
+            "user": "runcom",
+            "body": "Wait, I've just realized the archive is a docker archive, which isn't going to work with the `dir:` transport as what's inside the extracted archive is not something skopeo can understand with `dir:`."
+        },
+        {
+            "user": "runcom",
+            "body": "in this case you'll need to use `docker-archive:` transport even if `tar.xz` isn't a supported format to load from. @cyphar could you chime in here?"
+        },
+        {
+            "user": "cyphar",
+            "body": "Yeah, `dir:` doesn't mean what you think it means @maxamillion. It's an internal thing for `skopeo` -- mainly used for testing purposes. I'm not sure what your `Fedora-Docker-Base-25-20170420.1.x86_64.tar.xz` contains (is it an OCI image? a Docker image? just a rootfs?).\n\nIf it's a Docker image that's been `xz`d, you can use `docker-archive:`:\n\n```\n% unxz Fedora-Docker-Base-25-20170420.1.x86_64.tar.xz\n% skopeo copy docker-archive:Fedora-Docker-Base-25-20170420.1.x86_64.tar.xz docker://localhost:5000/testingfedora\n```\n\nIf it's an OCI image, you'd have to do something like this:\n\n```\n% tar -xvJf Fedora-Docker-Base-25-20170420.1.x86_64.tar.xz -C fedora-docker-base\n% skopeo copy oci:/root/fedora-docker-base/ docker://localhost:5000/testingfedora\n```\n\nIf it's just a root filesystem you'll need to use another program to convert the root filesystem into an image. [`umoci`](https://github.com/openSUSE/umoci) can do this for you.\n\n```\n% umoci init --layout /tmp/fedora-docker-base\n% umoci new --image /tmp/fedora-docker-base:latest\n% umoci unpack --image /tmp/fedora-docker-base:latest /root/fedora-docker-base\n% tar -xvJf Fedora-Docker-Base-25-20170420.1.x86_64.tar.xz -C /root/fedora-docker-base/rootfs\n% umoci repack --image /tmp/fedora-docker-base:latest /root/fedora-docker-base\n% skopeo copy oci:/tmp/fedora-docker-base:latest docker://localhost:5000/testingfedora\n```\n\nThe first two steps create a new blank OCI image, the `umoci unpack` creates a new runtime bundle, the `umoci repack` computes the diff for the root filesystem and adds a new layer to the OCI image."
+        },
+        {
+            "user": "mtrmac",
+            "body": "It is a (docker save) archive, i.e. see `docker-archive:` above.\n\nNevertheless I would still like to fix the crash, but I can’t see it with current `master`:\n```\nFATA[0000] Error initializing image from source dir:/home/mitr/x/fedora-docker-base/: json: cannot unmarshal array into Go value of type image.manifestSchema1 \n```\n\nSo, what version of skopeo is this?\n\n(This error message is used because `manifest.GuessManifestMIMEType` fails, returning `\"\"`, so `image.manifestInstanceFromBlob` defaults to schema1, and then we attempt to unmarshal the (docker save) manifest, which is an array, into a schema1 object. It’s not _immediately_ trivial to fix this, I suppose we could teach `GuessManifestMIMEType` to possibly fail with “definitely not a supported manifest”. Or, at least, `manifestSchema1FromManifest` could wrap the JSON error in “error decoding manifest” to give a bit more context. Longer-term it could make sense to make the (docker save) manifest a generally supported format through c/i/image, instead of hiding its existence in `docker/tarfile`, but it’s not quite obvious how to handle multiple named images with the c/i/image approacy.)"
+        },
+        {
+            "user": "maxamillion",
+            "body": "Yeah, it's a docker-archive. I wasn't aware of that being a transport type.\n\n```\nskopeo-0.1.19-1.dev.git0224d8c.fc25.x86_64\n```"
+        },
+        {
+            "user": "mtrmac",
+            "body": "Thanks, reproduced. This was fixed in commit f89bd82dcd05a8e09b770bac00d5731c33db5cb1 , a few days after that release was cut."
+        },
+        {
+            "user": "maxamillion",
+            "body": "Thanks all! 👍 "
+        },
+        {
+            "user": "runcom",
+            "body": "I'll cut a new release later today, but I really want to have https://github.com/containers/image/pull/262 in it at least, @mtrmac wdyt? "
+        },
+        {
+            "user": "mtrmac",
+            "body": "> I'll cut a new release later today, but I really want to have containers/image#262 in it at least, @mtrmac wdyt?\n\n#262 is acceptable after it passes tests.  I'm afraid I haven't seriously looked at #261 yet, and I’m leaving in a few minutes so probably won't be able to review it until tomorrow at the earliest."
+        },
+        {
+            "user": "runcom",
+            "body": "Alright, let's postpone the release to end of the week or next week at latest. "
+        },
+        {
+            "user": "mtrmac",
+            "body": "Available now as https://github.com/projectatomic/skopeo/releases/tag/v0.1.20 ."
+        }
+    ],
+    "cross_references": []
+}

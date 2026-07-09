@@ -1,0 +1,47 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "skopeo",
+    "number": 2686,
+    "type": "issue",
+    "title": "skopeo 1.20.0 not copying layers.annotations when copying from containers-storage: to docker://",
+    "state": "closed",
+    "labels": [
+        "locked - please file new issue/PR"
+    ],
+    "user": "ver4a",
+    "body": "OS: Fedora Kinoite (with layers) 42.20250816.0\nskopeo: 1.19.0/1.20.0 (rootless)\nthe image I'm copying is unmodified quay.io/fedora-ostree-desktops/kinoite:42\n\nProblem: `layers.annotations` are dropped and digest changes on `skopeo copy` from `containers-storage:` to `docker://`, a direct copy from `docker://` to `docker://` preserves both annotations and layer digests.\n\nIf I copy an image containing layers with \"annotations\", their digest changes and \"annotations\" is removed\n```bash\nskopeo copy containers-storage:quay.io/fedora-ostree-desktops/kinoite:42 docker://registry.uncontrol.me/ver4a/onc-kde:42-upstream\n```\n\nBefore copy\n```bash\nver4a@laptop:~$ skopeo inspect containers-storage:quay.io/fedora-ostree-desktops/kinoite:42 --raw | jq | wc -l\n537\n```\n[beforecopy.txt](https://github.com/user-attachments/files/22004701/beforecopy.txt)\n\nAfter copy \n```bash\nver4a@laptop:~$ skopeo inspect docker://registry.uncontrol.me/ver4a/onc-kde:42-upstream --raw | jq | wc -l\n345\n```\n[aftercopy.txt](https://github.com/user-attachments/files/22004671/aftercopy.txt)\n\nWhen I try the same copy with --preserve-digests, I get this error\n```bash\nver4a@laptop:~$ skopeo copy --preserve-digests containers-storage:quay.io/fedora-ostree-desktops/kinoite:42 docker://registry.uncontrol.me/ver4a/onc-kde:42-upstream\nGetting image source signatures\nFATA[0000] Copying this image would require changing layer representation, which we cannot do: \"Instructed to preserve digests\"\n```\nHere's a debug log with the first line containing environment removed [copy-preserve-log.txt](https://github.com/user-attachments/files/22004875/copy-preserve-log.txt)\n\nThe use case this breaks for me now is bootc upgrade/switch, bootc versions before 1.4.0 don't fail with this metadata disappearing, but newer versions do with an error `error: Switching: Pulling: Importing: Unencapsulating base: serialization error: invalid value: integer `-1`, expected u64` (I know that's related to a different repo, i put it here mainly for search engine indexing in case someone else hits it).",
+    "comments": [
+        {
+            "user": "GGh41th",
+            "body": "Hello @ver4a , i tried to understand why this was happening , and to avoid writing a huge comment , i will just provide the code snippets that matter , but i can provide a more detailed answer on how to get there.\nThe layers  are being copied using the copyLayers method in the single.go file in the image library , inside the copy package. (i refered to the single.go because there's only one image in the manifest index , otherwise we should consult the multiple.go instead). \n[single.go line 436 :](https://github.com/containers/image/blob/main/copy/single.go#L436)\n```\n// copyLayers copies layers from ic.src/ic.c.rawSource to dest, using and updating ic.manifestUpdates if necessary and ic.cannotModifyManifestReason == \"\".\nfunc (ic *imageCopier) copyLayers(ctx context.Context) ([]compressiontypes.Algorithm, error) {\n\tsrcInfos := ic.src.LayerInfos()\n\tupdatedSrcInfos, err := ic.src.LayerInfosForCopy(ctx)\n...\n...\n...\n```\nThe LayerInfos and the LayerInfosForCopy methods will return a slice of structs of type BlobInfo , which hold these attributes (each element of the slice represent an image layer):\n\n```\ntype BlobInfo struct {\n\tDigest      digest.Digest // \"\" if unknown.\n\tSize        int64         // -1 if unknown\n\tURLs        []string\n\tAnnotations map[string]string\n\tMediaType   string\n        Some other attributes ....\n```\nAfter adding some Printf's to the code and recompiling it , it found that the srcInfos variable contained the annotations , but the updatedSrcInfos didn't .\n\nSrcInfos:\n[srcInfos.txt](https://github.com/user-attachments/files/22059948/srcInfos.txt)\n\nUpdatedSrcInfos:\n\n[UpdatedSrcInfos.txt](https://github.com/user-attachments/files/22059953/UpdatedSrcInfos.txt)\n\n\nSo definetly something is going on in the LayersInfosForCopy , if we read it's implementation , which can be found in the storage/storage_src.go in the image repository.\n[storage_src.go line 284 :](https://github.com/containers/image/blob/main/storage/storage_src.go#L284)\nI'll let you discover the details of the implementation , but one part is definetly interesting for us .\n```\n\t\tblobInfo := types.BlobInfo{\n\t\t\tDigest:    blobDigest,\n\t\t\tSize:      size,\n\t\t\tMediaType: uncompressedLayerType,\n\t\t}\n\t\tphysicalBlobInfos = append(physicalBlobInfos, blobInfo)\n\t\tlayerID = layer.Parent\n\t}\n```\nThis part , which is located inside a for loop , will reconstruct the layers infos , starting from the top layer and then inverse them to get the correct order `\tslices.Reverse(physicalBlobInfos) `.\n\nBut as you can see , the annotations are omitted , this why they are absent in the UpdatedSrcInfos .\nNow , why does this happen with the containers-storage transport , meanwhile it doesn't occur when copying from a docker to docker transport directly , honestly not so sure since i didn't read that part from the source code (if you found why , i'd be more than happy to hear out).\nAlso why do we have this behaviour in the first place ? i don't know but i am sure the maintainers have valid reasons for that , let's hear from them."
+        },
+        {
+            "user": "mtrmac",
+            "body": "Thanks for your report!\n\n@GGh41th has correctly pointed at the relevant code — AFAICT this is overall a bug, the code intends to modify digests + MIME types, stripping annotations was not a goal."
+        },
+        {
+            "user": "mtrmac",
+            "body": "@ver4a https://github.com/containers/container-libs/pull/299 should fix this — could you test that, and confirm that it handles everything relevant to your use case, please?"
+        },
+        {
+            "user": "ver4a",
+            "body": "I finally figured out how to use your fork. Thank you, it resolves this specific issue with missing annotations.\n\nIt didn't fix my use case, so that's apparently caused by something else that happens during copying, but that's a different issue."
+        },
+        {
+            "user": "mtrmac",
+            "body": "Great, thanks for the confirmation. And I apologize I didn’t realize the repos are now in a bit of a flux with the switch to different module names, making the testing difficult."
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "bootc-dev",
+            "repository": "bootc",
+            "number": 1567
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "container-libs",
+            "number": 299
+        }
+    ]
+}

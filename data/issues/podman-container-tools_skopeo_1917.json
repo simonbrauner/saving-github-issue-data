@@ -1,0 +1,75 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "skopeo",
+    "number": 1917,
+    "type": "issue",
+    "title": "Building in OStree (from containers/image) support fails",
+    "state": "closed",
+    "labels": [
+        "locked - please file new issue/PR"
+    ],
+    "user": "joonas-fi",
+    "body": "## Problem\n\nBuild fails\n\n## Reproduction case\n\n```console\n$ docker run --rm -it golang:1.20.1\n$ apt update && apt install -y libgpgme-dev libassuan-dev libbtrfs-dev libdevmapper-dev pkg-config libostree-dev\n$ go install -tags containers_image_ostree github.com/containers/skopeo/cmd/skopeo@v1.11.1\n/go/pkg/mod/github.com/containers/image/v5@v5.24.1/ostree/ostree_dest.go:113:4: d.Compat undefined (type *ostreeImageDestination has no field or method Compat, but does have compat)\n/go/pkg/mod/github.com/containers/image/v5@v5.24.1/ostree/ostree_dest.go:114:9: cannot use d (variable of type *ostreeImageDestination) as private.ImageDestination value in return statement: *ostreeImageDestination does not implement private.ImageDestination (missing method PutBlob)\n```\n\n## Alternative steps tried\n\nI also tried a couple of older releases (v1.11.1 is latest), but those fail too.\n\nI also tried to install Skopeo from Alpine repo (also from Ubuntu repo), but those didn't have OSTree support enabled as a build flag.\n\n## Miscellaneous thoughts\n\nIt seems that OStree support has been in state of rot for a while? I suspect the cause is build flags system not carrying in these features, and hence they will not get tested.. Probably a root cause for things being behind flags is C-based dependencies (which in my experience usually bring in all sorts of hardship to builds)",
+    "comments": [
+        {
+            "user": "mtrmac",
+            "body": "Thanks for your report!\n\nThis is actually just Go bugs I introduced, but you’re right that not building things by default (and me working on a platform where OSTree is unavailable) certainly doesn’t help. There have been ongoing discussions about removing the transport because it has no known uses… and it being broken is certainly a new data point."
+        },
+        {
+            "user": "joonas-fi",
+            "body": "Thanks for responding so quickly!\n\nI have a thought/proposal: if I find the OSTree feature useful, I can take up maintaining that part of the codebase.\n\nI might have a use case at work, and on paper OSTree sounds like the perfect transport for moving container images around. I first would need to look into understanding how it all works to be able to determine if this subsystem helps with those use cases.\n\nDo you have pro-tips on the easiest way I could get my hands on a working build of Skopeo that has OSTree support? Older binaries somewhere, or a pointer to a version that still built this feature fine, but still recent enough that it has useful features?"
+        },
+        {
+            "user": "mtrmac",
+            "body": "> I have a thought/proposal: if I find the OSTree feature useful, I can take up maintaining that part of the codebase.\n\nThat would be great. I was just thinking that this failure suggests that we might just as well replace the `ostree` transport with a stub (without _formally_ breaking API compatibility, not that it makes that much of a difference), but having an interested comaintainer would definitely be better.\n\n---\n\n> Do you have pro-tips on the easiest way I could get my hands on a working build of Skopeo that has OSTree support? \n\nUntested, I think that requires c/image < 5.22.0, i.e. Skopeo ≤ 1.8.0 . Built locally, with the `containers_image_ostree` build tag.\n\n---\n\nAs for whether OSTree would be an appropriate solution for your needs, and another perspective on the long-term prospects, Cc: @giuseppe , who knows much more than me."
+        },
+        {
+            "user": "mtrmac",
+            "body": "https://github.com/containers/image/pull/1860 should fix the build failure."
+        },
+        {
+            "user": "giuseppe",
+            "body": "the ostree destination had a very specific use case with Atomic system containers, but this is not used anymore.  It is not a generic solution for storing container images.\n\nAre you looking for OSTree-like deduplication for the storage?"
+        },
+        {
+            "user": "joonas-fi",
+            "body": "@mtrmac thanks, I will try to find time soon to investigate!\n\n@giuseppe: I'm looking at deduplication at container image transport level (storage level is a nice bonus). At work we have a largish system composed of containers that we need to pull to end devices. Docker's layer chain caching is very inefficient and results in entire layers being downloaded for the only reason that very few files are actually modified. Ideally I'd replace `$ docker pull` with `$ ostree pull`'s and then be able to `$ docker run` the container images stored in various branches in OSTree repo."
+        },
+        {
+            "user": "mtrmac",
+            "body": "- I’m not sure `ostree pull` integrates with `podman run` quite that way; the OSTree backend uses a specific repo structure.\n- The ability to pull only changed files actually exists using the `zstd:chunked` compression format by Giuseppe, using ordinary registries. I’m not sure whether there’s an end-to-end tutorial for that."
+        },
+        {
+            "user": "joonas-fi",
+            "body": "> I’m not sure ostree pull integrates with podman run quite that way; the OSTree backend uses a specific repo structure.\n\nI understand that `$ podman` or `$ containerd` have different (compared to OSTree) repositories for container images.\n\nI've not explained myself well.\n\nWhat I'd like to do in the first stage:\n\n- We push container images to ordinary Docker registry\n- On deployment we'd have a central OSTree server. We'd `$ skopeo` sync all necessary Docker images to the OStree repo.\n- Deployment on end devices would:\n    * `$ ostree pull` all container-images-as-branches to their local OSTree repo, from our central OSTree repo\n    * Use `$ skopeo` to copy/checkout each OSTree branch (branch = container image name) back into the local containerd image store\n\nSo over the internet the end devices only have to do OSTree pulls. This already efficiently transfers deltas only (both at transport and at storage level).\n\nThe \"import OSTree branch into local container image store\" could be optimized even further. Conceptually we could do `$ ostree checkout` directly into containerd's image store (using hardlinks, which would use very little space) or even use something like FUSE to project a branch from OSTree as containerd-compatible image store without using any disk space at all.\n\nThe summary is that registries like DockerHub can serve as the source of truth, but their inefficient caching/transport/storage mechanisms can be mitigated by converting to OStree and working more closely with OStree downstream.\n\nI have some earlier thoughts here: https://twitter.com/joonas_fi/status/1596915228385898497"
+        },
+        {
+            "user": "joonas-fi",
+            "body": "> The ability to pull only changed files actually exists using the zstd:chunked compression format by Giuseppe, using ordinary registries. I’m not sure whether there’s an end-to-end tutorial for that.\n\nThat's new information to me, thanks for sharing! That however seems that is not well-supported by the ecosystem yet (we use Docker currently) and also using that seems to require all upstreams to push the container images in this format that better supports deduplication. (per what I understand from https://github.com/containers/podman/discussions/15126#discussioncomment-3301010 )\n\nMy long-term hope essentially would be to have transparent image proxy to accept all upstream images as they are today, but one which \"upgrades\" images to OStree for more modern transport and storage because I think the layered (= groups of files) approach of current container ecosystem is inferior approach compared to OSTree."
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "mtrmac",
+            "body": "I think we will update c/image in Skopeo soonish, for #1950 ."
+        },
+        {
+            "user": "joonas-fi",
+            "body": "Thank you for help!\n\nI was able to:\n- copy from remote Docker registry to OSTree\n- copy from local OSTree to local Docker daemon\n  * I was able to execute the container image (Redis)\n\nThis is very exciting, since I believe OSTree to potentially be a better/more efficient transport than what the Docker registry ecosystem **currently** offers.\n\nI will continue my research and I will probably get back \n\nFor anybody interested, here's my current research as `Dockerfile` - the commands to obtain OSTree-enabled Skopeo and some useful commands to go with it:\n\n```dockerfile\nFROM golang:1.20.1\n\nRUN apt update && apt install -y libgpgme-dev libassuan-dev libbtrfs-dev libdevmapper-dev pkg-config libostree-dev\nostree\n\nRUN go install -tags containers_image_ostree github.com/containers/skopeo/cmd/skopeo@d08bf213673fa4355277c49dd3620c96fb7ff79f\n\n# useful commands\n# ---------------\n#\n# configure containers policy:\n#  $ curl -o /etc/containers/policy.json 'https://raw.githubusercontent.com/containers/skopeo/main/default-policy.json'\n#\n# init OSTree repo:\n#  $ mkdir /repo && ostree init --repo=/testrepo\n#\n# copy from remote Docker registry to OSTree:\n#   $ skopeo copy docker://redis:latest ostree:redis:latest@/testrepo\n#\n# copy from local OSTree to local Docker daemon:\n#   $ skopeo copy ostree:redis:latest@/testrepo docker-daemon:redistest:latest\n```"
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "containers",
+            "repository": "image",
+            "number": 1860
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "skopeo",
+            "number": 1959
+        }
+    ]
+}

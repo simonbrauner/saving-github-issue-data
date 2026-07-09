@@ -1,0 +1,38 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "skopeo",
+    "number": 898,
+    "type": "issue",
+    "title": "sync: AWS ECR => private registry incorrect namespace",
+    "state": "closed",
+    "labels": [
+        "locked - please file new issue/PR"
+    ],
+    "user": "tiredpixel",
+    "body": "Firstly, please allow me to express my gratitude for such an awesome tool. We're slowly moving from traditional Docker service to Podman serviceless, whilst also migrating images from AWS ECR to a new private registry we've set up using `docker.io/library/registry`, and Skopeo, in particular the `sync` command from Skopeo 0.1.41 onwards, has been extremely helpful.\n\nWe've run into a small issue, however, which I've worked around, but I'm afraid haven't attempted to write a patch for: AWS ECR doesn't use namespaces, having a repository format like `000000000000.dkr.ecr.eu-west-1.amazonaws.com/tmp-repo`. When transferring using `sync` to our private registry, that repo name gets doubled as a namespace, with a format like: `example.com/tmp-repo/tmp-repo`. This was present on Skopeo 0.1.41 (CentOS 8 RPM) and Skopeo 0.2.0-dev commit: 2415f3fa4d2e7a9fb8a48b0ee05675e92793ed96 (compiled from source using container). Experimenting with `--scoped` resulted in a format like: `example.com/000000000000.dkr.ecr.eu-west-1.amazonaws.com/tmp-repo/tmp-repo` (or similar; this example is from memory).\n\nThus, it appears that when syncing from a registry which doesn't have namespaces, it gets incorrectly namespaced by repository. Adding a `base` namespace to the destination applies a namespace, but keeps the duplication, resulting in a format like `example.com/base/tmp-repo/tmp-repo`, instead of `example.com/base/tmp-repo`.\n\nSince this is a one-time migration, I experimented with simply changing the code to remove the path detection, and this worked perfectly:\n\n```\ndiff --git a/cmd/skopeo/sync.go b/cmd/skopeo/sync.go\nindex 93f6a362..3decb243 100644\n--- a/cmd/skopeo/sync.go\n+++ b/cmd/skopeo/sync.go\n@@ -523,7 +523,7 @@ func (opts *syncOptions) run(args []string, stdout io.Writer) error {\n                        }\n \n                        if !opts.scoped {\n-                               destSuffix = path.Base(destSuffix)\n+                               destSuffix = \"\"\n                        }\n \n                        destRef, err := destinationReference(path.Join(destination, destSuffix), opts.destination)\n```\n\nThis obviously wouldn't be suitable as-is for a patch, however, and I haven't investigated further.",
+    "comments": [
+        {
+            "user": "mtrmac",
+            "body": "Could you clarify what is the _precise, full_ name of the intended source and destination repositories, and what’s the command you used, please?"
+        },
+        {
+            "user": "tiredpixel",
+            "body": "Sure. The full names are:\n\nsource:\n```\n000000000000.dkr.ecr.eu-west-1.amazonaws.com/tmp-repo\n```\n(using TLS)\n\ndestination:\n```\nexample.com/tmp-repo\n```\n(using TLS)\n\ncommand:\n```\nskopeo sync --src docker --dest docker 000000000000.dkr.ecr.eu-west-1.amazonaws.com/tmp-repo example.com/tmp-repo\n```\n\nThat, said, now I'm not sure the hack above worked anyway, since it appears to have copied every source tag to a `latest` destination tag, which isn't what I intended."
+        },
+        {
+            "user": "tiredpixel",
+            "body": "Oh! It is my fault entirely. :)\n\nI went back and added more debugging:\n\n```\ndiff --git a/cmd/skopeo/sync.go b/cmd/skopeo/sync.go\nindex 93f6a362..26b30550 100644\n--- a/cmd/skopeo/sync.go\n+++ b/cmd/skopeo/sync.go\n@@ -509,24 +509,33 @@ func (opts *syncOptions) run(args []string, stdout io.Writer) error {\n                options.SourceCtx = srcRepo.Context\n                for counter, ref := range srcRepo.TaggedImages {\n                        var destSuffix string\n+                       fmt.Printf(\"D0: %s\\n\", destSuffix)\n                        switch ref.Transport() {\n                        case docker.Transport:\n                                // docker -> dir or docker -> docker\n                                destSuffix = ref.DockerReference().String()\n+                               fmt.Printf(\"D1: %s\\n\", destSuffix)\n                        case directory.Transport:\n                                // dir -> docker (we don't allow `dir` -> `dir` sync operations)\n                                destSuffix = strings.TrimPrefix(ref.StringWithinTransport(), srcRepo.DirBasePath)\n+                               fmt.Printf(\"D2: %s\\n\", destSuffix)\n                                if destSuffix == \"\" {\n                                        // if source is a full path to an image, have destPath scoped to repo:tag\n                                        destSuffix = path.Base(srcRepo.DirBasePath)\n+                                       fmt.Printf(\"D3: %s\\n\", destSuffix)\n                                }\n                        }\n \n                        if !opts.scoped {\n                                destSuffix = path.Base(destSuffix)\n+                               fmt.Printf(\"D4: %s\\n\", destSuffix)\n                        }\n \n                        destRef, err := destinationReference(path.Join(destination, destSuffix), opts.destination)\n+                       fmt.Printf(\"D5: %s\\n\", destination)\n+                       fmt.Printf(\"D6: %s\\n\", destSuffix)\n+                       fmt.Printf(\"D7: %s\\n\", opts.destination)\n+                       fmt.Printf(\"D8: %s\\n\", destRef)\n                        if err != nil {\n                                return err\n                        }\n```\n\nand running yielded:\n\n```\nD0: \nD1: 000000000000.dkr.ecr.eu-west-1.amazonaws.com/tmp-repo:1.1.1-6-g4ff6356\nD4: tmp-repo:1.1.1-6-g4ff6356\nD5: example.com\nD6: tmp-repo:1.1.1-6-g4ff6356\nD7: docker\nD8: {{{example.com tmp-repo} 1.1.1-6-g4ff6356}}\nINFO[0002] Copying image tag 4/143                       from=\"docker://000000000000.dkr.ecr.eu-west-1.amazonaws.com/tmp-repo:1.1.1-6-g4ff6356\" to=\"docker://example.com/tmp-repo\n:1.1.1-6-g4ff6356\"\n```\n\nthat is, `destination` already had that appended. This led me to reread that section of the manual more closely, and found:\n\n> source is a repository hosted on a container registry (e.g.: registry.example.com/busybox).\n\n> destination is a container registry (e.g.: my-registry.local.lan).\n\nI totally missed that on previous look-throughs. Changing the destination to not include the intended destination repository name appears to work fine.\n\nMy apologies for the noise. We can close this. :)"
+        },
+        {
+            "user": "mtrmac",
+            "body": "Thanks for the update. In retrospect, it is somewhat irregular (and it makes it difficult to rename a repository while syncing) — but we’ll have to keep this behavior in order not to break existing users."
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "skopeo",
+            "number": 1072
+        }
+    ]
+}

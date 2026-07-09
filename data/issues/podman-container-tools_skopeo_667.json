@@ -1,0 +1,68 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "skopeo",
+    "number": 667,
+    "type": "issue",
+    "title": "Unable to delete from local docker registry",
+    "state": "closed",
+    "labels": [
+        "locked - please file new issue/PR"
+    ],
+    "user": "dofinn",
+    "body": "I have reviewed similar tickets in this repo but unfortunately have not been able to resolve my issue. It may be PBKC but i would like to confirm... :)\n\nI am currently unable to delete a repo from my local registry. \n\n**inspect**\n\n```\n$ skopeo inspect docker://registry.local:5000/el7-base       \n{\n    \"Name\": \"registry.local:5000/el7-base\",\n    \"Digest\": \"sha256:2c9af36296b684757875b9a8e564861d0e4780caa4385ee64ab5a503a1e68c9f\",\n    \"RepoTags\": [\n        \"latest\"\n    ],\n    \"Created\": \"2019-06-06T02:04:12.567754296Z\",\n    \"DockerVersion\": \"\",\n    \"Labels\": {\n        \"name\": \"el7-base\"\n    },\n    \"Architecture\": \"amd64\",\n    \"Os\": \"linux\",\n    \"Layers\": [\n        \"sha256:677db987b43893305542e8385b60c5aae2a7f0a0ee86fd09f44e8d2082c1bce4\"\n    ]\n}\n```\n\n**delete**\n\n```\n$ skopeo --debug delete --tls-verify=false docker://registry.local:5000/el7-base       \nDEBU[0000] Using registries.d directory /etc/containers/registries.d for sigstore configuration \nDEBU[0000]  Using \"default-docker\" configuration        \nDEBU[0000]   Using file:///var/lib/atomic/sigstore      \nDEBU[0000] Looking for TLS certificates and private keys in /etc/docker/certs.d/registry.local:5000 \nDEBU[0000] GET https://registry.local:5000/v2/          \nDEBU[0000] Ping https://registry.local:5000/v2/ err Get https://registry.local:5000/v2/: http: server gave HTTP response to HTTPS client (&url.Error{Op:\"Get\", URL:\"https://registry.local:5000/v2/\", Err:(*errors.errorString)(0xc000450890)}) \nDEBU[0000] GET http://registry.local:5000/v2/           \nDEBU[0000] Ping http://registry.local:5000/v2/ status 200 \nDEBU[0000] GET http://registry.local:5000/v2/el7-base/manifests/latest \nFATA[0000] Unable to delete registry.local:5000/el7-base:latest. Image may not exist or is not stored with a v2 Schema in a v2 registry\n```\n\n**skopeo info**\n\n```\n$ skopeo --version\nskopeo version 0.1.36-dev\n```\n\n* Fedora 30, installed with `dnf`",
+    "comments": [
+        {
+            "user": "rhatdan",
+            "body": "The registry needs to be configured to support remote delete.\n@jwhonce Do you remember how to configure this?\n\nThe man page is supposed to say>\n\nAdditionally, the registry must allow deletions by setting `REGISTRY_STORAGE_DELETE_ENABLED=true` for the registry daemon.\n"
+        },
+        {
+            "user": "dofinn",
+            "body": "@rhatdan Thanks for the response. This is most likely the issue as my registry was initiated with the default: `podman run -d -p 5000:5000 --restart=always --name registry registry:2` as per: https://docs.docker.com/registry/\n\n"
+        },
+        {
+            "user": "mtrmac",
+            "body": "Thanks for your report.\n\nYes, the registry must be configured to allow deletion, but…\n> ```\n> $ skopeo inspect docker://registry.local:5000/el7-base       \n> ```\n> <results>\n> \n> ```\n> $ skopeo --debug delete --tls-verify=false docker://registry.local:5000/el7-base       \n> DEBU[0000] GET http://registry.local:5000/v2/el7-base/manifests/latest \n> <snip>\n> FATA[0000] Unable to delete registry.local:5000/el7-base:latest. Image may not exist or is not stored with a v2 Schema in a v2 registry\n> ```\nThis is actually reported when the image is not found at all; the code did not even try deleting it. Yet, `skopeo inspect` above did find it. Are those the actual outputs, or have they been edited?\n\n(And just guessing - if they have not been edited, is it possible that the image uses schema1? I.e. what is the output of `skopeo inspect --raw docker://registry.local:5000/el7-base`?"
+        },
+        {
+            "user": "dofinn",
+            "body": "Thanks for the response @mtrmac . \n\n> Are those the actual outputs, or have they been edited?\n\nYes, these are the actual outputs. \n![Screenshot from 2019-06-08 10-51-26](https://user-images.githubusercontent.com/21171128/59139991-682af680-89db-11e9-9637-cfb0e416910f.png)\n\n>what is the output of skopeo inspect --raw docker://registry.local:5000/el7-base?\n\n```\n$ skopeo inspect --raw docker://registry.local:5000/el7-base | jq .\n{\n  \"schemaVersion\": 2,\n  \"config\": {\n    \"mediaType\": \"application/vnd.oci.image.config.v1+json\",\n    \"digest\": \"sha256:b60e0c8ed5c1967c0d20c4796cd133f916d756652fcdb3df475fd25600ddb067\",\n    \"size\": 412\n  },\n  \"layers\": [\n    {\n      \"mediaType\": \"application/vnd.oci.image.layer.v1.tar\",\n      \"digest\": \"sha256:677db987b43893305542e8385b60c5aae2a7f0a0ee86fd09f44e8d2082c1bce4\",\n      \"size\": 24647582\n    }\n  ]\n}\n```\n\nOn further investigation, it appears this may be an issue in how either myself or buildah is creating the container manifests. Please see below for breakdown. \n\n1. starting my registry with `REGISTRY_STORAGE_DELETE_ENABLED=true` does indeed enable remote deletion. However, this appears to be only successful on images im pulling from docker.io. I am still unable to delete images that I am creating `(buildah from scratch)`\n\n```\n$ podman run golang\nTrying to pull docker.io/library/golang...Getting image source signatures\nCopying blob aa24759e848f done\nCopying blob c5e155d5a1d1 done\nCopying blob 3b7ca19181b2 done\nCopying blob 4250b3117dca done\nCopying blob 221d80d00ae9 done\nCopying blob 927e9eaeed19 done\nCopying blob 66293f4dacbd done\nCopying config 7ced090ee8 done\nWriting manifest to image destination\nStoring signatures\n$ podman tag docker.io/library/golang registry.local:5000/golang\n$ podman push registry.local:5000/golang\nGetting image source signatures\nCopying blob 2c719774c1e1 done\nCopying blob ec62f19bb3aa done\nCopying blob 4879ce009c87 done\nCopying blob 4230ff7f2288 done\nCopying blob f94641f1fe1f done\nCopying blob 16f63bc6cca8 done\nCopying blob d3c12cc41aa1 done\nCopying config 7ced090ee8 done\nWriting manifest to image destination\nStoring signatures\n$ ./skopeo --debug delete --tls-verify=false docker://registry.local:5000/golang\nDEBU[0000] Using registries.d directory /etc/containers/registries.d for sigstore configuration \nDEBU[0000]  Using \"default-docker\" configuration        \nDEBU[0000]   Using file:///var/lib/atomic/sigstore      \nDEBU[0000] Looking for TLS certificates and private keys in /etc/docker/certs.d/registry.local:5000 \nDEBU[0000] GET https://registry.local:5000/v2/          \nDEBU[0000] Ping https://registry.local:5000/v2/ err Get https://registry.local:5000/v2/: http: server gave HTTP response to HTTPS client (&url.Error{Op:\"Get\", URL:\"https://registry.local:5000/v2/\", Err:(*errors.errorString)(0xc00050eb60)}) \nDEBU[0000] GET http://registry.local:5000/v2/           \nDEBU[0000] Ping http://registry.local:5000/v2/ status 200 \nDEBU[0000] GET http://registry.local:5000/v2/golang/manifests/latest \nDEBU[0000] DELETE http://registry.local:5000/v2/golang/manifests/sha256:b0171f45b8cc75805ab589094c8b07084f73bfae784c316868983a494d294c5f \nDEBU[0000] Deleting /var/lib/atomic/sigstore/golang@sha256=b0171f45b8cc75805ab589094c8b07084f73bfae784c316868983a494d294c5f/signature-1\n```\n\nWhere as my builds...\n\n```\n$ podman push registry.local:5000/el7\nGetting image source signatures\nCopying blob 5b9daeb580c1 done\nCopying config c8699e09c0 done\nWriting manifest to image destination\nStoring signatures\n$ ./skopeo --debug delete --tls-verify=false docker://registry.local:5000/el7   \nDEBU[0000] Using registries.d directory /etc/containers/registries.d for sigstore configuration \nDEBU[0000]  Using \"default-docker\" configuration        \nDEBU[0000]   Using file:///var/lib/atomic/sigstore      \nDEBU[0000] Looking for TLS certificates and private keys in /etc/docker/certs.d/registry.local:5000 \nDEBU[0000] GET https://registry.local:5000/v2/          \nDEBU[0000] Ping https://registry.local:5000/v2/ err Get https://registry.local:5000/v2/: http: server gave HTTP response to HTTPS client (&url.Error{Op:\"Get\", URL:\"https://registry.local:5000/v2/\", Err:(*errors.errorString)(0xc00044f490)}) \nDEBU[0000] GET http://registry.local:5000/v2/           \nDEBU[0000] Ping http://registry.local:5000/v2/ status 200 \nDEBU[0000] GET http://registry.local:5000/v2/el7/manifests/latest \nFATA[0000] Unable to delete registry.local:5000/el7:latest. Image may not exist or is not stored with a v2 Schema in a v2 registry\n Status: 404\nmanifestBody: {\"errors\":[{\"code\":\"MANIFEST_UNKNOWN\",\"message\":\"OCI manifest found, but accept header does not support OCI manifests\"}]}\n```\n\nPlease note, I added some extra debugging in that output:\n\n```\nreturn errors.Errorf(\"Unable to delete %v. Image may not exist or is not stored with a v2 Schema in a v2 registry\\n Status: %v\\nmanifestBody: %s\", ref.ref, get.StatusCode, manifestBody)\n```\n\nIn comparing the inspect outputs of the golang and my el7 images, it appears that I may be missing a header...\n\n```\n$ ./skopeo inspect --raw --tls-verify=false docker://registry.local:5000/el7 | jq .\n{\n  \"schemaVersion\": 2,\n  \"config\": {\n    \"mediaType\": \"application/vnd.oci.image.config.v1+json\",\n    \"digest\": \"sha256:c8699e09c0706d8576f509f2fe33d6ac7f3127338ed7bf66af85382470f61580\",\n    \"size\": 393\n  },\n```\n\n```\n$ ./skopeo  inspect --raw --tls-verify=false docker://registry.local:5000/golang | jq .\n{\n  \"schemaVersion\": 2,\n  \"mediaType\": \"application/vnd.docker.distribution.manifest.v2+json\",\n  \"config\": {\n    \"mediaType\": \"application/vnd.docker.container.image.v1+json\",\n    \"size\": 5464,\n    \"digest\": \"sha256:7ced090ee82ee77beabd76ad1ba3b167acd8609b0b10c4ef46cee3ddf6e6fa5f\"\n  },\n```\n\nNotice the lack of ` \"mediaType\": \"application/vnd.docker.distribution.manifest.v2+json\",` in my el7 image?\n\n```\n/ # registry -v\nregistry github.com/docker/distribution v2.7.1\n```\n\nThis does not comply with the current code block of skopeo on:\n\n```\n\t// When retrieving the digest from a registry >= 2.3 use the following header:\n\t//   \"Accept\": \"application/vnd.docker.distribution.manifest.v2+json\"\n\theaders := make(map[string][]string)\n\theaders[\"Accept\"] = []string{manifest.DockerV2Schema2MediaType}\n```\n\nI presume the manifest is written by `buildah` when building?"
+        },
+        {
+            "user": "mtrmac",
+            "body": "Ah, thanks; this is an OCI image, and the code is incorrectly asking for schema2 images only. That should be easy to fix.\n\nIn the meantime, configuring buildah/podman to use the “docker” schema2 format instead of the OCI one may help — but of course only for newly pushed images."
+        },
+        {
+            "user": "dofinn",
+            "body": "Thanks for the response @mtrmac , would you like me to close this issue off? or will we close it once the issue is resolved?"
+        },
+        {
+            "user": "mtrmac",
+            "body": "No, please keep this open to track that the fix needs to be implemented."
+        },
+        {
+            "user": "vrothberg",
+            "body": "Fix for c/image: https://github.com/containers/image/pull/646\nVendored into skopeo: https://github.com/containers/skopeo/pull/680"
+        },
+        {
+            "user": "vrothberg",
+            "body": "Reopening as https://github.com/containers/skopeo/pull/680 must get in for Skopeo."
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "skopeo",
+            "number": 680
+        },
+        {
+            "organization": "containers",
+            "repository": "image",
+            "number": 646
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "skopeo",
+            "number": 694
+        }
+    ]
+}

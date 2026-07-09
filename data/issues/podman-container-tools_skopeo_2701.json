@@ -1,0 +1,113 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "skopeo",
+    "number": 2701,
+    "type": "issue",
+    "title": "`make test-integration` failed with `exec: \"registry\": executable file not found in $PATH`",
+    "state": "open",
+    "labels": [
+        "stale-issue"
+    ],
+    "user": "bitoku",
+    "body": "When I tried to run test-integration, it failed with `exec: \"registry\": executable file not found in $PATH`.\n\nThe command uses `quay.io/libpod/skopeo_cidev:c20250721t181111z-f42f41d13` image, and it doesn't have `registry` binary in $PATH.\n\n```\n❯ podman run --rm -it quay.io/libpod/skopeo_cidev:c20250721t181111z-f42f41d13 /bin/sh\nsh-5.2# echo $PATH\n/usr/local/bin:/usr/bin\nsh-5.2# ls -l /usr/local/bin | grep reg\n-rwxr-xr-x 1 root root  49795775 Jul 21 18:36 dockerregistry\n-rwxr-xr-x 1 root root  17683642 Jul 21 18:31 registry-v2-schema1\nsh-5.2# ls -l /usr/bin | grep reg\nsh-5.2# \n```\nAfter I installed `docker-distribution` in the image, the test worked.\n\nThese changes could be the cause, but not sure. Did I miss something?\nhttps://github.com/containers/skopeo/pull/2661\nhttps://github.com/containers/automation_images/pull/410",
+    "comments": [
+        {
+            "user": "mtrmac",
+            "body": "Thanks for your report!\n\nI’m afraid I don’t think anyone is manually running `make test-integration`; we mostly rely on the pull request automation.\n\nThat said, I would expect this to work, and I can’t see any obvious way how this is failing (it seems to be using an older CI image). @lsm5 can you see what is going wrong here?"
+        },
+        {
+            "user": "lsm5",
+            "body": "ugh yup. I made changes to make `test-integration-local` work, but that evidently broke test-integration this way. I would ideally like to get rid of `test-integration` or have it be aliased to just `test-integration-local` and not have to depend on skopeo_cidev image anymore.\n\n@bitoku would you be ok with just running `make test-integration-local` instead? \n\n@mtrmac wdyt about having integration tests depend on SKOPEO_BINARY variable to set binary path? Currently, it uses skopeo from default PATH which I guess could be an inconvenience in local environments."
+        },
+        {
+            "user": "mtrmac",
+            "body": "My one somewhat-strong opinion is that the default `Makefile` should be safe; users running `make test-integration` should not find their local machine broken.\n\nI don’t feel strongly about removing `test-integration` entirely. _In principle_ it would be nice not to be reliant on external services, but, in practice, we aren’t using it and we haven‘t been good at maintaining it, so saving everyone the trouble might be for the best.\n\n> @mtrmac wdyt about having integration tests depend on SKOPEO_BINARY variable to set binary path?  Currently, it uses skopeo from default PATH which I guess could be an inconvenience in local environments.\n\nGiven the contents of the Skopeo CI image (a very old v2s1 registry, and an ages-old version of OpenShift), I don’t think it makes much sense to have these tools installed on a developers’ primary machine, and to run these tests outside of a container. [We _might_ discuss reworking or dropping the tests, but the signing enforcement tests are currently implemented relying on the OpenShift registry; changing that is entirely possible, and it would be more representative, but it would be a bit of work.]\n\nAnd if they are running in a container or a specialized VM, changing or not changing `/usr/bin/skopeo` makes ~no difference to anything users truly care about. So I don’t feel strongly about this. (If anything, within that container/VM, overwriting `/usr/bin/skopeo` with the version we want to test, as `test-integration-local` is currently doing, should be _safer_ because it rules out confusion about which version is being tested. But, as you are proposing, _requiring_ `SKOPEO_BINARY` to be set, and not making any search, would also make it clear which binary is being tested, so there’s very little difference.)"
+        },
+        {
+            "user": "lsm5",
+            "body": "I wonder if we even need the older v2s1 registry binary.\n\nIIUC, the new registry should continue to accept both old and new formats per https://distribution.github.io/distribution/spec/manifest-v2-2/#backward-compatibility .  Correct me if I'm wrong.\n\nAlso, on my own local env, if I only have `docker-distribution` installed and no older format binary, my `integration-test-local` *still passes*.\n\nSo, if the above is correct and expected, then I think we can get rid of the older v2s1 registry binary from everywhere. That means no older stuff on either the primary machine or even on the skopeo_cidev container. And then:\n1. Install docker-distribution in skopeo_cidev (the previous change linked in description was only effective in the fedora CI images)\nAND/OR\n2. Have test-integration-local account for SKOPEO_BINARY (I much rather prefer this and I already have WIP)."
+        },
+        {
+            "user": "mtrmac",
+            "body": "> I wonder if we even need the older v2s1 registry binary.\n> \n> IIUC, the new registry should continue to accept both old and new formats per https://distribution.github.io/distribution/spec/manifest-v2-2/#backward-compatibility . Correct me if I'm wrong.\n\n- We use the v2s1 binary to exercise the code that automatically converts conversion from v2s2 to v2s1 if v2s2 is not supported. (Arguably that could be a unit test … or, arguably, it’s no longer a relevant scenario.)\n- (`docker/distribution` does not accept schema1 by default, it requires an opt-in)\n\n> Also, on my own local env, if I only have `docker-distribution` installed and no older format binary, my `integration-test-local` _still passes_.\n\nI’m surprised very much; I’d expect `s.s1Registry = setupRegistryV2At(t, v2s1DockerRegistryURL, false, true)` to fail. Well, let’s see: https://github.com/containers/skopeo/pull/2704 .\n\n> So, if the above is correct and expected, then I think we can get rid of the older v2s1 registry binary from everywhere. That means no older stuff on either the primary machine or even on the skopeo_cidev container.\n\nThere’s still the OpenShift all-in-one serving a registry."
+        },
+        {
+            "user": "mtrmac",
+            "body": "> > Also, on my own local env, if I only have `docker-distribution` installed and no older format binary, my `integration-test-local` _still passes_.\n> \n> I’m surprised very much; I’d expect `s.s1Registry = setupRegistryV2At(t, v2s1DockerRegistryURL, false, true)` to fail. Well, let’s see: [#2704](https://github.com/containers/skopeo/pull/2704) .\n\n```\n=== REGISTRY: Executing /usr/local/bin/registry-v2-schema1 /tmp/TestCopy2110308921/003/config.yaml for URL localhost:5556\n=== REGISTRY: Responding at URL localhost:5556\n```"
+        },
+        {
+            "user": "lsm5",
+            "body": "> > > Also, on my own local env, if I only have `docker-distribution` installed and no older format binary, my `integration-test-local` _still passes_.\n> > \n> > \n> > I’m surprised very much; I’d expect `s.s1Registry = setupRegistryV2At(t, v2s1DockerRegistryURL, false, true)` to fail. Well, let’s see: [#2704](https://github.com/containers/skopeo/pull/2704) .\n> \n> ```\n> === REGISTRY: Executing /usr/local/bin/registry-v2-schema1 /tmp/TestCopy2110308921/003/config.yaml for URL localhost:5556\n> === REGISTRY: Responding at URL localhost:5556\n> ```\n\nSo, am I reading it right that it passed when it was expected to fail?\n\nBy openshift all-in-one I guess you mean `integration/openshift_test.go`? Do we need any custom handling for it? FWIW, I didn't see any failures on local env for that either."
+        },
+        {
+            "user": "mtrmac",
+            "body": "No, I’m saying that, as it is running in CI, it does find and use the `registry-v2-schema1` binary. And because it is doing a connection check, I think it would be unlikely to could pass with the binary missing — a lot of things would have to be broken at once (we would have to miss exec failing, and the connection check would have to be broken).\n\n> By openshift all-in-one I guess you mean integration/openshift_test.go? Do we need any custom handling for it? \n\nWe need that OpenShift binary; it’s built for our CI container images, but otherwise _extremely unlikely_ to be present on anyone’s workstation for an `integration-test-local` build to succeed.\n\n"
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "mtrmac",
+            "body": "All right, I have a general idea of what has happened.\n\nIn CI, the tests run not on `skopeo_cidev`, but on a “Fedora” or “Rawhide” image: https://github.com/containers/skopeo/blob/01f5061a828536dfe979fd77323083c9f9bb8de3/.cirrus.yml#L204 and they only copy some binaries out of `skopeo_cidev`: https://github.com/containers/skopeo/blob/01f5061a828536dfe979fd77323083c9f9bb8de3/contrib/cirrus/runner.sh#L81 . (I don’t know, and I didn’t research, _why_ it is structured that way.) So, in a sense, the CI test environment is somewhat of a union of the two images.\n\nThen https://github.com/containers/automation_images/pull/410 removed the registry from `skopeo_cidev`, and added it into `fedora`. In particular, `/usr/bin/registry` exists in `quay.io/libpod/fedora_podman:c20250721t181111z-f42f41d13`. As far as the CI tests go, that’s fine, a `registry` binary exists in `$PATH` and everything works.\n\nOTOH, `test-integration` runs entirely within `skopeo_cidev`, so the binaries added/moved to `fedora_podman` are not available there.\n\n---\n\nSo that’s the “how this broke”. Now, what to do about it?\n\nOne avenue might be to research why CI is not using `skopeo_cidev` directly, and re-design CI and `make test-integration` to make the two more similar (using either of the two as a template, or maybe an entirely new design).\n\nAnother is to just shrug and delete `make test-integration`, giving up on local testing entirely. I don’t _like_ it but I like a known-broken test target even less.\n\nThird, if it is _just_ this path that is breaking tests, it should be possible to add `docker-distribution` to https://github.com/lsm5/automation_images/blob/main/skopeo_cidev/packages.txt , not do any work beyond that to consolidate the two test environments, and defer the full cleanup for an indeterminate future."
+        },
+        {
+            "user": "lsm5",
+            "body": "See this [Testing Farm link](https://artifacts.dev.testing-farm.io/42292d7f-3fc0-4f8f-9a83-1c2ed1651aae) against the [integration test job](https://github.com/containers/skopeo/pull/2640/checks?check_run_id=52839860467) added on #2640  . That runs `make test-integration-local` and passes *only* with `docker-distribution`. \n\nAlso verified this with a manual run on a vanilla [testing-farm instance](https://docs.testing-farm.io/Testing%20Farm/0.1/onboarding.html) (same environment used by the Packit TMT jobs). Here's what I ran on the environment:\n\n```\ndnf -y install make git docker-distribution\ngit clone https://github.com/containers/skopeo\n\ncd skopeo\ndnf -y builddep rpm/skopeo.spec\n\nmake test-integration-local\n```\n\nI didn't do any additional setup to install a separate v2s1 binary either in manual run or in TMT job. The only binary provided by `docker-distribution` is `/usr/bin/registry`. So, I will maintain that this one binary is all we need for integration and system tests.\n\nLet me know if you see anything wrong in any of ^.\n\nWith these in mind, I'd say we:\n1.  Get rid of skopeo_cidev altogether (less maintenance IMHO), and have `test-system and test-integration` as aliases to `test-system-local and test-integration-local` respectively. The integration test TMT job doesn't depend on the packit rpm job, so it'll run faster than the system test TMT job.\n2. We can also remove the `hack/warn-destructive-tests.sh`. We don't need the skopeo binary installed to $PATH to run integration tests anymore, so it shouldn't interfere with what's installed on the system."
+        },
+        {
+            "user": "mtrmac",
+            "body": "> See this [Testing Farm link](https://artifacts.dev.testing-farm.io/42292d7f-3fc0-4f8f-9a83-1c2ed1651aae) against the [integration test job](https://github.com/containers/skopeo/pull/2640/checks?check_run_id=52839860467) added on [#2640](https://github.com/containers/skopeo/pull/2640) . That runs `make test-integration-local` and passes _only_ with `docker-distribution`.\n\nIt passes in 8 seconds, which is implausibly fast…\n\n… Reproduced on an ~empty Fedora 43:\n```console\n# dnf install $(echo 'btrfs-progs-devel\n    - docker-distribution\n    - go-md2man\n    - golang\n    - gpgme-devel\n    - git-core\n    - make\n    - skopeo-tests' | sed -e 's/- //g') # package list from https://github.com/lsm5/skopeo/blob/bf123283839d5bf2df7e97ce8294f04578c8843f/tmt/main.fmf\n…\n# git clone --depth 1 https://github.com/containers/skopeo\n…\n# cd skopeo/\n# make test-integration-local \ngo build \"-buildmode=pie\" -ldflags '-X go.podman.io/image/v5/signature/internal/sequoia.sequoiaLibraryDir= ' -gcflags \"\" -tags \"  \" -o bin/skopeo ./cmd/skopeo\nTesting with ./bin/skopeo ...\nhack/warn-destructive-tests.sh\n***************************************************************\nWARNING: Executing tests directly on the local development\n         host is highly discouraged.  Many important items\n         will be skipped.  For manual execution, please utilize\n         the Makefile targets WITHOUT the '-local' suffix.\n***************************************************************\ncd ./integration && SKOPEO_BINARY=\"/root/skopeo/bin/skopeo\" go test -ldflags '-X go.podman.io/image/v5/signature/internal/sequoia.sequoiaLibraryDir= ' -timeout=15m -tags \"  \"\nPASS\nok  \tgithub.com/containers/skopeo/integration\t11.009s\n# SKOPEO_CONTAINER_TESTS=1 make test-integration-local \ngo build \"-buildmode=pie\" -ldflags '-X go.podman.io/image/v5/signature/internal/sequoia.sequoiaLibraryDir= ' -gcflags \"\" -tags \"  \" -o bin/skopeo ./cmd/skopeo\nTesting with ./bin/skopeo ...\nhack/warn-destructive-tests.sh\ncd ./integration && SKOPEO_BINARY=\"/root/skopeo/bin/skopeo\" go test -ldflags '-X go.podman.io/image/v5/signature/internal/sequoia.sequoiaLibraryDir= ' -timeout=15m -tags \"  \"\n--- FAIL: TestCopy (0.00s)\n    openshift_test.go:70: \n        \tError Trace:\t/root/skopeo/integration/openshift_test.go:70\n        \t            \t\t\t\t/root/skopeo/integration/openshift_test.go:39\n        \t            \t\t\t\t/root/skopeo/integration/copy_test.go:60\n        \t            \t\t\t\t/root/skopeo/vendor/github.com/stretchr/testify/suite/suite.go:211\n        \t            \t\t\t\t/root/skopeo/integration/copy_test.go:40\n        \t            \t\t\t\t/usr/lib/golang/src/runtime/asm_amd64.s:1693\n        \tError:      \tReceived unexpected error:\n        \t            \texec: \"openshift\": executable file not found in $PATH\n        \tTest:       \tTestCopy\n--- FAIL: TestSync (0.00s)\n    openshift_test.go:70: \n        \tError Trace:\t/root/skopeo/integration/openshift_test.go:70\n        \t            \t\t\t\t/root/skopeo/integration/openshift_test.go:39\n        \t            \t\t\t\t/root/skopeo/integration/sync_test.go:68\n        \t            \t\t\t\t/root/skopeo/vendor/github.com/stretchr/testify/suite/suite.go:211\n        \t            \t\t\t\t/root/skopeo/integration/sync_test.go:40\n        \t            \t\t\t\t/usr/lib/golang/src/runtime/asm_amd64.s:1693\n        \tError:      \tReceived unexpected error:\n        \t            \texec: \"openshift\": executable file not found in $PATH\n        \tTest:       \tTestSync\nFAIL\nexit status 1\nFAIL\tgithub.com/containers/skopeo/integration\t10.954s\nmake: *** [Makefile:212: test-integration-local] Error 1\n```\n\nIn retrospect, the test wording does say “Many important items will be skipped”."
+        },
+        {
+            "user": "mtrmac",
+            "body": "> Third, if it is _just_ this path that is breaking tests, it should be possible to add `docker-distribution` to https://github.com/lsm5/automation_images/blob/main/skopeo_cidev/packages.txt , not do any work beyond that to consolidate the two test environments, and defer the full cleanup for an indeterminate future.\n\nIt’s not _only_ that: adding `docker-distribution` helps but some tests fail with things like\n```\n            \tMessages:   \ttime=\"2025-10-16T18:58:06Z\" level=warning msg=\"Reading allowed ID mappings: reading subuid mappings for user \\\"root\\\" and subgid mappings for group \\\"root\\\": no subuid ranges found for user \\\"root\\\" in /etc/subuid\"\n            \t            \ttime=\"2025-10-16T18:58:06Z\" level=warning msg=\"Found no UID ranges set aside for user \\\"root\\\" in /etc/subuid.\"\n            \t            \ttime=\"2025-10-16T18:58:06Z\" level=warning msg=\"Found no GID ranges set aside for user \\\"root\\\" in /etc/subgid.\"\n            \t            \tGetting image source signatures\n            \t            \tCopying blob sha256:b72c84fef9a8d3d825bcb9677211b6ef6c983a72090979269d12351c79647535\n            \t            \ttime=\"2025-10-16T18:58:07Z\" level=error msg=\"While applying layer: ApplyLayer stdout:  stderr: potentially insufficient UIDs or GIDs available in user namespace (requested 0:12 for /var/spool/mail): Check /etc/subuid and /etc/subgid if configured locally and run \\\"podman system migrate\\\": lchown /var/spool/mail: invalid argument exit status 1\"\n```"
+        },
+        {
+            "user": "lsm5",
+            "body": "Ugh, yeah my bad. Evidently, I didn't account for SKOPEO_CONTAINER_TESTS in the runs earlier. I'll add docker-distribution to skopeo_cidev and maybe also set Cirrus and TMT to use `test-integration` instead of `-local` for now. \n\n`(system tests)` I don't see the SKOPEO_CONTAINER_TESTS variable used in `systemtest/` but that `hack/warn-destructive-tests.sh` is used for it too. Are you aware of anything that is skipped in `test-system-local` ? FWIW, The cirrus job also uses `test-system-local`. \n\n> time=\"2025-10-16T18:58:07Z\" level=error msg=\"While applying layer: ApplyLayer stdout:  stderr: potentially insufficient UIDs or GIDs available in user namespace (requested 0:12 for /var/spool/mail): Check /etc/subuid and /etc/subgid if configured locally and run \\\"podman system migrate\\\": lchown /var/spool/mail: invalid argument exit status 1\"\n\nWhere exactly did you see this?"
+        },
+        {
+            "user": "lsm5",
+            "body": "https://github.com/containers/automation_images/pull/419"
+        },
+        {
+            "user": "lsm5",
+            "body": "alright, I'm seeing that error in https://github.com/containers/skopeo/pull/2725/checks?check_run_id=53014696660"
+        },
+        {
+            "user": "mtrmac",
+            "body": "In my testing, adding `cap_sys_admin` to the `test-integration` container helps (guessing, probably https://github.com/containers/skopeo/pull/2616 ).\n\nBut… that rather defeats the point of containerizing the tests. At that point, it might make more sense to make the `containers-storage:` write tests conditional on `CAP_SYS_ADMIN`, and _not_ to use the containerized tests in our CI (i.e. to explicitly use `test-integration-local` in CI)."
+        },
+        {
+            "user": "mtrmac",
+            "body": "> `(system tests)` I don't see the SKOPEO_CONTAINER_TESTS variable used in `systemtest/` but that `hack/warn-destructive-tests.sh` is used for it too. Are you aware of anything that is skipped in `test-system-local` ?\n\nI can’t see any such conditions there. the tests _are_ destructive at least in the sense that they create system-global containers with predictable names.\n\n> maybe also set Cirrus and TMT to use test-integration instead of -local for now.\n\nI’m not too much of a fan of adding the extra indirection, but, meh, this issue is all about how having two different ways to run tests is a problem. So, fine, if we can deal with the `subuid` configuration a different way, and the impact to test runtime is not significant."
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "skopeo",
+            "number": 2704
+        },
+        {
+            "organization": "containers",
+            "repository": "automation_images",
+            "number": 419
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "skopeo",
+            "number": 2725
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "skopeo",
+            "number": 2714
+        }
+    ]
+}

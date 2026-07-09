@@ -1,0 +1,102 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "skopeo",
+    "number": 1498,
+    "type": "issue",
+    "title": "Performance improvements for large sync jobs",
+    "state": "closed",
+    "labels": [
+        "kind/feature",
+        "stale-issue",
+        "locked - please file new issue/PR"
+    ],
+    "user": "adriangb",
+    "body": "I recently had the need to sync multiple images across registries, and this seems like the best tool for the job. Thank you to all of the developers!\n\nFor my use case, I have several images, each with dozens to hundreds of tags.\nCurrently, syncing is basically impossible because:\n\n1. The initial sync takes a long time because there are a lot of images/tags to sync. This could be mitigated by parallelizing as suggested in https://github.com/containers/skopeo/pull/1445#issuecomment-919953326\n\n2. Subsequent syncs take a very long time even if nothing is copied in the end. I believe this is because after getting the tags from the source, each one is checked against the destination individually. I wonder if it would be possible to get the tags from the destination and pre-compute the missing ones so that a no-op sync would be almost instant.\n\nUnfortunately I am not a Gopher and know almost nothing about registry APIs, so I don't think I can implement this myself, but I wanted to leave the suggestion.\n\nThanks!",
+    "comments": [
+        {
+            "user": "mtrmac",
+            "body": "Thanks for your report.\n\nJust to be sure, please make sure to use Skopeo ≥ 1.2.3, to benefit from #1189.\n\n>  I wonder if it would be possible to get the tags from the destination and pre-compute the missing ones so that a no-op sync would be almost instant.\n\nThat wouldn’t work because listing tags just lists the tag names, but finding out what image the tag points to requires another per-image round-trip.\n\n---\n\nThe underlying image client code is primarily single-image focused and it could almost certainly be more efficient when dealing with repos that has many tags (approximately going from 3 HTTP requests to 1).\n\nBeyond that, actually measuring and profiling the performance might well uncover more optimization possibilities."
+        },
+        {
+            "user": "adriangb",
+            "body": "> Just to be sure, please make sure to use Skopeo ≥ 1.2.3, to benefit from #1189.\n\nI was using v1.4.1\n\n> That wouldn’t work because listing tags just lists the tag names, but finding out what image the tag points to requires another per-image round-trip.\n\nJust to be clear, you're referring to the situation where the tag exists but the image is completely different? I guess I hadn't thought of that, we use tags as if they were immutable and never duplicate them.\n\nI guess maybe I can manually list tags for both the source and destination, compute the difference and then launch multiple processes to do the sync on each image."
+        },
+        {
+            "user": "mtrmac",
+            "body": "> Just to be clear, you're referring to the situation where the tag exists but the image is completely different?\n\nYes.\n\n> I guess I hadn't thought of that, we use tags as if they were immutable and never duplicate them.\n\nThe `:latest` convention, at least, is _very_ widespread.\n\n> I guess maybe I can manually list tags for both the source and destination, compute the difference and then launch multiple processes to do the sync on each image.\n\nThat seems reasonable, and I’d be interested to hear any data about a possible speedup.\n\nIt might make sense to have an _opt-in_ (per-repo?) option to assume tags never change, and to do the list difference optimization you suggest. I’d be happy to review a PR, but that’s not an optimization I expect to be personally working on any time soon."
+        },
+        {
+            "user": "adriangb",
+            "body": "Sounds good.\n\nLet me at least go the easy route of writing a quick wrapper around `list-tags` and `sync`, see how it goes out and go from there. Thanks for the input!"
+        },
+        {
+            "user": "ChristianCiach",
+            "body": "@adriangb I've built such a wrapper. Maybe it helps you to write your own. Actually, it's not really a wrapper, but a script that generates a `sync.json` that can be passed to `skopeo sync --src yaml`:\n\n```python\nimport json\nimport os\nimport subprocess\n\nto_sync = {\n    \"docker.io\": [\n        \"library/mariadb\",\n        \"confluentinc/cp-kafka\",\n    ],\n    \"quay.io\": [\n        \"containers/skopeo\",\n    ],\n}\n\n\ntarget_repo_creds = os.environ[\"DEST_CREDENTIALS\"]\ntarget_repo = f\"your.destination.registry.tld/repo\"\n\n\ndef get_tags(image: str, creds: str = None) -> set[str]:\n    command = [\"skopeo\", \"list-tags\"]\n    if creds:\n        command.extend([\"--creds\", creds])\n    command.append(f\"docker://{image}\")\n    skopeo_result = subprocess.run(\n        command, stdout=subprocess.PIPE, text=True, check=True\n    )\n    json_result = json.loads(skopeo_result.stdout)\n    return set(json_result[\"Tags\"])\n\n\nresult = {}\n\nfor registry, imgs in to_sync.items():\n    images = {}\n    for img in imgs:\n        src_tags = get_tags(f\"{registry}/{img}\")\n        dest_tags = get_tags(f\"{target_repo}/{registry}/{img}\", target_repo_creds)\n\n        # always sync tags that start with \"latest\"\n        dest_tags = {x for x in dest_tags if not x.startswith(\"latest\")}\n        tags_to_sync = src_tags.difference(dest_tags)\n\n        if tags_to_sync:\n                images[img] = list(tags_to_sync)\n    result[registry] = {\"images\": images}\n\n\nprint(json.dumps(result))\n```\n\nI am creating JSON (which is a subset of YAML) instead of YAML because this script can be executed directly from within a  `quay.io/containers/skopeo`-container, which luckily contains python3 and the json-module.\n\nThis is my Gitlab-CI-Pipeline:\n\n```yaml\nstages:\n  - mirror\n\nmirror:\n  stage: mirror\n  image:\n    name: quay.io/skopeo/stable:latest\n    entrypoint: [\"\"]\n  variables:\n    DEST_CREDENTIALS: \"$DEST_CREDENTIALS\"  # configured as Gitlab CI/CD variable\n  script:\n    - './create_sync_json.py > sync.json'\n    - >\n        skopeo sync\n        --retry-times 5\n        --scoped\n        --dest-creds \"$DEST_CREDENTIALS\"\n        --src yaml\n        --dest docker\n        sync.json\n        your.destination.registry.tld/repo\n\n```\n\nAs expected, this speeds up the sync process *tremendously*. This also prevents our destination registry from registering a pull for every synced image (see https://github.com/containers/skopeo/issues/1516)."
+        },
+        {
+            "user": "adriangb",
+            "body": "Nice!\n\nI ended up building something as well, just forgot to update this thread.\nI needed to deal with filtering, auth and concurrency limits, so my version is considerably more complex. I like how simple yours is 😄 \n\n```python\nimport argparse\nimport asyncio\nimport json\nimport logging\nimport os\nimport re\nimport sys\nimport typing\n\nlogging.basicConfig(level=\"INFO\")\n\nlogger = logging.getLogger(__name__)\n\n\nclass Auth(typing.NamedTuple):\n    username: str\n    password: str\n\n\nasync def list_tags(repostiory: str, image: str, *, auth: typing.Optional[Auth] = None) -> list[str]:\n    uri = f\"docker://{repostiory}/{image}\"\n    auth_opts = \"\"\n    auth_opts = f\"--creds {auth.username}:{auth.password}\" if auth is not None else \"\"\n    proc = await asyncio.create_subprocess_shell(\n        f\"skopeo list-tags {uri} {auth_opts}\",\n        stdout=asyncio.subprocess.PIPE,\n    )\n    stdout, _ = await proc.communicate()\n    if proc.returncode != 0:\n        print(f\"Error retrieving tags for {uri}\")\n        sys.exit(1)\n    return json.loads(stdout)[\"Tags\"]\n\n\ndef diff_tags(source_tags: typing.Iterable[str], destination_tags: typing.Iterable[str]) -> typing.Iterable[str]:\n    tags = set(source_tags)\n    tags.difference_update(destination_tags)\n    logger.info(f\"Found {len(tags)} tags in source that are not in destination\")\n    logger.debug(f\"Planning to sync {tags}\")\n    return tags\n\n\ndef filter_tags(tags: typing.Iterable[str], pattern: str) -> typing.Iterable[str]:\n    logger.debug(f\"Filtering tags by pattern {pattern}\")\n    return (tag for tag in tags if re.match(pattern, tag))\n\n\nasync def sync(\n    sem: asyncio.Semaphore,\n    image: str,\n    tag: str,\n    src_repository: str,\n    dest_repository: str,\n    src_auth: typing.Optional[Auth],\n    dest_auth: typing.Optional[Auth],\n):\n    src_uri = f\"docker://{src_repository}/{image}:{tag}\"\n    dest_uri = f\"docker://{dest_repository}/{image}:{tag}\"\n    src_auth_opts = f\"--src-creds {src_auth.username}:{src_auth.password}\" if src_auth is not None else \"\"\n    dest_auth_opts = f\"--dest-creds {dest_auth.username} --dest-registry-token {dest_auth.password}\" if dest_auth is not None else \"\"\n    async with sem:\n        logger.info(f\"Copying {src_uri} -> {dest_uri}\")\n        proc = await asyncio.create_subprocess_shell(\n            f\"skopeo copy {src_uri} {dest_uri} {src_auth_opts} {dest_auth_opts}\",\n        )\n        await proc.wait()\n        if proc.returncode != 0:\n            logger.error(f\"Error syncing {src_uri}\")\n        else:\n            logger.info(f\"Synced {src_uri}:{tag} -> {dest_uri}:{tag}\")\n        return\n\n\nasync def process_image(\n    sem: asyncio.Semaphore,\n    tasks: typing.List[asyncio.Task[None]],\n    image: str,\n    pattern: str,\n    src_repository: str,\n    dest_repository: str,\n    src_auth: typing.Optional[Auth],\n    dest_auth: typing.Optional[Auth],\n):\n    logger.info(f\"Gathering tags for {src_repository}/{image} -> {dest_repository}/{image}\")\n    async with sem:\n        src_tags, dest_tags = await asyncio.gather(\n            asyncio.create_task(list_tags(src_repository, image, auth=src_auth)),\n            asyncio.create_task(list_tags(dest_repository, image, auth=dest_auth)),\n        )\n        tags = diff_tags(filter_tags(src_tags , pattern=pattern), dest_tags)\n    tags = list(tags)\n    for tag in tags:\n        tasks.append(\n            asyncio.create_task(\n                sync(\n                    sem=sem,\n                    src_repository=src_repository,\n                    image=image,\n                    tag=tag,\n                    dest_repository=dest_repository,\n                    src_auth=src_auth,\n                    dest_auth=dest_auth,\n                )\n            )\n        )\n\n\nasync def main(src_auth: typing.Optional[Auth], dest_auth: typing.Optional[Auth], concurrency: int) -> None:\n    cfg = json.load(open(os.path.join(os.path.dirname(__file__), \"config.json\")))\n    dest_repository = cfg[\"destination\"]\n    src_repository = cfg[\"source\"]\n    sync_tasks: typing.List[asyncio.Task[None]] = []\n    gather_tasks: typing.List[asyncio.Task[None]] = []\n    images: typing.Dict[str, str] = cfg[\"images\"]\n    sem = asyncio.Semaphore(concurrency)\n    for image, pattern in images.items():\n        gather_tasks.append(\n            asyncio.create_task(\n                process_image(\n                    sem=sem,\n                    tasks=sync_tasks,\n                    image=image,\n                    pattern=pattern,\n                    src_repository=src_repository,\n                    dest_repository=dest_repository,\n                    src_auth=src_auth,\n                    dest_auth=dest_auth,\n                )\n            )\n        )\n    await asyncio.gather(*gather_tasks)\n    await asyncio.gather(*sync_tasks)\n\n\nif __name__ == \"__main__\":\n    parser = argparse.ArgumentParser(\"skopeo-sync\")\n    parser.add_argument(\"--src-username\", help=\"Source registry username\", type=str,  default=None)\n    parser.add_argument(\"--src-password\", help=\"Source registry password\", type=str,  default=None)\n    parser.add_argument(\"--dest-username\", help=\"Destination registry username\", type=str,  default=None)\n    parser.add_argument(\"--dest-password\", help=\"Destination registry password\", type=str,  default=None)\n    parser.add_argument(\"--concurrency\", help=\"Max simultaneous processes to run\", type=int,  default=32)\n    args = parser.parse_args()\n\n    src_auth = dest_auth = None\n    if args.src_username and args.src_password:\n        src_auth = Auth(args.src_username, args.src_password)\n    if args.dest_username and args.dest_password:\n        src_auth = Auth(args.dest_username, args.dest_password)\n\n    asyncio.run(main(src_auth, dest_auth, args.concurrency))\n```\n\n```json\n{\n    \"destination\": \"...\",\n    \"source\": \"...\",\n    \"images\": {\n        \"some/image\": \"^regex$\",\n    }\n}\n```"
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "olfway",
+            "body": "I'm also interested in this issue"
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "helobinvn",
+            "body": "I'm interested in this issue (from https://github.com/containers/skopeo/issues/1801)"
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "skopeo",
+            "number": 1516
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "skopeo",
+            "number": 1531
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "skopeo",
+            "number": 1563
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "skopeo",
+            "number": 1801
+        },
+        {
+            "organization": "regclient",
+            "repository": "regclient",
+            "number": 442
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "skopeo",
+            "number": 2111
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "skopeo",
+            "number": 2426
+        }
+    ]
+}

@@ -1,0 +1,133 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "skopeo",
+    "number": 823,
+    "type": "issue",
+    "title": "auth file logic should match podman's",
+    "state": "open",
+    "labels": [
+        "kind/bug",
+        "stale-issue"
+    ],
+    "user": "edsantiago",
+    "body": "podman has arcane rules for figuring out a path to a registry auth file; skopeo should probably share those rules.\n\nCurrently, credentials sharing breaks on rootless if `$XDG_RUNTIME_DIR` is not set:\n```console\n$ skopeo copy ... docker://localhost:5537/skopeo-ok-etc\nGetting image source signatures\n   time=\"2020-02-19T08:46:56-05:00\" level=fatal msg=\"Error trying to reuse blob sha256:df64d3292fd6194b7865d7326af5255db6d81e9df29f48adde61a918fbd8c332 at destination: Error checking whether a blob sha256:df64d3292fd6194b7865d7326af5255db6d81e9df29f48adde61a918fbd8c332 exists in localhost:5537/skopeo-ok-fin9vf0f8w-ok: unauthorized: authentication required\"\n```\nTested with `enablelinger` both disabled and enabled, in which cases podman puts the auth.json file under `/var/tmp/run-1000/containers` and `/run/user/1000/containers` respectively. Skopeo does not see either one.\n\n[ Related to #822 but IIUC the code logic is in separate places ]",
+    "comments": [
+        {
+            "user": "mtrmac",
+            "body": "From a quick look, the _auth file_ logic is actually very thin in Podman; the difference is that Podman somehow decides to set $XDG_RUNTIME_DIR to non-default values (that c/image doesn’t currently replicate because that logic is intricately linked with _creating_ that directory in Podman).\n\nI do agree that `podman login`+`skopeo copy` should, in the default case with no extra configuration, just work."
+        },
+        {
+            "user": "mtrmac",
+            "body": "After https://github.com/containers/podman/pull/4337 Podman no longer depends on XDG_RUNTIME_DIR, and with #865 both Podman and Skopeo use the same defaults — and https://github.com/containers/podman/pull/5265 tests that.\n\nSo, this should be fine now; please reopen if that’s not the case."
+        },
+        {
+            "user": "edsantiago",
+            "body": "I don't have privs to reopen on this repo, but I believe this is not fixed\n\nSetup: rootless user (fedora, uid 1000) on a virt with `quay.io/libpod/registry:2.7` running on port 5000:\n```console\n$ skopeo copy containers-storage:quay.io/libpod/testimage:20210427 docker://localhost:5000/foo\nFATA[0000] Error initializing destination docker://localhost:5000/foo:latest: error getting username and password: 1 error occurred:\n        * error reading JSON file \"/run/containers/0/auth.json\": open /run/containers/0/auth.json: permission denied\n\nERRO[0000] exit status 1\n```\nThere are no XDG environment variables set. Note that skopeo is defaulting to `/run/containers/0` even though UID is 1000. The actual podman login file is `/tmp/podman-run-1000/containers/auth.json`\n\nskopeo-1.2.3-1.fc34"
+        },
+        {
+            "user": "TomSweeneyRedHat",
+            "body": "Reopening to investigate."
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "mtrmac",
+            "body": "> There are no XDG environment variables set. Note that skopeo is defaulting to `/run/containers/0` even though UID is 1000. The actual podman login file is `/tmp/podman-run-1000/containers/auth.json`\n\nYeah; I don’t know what I was looking at in the “this should be fine now” comment. It’s true that Podman _usually_ doesn’t set `AuthFilePath`, but it does set `XDG_RUNTIME_DIR` in the increasingly relevant rootless case, and that affects the default path.\n\nThere are multiple aspects to this:\n- It’s a bit hard for Skopeo to default to a Podman-only-created directory (not that defaulting to very likely unusable `/run/containers/$uid` is any better)\n- The current `pkg/docker/config` does not use `rootless.GetRootlessEUID` at all (and it clearly should) — and it uses the (real)UID, not EUID, so we can’t trivially switch (OTOH that does not matter if we are discussing changing the path entirely)."
+        },
+        {
+            "user": "cevich",
+            "body": "Related: https://github.com/containers/skopeo/issues/1240#issuecomment-878472089\n\nPodman is falling back to `/tmp/podman-run-1000/containers/auth.json`, buildah seems to behave similarly but I can't confirm.  The debug output from both reports using `containers-auth.json` (which is wrong)."
+        },
+        {
+            "user": "mtrmac",
+            "body": ">  The debug output from both reports using `containers-auth.json` (which is wrong).\n\nIf this is referring to the line\n```\nDEBU[0000] Stored credentials for localhost:5000 in credential helper containers-auth.json\n```\nnote the _credential helper_ wording: it’s not a file name, `containers-auth.json` is a special keyword in containers-registries.conf(5).\n\n(Compare https://github.com/containers/podman/pull/10068 which produces a non-debug end-user-targeted message.)"
+        },
+        {
+            "user": "cevich",
+            "body": "So I poked around in the podman vs skopeo code.  The best I can conclude is the behavior comes from differences in setup of the `sys` (called `sysCtx` in podman) struct(?).  In the case of podman at `login()` call time, I think `AuthFilePath` will be an empty string (if no XDG or REG env. var. is set).  OTOH, skopeo calls `newSystemContext()` which (best as I can read) uses cobra to initialize from `auth.GetLoginFlags()` resulting it in defaulting to (inaccessible) `/run/containers/<uid>`.\n\nIn any case, bottom-line:  I think it would be *okay* solution for skopeo to fall back to using a non-shared file, like `/tmp/skopeo-run-1000/containers/auth.json`.  However that can be made to happen.  Remember, at this point we're already in a known-funky environment.  So partial functionality is likely more acceptable to a user than failing with a permission-denied error (current behavior).  Esp. since both podman and buildah somehow make the same `login` operation work (even if in a limited scope).\n\nIn other words, IMHO it's less important that skopeo, buildah, and podman somehow coordinate shared auth-file access, and more important they be as minimally functional to the user as possible given the constrained environment context. "
+        },
+        {
+            "user": "mtrmac",
+            "body": "> In other words, IMHO it's less important that skopeo, buildah, and podman somehow coordinate shared auth-file access, and more important they be as minimally functional to the user as possible given the constrained environment context.\n\nI think that’s a very reasonable RFE (by which I mean “absolutely worth considering”, not “yes”), but it’s not _this_ RFE. Please file that as a c/image issue to consider changing the `/run/containers` default."
+        },
+        {
+            "user": "cevich",
+            "body": "Are you sure this is coming from `/run/containers`?  The behaviors I observed *only* happen in skopeo and not podman or buildah.  In my mind that means the fix needs to happen in skopeo so as to not adversely affect the other two.  But I'm willing to be wrong."
+        },
+        {
+            "user": "mtrmac",
+            "body": "> Are you sure this is coming from `/run/containers`?\n\nhttps://github.com/containers/image/blob/5a7aad2b495a6aa4b16ab07819a25524a73e838d/pkg/docker/config/config.go#L41\n\nSkopeo is using the API as originally envisioned and doesn’t override the defaults and doesn’t have its own private `XDG_RUNTIME_DIR` value. (To be fair “as originally envisioned” doesn’t work very well at all with setting up a new rootless environment — or if the software doesn’t want to fail without `XDG_RUNTIME_DIR`, like Skopeo currently does and just like Skopeo suffers the consequences.) The defaults live in c/image, changing them there would help third parties equally, and Skopeo could continue to do nothing.\n\n(OTOH it _is_ possible that we end up concluding that c/image should continue to have the root-only `/run/containers` default, and that Skopeo should implement its own fallback. But let’s discuss that in c/image , considering the previous c/image design discussions and the like.)"
+        },
+        {
+            "user": "cevich",
+            "body": "Right, okay I think I follow.  Also moving the `c/image` default would empower all of buildah, skopeo, and podman to \"follow the same rules\" instead of each doing something different (as is today).  Sounds good, I'll attempt to open an RFE tomorrow (but won't complain if anyone else gets to it sooner - since I'm not an expert on the topic) :grin: "
+        },
+        {
+            "user": "rhatdan",
+            "body": "Podman and Buildah are using contaers/common/pkg/auth.  I think the easiest solution would be to get skopeo to use this, and then look back porting this functionality into containers/image if it wants to go that way.\n\nI don't think containers/image should hard code a directory that only root can use."
+        },
+        {
+            "user": "cevich",
+            "body": "> Podman and Buildah are using contaers/common/pkg/auth\n\nBy my reading, skopeo is doing it that way too, but the setup of options passed in to `auth.Login()` is different.  I'm guessing this is where the behavior difference comes in - I didn't dig deeply into podman (and/or buildah) forcing `$XDG_RUNTIME_DIR` somehow, which could also easily explain the behaviors we see.\n\n> I don't think containers/image should hard code a directory that only root can use.\n\nYa, I think we're all in agreement on that one."
+        },
+        {
+            "user": "mtrmac",
+            "body": "> Podman and Buildah are using contaers/common/pkg/auth. I think the easiest solution would be to get skopeo to use this, and then look back porting this functionality into containers/image if it wants to go that way.\n\nThe part of Podman that unconditionally sets XDG_RUNTIME_DIR, and potentially creates it in `/tmp/podman-run-1000/containers`, has no code relationship with c/common/pkg/auth — but the global environment variable invisibly affects the outcome."
+        },
+        {
+            "user": "cevich",
+            "body": "IIRC (it's been a loooooong time, memory is fuzzy), podman has very good reasons for guaranteeing XDG_RUNTIME_DIR is set, and buildah also.  I my mind, this might be reason for simply overriding the defaults in skopeo, instead of fussing with c/common + the world.  Reason being, it's one PR instead of many (four?), so fixing a long-standing issue quickly (albeit less ideal).  That said, I'll still open an RFE for c/common since the default is definitely bad in any case."
+        },
+        {
+            "user": "cevich",
+            "body": "[Oh hey, look at that, there's already a c/common issue open on this.](https://github.com/containers/image/issues/1125)"
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 4283
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "skopeo",
+            "number": 1240
+        },
+        {
+            "organization": "containers",
+            "repository": "image",
+            "number": 1125
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "skopeo",
+            "number": 1654
+        },
+        {
+            "organization": "tektoncd",
+            "repository": "operator",
+            "number": 1105
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 19259
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 19268
+        }
+    ]
+}

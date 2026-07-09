@@ -1,0 +1,104 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "skopeo",
+    "number": 560,
+    "type": "issue",
+    "title": "copy: add null transport format to support signature verification",
+    "state": "closed",
+    "labels": [
+        "locked - please file new issue/PR"
+    ],
+    "user": "alonbl",
+    "body": "Hi,\n\nMaybe I am missing something, but there is no way to perform verify only of an image signature with the policy configuration. The only option I found is to use the copy the image to other image.\n\nIf that's true, it would be great if you add null transport format to allow something like:\n\n```\n$ skopeo copy docker://registry1.com/image:tag null:\nWriting manifest to image destination\nStoring signatures\n```\n\nThis will execute the cycle of verifying the source while not download/uploading the entire content, the null transport should also allow writing signatures (to null...) to avoid explicit `--remove-signatures`.\n\nAny better option to verify only?\n\nThanks!",
+    "comments": [
+        {
+            "user": "mtrmac",
+            "body": "Thanks for your report.\n\nSignatures are intended provide end-to-end nonrepudiability (proof of who signed the image, verified directly by the final consumer), even if the intervening registries / mirrors / HTTP proxies / other transport mechanisms are unreliable or outright malicious.\n\nWith these goals, “verify a remote image” is a very dangerous operation to provide: the verification results are only valid for that particular registry reply, nothing prevents the registry from providing a maliciously modified image on subsequent requests. So, such a “verify image on a registry” operation would provide a fundamentally unusable—and dangerous to rely on!—result.\n\nSo, if you are designing your workflow to have such a “verify signature” step with a not-100%-trusted registry, please reconsider.\n\nIf your registry—and the backing storage!—_is_ 100% trusted, and you want the “verify signature” operation maybe for a server-side audit run that all images are correctly signed, or something similar, that can of course be built — as you say, with a `skopeo copy` to a temporary destination (like a `dir:` which is immediately deleted), or with `skopeo standalone-verify`, or ultimately with the underlying GitHub.com/containers/image Go package. But as described above, I’d very strongly prefer to not provide “verify remote image” operation (quite a few users ask for it when they first hear of signatures, without considering the implications).\n\nIs there any important use case I am missing?"
+        },
+        {
+            "user": "alonbl",
+            "body": "Hi,\n\nThank you for the long description! I fully agree with anything you write. However, the use cases I had in mind are different... Mostly verify integrity of the repository and configuration not to actually execute the image.\n\nUsing standalone-verify is what I begun with, until I found out that it does not use the policy nor the repositories.d so it cannot verify the entire settings. The copy, however, does the work, so I currently download it into a docker-archive to enjoy the benefit, however, I think that downloading the actual data to verify the signature configuration is a bit of an overkill.\n\nExamples:\n\n1. CI performs image signature and pushes the result. Before completing the workflow, it should verify that the consumer will be able to pull image correctly, fail fast fail early... especially when signatures should be uploaded in different process.\n\n2. Testing policy and repository.d changes without messing up docker nor have root permissions. For example image re-tag at different repository requires a special policy, testing it using standalone tool before reaching production is required.\n\n3. Testing gpg key trust, expiration etc... as periodic task.\n\nThanks!"
+        },
+        {
+            "user": "mtrmac",
+            "body": "Right, that’s the ”audit use case”; the null transport, or a policy-aware version of `standalone-verify`, is certainly software that can be written (e.g. take the `dir:` transport and drop all writes), but as soon as it exists and is anywhere documented as “this is how you can verify a remote signature is valid”, I’m worried that it will be found and misused.\n\nSo I’m very tempted to say “feel free to write the tool but please don’t publish it at all”. I’m not at all sure that it is the right balance. @rhatdan WDYT?"
+        },
+        {
+            "user": "alonbl",
+            "body": "I do not understand why signature-policy-verify is not usable and require a separate tool to be written. I gave valid use cases that signature validation as infrastructure validation makes sense. Of course I can continue to copy it into a docker-archive while wasting network and cpu resources...."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@mtrmac Why/How do you think it will be abused?"
+        },
+        {
+            "user": "mtrmac",
+            "body": ">  Why/How do you think it will be abused?\n\n```console\n$ skopeo is-signature-valid docker://myISV.com/repo/busybox:1.23\n$ run-on-a-thousand-machine-cluster 'docker pull myISV.com/repo/busybox:1.23'\n# 100 machines run malware now.\n```\n\nSure it’s not the _right_ way to think about this, but the point-in-time-and-data aspect of verification is not quite obvious and people gravitate to an explicit/separate verification action (maybe so that there _is_ an explicit action and the mental checklist can be makes as handled). E.g. persuading OpenShift developers to make `oadm verify-image-signature` at least not completely broken took quite a lot of effort."
+        },
+        {
+            "user": "alonbl",
+            "body": "but the docker should be configured to enforce policy anyway...."
+        },
+        {
+            "user": "mtrmac",
+            "body": "I quite agree that this “should not” be happening; I’m reporting how (smart) people _actually think_ they should be using the system, and thus what is likely to be happening in practice."
+        },
+        {
+            "user": "alonbl",
+            "body": "Only smart people can use this skopeo tool :)\n\nIt took me 2 full days to understand the tool, the limitations and how to embed it into my flows. Not to mention the two signature types (docker, atomic) and the two options of distributing atomic (out-of-band, in-bound using red hat docker-distribution extension, which per entire repo cluster and not per image).\n\nI am still unconvinced why the docker way is not better, and I am unsure why the repository name is part of signature, which makes it very difficult to mirror and submirror.\n\nThis all resulted in me requiring a verify tool to be able to see if settings are correct."
+        },
+        {
+            "user": "mtrmac",
+            "body": "> I am unsure why the repository name is part of signature\n\nThis is necessary so that you don’t get ISV’s correctly-signed `debug-image-with-unrestricted-remote-reverse-shell` when you wanted to install `hardened-application-image-with-a-single-restricted-port-open` from the same ISV. Or so that you don’t get vulnerable `product:0.0.1` when you wanted to install latest `product:10.3.2`.\n\n>, which makes it very difficult to mirror and submirror.\n\n`policy.json` does anticipate mirrors and supports the `exactReference`/`exactRepository` options for downloading from mirrors while requiring original signatures. I do agree that this probably needs improving (notably there should be a ”use this repo instead but require original tag”, and probably a more general “this repo namespace is a mirror of that other repo namespace, including any nested namespaces and repos and tags”)."
+        },
+        {
+            "user": "alonbl",
+            "body": "How have we used for years tarball and gpg signature without providing the URL or embed the tarball name within the signature?\n\nIn any case... if I take what you write farther... it means that detached signature is a bad idea... and the signature protocol should have allowed to modify manifest with signature[s]."
+        },
+        {
+            "user": "mtrmac",
+            "body": "> How have we used for years tarball and gpg signature without providing the URL or embed the tarball name within the signature?\n\nAs far as I know, for source-based tarball releases, they were typically downloaded manually; the nameless signature authenticated the origin and that the tarball was unmodified; _after expanding the tarball_, the convention was to expand it into a _project_-_version_ subdirectory, which authenticated the identity of the contents. This depended on a human noticing that the contents of the tarball match the file names / what the human was trying to do (and might not have worked so well for products that chose to package the tarballs without versions in subdirectories, or without subdirectories at all).  Relying on a human like this is not practical in a cloud environment.\n\nThe signatures embedded in RPMs do also authenticate the name-epoch-version-release metadata fields, but there are a known problems in the way the RPM ecosystem deploys signatures:\n- Keys are not scoped in the package namespace (so an ISV who is expected to sign a single package can generate signatures for any other unrelated package like `kernel` and the signature would be accepted).\n- The repository metadata is not GPG-signed, so it may be possible for a repository mirror to manipulate the repository as long as it continues to contain correctly-signed packages (e.g. to continue to point to a years-old `product-0.0.1` RPM instead of the correct `product-10.3.2`).\n- I’m also not certain that the name-epoch-version-release metadata inside a RPM is matched against the repository-reported expected metadata — it well may be, but I never checked.\n\nThe container image signatures were designed to improve upon these known deficiencies.\n\n> In any case... if I take what you write farther... it means that detached signature is a bad idea... and the signature protocol should have allowed to modify manifest with signature[s].\n\nThe signatures do contain a manifest digest, which makes it impossible to mix-and-match accepted signatures with different manifests.\n\nNot embedding signatures into manifests\n1. makes it much easier to verify a signature without having to parse the manifest, involving a large amount of not-necessarily-hardened code\n2. allows having multiple signatures for a single manifest, and adding more signatures to an already signed image (e.g. an internal security department can sign approved images without invalidating the original ISV signature which proves the image’s origin)."
+        },
+        {
+            "user": "alonbl",
+            "body": "OK, I guess we can agree to disagree... as the operational side is also important.\n\nEmbedded signatures does not mean that original signature invalidate content, from PKCS#7 days you could have added signers without impact on existing signers. The only change is that we do not have standardization of formats anymore and every project invent its own.\n\nUsing pgp instead of X.509 also adds operational overhead, as key distribution introduces a complex overhead and is a weak link.\n\nA process of re-sign images is nice, however, it lacks the docker distribution proxy to automate the process for organization that cannot access the internet directly.\n\nI would find it much easier to allow to specify a logical name per registry which can be the same as the DNS name or other, the logical name would be added to the signature along with the image name (only image name part). Policy a set of [{gpg-key, registry logical name}]. This means that no matter where original image is moved, the signature validation stays intact.\n\nBTW: this issue of docker to create relationship between physical resource (DNS) and the logical resource (registry) is severe for non-internet use cases, as there is no option for the operator to specify alternate search locations. Well, red hat patched docker to support this in some way but this is not enough. To make it evident... docker supports alternate only for the docker main repository as a special case.\n\nI am still trying to figure out how to deal with this properly in a complex environment. Probably the best way would have been for docker to support \"Search path\" so when I specify REGISTRY/IMAGE it will have some mapping so I can define REGISTRY to refer to registry1, registry2, ... however, signature to be checked against REGISTRY/IMAGE.\n\n"
+        },
+        {
+            "user": "mtrmac",
+            "body": "> OK, I guess we can agree to disagree... as the operational side is also important.\n\nWhat is the _specific_ operational problem you are facing? I kind of ended up explaining the rationale for the design, but it’s not quite clear to me what is the specific thing you need to be better.\n\nAssuming that the name matching in signatures is valuable (or do you completely disagree that this is an useful thing to do?), are we talking about a better way to remap locations and identities in `policy.json`? Or something completely different?\n\n---\n\n\n> Embedded signatures does not mean that original signature invalidate content, from PKCS#7 days you could have added signers without impact on existing signers.\n\nUnfortunately not with the Docker digest references (`busybox@sha256:…`).  If those references matched the manifest including embedded signatures, adding a signature to an existing image would break the digest reference; if those references matched the embedded manifest without signatures, signed images could only be served by some kind of smart registry server which could match the digest against the embedded manifest (as opposed to dumbly using file digests), and they would be rejected by non-signature-aware clients who would not know they need to strip the digest.\n\nEither way, signatures would not be interoperable with existing images, workflows, and the Docker Hub in particular; the ability to add signatures to existing images, workflows, and to supplement Hub, hosting was pretty much a hard requirement.\n\n> Using pgp instead of X.509 also adds operational overhead, as key distribution introduces a complex overhead and is a weak link.\n\nUsing the PGP format does not imply relying on a web of trust; you need to supply a single public key in the configuration. Using X.509 for signatures would work exactly the same way, by supplying a certificate in the configuration. Using X.509 CAs does not obviously simplify key distribution - the configuration would still need to contain the CA certificate. Relying on the system trusted roots and the hundreds of CAs there, and figuring out a reasonable way to assign keys to specific namespaces, has all of the problems of the web PKI, compounded by trying to integrate into it for a comparatively very niche use case.\n\n(PGP is used to use a standardized cryptographic format and not to invent a new one, and because it was more practical to achieve a FIPS-validatable solution given existing tools and timeframes. X.509 is not excluded by this, in fact the existing code already anticipates that X.509 will eventually be supported, primarily for HSM interoperability. It’s just not been implemented yet.)\n\n> A process of re-sign images is nice, however, it lacks the docker distribution proxy to automate the process for organization that cannot access the internet directly.\n\nRe-signing breaks the end-to-end properties and is not the primary recommendation; that’s using the `exactRepository`/`exactReference` mechanisms in `policy.json`.\n \n> I would find it much easier to allow to specify a logical name per registry which can be the same as the DNS name or other, the logical name would be added to the signature along with the image name (only image name part). Policy a set of [{gpg-key, registry logical name}]. This means that no matter where original image is moved, the signature validation stays intact.\n\nThat’s more or less what `policy.json` is, isn’t it? It is basically a mapping for (location, key, “expected name”);  the default is that “location”==”expected name”, because that’s the smoothest user experience in the common case.\n\nHaving a _separate_ logical name would be problematic in that `docker pull` does not provide any place to specify the expected “logical name”, and matching the logical name is necessary to prevent substitution attacks.\n\n> BTW: this issue of docker to create relationship between physical resource (DNS) and the logical resource (registry) is severe for non-internet use cases, as there is no option for the operator to specify alternate search locations. Well, red hat patched docker to support this in some way but this is not enough. To make it evident... docker supports alternate only for the docker main repository as a special case.\n>\n> BTW: this issue of docker to create relationship between physical resource (DNS) and the logical resource (registry) is severe for non-internet use cases, as there is no option for the operator to specify alternate search locations. Well, red hat patched docker to support this in some way but this is not enough. To make it evident... docker supports alternate only for the docker main repository as a special case.\n\n(Yes, it would be much more convenient if it were possible to configure to ecosystem to know that `docker.io/foo/bar` is mirrored at `local.example.com/docker-mirror/foo/bar`, let users request a pull `docker.io/foo/bar` which is automatically routed to the mirror; then `policy.json` could be mirror-unaware. There’s some ongoing work towards this in the `github.com/containers/image/pkg/sysregistriesv2` subpackage, but it’s by no means complete yet and it’s unclear when it will be available.)\n"
+        },
+        {
+            "user": "alonbl",
+            "body": "Thanks for sharing everything. I am mostly interested in an offline isolated network solution.\n\nJust for letting you know... I am using skopeo with gpg and HSM...[1]\n\n[1] https://github.com/alonbl/gnupg-pkcs11-scd"
+        },
+        {
+            "user": "rhatdan",
+            "body": "@alonbl @mtrmac @vrothberg Is this still an issue?  Is it something we are going to work on?"
+        },
+        {
+            "user": "mtrmac",
+            "body": "As explained above, I don’t think there should be an easily-accessible `null` transport, and the improvements to policy.conf should probably be tracked separately."
+        },
+        {
+            "user": "alonbl",
+            "body": "Hi @rhatdan,\n\nI will love to have an option to verify signatures based on policy, this will allow CI and people to test images state and the policy.json settings.\n\nThe other part of the discussion relate to the method of having offline (internet disconnected) proxy and how to manage that properly, which is unrelated to the initial request.\n"
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "skopeo",
+            "number": 559
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "skopeo",
+            "number": 1306
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "skopeo",
+            "number": 2082
+        }
+    ]
+}

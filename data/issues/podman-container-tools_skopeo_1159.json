@@ -1,0 +1,96 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "skopeo",
+    "number": 1159,
+    "type": "pull_request",
+    "title": "Set User-Agent to skopeo/$VERSION",
+    "state": "closed",
+    "labels": [
+        "locked - please file new issue/PR"
+    ],
+    "user": "jonjohnsonjr",
+    "body": "Prior to this, the User-Agent used by containers/image would default to\nthe default User-Agent for golang, which makes it difficult to\ndistinguish skopeo from any other golang binaries in registry logs.\n\nFixes https://github.com/containers/skopeo/issues/1109\n\nIf you think this requires a test, I'm happy to add something, but `go test` fails to build for me because I'm missing certain header files, and I figured I'd give this a shot before diving into that 😉 \n\nSigned-off-by: Jon Johnson <jonjohnson@google.com>",
+    "comments": [
+        {
+            "user": "jonjohnsonjr",
+            "body": "Hah, of course the test would fail.\n\nLooking at `cmd/skopeo/main.go`, it seems like everything in `SystemContext` is overrideable via flags. Should I do the same for the user agent?"
+        },
+        {
+            "user": "mtrmac",
+            "body": "> If you think this requires a test, I'm happy to add something\n\nOther than those that already exists and need adjusting, an actual test that this really works is up to you, if you think this is important enough to notice if it ever got broken –  and the cost/benefit ratio of adding such a test (a custom HTTP server?) seems pretty dubious to me."
+        },
+        {
+            "user": "jonjohnsonjr",
+            "body": "> Most importantly, do we need this?\n\nI would prefer it, but I'm open to being convinced otherwise. Given that podman and buildah have distinct user-agents, I feel that skopeo deserves its own as well :)\n\nThis would at least allow me to distinguish between \"skopeo is doing this\" and \"some tools that uses containers/image\" is doing this. In terms of supportability, it's much easier for me to ask a customer \"are you using skopeo for anything?\" vs \"are you using something that leverages the containers/image library?\", as the former can usually be answered by grepping source code."
+        },
+        {
+            "user": "mtrmac",
+            "body": "> Looking at `cmd/skopeo/main.go`, it seems like everything in `SystemContext` is overrideable via flags. Should I do the same for the user agent?\n\nNo; it’s rather the other way around, options were added to `SystemContext` to allow implementing those flags.\n\nMaking the User-Agent variable would somewhat defeat the point of having it — we don’t typically add options (and take on the extra maintenance cost) without anticipating that they will be used. (It is possible that the User-Agent value chance could break some users, but those users can, in the short-term, revert to an older version and long-term we would like the servers to adjust instead of documenting a work-around that every user has to manually apply. And if we _had_ to have an user override for this long-term, a file like `registries.conf` would make more sense than a CLI flag.)"
+        },
+        {
+            "user": "mtrmac",
+            "body": "> In terms of supportability, it's much easier for me to ask a customer \"are you using skopeo for anything?\" vs \"are you using something that leverages the containers/image library?\", as the former can usually be answered by grepping source code.\n\nThat’s a good point. How about the `DockerRegistryPartialUserAgent` option discussed in #1109 , then?"
+        },
+        {
+            "user": "jonjohnsonjr",
+            "body": "> (It is possible that the User-Agent value chance could break some users, but those users can, in the short-term, revert to an older version and long-term we would like the servers to adjust instead of documenting a work-around that every user has to manually apply. And if we had to have an user override for this long-term, a file like registries.conf would make more sense than a CLI flag.)\n\nWhoops, pushed this right as your comment came in -- let me revert and just fix the `%s`."
+        },
+        {
+            "user": "jonjohnsonjr",
+            "body": "> That’s a good point. How about the `DockerRegistryPartialUserAgent` option discussed in #1109 , then?\n\nI thought about this a little more, and I'm not sure that it's worth the overhead of having both of these in the API. Having just containers/image default to _something_ gives me ~95% of the benefit if a consumer doesn't bother to set a user-agent. Client that _do_ care enough to set a user-agent would likely care enough to set it to something useful...\n\nI do think that being able to segment clients by library _is_ useful for other reasons (I've done something similar in other libraries), but that feels like a bigger change (inventing semantics and adding to the API surface vs just setting some defaults). I'm happy to leave the issue open and have this PR be a partial fix?\n\nEdit: It might also make sense to just have containers/image expose some `func (string) string` in `version` that enriches the useragent? Then we don't have to have two options..."
+        },
+        {
+            "user": "mtrmac",
+            "body": "> > That’s a good point. How about the `DockerRegistryPartialUserAgent` option discussed in #1109 , then?\n> \n> I thought about this a little more, and I'm not sure that it's worth the overhead of having both of these in the API.\n> …\n> Edit: It might also make sense to just have containers/image expose some `func (string) string` in `version` that enriches the useragent? Then we don't have to have two options...\n\nI kind of think about this the other way: Having two very simple clearly-scoped options that contain a `string` and don’t affect anything else is not a big deal (and without trying to write tests the implementation is about 5 lines that will probably never change). We can always add a few more options like this (`DockerRegistryPretendToBeDockerInUserAgent` or whatever ridiculous thing might be needed in the future) without breaking any past callers, on a strictly opt-in basis for future library users, and affecting only an extremely small part of the c/image codebase.\n\nA `func (string) string` API would not allow us to remove the existing `DockerRegistryUserAgent` field (we really don’t want to bump the major version of c/image again if at all possible), so we would still have 2 fields to maintain, and keeping the callback API compatible with past/future callers could be much more difficult. (What if c/image versioning changes? What if we eventually realize that we need _both_ c/image and a Go http stack version in there? Would we change the format of the string submitted to that function, or just not include some input and modify what the callback returns? Either way could break someone.)"
+        },
+        {
+            "user": "jonjohnsonjr",
+            "body": "I'm not sure that I understand what you're referring to as a callback. Maybe my edit wasn't super clear. I'm imagining something like this:\n\n```go\nctx := &types.SystemContext{\n  DockerRegistryUserAgent: cversion.UserAgent(\"skopeo/\"+version.Version),\n}\n```\n\n\n```go\n// containers/image/version/version.go\nfunc UserAgent(base string) string {\n  ua := \"containers-image/\"+Version\n  if base == \"\" {\n    return ua\n  }\n  return fmt.Sprintf(\"%s %s\", base, ua)\n}\n```\n\ndocker/docker does something similar in https://github.com/moby/moby/blob/master/pkg/useragent/useragent.go\n\nAnd https://github.com/moby/moby/blob/46cdcd206c56172b95ba5c77b827a722dab426c5/dockerversion/useragent.go#L18 + https://github.com/moby/moby/blob/46cdcd206c56172b95ba5c77b827a722dab426c5/api/server/server.go#L132\n\n(Which callers could also use, if they really wanted to pretend to be docker...)\n\nIt just seems simpler to have an option for \"set the user-agent to this string\" and then some accessory helpers for producing that string than to have a bunch of options for different string-assembling behavior.\n\n> (It is possible that the User-Agent value chance could break some users, but those users can, in the short-term, revert to an older version and long-term we would like the servers to adjust instead of documenting a work-around that every user has to manually apply. And if we had to have an user override for this long-term, a file like registries.conf would make more sense than a CLI flag.)\n\nRe-reading this, I _think_ I might understand what you're getting at -- you're thinking of this from the perspective of twiddling a string in a config file vs me thinking of this from the perspective of the golang API? Sorry for all this back and forth, I am not very familiar with the containers/image stuff, so I'm coming from a place of ignorance."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@mtrmac @vrothberg PTAL\n\nIs this one ready to go in?"
+        },
+        {
+            "user": "jonjohnsonjr",
+            "body": "I'm happy to rebase and squash, not sure what y'all would prefer."
+        },
+        {
+            "user": "jonjohnsonjr",
+            "body": "@mtrmac any strong opinions either way?"
+        },
+        {
+            "user": "mtrmac",
+            "body": "> I'm not sure that I understand what you're referring to as a callback. Maybe my edit wasn't super clear. I'm imagining something like this:\n> \n> ```go\n> ctx := &types.SystemContext{\n>   DockerRegistryUserAgent: cversion.UserAgent(\"skopeo/\"+version.Version),\n> }\n> ```\n\nAh.\n\n> It just seems simpler to have an option for \"set the user-agent to this string\" and then some accessory helpers for producing that string than to have a bunch of options for different string-assembling behavior.\n\nPeople, especially under time pressure, can be incredibly inventive about not using / bypassing optional helpers — and I don’t think we really want a whole general infrastructure for parsing/formatting/combining strings."
+        },
+        {
+            "user": "mtrmac",
+            "body": "> Is this one ready to go in?\n\nI’d still like to have _both_ c/image and Skopeo in the User-Agent header, but I guess that can wait for the user, if any, that needs that…"
+        },
+        {
+            "user": "jonjohnsonjr",
+            "body": "> Could you do a final rebase? Then we can merge.\n\nDone.\n\n> People, especially under time pressure, can be incredibly inventive about not using / bypassing optional helpers — and I don’t think we really want a whole general infrastructure for parsing/formatting/combining strings.\n\nDefinitely agree -- which is why I think good defaults are really important. This PR is actually a pretty good example. Go doesn't force people to set a user agent, so most people don't think about it.\n\n> I’d still like to have both c/image and Skopeo in the User-Agent header\n\nI'd be happy to change this default to:\n\n```go\nvar defaultUserAgent = fmt.Sprintf(\"skopeo/%s containers/%s (github.com/containers/image)\", version.Version, cversion.Version)\n```\n\nI could also expose github.com/containers/image/v5/docker.defaultUserAgent so we can just import the second half? I'm always in favor of a little bit of copying to avoid adding the dependency and having to bump versions, but I'd leave that up to you.\n\nThe exact string isn't super important to me, I just want to be able to pinpoint \"this is skopeo\". My other PR is mostly sufficient for that, given that podman and buildah set their own UA, but this PR is still necessary to distinguish skopeo from anything else using containers/image.\n\n> but I guess that can wait for the user, if any, that needs that…\n\nI'm happy if this merges as-is, but I'd also like you to be happy with it.\n\nLet me know whatever you'd prefer. "
+        },
+        {
+            "user": "mtrmac",
+            "body": "> I could also expose github.com/containers/image/v5/docker.defaultUserAgent so we can just import the second half?\n\nAn advantage of the `DockerRegistryPartialUserAgent` approach (along with soft-deprecating `DockerRegistryUserAgent`) would be that the caller _does not have to care_. Whatever process the caller has for choosing a user agent can continue to be unmodified, with no imports, no calls, no conventions, no opportunities for typos in the caller-irrelevant parts; just pass the value that the caller _does care about_ along."
+        },
+        {
+            "user": "thomasmckay",
+            "body": "Is the user-agent configurable? Quay uses skopeo for to implement \"repo mirror\" and there was an ask to set user-agent."
+        },
+        {
+            "user": "vrothberg",
+            "body": "It's not configurable in Skopeo but in the containers/image library.  Are you looking for something similar to `curl -A`?  I am supportive of this idea; I see Skopeo as a curl-like utility for container images.\n\nInterested in opening a PR for that? I imagine a top-level flag making it available to all (sub)commands."
+        },
+        {
+            "user": "thomasmckay",
+            "body": "@vrothberg sorry, golang is outside my skill set so no PR from me"
+        },
+        {
+            "user": "mtrmac",
+            "body": "> Is the user-agent configurable? Quay uses skopeo for to implement \"repo mirror\" and there was an ask to set user-agent.\n\nSet user-agent for what purpose? User-agent is not an authentication mechanism; AFAIK it’s primarily to help interoperability (allow bug workarounds and the like) — and in that sense, all Skopeo clients (and really all c/image clients) with a particular version should be, I think, treated the same."
+        }
+    ],
+    "cross_references": []
+}

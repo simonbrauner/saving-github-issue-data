@@ -1,0 +1,60 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "skopeo",
+    "number": 764,
+    "type": "issue",
+    "title": "Copy an image index from oci format to a docker registry",
+    "state": "closed",
+    "labels": [
+        "locked - please file new issue/PR"
+    ],
+    "user": "xlucas",
+    "body": "I'm trying to leverage `docker buildx` toolchain to create an OCI image index that I can then push to docker hub later with `skopeo`. I'm running this:\n\n```\n# docker buildx build --platform=linux/amd64,linux/arm64 -f Dockerfile -o type=oci,dest=./test.tar\n# ./skopeo copy oci-archive:test.tar docker://docker.io/myusername/test -a\n```\n\nThe result of the latter is:\n\n```\nGetting image list signatures\nCopying 2 of 2 images in list\nCopying image sha256:ffe52a6807245eb5fde1b3fd17cd8538d29eda21375b6526a729ac9929a42ba9 (1/2)\nGetting image source signatures\nCopying blob c7b7d16361e0 skipped: already exists\nCopying blob b7a128769df1 skipped: already exists\nCopying blob 1128949d0793 skipped: already exists\nCopying blob 667692510b70 skipped: already exists\nCopying blob c70d80036479 skipped: already exists\nCopying blob 50f26e2b5c7f skipped: already exists\nCopying blob 2ea72dab87cf skipped: already exists\nCopying blob 05b6d4a9b03e skipped: already exists\nCopying blob 948eb7bd221f skipped: already exists\nCopying blob ab12078a6410 skipped: already exists\nCopying config d03553b62e done\nWriting manifest to image destination\nStoring signatures\nCopying image sha256:ef7aa3acf35768448d1530aff5b65c933c949a06726331cea9d18282fa18cc7e (2/2)\nGetting image source signatures\nCopying blob 5a8521f5974d skipped: already exists\nCopying blob dd1378028f1d skipped: already exists\nCopying blob 15cab53b0844 skipped: already exists\nCopying blob f6b3955dadc0 skipped: already exists\nCopying blob 56c70e5b63d1 skipped: already exists\nCopying blob 311d908f8944 skipped: already exists\nCopying blob 1f21fa0d440a skipped: already exists\nCopying blob c88f6a1b2836 skipped: already exists\nCopying blob e94fdee810e0 skipped: already exists\nCopying blob 102a73ab614b skipped: already exists\nCopying config 43606257e0 done\nWriting manifest to image destination\nStoring signatures\nWriting manifest list to image destination\nStoring list signatures\n```\n\nAnd nothing appears in docker hub.\nIs it possible to do this?",
+    "comments": [
+        {
+            "user": "mtrmac",
+            "body": "@nalind ?"
+        },
+        {
+            "user": "btashton",
+            "body": "@xlucas I saw some funny behaviour doing this as well on a non docker.io repository.  I capture the http requests and the manifest list json looked something like this:\n\n```\n{\n   \"schemaVersion\":2,\n   \"manifests\":[\n      {\n         \"mediaType\":\"application/vnd.docker.distribution.manifest.v2+json\",\n         \"digest\":\"sha256:e9818a25b9c9aa2bfaabd4459ae8baa4c4f02e392cb835a5d8895a2f00bc53c1\",\n         \"size\":749,\n         \"platform\":{\n            \"architecture\":\"amd64\",\n            \"os\":\"linux\"\n         }\n      },\n      {\n         \"mediaType\":\"application/vnd.docker.distribution.manifest.v2+json\",\n         \"digest\":\"sha256:8cc2a397a9e7dd4e2cef626bad3066e3e8c552a665f09547d3aab52f5b902772\",\n         \"size\":749,\n         \"platform\":{\n            \"architecture\":\"arm64\",\n            \"os\":\"linux\"\n         }\n      }\n   ]\n}\n```\n\nWhich is missing the `mediaType` for the manifest list itself which I do not believe is valid.  I found this intermediate step produced the correct manifest list.\n\n```\ndocker buildx build --platform linux/amd64,linux/arm64  -o type=oci,dest=- . > myimage-oci.tar\nskopeo  copy  oci-archive:myimage-oci.tar dir:tmp -f v2s2 --all\nskopeo  copy  --dest-tls-verify=false --dest-creds=username:password dir:tmp docker://localhost:8081/docker-local/hello --all\n```\nI will dig in and see what is going on here with the missing mediaType, but I would be curious if this solves the problem for you with docker.io"
+        },
+        {
+            "user": "btashton",
+            "body": "Adding `-f v2s3` to the copy resolved it for me, but it is not clear why this would need to be explicitly set."
+        },
+        {
+            "user": "vrothberg",
+            "body": "> -f v2s3\n\nThat's looks like a typo and should be `v2s2`. This observation can be explained with Docker Hub having issues displaying images in the OCI format. The images are on the registry but the web UI apparently has issues displaying them, see https://github.com/docker/hub-feedback/issues/1871. According to Docker, the bug should soon be fixed."
+        },
+        {
+            "user": "btashton",
+            "body": "@vrothberg Yes that was a type'o in my comment, but as I said the manifest list is missing `mediaType` if I copy without supplying the v2s2 which does not seem correct to me and some registries will reject."
+        },
+        {
+            "user": "vrothberg",
+            "body": "Apologies for missing that part. I reopened the issue and will have a look after a fresh coffee :)"
+        },
+        {
+            "user": "vrothberg",
+            "body": "The mediatype is missing because the go-specs of the image spec do not implement it which to me looks like a bug upstream since the image spec requires the media type. I'll open a PR upstream.\n\nThanks for the additional report, @btashton !"
+        },
+        {
+            "user": "mtrmac",
+            "body": "@vrothberg is there an upstream (?) issue we could link to?"
+        },
+        {
+            "user": "mtrmac",
+            "body": "… found it I think: https://github.com/opencontainers/image-spec/pull/795 .\n\nAn OCI index is valid without the `mediaType` field (in fact, per the above, invalid with it). It is a bit surprising to have an OCI index that points to Docker v2s2 images, admittedly.\n\nDo I understand correctly that the image, using the simplest default workflow (`skopeo copy --oci-archive:… docker://…`, no `--format` option) does work and can be pulled successfully, and it’s _only_ the Docker Hub UI that doesn’t show it?"
+        },
+        {
+            "user": "vrothberg",
+            "body": "> … found it I think: [opencontainers/image-spec#795](https://github.com/opencontainers/image-spec/pull/795) .\n> \n> An OCI index is valid without the `mediaType` field (in fact, per the above, invalid with it). It is a bit surprising to have an OCI index that points to Docker v2s2 images, admittedly.\n\nI guess we can close this issue?\n\n> Do I understand correctly that the image, using the simplest default workflow (`skopeo copy --oci-archive:… docker://…`, no `--format` option) does work and can be pulled successfully, and it’s _only_ the Docker Hub UI that doesn’t show it?\n\nNow it does. There was an issue last year where Docker Hub UI did not show OCI images."
+        },
+        {
+            "user": "mtrmac",
+            "body": "If the code generates valid OCI images, and they are actually usable on the registry, yes, I think we can close this. Thanks for the confirmation."
+        }
+    ],
+    "cross_references": []
+}

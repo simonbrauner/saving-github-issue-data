@@ -1,0 +1,175 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "skopeo",
+    "number": 425,
+    "type": "issue",
+    "title": "Image format docker-archive is not equivalent to docker save ",
+    "state": "closed",
+    "labels": [
+        "locked - please file new issue/PR"
+    ],
+    "user": "nlewo",
+    "body": "The format of an image copied from the Docker Hub to `docker-archive://my-image` is not what is produced by `docker save`.\n`docker save` produces a image that follows this [spec](https://github.com/moby/moby/blob/749d90e10f989802638ae542daf54257f3bf71f2/image/spec/v1.2.md#combined-image-json--filesystem-changeset-format). Basically, the image layout is such as:\n```\n├── 47bcc53f74dc94b1920f0b34f6036096526296767650f223433fe65c35f149eb.json\n├── 5f29f704785248ddb9d06b90a11b5ea36c534865e9035e4022bb2e71d4ecbb9a\n│   ├── VERSION\n│   ├── json\n│   └── layer.tar\n├── a65da33792c5187473faa80fa3e1b975acba06712852d1dea860692ccddf3198\n│   ├── VERSION\n│   ├── json\n│   └── layer.tar\n├── manifest.json\n└── repositories\n```\n\nWhile the format of the image produced by Skopeo only contains `tar.gz` file and a `manifest.json` such as:\n```\nsha256:5a132a7e7af11f304041e93efb9cb2a0a7839bccaec5a03cfbdc9a3f5d0eb481\nsha256:fd2731e4c50ce221d785d4ce26a8430bca9a95bfe4162fafc997a1cc65682cce\nsha256:28a2f68d1120598986362662445c47dce7ec13c2662479e7aab9f0ecad4a7416\nsha256:a3ed95caeb02ffe68cdd9fd84406680ae93d633cb16422d00e8a7c22955b46d4\nsha256:07c86167cdc4264926fa5d2894e34a339ad27f730e8cc81a16cd21b7479e8eac\nmanifest.json\n```\n\nWhat is this format? Is there a spec somewhere? Or would it be possible to be compliant with `docker save` ?\n ",
+    "comments": [
+        {
+            "user": "mtrmac",
+            "body": "`docker save`/`docker load` actually implement two different formats/semantics : a “legacy” one, with a top-level `repositories` file, and the schema1-like set of layer+metadata subdirectories (with each layer having its metadata), and the newer one, with a `manifest.json` and a schema2-like config+blob files (with one config regardless of the number of blobs).  \n\nThe linked specification documents the legacy and the newer format together, not going out of its way to document the distinction – but see the “for backward compatibility” notes for the legacy parts.\n\n`docker-archive` implements only the newer format, very similarly to the way Docker does that, and is, to my knowledge, interoperable with all recent Docker versions.\n\nImplementing the legacy format would be possible but so far we haven’t seen a reason to — and the more time passes the less important it seems. Do you have a specific use case?"
+        },
+        {
+            "user": "nlewo",
+            "body": "No particular use cases and I prefer to use the newest format. \nIn fact, we were just wondering what is this image format to be sure we are not implementing a non standardized format. But I'm really surprised to not be able to find a clear spec of this format.\n\nFYI, with Docker 1.12.6 `docker save` uses the old format.\n\nThanks for your answer."
+        },
+        {
+            "user": "lo1tuma",
+            "body": "@mtrmac Even the latest version of the docker image spec doesn’t say anything about that `.tar.gz` files would be supported for the layer changesets. So I think a spec-compliant version should only produce `.tar` files."
+        },
+        {
+            "user": "mtrmac",
+            "body": "That’s fair.\n\nDocker does accept compressed layers, and that’s what originally mattered. (The format was reverse-engineered, I couldn’t find any documentation at that time, and only to be consumed by `docker load` initially.)\n\nNow that there is `docker-archive:`, not only `docker-daemon:`, the formal semantics of that format do matter more.\n\nThe flip side is that decompressing the stream would force us to create a temporary copy on disk (only to know the size to write into the tar header), which is pretty costly, and would be unnecessary if the consumer didn’t care. Similarly, the read side of `docker-archive:` requires a seekable file, not a stream, so both the read and write side is more efficient with an uncompressed tar archive which contains compressed layer tarballs than the other way around. \n\nTrade-offs everywhere… I guess the caller could opt in into uncompressed data (or compressed data?) via `types.SystemContext`, if someone cared to implement that. Or perhaps I’m overlooking a nice clean solution of some kind.\n\n@runcom WDYT?"
+        },
+        {
+            "user": "runcom",
+            "body": "I think we should defiant to uncompressed and opt-in for compressed layers chanesets"
+        },
+        {
+            "user": "nlewo",
+            "body": "@mtrmac I had a look at the code to see how could this be implemented.\n\nFirst, the read side of `docker-archive` works well with the v1 legacy image format. So i think there is nothing to do on this side.\n\nRegarding the destination side, it seems the `PutBlob` method copy blob to a tar file called `sha256:imageSha`. To switch to the v1 legacy format, we have to copy it to the tar file `layer/imageSha` instead. This seems to be trivial.\n\nOne problem is that we don't have to copy the config file blob to a layer directory. So in `putBlobs` we should not copy the config blob but I don't find a way to distinguish layer blobs from config blobs in the `putBlob` method. Maybe blobs could be annotated at a early step by setting the type of the blob in `BlobInfo.Annotations`. Do you know how to do this? Is there an existing example?\n\nA last thing is that we have to create config file in each layer directory, and also a repository file at the image root level. Could this be done in the `Commit` method? Note we need the initial image configuration to do this."
+        },
+        {
+            "user": "mtrmac",
+            "body": "> First, the read side of `docker-archive` works well with the v1 legacy image format.\n\nDoes it? `c/i/tarfile/Source.loadTarManifest` only reads the schema2-like `manifest.json`.\n\n> One problem is that we don't have to copy the config file blob to a layer directory.\n\nIs that a _problem_? So the config blob would be in a subdirectory, and `manifest.json` would point to it. Seems compliant.\n\n> So in `putBlobs` we should not copy the config blob but I don't find a way to distinguish layer blobs from config blobs in the `putBlob` method. Maybe blobs could be annotated at a early step by setting the type of the blob in `BlobInfo.Annotations`.\n\nNo untyped `string`:`string` maps for intra-process data passing, please. If anything, just add another boolean to `BlobInfo`, or use separate `PutBlob`/`PutConfig` (which would also help containers-storage). But really this seems unnecessary.\n\n> A last thing is that we have to create config file in each layer directory, and also a repository file at the image root level. Could this be done in the `Commit` method? Note we need the initial image configuration to do this.\n\n`Commit` would work; of course most of the `$digest/json` files would be entirely unusable because we don’t have any configs of the parent images available when the input is schema2."
+        },
+        {
+            "user": "nlewo",
+            "body": "To affirm the read side of `docker-archive` works with v1 legacy image, I `docker saved` an image that I then used as a `docker-archive` source. More precisely, it's v1.2 legacy image.\n\nIf we don't distinguish the config from the layer, the config file will be put in a `DIGEST/layer.tar` which is not really clean...Moreover, it's far from what is generated by `docker save`.\n\nI `docker saved` several upstream images and layer configurations only contain the digest of the parent, except for the leaf layer that contains a part of the image configuration."
+        },
+        {
+            "user": "mtrmac",
+            "body": "> More precisely, it's v1.2 legacy image.\n\nIf I understand correctly you actually don’t care about what I call the “legacy” format (**schema**1-like, with `repositories`), only about the schema2-like one with `manifest.json`.\n\nIf I misunderstood, please explain what you mean by legacy/non-legacy images."
+        },
+        {
+            "user": "cyphar",
+            "body": "@nlewo IMO, what really matters is whether `docker load` supports it, which it does. This code was written before `1.12.0` was released, and it works with older Docker releases. If you do a `docker save` of an import of our output, you get the \"new\" format which indicates that Docker clearly knows what's going on. Can you give an example of an image which was not correctly handled by `skopeo` or Docker because of these issues?\n\nI also am not a huge fan of decompressing blobs through `skopeo`, these sorts of tricks (trying to work around the `Put...` interfaces by lying about the checksum of a blob) always results in a bunch of issues. Not to mention I believe it would break signing, no?\n\nAnother point is that we **are** following the `v1.2` Docker \"spec\". It clearly allows you to specify any paths for the `Config` and `Layers`. We just aren't producing the same paths as Docker, which isn't a problem and I don't see why it would be (the spec allows it explicitly). You could argue compression isn't explicitly allowed, but since there's only two implementations of this format (`skopeo` and Docker) I would be fairly confident in saying that this counts as consensus on a spec extension."
+        },
+        {
+            "user": "mtrmac",
+            "body": "> IMO, what really matters is whether `docker load` supports it, which it does.\n\nThe context for this discussion to be that there are other tools which can process the output of `docker save` but not the files generated by `docker-archive:`. I guess that’s an unexpected use case but it makes enough sense, if someone cares enough to implement this.\n\n> Not to mention I believe it would break signing, no?\n\nNot quite for `docker-archive:`, which can not represent signatures. For `docker-daemon:` I do care about the ability to preserve signatures, but in that case the daemon decompresses and throws away the original blob anyway, so this would not be an extra obstacle.  (Still, `docker-daemon:` should not do the decompression, we might just as well send the smaller compressed version over the socket, and let the daemon process deal with that.)\n\nAnd if the format did grow support for signatures, if the decompression happened in the generic `copy.Image` code (possible in principle, at the cost of making `copy.copyBlob` even more complex), that code could decide based on the presence of signatures to skip the decompression, or refuse to decompress and fail, just like we disable compression when copying signed images."
+        },
+        {
+            "user": "nlewo",
+            "body": "@mtrmac I mean this [\"spec\"](https://github.com/moby/moby/blob/749d90e10f989802638ae542daf54257f3bf71f2/image/spec/v1.2.md#combined-image-json--filesystem-changeset-format). I used the term \"legacy\" because this is what the Docker code uses to talk about these images (https://github.com/moby/moby/blob/master/image/tarexport/tarexport.go#L12).\n\n@cyphar as said by @mtrmac, we plan to use Skopeo to get images from the registry to the format that is used by `docker save`. These images can then be used by tools that build images without relying on Docker (mainly because it's hard to use Docker in reprocible environments).\n\n@cyphar With `docker  1.12.6`, I get the image ` ubuntu@sha256:45b23dee08af5e43a7fea6c4cf9c25ccf269ee113168c19722f87876677c5cb2` with skopeo to the `docker-archive` format. I then loaded this `tgz` and saved it with docker. The resulting `tgz` format is the [v1.2](https://github.com/moby/moby/blob/749d90e10f989802638ae542daf54257f3bf71f2/image/spec/v1.2.md#combined-image-json--filesystem-changeset-format) one. But maybe, my docker version is too old.\n\nOne last thing is that the Skopeo readme says \"docker-archive:path[:docker-reference] An image is stored in the docker save formated file [...]\" which is not the case form my point of view."
+        },
+        {
+            "user": "cyphar",
+            "body": "@nlewo My point is that `skopeo` **is** generating valid images according to the \"spec\" document you've linked. We just don't structure it in the same way (in the same way that people write HTML documents in different ways, but all HTML documents are still HTML). Restructuring it is not really all that hard, but it is still compliant to their \"spec\". Compression is a fair point, though as I said above, Docker supports compression on import so I don't see that as a huge issue (but I guess @mtrmac has no problem with uncompressing for `docker-archive` -- though it does cause some extra costs that are not really favourable).\n\nIf you're working on a project to use `docker-archive` images then you have to implement their \"spec\" fully, not just the particular way that Docker formats it (as an aside, if you're thinking of using container images please use [OCI](https://github.com/opencontainers/image-spec) which is actually standardised and Docker will move to eventually)."
+        },
+        {
+            "user": "mtrmac",
+            "body": "> @mtrmac I mean this [\"spec\"](https://github.com/moby/moby/blob/749d90e10f989802638ae542daf54257f3bf71f2/image/spec/v1.2.md#combined-image-json--filesystem-changeset-format). I used the term \"legacy\" because this is what the Docker code uses to talk about these images (https://github.com/moby/moby/blob/master/image/tarexport/tarexport.go#L12).\n\nMy point is that that spec is vague/imprecise about what the legacy/non-legacy parts are. The essential part of the `legacy` format is the top-level `repositories` index, and that is _not_ currently supported by `docker-archive:` (but to test that you need to make sure the archive does not contain `manifest.json` at all)."
+        },
+        {
+            "user": "mtrmac",
+            "body": "> but I guess @mtrmac has no problem with uncompressing for `docker-archive` -- though it does cause some extra costs that are not really favourable\n\n\\*shrug\\* I don’t _like_ the extra complexity, but I also like containers/image to be generally useful; so if someone wanted to invest the effort into implementing this in a clean and reasonably efficient way, it would be nice to have."
+        },
+        {
+            "user": "mtrmac",
+            "body": "(Also, seconding the suggestion to use OCI formats for transport in the future. They have their own interoperability problems, but not as big as this, and the OCI formats benefit from a few more years of experience in the design. Of course that does not help all that much if there already is an ecosystem of tools which accept `docker save`-like archives.)"
+        },
+        {
+            "user": "nlewo",
+            "body": "These first investigations really motivates me to go to OCI... for instance just to have precise specs;) But for now, I have to use Docker... and maybe I could start a smooth migration by using OCI internally and continuing to export images as Docker image.\n\n@mtrmac I'm sorry, I didn't get your point regarding `repository` and `manifest.json`. Regarding these two files, `docker save` creates both of them in its output.  "
+        },
+        {
+            "user": "mtrmac",
+            "body": "> @mtrmac I'm sorry, I didn't get your point regarding `repository` and `manifest.json`. Regarding these two files, `docker save` creates both of them in its output.\n\nThe Docker implementation, and with close reading the spec as well, really specifies _two different_ formats with _orthogonal_ properties:\n\n1. Legacy / schema1-like: `repositories`, and _digest_ directories containing `VERSION`, `json`, `layer.tar`\n\n2. New / schema2-like: `manifest.json` containing arbitrary paths, and other files in those arbitrary paths.\n\nThe two have _nothing in common_ as such; it is possible to create archives which are compliant with both at the same time (like `docker save` does), but conceptually a consumer should expect one or the other.\n\nIn https://github.com/projectatomic/skopeo/issues/425#issuecomment-334384579 you say that `docker-archive:` can already read the “legacy”, i.e. schema1-like format. It just can’t.\n\nNow, I’m not actually sure whether the schema1-like/schema2-like difference matters to you; maybe all that’s important is the layer compression, and we are just talking past each other about what “legacy” means or doesn’t mean. "
+        },
+        {
+            "user": "nlewo",
+            "body": "@mtrmac The legacy/schema1-like also contains a `manifest.json` file which can be used to get layers and image config. I think this is why the `schema1` format is supported by `docker-archive`.\n\nIn fact, I don't really know exactly what people do with images they fetched with Skopeo but when I have tryied to switch form the \"docker save\" format to the \"skopeo\" format, several things didn't work anymore.\n\nFrom my point of view it would be nice to see any difference between a `docker save` and a `skopeo copy docker-archive`. As we know, it's quite difficult to understand and implement the docker image spec! So I feel it easier for everybody to mimic docker tools.\n\nI will have a look at the implementation and come back to you."
+        },
+        {
+            "user": "mtrmac",
+            "body": "> @mtrmac The legacy/schema1-like also contains a `manifest.json` file which can be used to get layers and image config.\n\nNo."
+        },
+        {
+            "user": "mtrmac",
+            "body": "> > @mtrmac The legacy/schema1-like also contains a `manifest.json` file which can be used to get layers and image config.\n>\n> No.\n\nTo be definitive, see the removed load/save code in ed4d236e04e1a5724de578654939e3a42f7466cc ."
+        },
+        {
+            "user": "cyphar",
+            "body": "@nlewo \n\n> In fact, I don't really know exactly what people do with images they fetched with Skopeo but when I have tryied to switch form the \"docker save\" format to the \"skopeo\" format, several things didn't work anymore.\n\nCan you give me a precise example of this? I'm legitimately surprised, as it has worked in all of the things we use it for (we use it in several key parts of container-related tooling at SUSE and within the openSUSE projects -- which is why I added support for it in the first place :wink:). I can tell you what we do with them, but usually we only use `docker-archive` for cases where something is directly imported into Docker -- we use OCI for everything else.\n\nIf it is the case that it doesn't work with some existing tool, then obviously we should fix it so that it does. Your original bug report read as \"these are not the same, so therefore it's not correct\" which as we've discussed is not an accurate statement."
+        },
+        {
+            "user": "nlewo",
+            "body": "@mtrmac hmm, I'm really confused! If you `docker save` an image, you will have a manifest.json file in the archive (and also a `repositories` file). And [here](https://github.com/moby/moby/blob/master/image/tarexport/save.go#L251), they open the `manifest.json` file. Moreover, this `manifest.json` file is also mentionned [here](https://github.com/moby/moby/blob/master/image/spec/v1.2.md#combined-image-json--filesystem-changeset-format)."
+        },
+        {
+            "user": "nlewo",
+            "body": "@cyphar this [code](https://github.com/NixOS/nixpkgs/blob/master/pkgs/build-support/docker/default.nix#L459) is used to build Docker images and it relies on the `repositories` files for instance. If the base image is pulled with Skopeo, this code doesn't work, while it works if the base image is pulled by Docker.\n"
+        },
+        {
+            "user": "mtrmac",
+            "body": "> @mtrmac hmm, I'm really confused! If you `docker save` an image, you will have a manifest.json file in the archive (and also a `repositories` file).\n\n\\*sigh\\* No, not with an old enough version.\n\n> And [here](https://github.com/moby/moby/blob/master/image/tarexport/save.go#L251), they open the `manifest.json` file.\n\nOn `master`, sure. Irrelevant to what the schema1-like format used to be.\n"
+        },
+        {
+            "user": "cyphar",
+            "body": "@nlewo Not to shill my own projects too hard, but if you just used [umoci](https://github.com/openSUSE/umoci) then that script would be 90% shorter and you wouldn't have to manually generate all of the things you generate. I see your point, though I would argue that the reason it works is mostly by chance. I guess we might have to support this then."
+        },
+        {
+            "user": "mtrmac",
+            "body": "@nlewo From that spec:\n\n> Generally, implementations that support this version of the spec will use the `manifest.json` file if available, and older implementations will use the legacy `*/json` files and `repositories`.\n\nRead that in context with what I’ve been telling you. There are **two** formats."
+        },
+        {
+            "user": "nlewo",
+            "body": "@cyphar yep, i was trying to reduce this shell code smoothly by first replacing our docker pull code with Skopeo"
+        },
+        {
+            "user": "nlewo",
+            "body": "@mtrmac @cyphar First of all, thanks for all your comments!\n\nFYI, it seems mesos 1.4.0 (and master also I think) has also some troubles with the `shema2` format:\n```\nslave# [ 1398.219958] mesos-slave[659]: E1017 08:11:04.241060   772 slave.cpp:5292] Container 'c0c71699-dadc-438e-a795-3b01f4445dc1' for executor 'simple-docker' of framework 04bb19d8-c342-486c-892a-a7bf297a5255-0003 failed to start: Failed to read 'repositories': Failed to open file: No such file or directory\n```\nThe mesos pull code is [there](https://github.com/apache/mesos/blob/master/src/slave/containerizer/mesos/provisioner/docker/local_puller.cpp#L198)\n"
+        },
+        {
+            "user": "Hollerweger",
+            "body": "Docker does not accept my image saved via skopeo:\n\n```\nskopeo --override-os linux --insecure-policy copy docker://quay.io/keycloak/keycloak:18.0.0 dir:docker\nGetting image source signatures\nCopying blob 4752687a61a9 done\nCopying blob 0344366a246a done\nCopying blob bf8a68204bbb done\nCopying blob c4db0a36467a done\nCopying config f3c086ee76 done\nWriting manifest to image destination\nStoring signatures\n```\n\nCreated tar from contents of docker folder (only files) and tried to load via docker:\n```\ndocker load -i .\\keycloak-18.0.0.tar\njson: cannot unmarshal object into Go value of type []tarexport.manifestItem\n```\n\nI used latest skopeo windows version from release page.\n\n\n"
+        },
+        {
+            "user": "mtrmac",
+            "body": "The `dir:` format is something _completely different_ from `docker-archive:`, this is not expected to work at all. If you need interoperability with `docker load`, use `docker-archive:`."
+        },
+        {
+            "user": "Hollerweger",
+            "body": "@mtrmac Thanks that worked! Overlooked it in the documentation as it was not part of the Readmr examples for copy."
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "NixOS",
+            "repository": "nixpkgs",
+            "number": 29660
+        },
+        {
+            "organization": "containers",
+            "repository": "image",
+            "number": 370
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 2013
+        },
+        {
+            "organization": "google",
+            "repository": "go-containerregistry",
+            "number": 526
+        },
+        {
+            "organization": "google",
+            "repository": "go-containerregistry",
+            "number": 651
+        },
+        {
+            "organization": "blackducksoftware",
+            "repository": "hub-imageinspector-lib",
+            "number": 20
+        }
+    ]
+}

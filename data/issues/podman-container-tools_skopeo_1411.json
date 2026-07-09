@@ -1,0 +1,95 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "skopeo",
+    "number": 1411,
+    "type": "issue",
+    "title": "install-binary doesn't generate policy.json and certain other files",
+    "state": "closed",
+    "labels": [
+        "stale-issue",
+        "locked - please file new issue/PR"
+    ],
+    "user": "jaikiran",
+    "body": "When building the skopeo tool from source, if I just install the binary using `make install-binary`, the binary is generated fine but using the generated binary `skopeo` for any command like `skopeo copy` results in an error:\n\n> Error loading trust policy: open /etc/containers/policy.json: no such file or directory\n\nLooking at the Makefile https://github.com/containers/skopeo/blob/main/Makefile#L177 it appears that the creation of this `policy.json` and a few other directories and files is only done by the `install` target but not the `install-binary` target? Seeing how these files are required by the generated binary, I guess the `install-binary` should perhaps be creating these files/directories too?\n\nThe reason why we don't use `install` target is because it has the docs generation target which fails for us because none of our setups have `go-md2man` installed.\n",
+    "comments": [
+        {
+            "user": "rhatdan",
+            "body": "You could add a install-config if you want, then you would need to call both.  Open a PR if this is something you want."
+        },
+        {
+            "user": "mtrmac",
+            "body": "Thanks for your report.\n\nThe `install-binary` target is not documented, originally apparently existed for tests, and basically there’s no specific intent/promise associated with it. (To the extent it was originally targeted at tests, it might have worked fine, because tests use their own `policy.json`, and anyway those tests now use full `make install`, so we could just drop the `install-binary` target.)\n\nFor `go-md2man`, there is also (supposedly?) a `make docs-in-container`.\n\n---\n\nHonestly there’s a limit to how much the installation can be reasonably customizable — adding more and more custom targets will just result in situations like these, with unmaintained undocumented sub-targets that break without anyone noticing.\n\nBut, let’s take a look. @lsm5 https://src.fedoraproject.org/rpms/skopeo/blob/f34/f/skopeo.spec doesn’t use `make install`, or any of the build targets, either.\n\nIs there a specific Make targets structure that would be more useful?"
+        },
+        {
+            "user": "lsm5",
+            "body": "@mtrmac so policy.json and default.yaml are now provided by the standalone containers-common package. So, the `install` target as-is would cause installation issues.\n\nWe do use the `install-binary` target (see: https://src.fedoraproject.org/rpms/skopeo/blob/f34/f/skopeo.spec#_303-305 )  but it's modified to not call the build target https://src.fedoraproject.org/rpms/skopeo/blob/f34/f/skopeo.spec#_260 so that we can use fedora's provided `%{gobuild}` macro to build the binaries.\n\nI would really like to have separate `-nobuild` and maybe `install-config` targets like @rhatdan suggested which I think would provide more flexibility.\n\n@jaikiran btw, what environment are you on? I'd imagine most distros have go-md2man by now."
+        },
+        {
+            "user": "jaikiran",
+            "body": "> @jaikiran btw, what environment are you on? I'd imagine most distros have go-md2man by now.\n\nSome context - we plan to use this tool with our local/private docker registry (container). `skopeo` will be used to schedule specific `sync` from some other external registries. The `skopeo` tool will be pre-installed as part of our custom docker image creation. The base image for that is going to be the offical `registry:2` docker image[1] which is based off Alpine[2]. I haven't found any packages for `go-md2man` for Alpine.\nThe install doc of skopeo[3] does mention that we can install the tool through the pacakge manager, but the version that's shipped is outdated and isn't the latest, so I can't use that one.\n\n[1] https://docs.docker.com/registry/deploying/\n[2] https://github.com/docker/distribution-library-image\n[3] https://github.com/containers/skopeo/blob/main/install.md#alpine"
+        },
+        {
+            "user": "lsm5",
+            "body": "@mtrmac @rhatdan buildah lets you build go-md2man AFAICT https://github.com/containers/buildah/blob/main/docs/Makefile . Maybe we could replicate the same in skopeo?"
+        },
+        {
+            "user": "mtrmac",
+            "body": "\\*shrug\\* users can always do `go install …` somewhere into $PATH if they want to manage this manually.\n\nOur CI does install a distribution package (and we’d probably prefer not to spend time building it from scratch for no benefit), so a separate Makefile target that our CI, and our RPM packaging, doesn’t use, would not be well-maintained."
+        },
+        {
+            "user": "mtrmac",
+            "body": "> I would really like to have separate `-nobuild` and maybe `install-config` targets like @rhatdan suggested which I think would provide more flexibility.\n\n`install-binary-nobuild` would be easy enough.\n\nWRT `install-config`, AFAICS the RPM doesn’t quite want to use this one — to an extent the ideal `install-all-but-config-and-nobuild`, so that any future file types are automatically included; but that is just exponential explosion of options. But I guess if the RPM is patching the Makefile, a separate `install-config` that the RPM can patch out, allowing it to call `make install`, would work acceptably."
+        },
+        {
+            "user": "jaikiran",
+            "body": "FWIW - At least in the context of our usage, the docs (the man pages that get generated) are never going to be used anyway. So, for us, if the doc generation could be skipped, by perhaps explicitly setting an env variable while triggering the recommended `make install`, should be good enough too."
+        },
+        {
+            "user": "mtrmac",
+            "body": "One more not-even-half-baked idea — _ideally_ it should be fine for `install-binary` to depend on `bin/skopeo`, if Makefile could correctly express the full dependency set and notice that a `%{gobuild}`-created binary already exists and is new enough; `bin/skopeo` is `.PHONY` only because we don’t do that.\n\nI don’t know that it is possible to express such dependencies in Makefile (and do it cheaply enough), I suspect not — but if it is possible, and someone knows how to that, that would be very interesting."
+        },
+        {
+            "user": "mtrmac",
+            "body": "> So, for us, if the doc generation could be skipped, by perhaps explicitly setting an env variable while triggering the recommended `make install`, should be good enough too.\n\n(Something like `for i in docs/*.md; do touch ${i%.md}; done` might work right now, but that’s of course not all that maintainable.)"
+        },
+        {
+            "user": "jaikiran",
+            "body": "I went ahead and added a tiny enhancement to disable doc generation, using the environment variable approach I noted. The diff looks like:\n\n```\ndiff --git a/Makefile b/Makefile\nindex 5721b06d..172c307e 100644\n--- a/Makefile\n+++ b/Makefile\n@@ -140,7 +140,9 @@ build-container:\n \t${CONTAINER_RUNTIME} build ${BUILD_ARGS} -t \"$(IMAGE)\" .\n \n $(MANPAGES): %: %.md\n+ifneq ($(DISABLE_DOCS), 1)\n \tsed -e 's/\\((skopeo.*\\.md)\\)//' -e 's/\\[\\(skopeo.*\\)\\]/\\1/' $<  | $(GOMD2MAN) -in /dev/stdin -out $@\n+endif\n \n docs: $(MANPAGES)\n \n@@ -164,8 +166,10 @@ install-binary: bin/skopeo\n \tinstall -m 755 bin/skopeo ${DESTDIR}${BINDIR}/skopeo\n \n install-docs: docs\n+ifneq ($(DISABLE_DOCS), 1)\n \tinstall -d -m 755 ${DESTDIR}${MANDIR}/man1\n \tinstall -m 644 docs/*.1 ${DESTDIR}${MANDIR}/man1\n+endif\n \n install-completions:\n \tinstall -m 755 -d ${DESTDIR}${BASHCOMPLETIONSDIR}\n```\nI then run `DISABLE_DOCS=1 DISABLE_CGO=1 make install` which now works fine. I decided to go with the `DISABLE_DOCS` approach since it's easily configurable. If there is interest in disabling docs in this manner, I will raise a PR with this change for review."
+        },
+        {
+            "user": "mtrmac",
+            "body": "> We do use the `install-binary` target (see: https://src.fedoraproject.org/rpms/skopeo/blob/f34/f/skopeo.spec#_303-305 ) but it's modified to not call the build target https://src.fedoraproject.org/rpms/skopeo/blob/f34/f/skopeo.spec#_260 so that we can use fedora's provided `%{gobuild}` macro to build the binaries.\n> \n> I would really like to have separate `-nobuild` and maybe `install-config` targets like @rhatdan suggested which I think would provide more flexibility.\n\n@lsm5 so if `install` depended on `install-config`, would that be useful for the RPM? Maybe by patching the Makefile to drop the `install-config` dependency and then running `make install`?\n\nOr should we really need to add individual disable-that-part options?"
+        },
+        {
+            "user": "lsm5",
+            "body": "\n\n> @lsm5 so if `install` depended on `install-config`, would that be useful for the RPM? Maybe by patching the Makefile to drop the `install-config` dependency and then running `make install`?\n\nskopeo rpm can't/won't use `install-config` as configs are handled by the separate standalone containers-common rpm, which is no longer in the skopeo package.\n\nIf any install target depends on a build target, it's likely a deal-breaker for rpm. RE: your earlier comment about Makefile noticing whether recently built binary using %{gobuild} is new enough and doesn't need replacement, I don't know if things have changed recently, but maybe a year or so ago when I last tried it, it did end up rebuilding the binary.\n\n> Or should we really need to add individual disable-that-part options?\n\nI think everything would be just a lot simpler with install targets being independent of build targets. \n\nBut, if install targets need to depend on build targets upstream, I would really prefer separate -nobuild options. I was thinking along the lines of what we have in podman + @jaikiran's patch above:\n```\n$(MANPAGES): %: %.md\nifneq ($(DISABLE_DOCS), 1)\n \tsed -e 's/\\((skopeo.*\\.md)\\)//' -e 's/\\[\\(skopeo.*\\)\\]/\\1/' $<  | $(GOMD2MAN) -in /dev/stdin -out $@\nendif\n\ninstall-binary-nobuild: \n    install -d -m 755 ${DESTDIR}${BINDIR}\n    install -m 755 bin/skopeo ${DESTDIR}${BINDIR}/skopeo\n\ninstall-binary: bin/skopeo install-binary-nobuild\n\ninstall-docs-nobuild:\nifneq ($(DISABLE_DOCS), 1)\n    install -d -m 755 ${DESTDIR}${MANDIR}/man1\n    install -m 644 docs/*.1 ${DESTDIR}${MANDIR}/man1\nendif\n\ninstall-docs: docs install-docs-nobuild\n\ninstall-config:\n    install -d -m 755 ${DESTDIR}${SIGSTOREDIR}\n    install -d -m 755 ${DESTDIR}${CONTAINERSCONFDIR}\n    install -m 644 default-policy.json ${DESTDIR}${CONTAINERSCONFDIR}/policy.json\n    install -d -m 755 ${DESTDIR}${REGISTRIESDDIR}\n    install -m 644 default.yaml ${DESTDIR}${REGISTRIESDDIR}/default.yaml\n\n#Optional: If everyone is ok, this could be install-nobuild or install-package etc.\ninstall-nobuild: install-binary-nobuild install-docs-nobuild install-completions\n\ninstall: install-binary install-docs install-completions install-config\n```\n\nWith this: \n- we don't break existing behavior upstream for `make install` + @jaikiran can use DISABLE_DOCS\n- for rpms I can only use `install-binary-nobuild install-docs-nobuild` or the optional `install-nobuild` and I don't need to carry any patches in the rpm.\n- If people need to add further install rules, they could simply update the -nobuild sections and the rest should just work (hopefully)."
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@lsm5 @mtrmac @jaikiran What is happening with this issue?"
+        },
+        {
+            "user": "jaikiran",
+            "body": "Hello @rhatdan, I am willing to raise a PR which employs the change I proposed in a comment above https://github.com/containers/skopeo/issues/1411#issuecomment-897328285, but I haven't see interest in it. So I'm not sure if something else is being planned."
+        },
+        {
+            "user": "lsm5",
+            "body": "I'm ok with @jaikiran's patch upstream. Packaging side can be handled later AFAICT."
+        },
+        {
+            "user": "jaikiran",
+            "body": "I've now opened https://github.com/containers/skopeo/pull/1443 with the proposed change."
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "skopeo",
+            "number": 1443
+        }
+    ]
+}

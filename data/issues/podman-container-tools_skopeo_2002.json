@@ -1,0 +1,63 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "skopeo",
+    "number": 2002,
+    "type": "issue",
+    "title": "Allow overriding registries.conf and registries.d paths",
+    "state": "open",
+    "labels": [
+        "kind/feature",
+        "stale-issue"
+    ],
+    "user": "hadmut",
+    "body": "Hi, \nusing skopeo 1.4.1 under Ubuntu 22.04 I ran into that problem:\n\nFor a network I've set on all linux machines in /etc/containers/registries.conf.d/something.conf\n\n[[registry]]\nprefix   = \"docker.io\"\nlocation = \"docker.io\"\n\n[[registry.mirror]]\nprefix   = \"docker.io\"\nlocation = \"install.local:5000/docker.io\"\n\n\nThen I have a sync_install.yaml file which contains a list of containsers to be synchronized like\n\ndocker.io:\n  images:\n    \n    alpine:\n      - \"latest\"\n      - \"3.17\"\n  ... and some more\n\n\nBut when trying to copy with \n\nskopeo sync --scoped --src yaml --dest docker /etc/containers/sync_install.yaml  install.local:5000\n\n\nit doesn't (checked with strace) the source docker.io at all, but takes the local mirror to synchronize it with itself and comes to the conclusion \"Skipping: image already present at destination\"\n\nI have to remove  /etc/containers/registries.conf.d/something.conf in order to make skopeo work correctly, i.e. connect to docker.io instead of my local mirror. \n\nIt doesn't make sense to synchronize a local mirror just with itself. And I did not find any option to not use the mirror. \n\nAny solution (instead of removing the file, which requires root privileges)?\n\nregards\n\n\n\n",
+    "comments": [
+        {
+            "user": "mtrmac",
+            "body": "Thanks for your report. `skopeo sync` obeys mirrors just like every other `skopeo` command. (That allows reading from a mirrored source.)\n\nThere’s a hidden `skopeo --registries-conf` option that can be used to not use the system-wide config file; maybe that option should be officially documented."
+        },
+        {
+            "user": "hadmut",
+            "body": "Does it affect the /etc/containers/registries.conf.d/ as well?\n\nUnder Ubuntu, the /etc/containers/registries.conf consists of comments only, thus it is effectively empty. Not using it wouldn't help. \n\nDoes the --registries.d option add an additional directory to read, or does it replace the path?"
+        },
+        {
+            "user": "mtrmac",
+            "body": "(Note that `--registries.d` and `--registries-conf` are separate.)\n\n`registries.conf.d` can’t currently be overridden in Skopeo. (Infrastructure for that exists, but we currently don’t have an option for `SystemRegistriesConfDirPath`.)\n\n---\n\nAlternatively, you can create a (potentially empty) per-user config file in `~/.config/containers/registries.conf`; if that exists, the `/etc/*.conf.d` directory is not used, only a per-user directory.\n\n"
+        },
+        {
+            "user": "hadmut",
+            "body": "Creating an empty ~/.config/containers/registries.conf makes it work. \n\nBut I guess that having this file makes other programs like podman stop using the mirror as well. \n\n"
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "hadmut",
+            "body": "So what is the intended way to fill a local mirror with images without such workarounds?\n "
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "mirekphd",
+            "body": "> Creating an empty ~/.config/containers/registries.conf makes it work.\n\nI think the root of the issue can lie in an implicit root requirement introduced by assuming that Skopeo has read access to ~/ . If it is granted such access, and it fails to find the file, it does not complain or initialize the above file populating it with some defaults. It just does nothing. So checking for the presence of this file may not even be needed at all, and at least the reaction of Skopeo to not finding this file (e.g. due to not having read access to `~/`)  should be reclassified from FATA to WARN.\n\nTo reproduce the issue:\n\n```\n# run the Skopeo (containerized for Ubuntu) under non-existing user,\n# while mapping a host folder `/home/jovyan` to eponymous container folder (`/home/jovyan`:  \n# a home folder (`~/`)  inside the container, where the container user \n# has no access rights (not even for reading)):\n$ docker run --rm -it --name test -u 123456 -v /var/lib/docker/:/var/lib/docker -v /home/jovyan:/home/jovyan \nlatestml/ml-admin-jup:20240106 bash -c \"skopeo copy docker://hello-world docker-archive:/tmp/hello-world-10.tar\" \nFATA[0000] initializing source docker://hello-world:latest: loading registries configuration: reading registries.conf.d: lstat /home/jovyan/.config/containers/registries.conf.d: permission denied \n``` \nvs. masking the problem by using the correct user ID (1007) with access rights \nto the host folder where container home folder `~/ = /home/jovyan` is mapped: \n```\n$ docker run --rm -it --name test -u 1007 -v /var/lib/docker/:/var/lib/docker -v /home/jovyan:/home/jovyan latestml/ml-admin-jup:20240106 bash -c \"skopeo copy docker://hello-world docker-archive:/tmp/hello-world-10.tar\" \nGetting image source signatures\nCopying blob c1ec31eb5944 done   | \nCopying config d2c94e258d done   | \nWriting manifest to image destination\ntotal 74200\n\n```\n\nNotice that the missing registries config file has *not* been created during the second successful Skopeo run above, despite having write access to the container and host `/home/jovyan/.config` folder:\n\n```\n$ sudo ls -lantr /home/jovyan/.config \ntotal 12\ndrwx------ 3 1007    0 4096 Dec 25 11:52 .\ndrwx------ 2 1007    0 4096 Dec 25 11:53 mc\ndrwxr-x--- 9 1007 1007 4096 Dec 26 11:37 ..\n```"
+        },
+        {
+            "user": "mtrmac",
+            "body": "> I think the root of the issue can lie in an implicit root requirement introduced by assuming that Skopeo has read access to ~/ . \n\nSure; that’s ordinary for per-user config files.\n\n> So checking for the presence of this file may not even be needed at all, and at least the reaction of Skopeo to not finding this file (e.g. due to not having read access to `~/`) should be reclassified from FATA to WARN.\n\nThere are many possible ways for that access to fail, including disk corruption, or a `root`-imposed SELinux policy preventing the user from accessing the user’s own files. Skopeo can’t tell the cause, it is just certain that it is running in an unexpected configuration, so I feel fairly strongly that the right response is to report that to the user, not to silently continue with possibly unwanted configuration.\n\n---\n\nReally, the direct solution is to allow overriding the path to `registries.conf.d`. Then the usual operation within an ordinary home directory can do the right thing without any configuration, and special-cases can be handled."
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "0x77dev",
+            "repository": "pdf-sign",
+            "number": 103
+        }
+    ]
+}

@@ -1,0 +1,108 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "skopeo",
+    "number": 281,
+    "type": "issue",
+    "title": "If image exists, skopeo copy should not repull image",
+    "state": "closed",
+    "labels": [
+        "locked - please file new issue/PR"
+    ],
+    "user": "baude",
+    "body": "In the case of docker, I don't think skopeo copy should repull the same image (if already present).  Perhaps a command line switch one way or another would be preferred?",
+    "comments": [
+        {
+            "user": "runcom",
+            "body": "Can't other tools check for the presence of the image already? \n\nI'm not sure _how_ this will work out though (even if it's conceptually simple). It must check _somehow_ if the destination is already populated with the same image digest (and maybe other checks for signatures, cc @mtrmac). \nI'm not totally opposed to this, but if we can keep skopeo as simple as possible and leave these decisions to upper layers it would be better. We're basically adding something which could be potentially be done elsewhere from skopeo."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@baude can we make atomic check?"
+        },
+        {
+            "user": "baude",
+            "body": "Sure but ... that means atomic will perform a series of network hops to figure this out.  Usually this includes getting a token, looking for the manifest, etc.  Then if need be, pull the image via skopeo copy.  Skopeo copy will essentially repeat some of those steps.  You guys decide.  I can be flexible."
+        },
+        {
+            "user": "rhatdan",
+            "body": "Well it could check if there is a pull by image id, whether the image id is in the storage backend.  If the pull is by name.  Could we add something to the dbus api to tell it to check locally only?  IE If I have a fedora:latest, then don't go to the network.  If the user does not specify local check, then we always skopeo copy?"
+        },
+        {
+            "user": "baude",
+            "body": "I think the use case is outside the realm of dbus only.  If the image is 1GB, you really don't want to repull it again (and wait) if the image already exists locally.  I'll dummy up a PR for atomic cli and we can decide how we like it.  Let's keep this open until then."
+        },
+        {
+            "user": "mtrmac",
+            "body": "> Perhaps a command line switch one way or another would be preferred?\n\nA command-line switch would be fairly pointless; the `docker load` implementation does not re-load duplicate objects (layers / configs) anyway.\n\nReally the difficulty here is how to detect _in advance_ that the image is already present at the destination, with different ways to identify an image (`docker-daemon:` does not really do manifest digests), manifest schema conversion in general, and with `docker-daemon:` not really using the manifest as given, but using the config blob as the primary object.\n\nIt seems plausible to have an `ImageDestination.AlreadyContainsManifest(manifestBytes []byte)` (with an `ImageDestination` implicitly referring to an `ImageReference`), but that’s still insufficient because the copy operation ordering is:\n\n* Copy layers to destination (possibly compressing / decompressing / computing DiffIDs)\n* Update or convert manifest depending on newly determined compressed digests, and schemas supported in the destination\n* _only now_ we have the manifest we would be storing into the destination. But calling `AlreadyContainsManifest` now is… not _entirely_ late but very late; we have done at least 75% of the work.\n\nOf course not copying an existing image is, in a sense, “only” an optimization, so perhaps we could call `AlreadyContainsManifest` as the very first thing, on the original unmodified/unconverted manifest; if that detected a duplicate, we would do nothing; if it didn’t detect a duplicate (e.g. pulling schema1 and converting on the fly), there might still end up being one.\n\n(Another tricky aspect, for the more general problem, not this one in particular is that even if we _know_ that an _individual layer_ is already present, we still seem to have to include a layer in the tarball. _Perhaps_ we could convince ourselves that the layer in the tarball is never used, so we could put garbage in there, but that is racy WRT concurrent layer deletion.)"
+        },
+        {
+            "user": "rhatdan",
+            "body": "Can you do a skopeo inspect to check if the image has changed from the current and then do a skopeo copy?"
+        },
+        {
+            "user": "runcom",
+            "body": "Let's see what @mtrmac says about signatures. ~~I believe it would be a simple check to do (given c/image API is much friendly to this kind of checks now that we have c/storage integrated). ~~"
+        },
+        {
+            "user": "mtrmac",
+            "body": "`(skopeo inspect)` on a `docker-daemon:` would be a `docker save` with all the layers; probably not as expensive as pulling the image remotely, but pretty expensive.\n\nOf course we can build something better, but _right now_ `skopeo` does not give efficient tools to work with `docker-daemon:`.  Also, `skopeo inspect` does not reveal the existence / values of config.json digests outside of `--raw`.\n\nSomething probably could be hacked up with `docker inspect $(skopeo inspect --raw | jq $extract_config_json_digest)`, but that’s a hack specific to the two individual transports."
+        },
+        {
+            "user": "mtrmac",
+            "body": "> Let's see what @mtrmac says about signatures.\n\nHum, signatures are “interesting” in that adding a signature (by design) does not change the manifest digest, so they have to be synced separately. But that’s also 1) irrelevant for current `docker-daemon:` and 2) cheap enough.\n\n>  I believe it would be a simple check to do (given c/image API is much friendly to this kind of checks now that we have c/storage integrated).\n\nIt’s not obvious to me that c/storage somehow immediately eliminates the need to talk with the docker daemon; does it?\n\n—\n\nIn general, I _am_ in favor of making `copy.Image` a single place which hides the complexity and transport differences from callers (even at the cost of a fair amount of non-trivial code), so that callers can just call `copy.Image(to, from)` and not have to worry about anything (as long as they don’t ask for performance guarantees at least)."
+        },
+        {
+            "user": "mtrmac",
+            "body": "Separately, cc @nalind for c/storage integration issues:\n\nCurrently `ImageDestination` prescribes a fairly strict order: A sequence of `HasBlob`+`PutBlob`/`ReapplyBlob`, then `PutManifest`, then `PutSignatures`, finally `Commit`. To what extent can we restructure this to make things optional?\n\nMost of our backends are either dumb enough (`dir:`) or ~inherently atomic (`docker-daemon:` only really starting to work when the streamed tarfile is correctly terminated) that cherry-picking (e.g. skipping some layer blobs, or calling `PutSignatures` without `PutManifest` in the advance) should be possible to reasonably implement. How does containers/storage behave in this respect?\n\n---\n\nOf course that’s the complex case; we can _still_ just do a check for a completely uploaded image+signatures first, bail out successfully if so, and do a the existing expensive copy on any mismatch, however minor."
+        },
+        {
+            "user": "rhatdan",
+            "body": "I was suggesting that we just do the simple path, use skopeo to check remote image/tag name for an image ID and then check if the image ID exists in our local storage docker, container/storage, ostree.  If not then it copies everything.  \n\nBetter then nothing.\n\nLater we can further optimize skopeo "
+        },
+        {
+            "user": "baude",
+            "body": "@rhatdan assuming you mean to do this in atomic cli right?"
+        },
+        {
+            "user": "rhatdan",
+            "body": "Yes"
+        },
+        {
+            "user": "nalind",
+            "body": "@mtrmac the storage `ImageDestination` currently defers everything except the storage of the layers until `Commit` is called, so as long as the layers are `Put` or `Reapply`d in the right order, there's no other requirement on the order in which things happen.  We don't currently try to roll back those layers if `Close` is called without `Commit` being called first, but if you think it'll help, we can work on that."
+        },
+        {
+            "user": "mtrmac",
+            "body": "> so as long as the layers are Put or Reapplyd in the right order\n\nWhat if there were only a `PutSignatures` + `Commit`? Or only `PutManifest` + `Commit`? (Both only if we somehow could tell that the layers and manifest are already available in the `ImageDestination`. [Of course one way to deal with this would be to pretend that this is never the case, and defeat the optimization.])"
+        },
+        {
+            "user": "nalind",
+            "body": "@mtrmac I would expect that to succeed.  Right now we record a zero-length manifest along with the empty set of signatures, but that can be changed if it's a problem."
+        },
+        {
+            "user": "rhatdan",
+            "body": "I believe this is fixed, so closing, reopen if I am mistaken."
+        },
+        {
+            "user": "mtrmac",
+            "body": "For the record, nothing has been improved for the originally-implied `docker-daemon:` destinations.  `containers-storage:` destinations + the blob info cache have several duplicate detection facilities, which should avoid repeated copies of the large blobs, overall a bit more expensive than the suggested `ImageDestination.AlreadyContainsManifest` in that particular case, but all local disk I/O, not network traffic."
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "projectatomic",
+            "repository": "atomic",
+            "number": 812
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "skopeo",
+            "number": 395
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "skopeo",
+            "number": 511
+        }
+    ]
+}

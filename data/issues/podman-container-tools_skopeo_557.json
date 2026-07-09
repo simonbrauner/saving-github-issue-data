@@ -1,0 +1,71 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "skopeo",
+    "number": 557,
+    "type": "issue",
+    "title": "DOCKER_HOST is being ignored?",
+    "state": "closed",
+    "labels": [
+        "locked - please file new issue/PR"
+    ],
+    "user": "alonbl",
+    "body": "Hello,\n\nI am using atomic within centos docker image, the image includes docker-client which communicates with docker server using TLS.\n\nFor some reason the DOCKER_HOST is being ignored. I see that client.go::NewEnvClient should accept the environment, however, I do not see any reference to it, maybe I am missing something. I expect the process to use DOCKER_HOST if explicit host is not provided in command-line.\n\nThanks!\n\n```\n$ export | grep DOCKER\ndeclare -x DOCKER_CERT_PATH=\"/etc/docker\"\ndeclare -x DOCKER_HOST=\"tcp://project1-slave01.xxx.com:4243\"\ndeclare -x DOCKER_TLS_VERIFY=\"1\"\n$ atomic --debug push --sign-by key1@xxx.com project1-master.xxx.com:5002/project1/runtime/review:11790\nNamespace(_class=<class 'Atomic.push.Push'>, activation_key=None, anonymous=False, assumeyes=False, debug=True, func='push', gnupghome=None, ignore=False, image='project1-master.xxx.com:5002/project1/runtime/review:11790', insecure=False, password=None, profile=False, pulp=False, reg_type='docker', repo_id=None, satellite=False, sign_by='key1@xxx.com', url=None, username=None, verify_ssl=None)\n\nSigning with 'key1@xxx.com'\n\nExecuting: /usr/bin/skopeo --debug copy --remove-signatures --sign-by key1@xxx.com docker-daemon:project1-master.xxx.com:5002/project1/runtime/review:11790 docker://project1-master.xxx.com:5002/project1/runtime/review:11790\nDEBU[0000] Using registries.d directory /etc/containers/registries.d for sigstore configuration \nDEBU[0000]  Using \"default-docker\" configuration        \nDEBU[0000]   Using file:///var/lib/atomic/sigstore      \nDEBU[0000] Looking for TLS certificates and private keys in /etc/docker/certs.d/project1-master.xxx.com:5002 \nFATA[0000] Error initializing source docker-daemon:project1-master.xxx.com:5002/project1/runtime/review:11790: Error loading image from docker engine: Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running? \n\nTraceback (most recent call last):\n  File \"/bin/atomic\", line 185, in <module>\n    sys.exit(_func())\n  File \"/usr/lib/python2.7/site-packages/Atomic/push.py\", line 200, in push\n    gpghome=self.args.gnupghome)\n  File \"/usr/lib/python2.7/site-packages/Atomic/util.py\", line 454, in skopeo_copy\n    return check_call(cmd, env=os.environ)\n  File \"/usr/lib/python2.7/site-packages/Atomic/util.py\", line 214, in check_call\n    return subprocess.check_call(cmd, env=env, stdin=stdin, stderr=stderr, stdout=stdout, close_fds=True)\n  File \"/usr/lib64/python2.7/subprocess.py\", line 542, in check_call\n    raise CalledProcessError(retcode, cmd)\nCalledProcessError: Command '['/usr/bin/skopeo', '--debug', 'copy', '--remove-signatures', '--sign-by', 'key1@xxx.com', 'docker-daemon:project1-master.xxx.com:5002/project1/runtime/review:11790', 'docker://project1-master.xxx.com:5002/project1/runtime/review:11790']' returned non-zero exit status 1\n```",
+    "comments": [
+        {
+            "user": "mtrmac",
+            "body": "Thanks for your report.\n\nRight; the library tries to minimize behavior changes based on (completely invisible and difficult to audit) environment variables, and $DOCKER_HOST is not supported. (The `docker-daemon:` functionality was from the start implemented to work with a _local_ daemon.)\n\nThe library does allow overriding the host, and the `skopeo` CLI exposes it, in this case you could use `skopeo copy --src-daemon-host=…`. I’m not sure whether that can be done through the `atomic` wrapper."
+        },
+        {
+            "user": "alonbl",
+            "body": "Hi!\nThanks for quick respond. No the atomic does not delegate that into the skopeo. Can you please consider supporting the DOCKER_HOST as fallback if a parameter is not provided? I believe this is the expected behaviour in docker environment. Alternatively, support a configuration file where these can be specified.\nThanks!"
+        },
+        {
+            "user": "mtrmac",
+            "body": "As mentioned above, implicit environment affecting libraries makes for behavior that is difficult to reason about.\n\nAlso, do you have some unusual reason for running the signing remote this way?\n\nIn general, I’d rather strongly recommend running the `skopeo` command directly on the destination host:\n- Using `--src-daemon-host= docker-daemon:` is _very_ inefficient: it makes an _uncompressed_ copy of the whole container over the network, only for `skopeo` to locally compress it and push it, again over the network, to the destination registry.\n- Also, access to the Docker socket on a remote machine is equivalent to having root access to that machine; so, not installing `skopeo`/`atomic` on that machine and using the Docker socket is not making the setup any safer; if anything, it makes it much worse than a local-only socket."
+        },
+        {
+            "user": "alonbl",
+            "body": "Hi,\n\nEnvironment variable as defaults is stable and make sense... most of the application including the most secure ones such as openssh, gnupg fallback to environment and only if absent fallback to the hardcoded default. Needless to say that docker behaves the same, so I do not understand what difficult to reason about, it is best practice and expected behaviour.\n\nUsing atomic as a wrapper is what endorsed by red hat as far as I know, it is a simplified interface for their processes, it is very hard for me to justify why not to use it as it is well documented and supported.\n\nThe docker container is jenkins slave which runs the build process, the host machine is minimalistic, only capable of executing containers. This docker build slave is a client to a remote machine that is not critical and can be refreshed at any time to this machine all docker activities are delegated. But it is not important for this discussion.\n\nPlease please please fallback to environment and only if absent fallback to the hardcoded values, as in client.go::NewEnvClient, you can get the parameters and override them with command-line argument values.\n\nThanks!"
+        },
+        {
+            "user": "mtrmac",
+            "body": "Environment variables _may_ make sense at the top application level; anywhere deeper in a stack of libraries or applications they are very risky, when the library just arbitrarily does something entirely different from what its caller asked it to do just because a value was left in the environment (and, while environment variables are at all prevalent, the only reasonable way for the caller to prevent is, by clearing the environment entirely to get to a known state, is not practical).\n\nIn a sense, the use case you are asking for is _exactly_ such an “does something entirely different” situation: `atomic push` was designed, and tested, for interacting with the local daemon.  Adding an environment variable that just arbitrarily overrides middle of the call stack to deal with a different daemon (regardless of what other interactions `atomic` may or may not have done with the local daemon or other local state), is entirely unexpected.\n\nThe _feature_ may or may not be supportable, desirable, great (I don’t have the time to investigate now); the _implementation_ of using an entirely unexpected environment variables to change the behavior of a small part of a bigger stack, without any investigation whether the rest of the stack is ready for this, or maybe even without the _ability_ to investigate this, is unreliable and not a good design.\n\nThis works for /usr/bin/docker because it is the _top level_, and the environment variable is essentially equivalent to a CLI option in almost all aspects; but using an environment variable to change the behavior of /usr/bin/docker used within a bigger software stack (whether including /usr/bin/atomic, or anything else), is equally risky."
+        },
+        {
+            "user": "alonbl",
+            "body": "Atomic properly document the use of the well known environment variables[1], as expected and working. The library that you use endorse using the environment based client. All components behaves in consistent way, except of this component.\n\nI am sorry, but I do not get your point. Following your logic, there must be no defaults in your tools as all must be provided by top level explicitly. It just like you say that X11 application should not lookup the DISPLAY environment and use :0 hardcoded.\n\nRegardless, now that I keep trying to use this utility I am facing a lot of assumptions of running as root, reading from /etc/ without allow to override by using settings. A well behaved program, once again, let's take [1] (ATOMIC_CONF, ATOMIC_CONFD) as an example has environment variable to specify where configuration is and only then fallback to /etc.\n\nI understand that you had a very specific use case and a runtime environment in your mind when implementing this, however, the generic case should make it possible to avoid root and reuse context state similar to other utilities that handle the same eco-system.\n\nFindings so far:\n1. Fallback to environment and only then fallback to hardcoded values.\n2. (1) applies to docker host and to configuration files location.\n3. Do not assume root as docker may run on a remote host.\n\nThanks!\n\n[1] https://github.com/projectatomic/atomic/blob/master/docs/atomic.1.md"
+        },
+        {
+            "user": "alonbl",
+            "body": "Closing as probably not interesting."
+        },
+        {
+            "user": "mtrmac",
+            "body": "> Following your logic, there must be no defaults in your tools as all must be provided by top level explicitly.\n\nSure, there is a _default_, it is `unix:///var/run/docker.sock`. We are talking about are different ways of expressing _options_, and environment variables are a non-transparent and risky way to express an option. (In some cases, like `DISPLAY` or `XDG_RUNTIME_DIR`, that option is so widely needed and the implicit inheritance through `fork`/`exec` is so desirable  that an environment variable still ends up being the only practical option; but that’s not the case for a vast majority of options. )\n\n> Atomic properly document the use of the well known environment variables[1], as expected and working.\n\nThat’s honestly a surprise to me.[1]\n\nOTOH, that’s up to the `atomic` command maintainers, and they are perfectly in their right to decide to accept options that way (and it may make sense for them _as a top-level application_). If `atomic` wants to comprehensively implement the `DOCKER_HOST` environment variable, that’s fine with me; it can convert the `DOCKER_HOST` environment variable to `skopeo`’s `--src-docker-host` CLI option, explicitly reflecting in the code that such an option is intended to be supported.\n\nSo, please report this missing support for `DOCKER_HOST` against the `atomic` project.\n\nMeanwhile, for the containers/image _library_ really the intent is to minimize accepting options via environment variables, and `skopeo` is designed to be a very thin CLI on top of that library.\n\n---\n\n[1] (I’m not sure how `atomic`’s support for `DOCKER_HOST` can be comprehensive considering the references to `/var/lib/docker` on a local host, at least for the `atomic storage` subcommand. And because the `DOCKER_HOST` environment variable is entirely invisible to the code, it’s possible that no-one has considered this case.)"
+        },
+        {
+            "user": "rhatdan",
+            "body": "Perhaps DOCKER_HOST Should be supported by podman and buildah, But I agree that skopeo should not support it, since it is supposed to be a low level tool for manipulation of images."
+        },
+        {
+            "user": "mtrmac",
+            "body": "> Perhaps DOCKER_HOST Should be supported by podman and buildah\n\nNote that it would affect only `docker-daemon:`.  Still, that may be a desirable feature (`podman pull` from a remote Docker daemon)"
+        },
+        {
+            "user": "mcg1969",
+            "body": "Just happened onto this discussion. I recognize it is closed but to those that might have my experience, I was seeking to use skopeo with a Minikube installation. What I found to work well was this:\n```\neval $(minikube docker-env)\nskopeo copy --src-cert-dir=$DOCKER_CERT_PATH --src-daemon-host=$DOCKER_HOST docker-daemon:...\n```\nI hope anyone who happens on this finds it helpful. And now I'm headed off to the docs to see if there is yet a simpler way implemented since this issue was first raised!"
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "skopeo",
+            "number": 1570
+        },
+        {
+            "organization": "cachix",
+            "repository": "devenv",
+            "number": 671
+        }
+    ]
+}

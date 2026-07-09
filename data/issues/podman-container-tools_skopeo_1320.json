@@ -1,0 +1,62 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "skopeo",
+    "number": 1320,
+    "type": "issue",
+    "title": "Fail to decrypt the image with PKCS7",
+    "state": "closed",
+    "labels": [
+        "locked - please file new issue/PR"
+    ],
+    "user": "wlei27",
+    "body": "I build the skopeo version v1.2.3 and version 1.3.1-dev commit: dde3e759f6beda3f586896245fd8ca74ad15c7eb from the source codes.  Then I used them to decrypt the image with PKCS7, but I get the failure for both of them. \nThen I switch to build the version v1.2.2, and I can run the decryption successfully.\nHere are the details about my decryption failure with my built v1.2.3.\n```\n[root@oc2587580306 skopeo]# uname -a\nLinux oc2587580306.ibm.com 3.10.0-1160.11.1.el7.x86_64 #1 SMP Fri Dec 18 16:34:56 UTC 2020 x86_64 x86_64 x86_64 GNU/Linux\n[root@oc2587580306 skopeo]# \n\n## Generate the certification first  ##\n\n[root@oc2587580306 skopeo]# openssl genrsa -out myjwekey.pem 2048\nGenerating RSA private key, 2048 bit long modulus\n..................................+++\n....................+++\ne is 65537 (0x10001)\n[root@oc2587580306 skopeo]# openssl req -new -sha256 -key myjwekey.pem -out myjwekey.csr\nYou are about to be asked to enter information that will be incorporated\ninto your certificate request.\nWhat you are about to enter is what is called a Distinguished Name or a DN.\nThere are quite a few fields but you can leave some blank\nFor some fields there will be a default value,\nIf you enter '.', the field will be left blank.\n-----\nCountry Name (2 letter code) [XX]:cn\nState or Province Name (full name) []:beijing\nLocality Name (eg, city) [Default City]:beijing\nOrganization Name (eg, company) [Default Company Ltd]:ibm\nOrganizational Unit Name (eg, section) []:csl\nCommon Name (eg, your name or your server's hostname) []:lei\nEmail Address []:\n\nPlease enter the following 'extra' attributes\nto be sent with your certificate request\nA challenge password []:\nAn optional company name []:\n[root@oc2587580306 skopeo]# openssl x509 -req -sha256 -days 365 -in myjwekey.csr -signkey myjwekey.pem -out mykey_x509.crt\nSignature ok\nsubject=/C=cn/ST=beijing/L=beijing/O=ibm/OU=csl/CN=lei\nGetting Private key\n[root@oc2587580306 skopeo]#\n\n## Encrypt the image nginx ##\n[root@oc2587580306 skopeo]# bin/skopeo  copy --encryption-key pkcs7:./mykey_x509.crt oci:local_nginx:latest oci:nginx_encrypted_x509:latest\nGetting image source signatures\nCopying blob 69692152171a done  \nCopying blob 30afc0b18f67 done  \nCopying blob 596b1d696923 done  \nCopying blob febe5bd23e98 done  \nCopying blob 8283eee92e2f done  \nCopying blob 351ad75a6cfa done  \nCopying config b96e6c32a3 done  \nWriting manifest to image destination\nStoring signatures\n[root@oc2587580306 skopeo]#\n\n## Decrypt the nginx ##\n[root@oc2587580306 skopeo]# bin/skopeo copy --decryption-key ./mykey_x509.crt --decryption-key ./myjwekey.pem oci:nginx_encrypted_x509:latest oci:nginx_decrypted_x509:latest\nGetting image source signatures\nCopying blob e475facb2a01 [--------------------------------------] 0.0b / 25.9MiB\nCopying blob fc1b2134900c [--------------------------------------] 0.0b / 25.3MiB\nCopying blob 0a93445a8032 [--------------------------------------] 0.0b / 601.0b\nCopying blob fe8a1bcb853a [--------------------------------------] 0.0b / 893.0b\nCopying blob 56a80b6d17ee [--------------------------------------] 0.0b / 665.0b\nCopying blob 92ca8c8917dd [--------------------------------------] 0.0b / 1.4KiB\nFATA[0000] Error decrypting layer sha256:e475facb2a0186b1bdda2200e6fd77cb666f3f3e526f87d975d5c904dc5208d0: no suitable key unwrapper found or none of the private keys could be used for decryption:\nno suitable key found for decrypting layer key:\n- no x509 certificates found needed for PKCS7 decryption\n \n[root@oc2587580306 skopeo]#\n```",
+    "comments": [
+        {
+            "user": "lumjjb",
+            "body": "@harche do you have any ideas what may have changed since 1.2.2 to break this? Any changing of passing arguments around?"
+        },
+        {
+            "user": "harche",
+            "body": "Not sure. Maybe something changed in containers/storage? \n\ncc @vrothberg @mtrmac "
+        },
+        {
+            "user": "mtrmac",
+            "body": "This is an OCI/OCI copy, c/storage is not involved at all. The “no suitable key unwrapper” message refers to concepts c/image is completely unaware of, it just provides raw data to the cryptography implementation.\n\nSo it’s tempting to point at github.com/containers/ocicrypt updating from v1.0.3 to  github.com/containers/ocicrypt v1.1.1 , but I didn’t even try to reproduce this yet."
+        },
+        {
+            "user": "lumjjb",
+            "body": "I will test the ocicrypt changes"
+        },
+        {
+            "user": "lumjjb",
+            "body": "yea it looks like going into ocicrypt 1.1.0 broke something, let me investigate further"
+        },
+        {
+            "user": "lumjjb",
+            "body": "Seemed to have found the issue, bad change in getting x509 certs from files, this will fix, and i'll create a new release.\n\n```\n-       if len(x509s) > 0 {\n-               // x509 certs can also be passed in via keys\n-               x509FromKeys, err := processx509Certs(keys)\n-               if err != nil {\n-                       return encconfig.CryptoConfig{}, err\n-               }\n-               x509s = append(x509s, x509FromKeys...)\n+       // x509 certs can also be passed in via keys\n+       x509FromKeys, err := processx509Certs(keys)\n+       if err != nil {\n+               return encconfig.CryptoConfig{}, err\n        }\n+       x509s = append(x509s, x509FromKeys...)\n+\n```"
+        },
+        {
+            "user": "lumjjb",
+            "body": "This should now be fixed with https://github.com/containers/ocicrypt/releases/tag/v1.1.2"
+        },
+        {
+            "user": "mtrmac",
+            "body": "#1344 was just merged; @wlei27 can you confirm this one works, please?"
+        },
+        {
+            "user": "wlei27",
+            "body": "@mtrmac I rebuilt the skepeo with the latest 1.3.1-dev commit: 71e7a5839ef6bed3e280742d916e073b465f6d81, and I can decrypt the image with PKCS7 now. Thanks!"
+        },
+        {
+            "user": "mtrmac",
+            "body": "Great, thanks for the confirmation and @lumjjb thanks for the fix!"
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "containers",
+            "repository": "ocicrypt",
+            "number": 54
+        }
+    ]
+}

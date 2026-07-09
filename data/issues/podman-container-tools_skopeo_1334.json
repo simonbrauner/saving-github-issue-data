@@ -1,0 +1,185 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "skopeo",
+    "number": 1334,
+    "type": "pull_request",
+    "title": "Cirrus: Run checks directly on the host",
+    "state": "closed",
+    "labels": [
+        "locked - please file new issue/PR"
+    ],
+    "user": "cevich",
+    "body": "In order to meet achievable deadlines converting from Travis to Cirrus\nCI, one significant artifact was carried forward (instead of fixing):\n\nDepending on a `--privileged` container to execute all/most automated\nchecks/tests.\n\nPrior attempts to remove this aspect resulted in several test failures.\nFixing the problems was viewed as more time-consuming than simply\npreserving this runtime environment.\n\nTime has passed, and the code has since moved on.  This commit removes\nthe legacy need to execute CI operations in a `--privileged`\ncontainer, instead running them directly on the host.  At the same time,\nthe necessary test binaries are obtained from the same container used\nfor development/local testing purposes.  This ensures the two experiences\nare virtually always identical.",
+    "comments": [
+        {
+            "user": "cevich",
+            "body": "ahh right [most of the tests are skipped when not running in a container](https://cirrus-ci.com/task/6314613785493504), there was something I needed to tweak to get around that..."
+        },
+        {
+            "user": "cevich",
+            "body": "Wait...what?!?!?! It passed??????\n\n@mtrmac PTAL (it's still a prototype)."
+        },
+        {
+            "user": "cevich",
+            "body": "oh! wait, I made a typo, and we probably want developers to be able to build a container for testing in..."
+        },
+        {
+            "user": "cevich",
+            "body": "> for local development it is convenient\n\nYes, we need to do both, the challenge is keeping the environments and experience as similar as possible.\n\n> Would running vendor+build+validate+unit directly on the VM, and integration+system in a container be (even possible and) worth the effort?\n\nThere's no reason we can't/shouldn't do both in parallel (on separate VMs).  \n\n"
+        },
+        {
+            "user": "cevich",
+            "body": "[The openshift thingie seems to be failing to start due to SSl/TLS crap:](https://cirrus-ci.com/task/5463315578093568?logs=integration#L259)\n\n`transport: http2Client.notifyError got notified that the client transport was broken remote error: tls: bad certificate.`\n\nBut I also see a fair number of what looks like errors binding to port 8443 of the local IP...I wonder if maybe something in the GCP networking setup is (somehow) blocking this?   I would think the system/kernel smart enough to recognize that as the local address and not actually send anything out.\n\n"
+        },
+        {
+            "user": "mtrmac",
+            "body": "> [The openshift thingie seems to be failing to start due to SSl/TLS crap:](https://cirrus-ci.com/task/5463315578093568?logs=integration#L259)\n> \n> `transport: http2Client.notifyError got notified that the client transport was broken remote error: tls: bad certificate.`\n\nYeah. I don’t know what that’s about :/ It’s quite possible that a networking difference changes the detected primary IP address inconsistently in some parts of the code vs. others, or something like that. \n\n> But I also see a fair number of what looks like errors binding to port 8443 of the local IP...\n\nBinding or connecting? Connecting retries are expected, that’s just https://github.com/containers/skopeo/blob/71e7a5839ef6bed3e280742d916e073b465f6d81/integration/utils.go#L117 waiting for the server to start up.\n\nBinding to `0.0.0.0:8443` seems to succeed in those logs; also the “remote error” strings at least hint in the direction that a “remote” connection was actually established. Do you mean that it fails from time to time?\n\n> I would think the system/kernel smart enough to recognize that as the local address and not actually send anything out.\n\nYes — OTOH OpenShift might be trying to be “useful” on the local network; we just run an `openshift start master` (in this old version that didn’t use dozens of separate containers) with no configuration at all, and I don’t really know much at all what that does."
+        },
+        {
+            "user": "cevich",
+            "body": "> quite possible that a networking difference changes the detected primary IP address inconsistently\n\nOh, good thought.  I can check this manually by comparing the logs from a job run from master.\n\n> Binding to 0.0.0.0:8443 seems to succeed in those logs;\n\nInteresting, I didn't notice that.  \n\n> OTOH OpenShift might be trying to be “useful” on the local network\n\nHmmm, so the VMs definitely have TWO IP addresses.  One is internal-network only, the other is external.  IIRC, the logs mentioned the 10.x.x.x (internal) network.  That _should_ work, but maybe not.  We're using a very vanilla/default GCP networking setup, it's possible the default is to block inter-VM communications.\n\nIn any case, I think this is going to require some hands-on work."
+        },
+        {
+            "user": "cevich",
+            "body": "> this old version that didn’t use dozens of separate containers\n\n@mtrmac QQ: Is the purpose of this to verify Skopeo can talk to the OpenShift registry?  Is there a (testing) reason why skopeo needs to remain compatible with an unsupported OpenShift?\n\nReason I ask is...might it be easier to get a newer/supported registry to test against rather than fight/fix old one?"
+        },
+        {
+            "user": "mtrmac",
+            "body": "> QQ: Is the purpose of this to verify Skopeo can talk to the OpenShift registry?\n\nYes,\n\n> Is there a (testing) reason why skopeo needs to remain compatible with an unsupported OpenShift?\n\nSomewhat.\n\nWe need the registry for testing two things:\n- The X-Registry-Supports-Signatures API, a registry-native way of storing signatures, independent of OpenShift’s k8s API. That one is, AFAIK, supported by the OpenShift integrated registry in current versions as well, and it is _much_ easier to use than external sigstores, so it’s something we fairly strongly need to keep functional, i.e. keep testing. (It’s fairly reasonable to argue that testing against _old_ OpenShift will over time be less representative than testing against currently-supported versions, so if testing against the current full-cluster monsters isn’t feasible, so we could just give up and test against completely fake mock servers instead, and get similar coverage as we do now. It’s arguable but it’s not obviously the right call, and anyway replacing the current tests with the fake-mock-server tests would be a somewhat sizable effort.)\n- The preceding OpenShift-k8s-specific signature API, using the `atomic:` transport. That is still shipped but fairly strongly deprecated (it was created before the X-R-S-S API, so we need it either not to break old `atomic:` users, or to allow reading/writing signatures for OpenShift versions that support the `atomic:` API but not X-R-S-S), and less and less relevant over time. OpenShift has already changed its API so that `atomic:` does not work against recent servers, we keep it only to access the old ones. At some point, I don’t know how to decide when, we could just cut our losses and stop testing `atomic:`, or even remove it altogether.\n\nIn an ideal world I don’t expect to happen any time soon, we would teach GitHub.com/distribution/distribution the X-R-S-S API, and test against that — a simple registry server is much smaller and easier to run. But nobody has worked on such a server, to my knowledge; and even in that case we would probably want to ensure interoperability with the OpenShift implementation of X-R-S-S. (… and in a _truly ideal_ world, we would have testing coverage of the most of the major registry products, but that’s another problem space entirely.)"
+        },
+        {
+            "user": "cevich",
+            "body": "Okay, thanks for the insights.\n\nYeah, mocking it would be a major undertaking and additional maintenance, much better to use the real-deal.  Too bad it's such a behemoth.\n\nThere are also now registries on both github and gitlab, in addition to quay and in the google cloud.  I assume testing those wouldn't add much value, but please correct me if I'm wrong."
+        },
+        {
+            "user": "cevich",
+            "body": "Okay, I setup an POC [container build over in the c/automation_images repo.](https://github.com/containers/automation_images/pull/83).  Next I will work to incorporate it's use into both CI and the Makefile."
+        },
+        {
+            "user": "cevich",
+            "body": "@mtrmac  I've taught `make` how to lookup and use the container image shared with CI.  This involves some compromises (pulling & running two container images), though it's a one-time cost (only pulled if absent) and the images are relatively small.  The big benefit here is, CI and local development will always remain in-sync (with an option to override for trying out a newer image).  Please clone this PR and try out the Makefile so far (`make docs-in-container`, `validate`, `shell`, `test-unit`, `test-integration`, etc).  I know some of the tests are still broken, but I'd like your blessing on the \"look and feel\" aspect.  \n\nMeanwhile...let me see about fixing some of these docker-rate-limit problems, they're starting to drive me crazy :angry: "
+        },
+        {
+            "user": "cevich",
+            "body": "@mtrmac I'm pretty sure the etcd certificate error is coming from bad IP-address detection (as you suspect).  A long while ago, I was playing with etcd and seem to recall there is a special/magic config option (or env. var.) you can set that makes it relax it's verification when running in single-node \"testing\" mode.\n\n```\nLog line: 2021-07-26 10:48:21.219416 I | etcdserver/api/v3rpc: transport: http2Client.notifyError got notified that the client transport was broken remote error: tls: bad certificate.\n```\n\nRing any bells?"
+        },
+        {
+            "user": "cevich",
+            "body": "@mtrmac I'm looking through `integration/openshift.go` and the `go test` output, trying to reconcile what's happening between executing inside a container and directly on the host.  There are certainly some major networking differences, notably in `/etc/hosts`, `/etc/resolv.conf`, and of course outside the container there's the podman CNI network (bridge) in addition to the normal system interfaces.  Any number of these things could be breaking client certificate validation :confused: \n\nIs there some kind of special/extra debugging I can enable that will show the complete commands being executed?\n\nAlso a long-short:  Do you have any ideas on how we can get more details out of `etcd` regarding the client certificate validation, and why it's failing?  (this info. may not be available)"
+        },
+        {
+            "user": "cevich",
+            "body": "Update: I tried testing the certificates/keys themselves both in a container and on a VM using openssl's `s_client` and `s_server`.  In both cases the certificates appear to work fine (w/o any validation settings enabled).  So to move forward here...we really need to know exactly why etcd is rejecting the client certificate when running on a VM."
+        },
+        {
+            "user": "cevich",
+            "body": "> I’m afraid.\n\nYou and me both! :scream: \n\nHowever, I think if we can hack on it together, between you knowledge of openshift and my ample supply of bubble-gum and duct-tape, we can figure it out :grin: \n\n@mtrmac any chance I could cajole you onto #podman on libera or matrix...maybe with some freshly baked cookies?"
+        },
+        {
+            "user": "cevich",
+            "body": "Progress :clap:\n\n[We're successfully starting up OpenShift now and talking to the registry.  ](https://cirrus-ci.com/task/4888452610129920?logs=integration#L41).  Next problem is the one I reproduced manually: Timeout in the next OpenShift startup + registry test (the traceback isn't very helpful :face_with_head_bandage:)\n\nI've got to sign-off for the day, so we'll tackle that one tomorrow.\n\nP.S. Thanks a **TON** for all your help so far."
+        },
+        {
+            "user": "mtrmac",
+            "body": "> Timeout in the next OpenShift startup + registry test (the traceback isn't very helpful 🤕)\n\nTry just bumping it to 25 minutes? IIRC I’ve had that locally for some time, though it was not necessary in Travis — and it’s also not necessary for the current implementation. So it’s not very likely to be the cause, or even necessarily the right fix (fast tests are better than slow tests, quite possibly we are doing something stupid), but there’s a chance it’s a half a bit of relevant information."
+        },
+        {
+            "user": "cevich",
+            "body": "> So it’s not very likely to be the cause, or even necessarily the right fix\n\nNo it's definitely not the right fix...remember these tests all pass fine when run under a `--privileged` container.  The one that's timing out is another registry-test, the one where it endlessly loops waiting to bind & connect to port 5000 then 5001.  Maybe https://github.com/containers/skopeo/blob/main/integration/check_test.go#L33 ?\n\nWhat's the correct way to tell make to **only** run one test.  I tried the other day with `-test.run \"SkopeoSuite.TestLoginLogout\"` but then it ran no tests :disappointed: "
+        },
+        {
+            "user": "cevich",
+            "body": "@mtrmac Since it never shows the failing test's name, just the unhelpful go-check timeout traceback, I ran all the tests one at a time.  The test that get's stuck in a loop is `CopySuite.TestCopyAllWithManifestList`:\n\n```\n...cut...\nOutput /usr/local/bin/oc oc create -f - stdout: Closed\nOutput registry-5000 stdout: waiting\nOutput registry-5000 stderr: waiting\nWaiting for registry to start\nChecking for port 5000...\nSleeping for port 5000\nOutput registry-5000 stderr: got 147,<nil>: time=\"2021-07-28T12:42:43-05:00\" level=fatal msg=\"Unable to open configuration file: open /atomic-registry-config.yml: no such file or directory\"\nOutput registry-5000 stderr: waiting\nOutput registry-5000 stderr: got 0,&errors.errorString{s:\"EOF\"}:\nOutput registry-5000 stderr: Closed\nOutput registry-5000 stdout: got 0,&errors.errorString{s:\"EOF\"}:\nOutput registry-5000 stdout: Closed\nSleeping for port 5000 done, will retry\nChecking for port 5000...\nSleeping for port 5000\nSleeping for port 5000 done, will retry\nChecking for port 5000...\nSleeping for port 5000\n...repeats...\n```\n\n"
+        },
+        {
+            "user": "mtrmac",
+            "body": "> What's the correct way to tell make to **only** run one test. I tried the other day with `-test.run \"SkopeoSuite.TestLoginLogout\"` but then it ran no tests 😞\n\n`openshift_shell_test.go` uses (also to enable logging as it goes): `-v -check.v -check.vv -check.f='CopySuite.TestRunShell'`\n\n(We are only using that “check” testing mechanism because that’s what we started with. One of these days with copious spare time we probably should rip it out…)"
+        },
+        {
+            "user": "mtrmac",
+            "body": "> Output registry-5000 stderr: got 147,<nil>: time=\"2021-07-28T12:42:43-05:00\" level=fatal msg=\"Unable to open configuration file: open /atomic-registry-config.yml: no such file or directory\"\n\nThanks. That looks like a root cause for the failure, and that file was created by `Dockerfile`; I think the part of `runner.sh` that copies files from `/usr/local/bin` should copy this one as well.\n\n(I don’t care act all about continuing to place it in the root directory; maybe `/usr/local/etc/skopeo-tests` or something similarly easy to identify/search for would work better.)"
+        },
+        {
+            "user": "mtrmac",
+            "body": "> > So it’s not very likely to be the cause, or even necessarily the right fix\n> \n> No it's definitely not the right fix...remember these tests all pass fine when run under a `--privileged` container. The one that's timing out is another registry-test, the one where it endlessly loops waiting to bind & connect to port 5000 then 5001. Maybe https://github.com/containers/skopeo/blob/main/integration/check_test.go#L33 ?\n\n(Not that one, that one does fail eventually.)\n\nLet’s fix the infinite hangs as well: #1390 ."
+        },
+        {
+            "user": "cevich",
+            "body": "> That looks like a root cause for the failure, and that file was created by Dockerfile\n\nOh fantastic, and likely something I missed.  That should be an easy fix..."
+        },
+        {
+            "user": "cevich",
+            "body": "Okay let's try this now (just pushed).  Note: I moved and combined the `TESTFLAGS` definition into the Makefile where it will be easier to maintain.  "
+        },
+        {
+            "user": "mtrmac",
+            "body": "> ... error: Missing or incomplete configuration info.  Please login or point to an existing, complete config file:\n\nHuh. Is it possible that the home directory does not exist, or is not writeable? The `out` variable at https://github.com/containers/skopeo/blob/8060e41dce9009b9ec7e3cd3fe888b44085bba3b/integration/openshift.go#L219 might be useful, in case it reported successful login + inability to record that."
+        },
+        {
+            "user": "cevich",
+            "body": "> Is it possible that the home directory does not exist, or is not writeable?\n\nWe're running as root, so I doubt that simple case is the problem, but could it be an SELinux issue maybe?\n\nI'm hitting all kinds of problems in podman land with these same VM images, due to policy updates: https://github.com/containers/podman/issues/10522\n\nSpecifically, any volume mounts with `:ro` or those missing a `:Z` or `:z` are causing all kinds of problems with registry containers.\n\nI'm having a really (**REALLY**) hard time parsing all the openshift/registry output mixed in with the test output.  Is there any way we could send the openshift stuff into a file instead of printing it all?  It's really easy for me to tell Cirrus to attach a file after the task runs (pass or fail)."
+        },
+        {
+            "user": "cevich",
+            "body": "confirmed: `$HOME` is set to `/root` and the permissions seem correct (`0755`), and SELinux type `admin_home_t:s0`"
+        },
+        {
+            "user": "mtrmac",
+            "body": "> Huh. Is it possible that the home directory does not exist, or is not writeable?\n\nClose enough of a guess, it seems.\n\n> confirmed: `$HOME` is set to `/root` and the permissions seem correct (`0755`), and SELinux type `admin_home_t:s0`\n\nThat’s not _quite_ what I see. The home directory, per `getpwnam(3)`/`/etc/passwd`, is indeed `/root`, but `$HOME` is either unset or empty.\n\nSee https://github.com/containers/skopeo/pull/1403 , which includes various debugging printouts, and where the integration tests pass when run with `HOME=/root make …`."
+        },
+        {
+            "user": "mtrmac",
+            "body": "> I'm having a really (**REALLY**) hard time parsing all the openshift/registry output mixed in with the test output. Is there any way we could send the openshift stuff into a file instead of printing it all? It's really easy for me to tell Cirrus to attach a file after the task runs (pass or fail).\n\nI’m probably thinking about this incorrectly — I think those log streams have identifiable prefixes, so it seems possible to filter them out after-the-fact, using tools if necessary. So far it seemed convenient enough to me to have everything in the same log stream, usually in the natural order (“starting registry” … registry start-up logs … “waiting for registry start-up finished”); separating some of those logs out into external files would almost every time require looking up one or more of those files (presumably the main log would contain paths?), which seems to be more work to me. Is it the visual noise on each individual line? Too many useless log lines? The fact that everything is mixed in a single stream, regardless of what the individual lines look like? Something entirely different? Some combination of factors?\n\nAdmittedly:\n- It is _definitely_ confusing that when start-up of the first cluster fails, we don’t tear it down and then the other test setup fails with a “port is already in use”. That’s should be fixable with a little effort.\n- The `http2Client.notifyError got notified that the client transport was broken remote error: tls: bad certificate` logs certainly spam the log, and IIRC weren’t there when writing the tests originally. But if the tests pass anyway, I’m not _too_ tempted to dig deep into this old version of software to understand what that’s about; it is likely to be non-trivial effort and the outcome of that investigation is  not very probable to be reusable to any modern software."
+        },
+        {
+            "user": "cevich",
+            "body": "> So far it seemed convenient enough to me to have everything in the same log stream\n\nThat's fine too, it's just hard on my eyes.  But if it makes sense to you and you can make sense of it, I'm fine just being the lever-puller.\n\n> Some combination of factors?\n\nFrom the perspective of someone who doesn't see it much / ever, it's hard to visually distinguish between test harness output and subject (skopeo) output and tooling (openshift, registry, etc.) output.\n\n> IIRC weren’t there when writing the tests originally\n\nThe horrendous amount of redundant messages from openshift/etcd (\"blah blah tls cert invalid blah blah\") are also really confusing.  But yes, this can be a problem for another day and PR.  I too am concerned as I don't remember seeing them before, maybe they were simply not shown before (somehow)?\n\n> the integration tests pass when run with HOME=/root\n\nOh wait, this just struck me.  When the tests run, it's **not** a login shell, but in a `get_ci_vm.sh` environment, it is.  This may be exactly the problem, and I remember having it in tests on the other repos.  Let me copy-paste the fix..."
+        },
+        {
+            "user": "mtrmac",
+            "body": "> > So far it seemed convenient enough to me to have everything in the same log stream\n> \n> That's fine too, it's just hard on my eyes. But if it makes sense to you and you can make sense of it, I'm fine just being the lever-puller.\n> \n> > Some combination of factors?\n> \n> From the perspective of someone who doesn't see it much / ever, it's hard to visually distinguish between test harness output and subject (skopeo) output and tooling (openshift, registry, etc.) output.\n\nI think there’s basically two cases of the _asynchronous_ output: `Log line:` comes from OpenShift, and `Output registry-$port {stdout,stderr}` comes from registry processes. It should be easy enough to make the two more similar, or use a more prominent log prefix, or something like that.\n\nSome other synchronous commands log output. Skopeo itself typically doesn’t log output, unless the test fails and the output is included in an assertion message.\n\nProbably none of that is 100% consistent, as the code grew over time.\n\n---\n\nI can’t really remember any more, and of course past problems are not _that_ much of an indication of future problems, but it seems reasonable that those noisy `Output /usr/local/bin/oc oc create -f - stderr: waiting` lines were added for a reason, and losing the relative timing of those vs. other output might be bad. OTOH it’s also quite possible that those log lines were added only while developing the log catching implementation and were never relevant for timing; my commit message doesn’t say.\n\nI don’t feel about the output format strongly… I guess PRs are welcome?\n\n---\n\n> The horrendous amount of redundant messages from openshift/etcd (\"blah blah tls cert invalid blah blah\") are also really confusing. But yes, this can be a problem for another day and PR. I too am concerned as I don't remember seeing them before, maybe they were simply not shown before (somehow)?\n\nMy first guess is that this has something to do with recent Go only looking for host names in subjectAltName instead of CN. But that’s really just a guess with no supporting evidence at all."
+        },
+        {
+            "user": "cevich",
+            "body": "Huh...well [it seems (somehow) the tests passed.](https://cirrus-ci.com/build/5326981723062272)  I didn't notice anything funny in the output, but I'm a bit skeptical.  Let me push this small `Makefile` fixup and let's see if it passes again..."
+        },
+        {
+            "user": "cevich",
+            "body": "[Well, okay then it passed again.](https://cirrus-ci.com/build/4858500447731712)  Removing the draft status, let's get on with final review before something breaks :grin: "
+        },
+        {
+            "user": "cevich",
+            "body": "@mtrmac thanks for all your help on this too, couldn't have done it w/o you.  What a doozy of a PR! :sweat_smile: "
+        },
+        {
+            "user": "mtrmac",
+            "body": "FWIW https://cirrus-ci.com/build/6216764259303424 lists some “Issues found while parsing configuration” — most look like stylistic preferences rather than something that needs fixing. I have no idea about the severity (or it might have been a well-considered long-standing decision), I just happened to randomly notice that field (well, the whole page, actually) for the first time today."
+        },
+        {
+            "user": "cevich",
+            "body": " >some “Issues found while parsing configuration” — most look like stylistic preferences rather than something that needs fixing.\n\nUgh, I know it does that everywhere now.  For some reason they really don't like how we use `alias` + `name` in jobs, but we literally have to because of a bug they (supposedly) can't fix.  It's safe to ignore for now."
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "skopeo",
+            "number": 1249
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "skopeo",
+            "number": 1403
+        },
+        {
+            "organization": "containers",
+            "repository": "automation_images",
+            "number": 85
+        },
+        {
+            "organization": "containers",
+            "repository": "image",
+            "number": 1334
+        }
+    ]
+}

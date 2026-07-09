@@ -1,0 +1,70 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "skopeo",
+    "number": 2627,
+    "type": "issue",
+    "title": "Skopeo copy fails with preserve-digests and OCI image with zstd compression",
+    "state": "closed",
+    "labels": [
+        "kind/bug"
+    ],
+    "user": "dkatavic",
+    "body": "Hi Skopeo Team, I'm having an issue with skopeo copy I hope you can help me with\n\nFor the specific OCI images, when using skopeo copy command, skopeo annotates manifest index with \n```\n\"annotations\": {\n            \"io.github.containers.compression.zstd\": \"true\"\n        }\n```\nwhich changes digest of a manifest index. If using `--preserve-digests` flag, skopeo will fail with a \n```\nFATA[0005] Manifest list must be converted to type \"application/vnd.oci.image.index.v1+json\" to be written to destination, but we cannot modify it: \"Instructed to preserve digests\"\n```\nError message. I'm not sure why the annotation is added, I think because the referenced image manifest contains layers with `zstd` compression, so the annotations seems as an extra informational piece. We have noticed this on multiple images, Issue can be reproduced with the following command:\n\n```\nskopeo copy --debug --all --preserve-digests --digestfile /tmp/digests.txt \\\n  --src-username $USERNAME --src-password $PASSWORD \\\n  --dest-creds token:$DEST_TOKEN \\\n  docker://registry.gitlab.com/gitlab-org/gitlab-runner/helper-entrypoint:latest \\\n  docker://ourprivateoci.io/gitlab-org/gitlab-runner/helper-entrypoint:latest\n```\n\nI can't find a way of stopping skopeo from annotating manifest, if there is one, please let me know. I have tried disabling compression on dst from skopeo, but the annotation is still added. Is this annotation just extra informational piece?\n\nWould it make sense to add a flag that can disable mutating source manifest?\n",
+    "comments": [
+        {
+            "user": "mtrmac",
+            "body": "Thanks for reaching out!\n\n> Would it make sense to add a flag that can disable mutating source manifest?\n\nThat’s what `--preserve-digests` should be doing.\n\nCan you collect the output of the copy command with `--debug`, and the output of `skopeo inspect -n --raw docker://registry.gitlab.com/gitlab-org/gitlab-runner/helper-entrypoint:latest`, please?"
+        },
+        {
+            "user": "mtrmac",
+            "body": "Note to self: The `if !bytes.Equal(attemptedManifestList, originalManifestList) {` failure case has a misleading error message. That’s not the ultimate root cause, though."
+        },
+        {
+            "user": "dkatavic",
+            "body": "Thanks for a quick response @mtrmac \n\nSkopeo inspect gives:\n`# skopeo inspect -n --raw docker://registry.gitlab.com/gitlab-org/gitlab-runner/helper-entrypoint:latest`\n```json\n{\n  \"schemaVersion\": 2,\n  \"mediaType\": \"application/vnd.oci.image.index.v1+json\",\n  \"manifests\": [\n    {\n      \"mediaType\": \"application/vnd.oci.image.manifest.v1+json\",\n      \"digest\": \"sha256:ac35700ec41af8a621237d4e1bdd767ca57f14ec975ad3cc929356f95bf6e6f4\",\n      \"size\": 1995,\n      \"platform\": {\n        \"architecture\": \"amd64\",\n        \"os\": \"linux\"\n      }\n    },\n    {\n      \"mediaType\": \"application/vnd.oci.image.manifest.v1+json\",\n      \"digest\": \"sha256:fb44e6f2da13679af6dbb7d0da20c98b2caf83ca15cac452bab335e8f34fbadd\",\n      \"size\": 566,\n      \"annotations\": {\n        \"vnd.docker.reference.digest\": \"sha256:ac35700ec41af8a621237d4e1bdd767ca57f14ec975ad3cc929356f95bf6e6f4\",\n        \"vnd.docker.reference.type\": \"attestation-manifest\"\n      },\n      \"platform\": {\n        \"architecture\": \"unknown\",\n        \"os\": \"unknown\"\n      }\n    }\n  ]\n}\n```\n\n[debug logs from the copy command](https://github.com/user-attachments/files/20737269/skopeo.copy.debug.log.txt)\n\nIf I remove `--preserve-digests` flag, resulting manifest index that gets pushed to the dest is\n```json\n{\n    \"schemaVersion\": 2,\n    \"mediaType\": \"application/vnd.oci.image.index.v1+json\",\n    \"manifests\": [\n        {\n            \"mediaType\": \"application/vnd.oci.image.manifest.v1+json\",\n            \"digest\": \"sha256:ac35700ec41af8a621237d4e1bdd767ca57f14ec975ad3cc929356f95bf6e6f4\",\n            \"size\": 1995,\n            \"annotations\": {\n                \"io.github.containers.compression.zstd\": \"true\"\n            },\n            \"platform\": {\n                \"architecture\": \"amd64\",\n                \"os\": \"linux\"\n            }\n        },\n        {\n            \"mediaType\": \"application/vnd.oci.image.manifest.v1+json\",\n            \"digest\": \"sha256:fb44e6f2da13679af6dbb7d0da20c98b2caf83ca15cac452bab335e8f34fbadd\",\n            \"size\": 566,\n            \"annotations\": {\n                \"vnd.docker.reference.digest\": \"sha256:ac35700ec41af8a621237d4e1bdd767ca57f14ec975ad3cc929356f95bf6e6f4\",\n                \"vnd.docker.reference.type\": \"attestation-manifest\"\n            },\n            \"platform\": {\n                \"architecture\": \"unknown\",\n                \"os\": \"unknown\"\n            }\n        }\n    ]\n}\n```"
+        },
+        {
+            "user": "mtrmac",
+            "body": "Thanks, yes, that’s a bug — we should not be adding the annotation with `--preserve-digest`. (A reminder to self: also https://github.com/containers/skopeo/issues/2627#issuecomment-2972472274 )"
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "GGh41th",
+            "body": "Hi , i stumbled upon this problem today , and i don't think that it is a bug , after digging through the code , this looks like the correct behaviour.\n@dkatavic your suspicions are correct , skopeo is adding a compressionn algorithm annotation to the manifest index , because the source image (at least one of the source image manifests , since a manifest index can reference multiple image manifests that differs in architecture for example) has a zsdt compression used on some of the layers.\nThese are the code snippets that i have followed to come to this conclusion:\nThe copy operation will be initiated from the [/skopeo/cmd/skopeo/copy.go (Line 259)](https://github.com/containers/skopeo/blob/main/cmd/skopeo/copy.go#L244) by calling the Image function provided by the[ image/copy api](https://github.com/containers/image/tree/v5.36.1)\n`manifestBytes, err := copy.Image(ctx, policyContext, destRef, srcRef, copyOpts)` \nThen since your manifest index has multiple image manifests this function will be called\n`if copiedManifest, err = c.copyMultipleImages(ctx); err != nil {\n\treturn nil, err\n}` [containers/image/v5/copy.go Line 353](https://github.com/containers/image/blob/v5.36.1/copy/copy.go#L353)\n\n@mtrmac and indeed it is failing here `if !bytes.Equal(attemptedManifestList, originalManifestList) { ` [image/v5/copy/multiple.go Line310](https://github.com/containers/image/blob/v5.36.1/copy/multiple.go#L310) and this is because the manifest is being changed by the call to the [EditInstance function in the line 284 in the mutliple.go](https://github.com/containers/image/blob/v5.36.1/copy/multiple.go#L284)\n\n`\tif err = updatedList.EditInstances(instanceEdits); err != nil {\n`\n\nI have added some logging to the code and recompiled it so i can know what's exactly being passed in the instanceEdits struct , and here is a formatted output for the image that was used by dkatavic \n\n> [\n>   {\n>     \"ListOperation\": 2,\n>     \"UpdateOldDigest\": \"sha256:ac35700ec41af8a621237d4e1bdd767ca57f14ec975ad3cc929356f95bf6e6f4\",\n>     \"UpdateDigest\": \"sha256:ac35700ec41af8a621237d4e1bdd767ca57f14ec975ad3cc929356f95bf6e6f4\",\n>     \"UpdateSize\": 1995,\n>     \"UpdateMediaType\": \"application/vnd.oci.image.manifest.v1+json\",\n>     \"UpdateAffectAnnotations\": false,\n>     \"UpdateAnnotations\": {},\n>     \"UpdateCompressionAlgorithms\": [\n>       {\n>         \"name\": \"gzip\",\n>         \"baseVariantName\": \"gzip\",\n>         \"prefix\": [\n>           31,\n>           139,\n>           8\n>         ],\n>         \"decompressor\": \"0x619de3568d60\",\n>         \"compressor\": \"0x619de3569000\"\n>       },\n>       {\n>         \"name\": \"zstd\",\n>         \"baseVariantName\": \"zstd\",\n>         \"prefix\": [\n>           40,\n>           181,\n>           47,\n>           253\n>         ],\n>         \"decompressor\": \"0x619de3569f20\",\n>         \"compressor\": \"0x619de3569e80\"\n>       }\n>     ],\n>     \"AddDigest\": null,\n>     \"AddSize\": 0,\n>     \"AddMediaType\": null,\n>     \"AddArtifactType\": null,\n>     \"AddPlatform\": null,\n>     \"AddAnnotations\": {},\n>     \"AddCompressionAlgorithms\": []\n>   },\n>   {\n>     \"ListOperation\": 2,\n>     \"UpdateOldDigest\": \"sha256:fb44e6f2da13679af6dbb7d0da20c98b2caf83ca15cac452bab335e8f34fbadd\",\n>     \"UpdateDigest\": \"sha256:fb44e6f2da13679af6dbb7d0da20c98b2caf83ca15cac452bab335e8f34fbadd\",\n>     \"UpdateSize\": 566,\n>     \"UpdateMediaType\": \"application/vnd.oci.image.manifest.v1+json\",\n>     \"UpdateAffectAnnotations\": false,\n>     \"UpdateAnnotations\": {},\n>     \"UpdateCompressionAlgorithms\": [],\n>     \"AddDigest\": null,\n>     \"AddSize\": 0,\n>     \"AddMediaType\": null,\n>     \"AddArtifactType\": null,\n>     \"AddPlatform\": null,\n>     \"AddAnnotations\": {},\n>     \"AddCompressionAlgorithms\": []\n>   }\n> ]\n\nSince the image has some zstd compressed layers , we do have an item in the **UpdateCompressionAlgorithms** field , that coressponds to those compressed data streams.\n\nAnd since the manifest MIME type is oci , i checked the code of the EditInstance function in the [image/internal/manifest/oci_index.go Line 116  ] (https://github.com/containers/image/blob/v5.36.1/internal/manifest/oci_index.go#L116) (here the case ListOpUpdate will be triggered because the operation is an update operation , as show in the above struct **\"ListOperation\": 2**)\n\n> \t\tswitch editInstance.ListOperation {\n> \t\tcase ListOpUpdate:\n> \t\t\t/* the rest of the logic */\n> \t\t\taddCompressionAnnotations(editInstance.UpdateCompressionAlgorithms, &index.Manifests[targetIndex].Annotations)\n\nAnd it's calling a function which i guessed based on it's name that it's adding the problematic annotation , since it's taking the list of the **UpdateCompressionAlgorithms** as input.\n\nAlso i found this comment in the addCompressionAnnotations function \n\n> \t// TODO: This should also delete the algorithm if map already contains an algorithm and compressionAlgorithm\n\t// list has a different algorithm. To do that, we would need to modify the callers to always provide a reliable\n\t// and full compressionAlghorithms list.\n\nSo my question is , should this be considered a bug , and why do we need to add a new annotation if it's not present the original manifet index . Sure enough it will be useful for some people , but i think it's a good idea if we had the choice to disable that , and this doesn't look so hard (it might be , i didn't read the whole code base , so i have no idea how complicated would that be).\nAlso @mtrmac it will be really helpful if you can explain the intentions behind that TODO message . \n\n"
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "mtrmac",
+            "body": "This should be fixed with https://github.com/containers/container-libs/pull/495, at least it works as expected for the original reproducer. More testing would be appreciated."
+        },
+        {
+            "user": "adyada",
+            "body": "When will this fix be released in windows skopeo binary?"
+        },
+        {
+            "user": "mtrmac",
+            "body": "This upstream project is not providing Windows binaries at all. (Note that it is not yet included in any Skopeo release.)"
+        },
+        {
+            "user": "luckylinux",
+            "body": "> This should be fixed with [containers/container-libs#495](https://github.com/containers/container-libs/pull/495), at least it works as expected for the original reproducer. More testing would be appreciated.\n\nDoes NOT seem to be fixed on Skopeo 1.22.0 😕.\n\nhttps://github.com/containers/skopeo/issues/2778#issuecomment-3989136933\n\nEDIT 1: switching to `crane` to Sync / Copy Image seems to do the \"Trick\" until Skopeo can resolve this Issue 😕:\n\n```\ncrane copy mirror.gcr.io/stalwartlabs/stalwart:latest DOCKER.MYDOMAIN.TLD/docker.io/stalwartlabs/stalwart:latest\n```"
+        },
+        {
+            "user": "mtrmac",
+            "body": "1.22.0 does not contain the fix yet, I’m afraid."
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "container-libs",
+            "number": 495
+        }
+    ]
+}

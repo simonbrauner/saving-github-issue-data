@@ -1,0 +1,118 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "skopeo",
+    "number": 2400,
+    "type": "pull_request",
+    "title": " proxy: Verify *either* toplevel or target",
+    "state": "closed",
+    "labels": [
+        "kind/feature",
+        "stale-pr"
+    ],
+    "user": "cgwalters",
+    "body": "proxy: Move policycontext into global state\n\nI am not aware of a reason not to just cache this for the life\nof the proxy, like we do other global state.\n\nPrep for further changes.\n\nSigned-off-by: Colin Walters <walters@verbum.org>\n\n---\n\nproxy: Verify *either* toplevel or target\n\n\nAn issue was raised in that a current Red Hat internal build system\nwas performing a signature just on the per-architecture manifest,\nbut the current proxy code is expecting a signature on the manifest\nlist.\n\nTo quote Miloslav from that bug:\n\n> Podman signs both the per-platform items and the top level,\n> and enforces signatures only on per-platform items. cosign,\n> by default, signs only the top level (and has an option to\n> sign everything), I’m not sure which one it enforces.\n> I don’t immediately recall other platforms.\n\nWe believe the current proxy code is secure since\nwe always require signatures (if configured) on the manifest\nlist, and the manifest list covers the individual manifests\nvia sha256 digest.\n\nHowever, we want to support signatures only being present\non the per-arch manifest too in order to be flexible.\n\nYet, we can't hard switch to requiring signatures on the\nper-arch manifests as that would immediately break anyone\nrelying on the current behavior of validating the toplevel.\n\nChange the logic here to:\n\n- Verify signature on the manifest list, and cache the error (if any)\n- Fetch the manifest\n- Verify signature on the manifest\n- Allow if *either* signature was accepted; conversely, only error\n  if signature validation failed on *both* the manifest list and\n  manifest\n\nThis also switches things to cache the manifest upfront instead\nof doing it lazily on `GetManifest/GetConfig`; in practice\ncallers were always immediately requesting those anyways.\nThe use case of just fetching blobs exists (e.g. to resume\nan interrupted fetch), but is relatively obscure and\nin general I think it's good to re-verify signatures on\neach operation.\n\nSigned-off-by: Colin Walters <walters@verbum.org>\n\n---",
+    "comments": [
+        {
+            "user": "cgwalters",
+            "body": "OK I went to add tests and got burned by the fact that actually `quay.io/coreos/11bot` seemed to become a single-arch manifest list at some point...\n\nBut, using my own test image, I did at least verify that \n```\ngit diff\ndiff --git a/cmd/skopeo/proxy.go b/cmd/skopeo/proxy.go\nindex a4a90898..c3fdabed 100644\n--- a/cmd/skopeo/proxy.go\n+++ b/cmd/skopeo/proxy.go\n@@ -294,9 +294,9 @@ func (h *proxyHandler) openImageImpl(args []any, allowNotFound bool) (retReplyBu\n                target = unparsedTopLevel\n \n                // We're not using a manifest list, so require verification of the single arch manifest.\n-               if toplevelVerificationErr != nil {\n-                       return ret, toplevelVerificationErr\n-               }\n+               // if toplevelVerificationErr != nil {\n+               //      return ret, toplevelVerificationErr\n+               // }\n        }\n \n        img, err := image.FromUnparsedImage(ctx, h.sysctx, target)\n```\n\n(i.e. my original bug) will correctly cause the tests to fail.\n\nIt should be trivial to get someone with creds to upload a non-manifest-list fixture to quay.io/libpod - do you know who to ping? Chris?"
+        },
+        {
+            "user": "cgwalters",
+            "body": "It'd also be useful to have sigstore-signed fixtures there of course."
+        },
+        {
+            "user": "mtrmac",
+            "body": "@edsantiago probably has a good idea of what images exist / are appropriate to use from `quay.io/libpod`.\n\nIf we have no requirements for how the subject images {are, are not} signed: in the worst case, given a multi-platform image, we can read the index, choose an instance, and use a digest reference as a single-platform image."
+        },
+        {
+            "user": "edsantiago",
+            "body": ">what images exist / are appropriate to use from quay.io/libpod.\n\nShort answer: anything you want, it's under our control with multiple people having access.\n\nLonger answer: CI VM images now include a local cache registry running on port 60333, with copies of all images required by buildah and podman. I'd like to extend that to skopeo too. Purpose is to reduce our exposure to quay flakes. Can signed images be served by a simple local registry process? If not, is there a way to make it possible?"
+        },
+        {
+            "user": "mtrmac",
+            "body": "sigstore signatures are ordinary objects on a registry, and can be served that way.\n\nsimple signing signatures are served using plain HTTP. It should not be very hard (set up a directory as a staging destination in `registries.d`, mirror the images, then publish contents of that directory as HTTP), but a bit of extra work."
+        },
+        {
+            "user": "mtrmac",
+            "body": "… alternatively, we _could_ also design a way to store simple-signing signatures on the registry (perhaps not using exactly the sigstore tag convention, but using OCI referrers as intended). We’ve been converging on sigstore as the future, so it’s unclear that it is necessary, and in some sense, having this convenient feature sigstore-only might motivate users to migrate, so maybe we should not be adding that."
+        },
+        {
+            "user": "cgwalters",
+            "body": "Tangential to this PR landing but...per your comment on the bug:\n\n> (It would be easy enough to accept top-level-only signatures in c/image, but then users would lose the ability to create sparse mirrors with a subset of platforms; and it seems that there is a class of users which does care about that feature. Requiring pre-platform signatures, and preserving this feature for users, seems valuable.)\n\nThe next problem is, if we start trying to move bootc itself over to more like what podman/skopeo does (which includes hopefully [unified storage](https://github.com/containers/bootc/issues/20)) it will also necessarily imply that we'd need to ensure we replicate this \"accept top-level-only\" on at least the pull code path we use for bootc. I don't know what that would look like exactly...maybe some sort of new `accept-toplevel-signatures` flag in `containers-registries.conf`? Or a CLI flag, or...maybe we actually do just continue to use the proxy but expose a much higher level `Copy` API that can write to c/storage too.\n\n(When we do that type of stuff though we'll definitely want a basic progress bar... https://github.com/containers/skopeo/issues/658 is related in that I think a lot of these \"script skopeo on the CLI\" cases would really more nicely generalize to \"language-independent c/image RPC API\")"
+        },
+        {
+            "user": "mtrmac",
+            "body": "Ugh, I’d prefer not to have that option, recognizing that it really might be unavoidable. That makes me more motivated to argue that this PR should just do what c/image does <s>in this PR</s>, and we would see if anything breaks.\n\n---\n\nThe implementation would probably be a new field in `c/image/copy.Options`; there is no obvious config file wired to that. (It would probably be `containers.conf`, except that currently Skopeo does not use it at all.)"
+        },
+        {
+            "user": "cgwalters",
+            "body": "> If we have no requirements for how the subject images {are, are not} signed: in the worst case, given a multi-platform image, we can read the index, choose an instance, and use a digest reference as a single-platform image.\n\nI looked at this, but it's a bit logistically annoying to do in the tests at the moment.\n\n> Short answer: anything you want, it's under our control with multiple people having access.\n\nIdeally there'd be a git repository defining the images in quay.io/libpod - in this case a periodic sync like e.g. `skopeo copy --multi-arch system docker://quay.io/centos/centos:stream9 docker://quay.io/libpod/centos-non-manifest-list` or so. But, a one-time invocation of that is also fine.\n\n"
+        },
+        {
+            "user": "cgwalters",
+            "body": "Hmm. Maybe what would be helpful here is for the proxy to expose back to the client the signature state - especially the case when we detect only the manifest list was signed. I could then add something to bootc to loudly warn if this is the case...the problem is that there are going to be users that aren't paying attention to the journal/process-stdout for the often unattended systems that are a primary target for bootc. But it may help.\n\n"
+        },
+        {
+            "user": "mtrmac",
+            "body": "> Maybe what would be helpful here is for the proxy to expose back to the client the signature state \n\nOr have the proxy warn directly, and direct proxy’s stderr to a log?"
+        },
+        {
+            "user": "cgwalters",
+            "body": "> Short answer: anything you want, it's under our control with multiple people having access.\n\n@edsantiago ok but can you link me to the procedure or code or process for adding images there?"
+        },
+        {
+            "user": "edsantiago",
+            "body": "I've lost the thread here, so this is the question I am answering:\n* how does a given image X get pushed to `quay.io/libpod` ?\nIf that is not the question you intended, please ignore this, and clarify your question.\n\nAnswer: someone with credentials (me, @baude, not sure who else) pushes it.\n\nIf it is me, I'm neurotic about generating reproducible, documented, clearly tagged multiarch images. I will be glad to help craft something then push it. Please let me know how/where to begin with the image building process."
+        },
+        {
+            "user": "cgwalters",
+            "body": ">If it is me, I'm neurotic about generating reproducible, documented, clearly tagged multiarch images. I will be glad to help craft something then push it. \n\nThis sounds good to me but to achieve reproducible documented process I'd expect a a git repository to contain that, that's what I was looking for.\n\nAt this point I'm basically just repeating https://github.com/containers/skopeo/pull/2400#issuecomment-2293394273"
+        },
+        {
+            "user": "edsantiago",
+            "body": "IIUC you are referencing this part of the comment:\n\n>Ideally there'd be a git repository defining the images in quay.io/libpod - in this case a periodic sync like e.g. skopeo copy --multi-arch system docker://quay.io/centos/centos:stream9 docker://quay.io/libpod/centos-non-manifest-list or so. But, a one-time invocation of that is also fine.\n\nThat's not something I can ever imagine myself doing. I can envision myself doing a one-time `skopeo copy ... /libpod/centos-non-manifest-list:20240821`, preferably with a corresponding commit to the skopeo repo, in the section(s) that use this image, describing how/when/who that image was copied and what is so special about the source centos image.\n\nYou mentioned `periodic`. What would be the purpose of that?"
+        },
+        {
+            "user": "cgwalters",
+            "body": "> I can envision myself doing a one-time skopeo copy ... /libpod/centos-non-manifest-list:20240821, preferably with a corresponding commit to the skopeo repo, in the section(s) that use this image, describing how/when/who that image was copied and what is so special about the source centos image.\n\nSure, that's fine. There's nothing special about the image, it could actually literally be any image; the goal is a fixture that is explicitly *not* a manifest list.\n\n> You mentioned periodic. What would be the purpose of that?\n\nFor the general reason that often creating something is only 15% of the work, the remaining 85% is maintaining it over time. Having images be pushed from a git repository with clear ownership and audibility is just better. But, if it's not true for the other images there today I wouldn't say we need to start doing it now just for this one.\n\n---\n\nThat said, to combine these two things, I think it would actually be useful to have test fixtures set up with cosign; the current skopeo test suite does signing locally, which is fine, but it's handy to just have pre-made images with both good and bad signatures, etc. That'd be handy right now, but I can get by with just the not-manifest-listed fixture to start."
+        },
+        {
+            "user": "mtrmac",
+            "body": "> This sounds good to me but to achieve reproducible documented process I'd expect a a git repository to contain that, that's what I was looking for.\n\nFWIW compare existing https://github.com/containers/skopeo/blob/main/systemtest/make-noarch-manifest . It’s not automated anywhere, but it _is_ recorded in the same directory as the test that uses it."
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this PR had no activity for 30 days."
+        },
+        {
+            "user": "cgwalters",
+            "body": "Coming back to this one, I believe the resolution for this was the build system was changed to sign the manifest list too.\n\nSo....dunno. There's definitely a lingering compatibility issue here that'd be fixed by this, but there's also no immediate strong driver."
+        },
+        {
+            "user": "mtrmac",
+            "body": "The code has moved to container-libs; https://github.com/containers/container-libs/pull/765 is a slightly updated implementation in that repo.\n\nThanks!"
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "skopeo",
+            "number": 2440
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "container-libs",
+            "number": 758
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "skopeo",
+            "number": 2847
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "container-libs",
+            "number": 765
+        }
+    ]
+}

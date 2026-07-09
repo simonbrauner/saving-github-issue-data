@@ -1,0 +1,68 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "skopeo",
+    "number": 588,
+    "type": "issue",
+    "title": "Support no_proxy env var",
+    "state": "closed",
+    "labels": [
+        "locked - please file new issue/PR"
+    ],
+    "user": "cjeanner",
+    "body": "Hello,\n\nApparently, while the support for http(s)_proxy have been added (see #178), it seems the no_proxy env var isn't taken.\n\nA small test showed me that:\nin an env, I have set http_proxy, https_proxy and no_proxy - when skopeo is called, it apparently hits the proxy:\n```bash\nenv | grep -i proxy\nNO_PROXY=localhost,127.0.0.0/8,172.16.0.0/12,192.168.0.0/16\nhttp_proxy=http://10.10.0.136:3128\nhttps_proxy=http://10.10.0.136:3128\nHTTPS_PROXY=http://10.10.0.136:3128\nno_proxy=localhost,127.0.0.0/8,172.16.0.0/12,192.168.0.0/16\nHTTP_PROXY=http://10.10.0.136:3128\n\nskopeo inspect --tls-verify=false docker://192.168.24.1:8787/rhosp14/openstack-tempest:14.0-99\n```\nAnd we can see in the proxy logs:\n```\n1547111119.127      0 10.10.0.19 TCP_DENIED/403 3877 CONNECT 192.168.24.1:8787 - HIER_NONE/- text/html\n1547111179.621  60492 10.10.0.19 TCP_MISS/503 4089 GET http://192.168.24.1:8787/v2/ - HIER_DIRECT/192.168.24.1 text/html\n```\n\nNotes: I've added env var in both caps and standard as I suspected it might play a role - apparently it's not the case.\n\nThank you!\n\nCheers,\n\nC.",
+    "comments": [
+        {
+            "user": "cjeanner",
+            "body": "Some more debug output from skopeo:\n```\nno_proxy=192.168.24.1 skopeo --debug inspect --tls-verify=false docker://192.168.24.1:8787/rhosp14/openstack-tempest:14.0-99\nDEBU[0000] Using registries.d directory /etc/containers/registries.d for sigstore configuration \nDEBU[0000]  Using \"default-docker\" configuration        \nDEBU[0000]  No signature storage configuration found for 192.168.24.1:8787/rhosp14/openstack-tempest:14.0-99 \nDEBU[0000] Looking for TLS certificates and private keys in /etc/docker/certs.d/192.168.24.1:8787 \nDEBU[0000] GET https://192.168.24.1:8787/v2/            \nDEBU[0000] Ping https://192.168.24.1:8787/v2/ err &url.Error{Op:\"Get\", URL:\"https://192.168.24.1:8787/v2/\", Err:(*errors.errorString)(0xc4200c2af0)} \nDEBU[0000] GET http://192.168.24.1:8787/v2/\n```\n\nThese calls (GET, Ping and GET) match the squid log entries:\n```\n1547112127.674      0 10.10.0.19 TCP_DENIED/403 3877 CONNECT 192.168.24.1:8787 - HIER_NONE/- text/html\n1547112185.823  58147 10.10.0.19 TCP_MISS_ABORTED/000 0 GET http://192.168.24.1:8787/v2/ - HIER_DIRECT/192.168.24.1 -\n1547112196.796      0 10.10.0.19 TCP_DENIED/403 3877 CONNECT 192.168.24.1:8787 - HIER_NONE/- text/html\n```\n\nThe no_proxy and NO_PROXY are also present in the \"env\" - putting it in front of the command was just a test in order to ensure it wasn't a parsing issue or something like that.\nI've also tried to export the same value in the env, just in case it changes the behaviour.\n\nCheers,\n\nC."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@vrothberg @runcom @mtrmac Are these flags in containers/image or just skopeo?  Should podman, buildah and CRI-O respect them?"
+        },
+        {
+            "user": "vrothberg",
+            "body": "> Are these flags in containers/image or just skopeo? \n\nI don't know and I don't see references on any of those variables in the code.\n\n>  Should podman, buildah and CRI-O respect them?\n\nI think that all tools should have the very same behaviour when it comes to pulling images."
+        },
+        {
+            "user": "rhatdan",
+            "body": "I agree. "
+        },
+        {
+            "user": "cjeanner",
+            "body": ":+1: on having a common behaviour :).\nThank you for your quick feedback!"
+        },
+        {
+            "user": "mtrmac",
+            "body": "The code is, via `c/image/pkg/tlsclientconfig`, ultimately using standard Go https://golang.org/pkg/net/http/#ProxyFromEnvironment , which is already supposed to support `no_proxy`.\n\nWith 10.10.0.136 just hanging for me,\n```console\n$ env -i http_proxy=http://10.10.0.136:3128 https_proxy=http://10.10.0.136:3128 ./skopeo inspect docker://docker.io/busybox\n```\nhangs as expected, and\n```console\n$ env -i http_proxy=http://10.10.0.136:3128 https_proxy=http://10.10.0.136:3128 no_proxy=*.docker.io ./skopeo inspect docker://docker.io/busybox\n```\nworks as expected.\n\nI can’t trivially reproduce your exact setup to test your exact inputs, but, adding some extra tracing, this does seem to work, in principle, as expected for me (omitting the full output, only the first connection attempts); notably the CIDR matches work, and the lack of a port on the CIDR match is also not a problem:\n```console\n$ env -i http_proxy=http://10.10.0.136:3128 ./skopeo inspect docker://8.8.8.8/foo\n[https://8.8.8.8/v2/] GetConn 10.10.0.136:3128 \n$ env -i http_proxy=http://10.10.0.136:3128 no_proxy=8.8.0.0/16 ./skopeo inspect docker://8.8.8.8/foo\n[https://8.8.8.8/v2/] GetConn 8.8.8.8:443 \n\n$ env -i http_proxy=http://10.10.0.136:3128 https_proxy=http://10.10.0.136:3128 no_proxy=localhost,127.0.0.0/8,172.16.0.0/12,192.168.0.0/16 ./skopeo inspect docker://192.168.24.1:8787/rhosp14/openstack-tempest:14.0-99\n[https://192.168.24.1:8787/v2/] GetConn 192.168.24.1:8787 \n```\n\nWhat version of Skopeo is this?"
+        },
+        {
+            "user": "mtrmac",
+            "body": "Also, possibly, what version of Go was used to build it? https://go-review.googlesource.com/c/go/+/122655/  / https://golang.org/doc/go1.11 say that CIDR support is new in Go 1.11."
+        },
+        {
+            "user": "cjeanner",
+            "body": "@mtrmac weird... I expected it to be OK, but apparently...\nAnyway, here are my versions:\n```\nskopeo --version\nskopeo version 0.1.31\n```\nThe packager manager (yum) also provides those informations:\n```\nName        : skopeo\nArch        : x86_64\nVersion     : 0.1.31\nRelease     : 7.gitb0b750d.el7\nFrom repo   : rhelosp-rhel-7.6-extras\n```\n\nRegarding go, apparently rhel-7.6 provides this version:\n```\nName        : golang\nArch        : x86_64\nVersion     : 1.9.4\nRelease     : 1.el7\n```\n\nMaybe it's the issue? Go being too old for this one to work?\n\nThat said, I've also tested without the CIDR notation, and it failed :/. I'll do some more tests on my side, as I have the whole env at will.\n\nCheers,\n\nC."
+        },
+        {
+            "user": "mtrmac",
+            "body": "FWIW that package was built using `go-toolset-7-golang-bin-1.10.2-4.el7`, which would indeed be before support for CIDRs, and for ports in `no_proxy` (though AFAICS ports could be included in the string but would be ignored and the addresses would match regardless of ports, which should be fine).\n\n"
+        },
+        {
+            "user": "rhatdan",
+            "body": "Seems like a reason to requiest golang 1.11 be added to the RHEL7 build root."
+        },
+        {
+            "user": "frittentheke",
+            "body": "@cjeanner thanks for opening this issue. I was about to open a similar issue to allow using a proxy for only \"one leg\" of the communication when doing _skopeo copy_ between two registries.\n\nBut I suppose when NO_PROXY is available one can simply place the registry to be accessed without proxy to that list and achieve just that ?"
+        },
+        {
+            "user": "cjeanner",
+            "body": "@frittentheke hey, yep, just put the registry in the NO_PROXY, as a simple IP/hostname (no CIDR), and Voilà.\n\nPlease beware of the variable value length limitation (something like 256 chars or around that number) in case you want to push multiple values.\n\nBTW, @rhatdan @mtrmac guess we might close that one, since the issue is more related to rhel7/8 golang version than skopeo itself."
+        },
+        {
+            "user": "jamescassell",
+            "body": "no_proxy has historically not supported CIDRs.  The workaround I've used is to effectively add all raw IPs to the no_proxy by setting `no_proxy=0,1,2,{...},254,255` -- I've never had a reason to have a raw IP go thru the proxy; they were always local accesses."
+        }
+    ],
+    "cross_references": []
+}

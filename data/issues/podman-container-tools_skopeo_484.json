@@ -1,0 +1,56 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "skopeo",
+    "number": 484,
+    "type": "issue",
+    "title": "Deduplication does not work for oci targets",
+    "state": "closed",
+    "labels": [
+        "locked - please file new issue/PR"
+    ],
+    "user": "pquq12",
+    "body": "With commit 43acc747d514022780ec864b423424bb86110e74 skopeo no longer detect that image layer blobs have already been downloaded, for some images. The [change in function UpdatedImageNeedsLayerDiffID](https://github.com/projectatomic/skopeo/blob/master/vendor/github.com/containers/image/image/docker_schema1.go#L99) seem to be the source of the problem but I have no idea how to fix it. Reverting that change brings back another bug present in previous revisions that make images not showing up in the docker daemon when doing \"skopeo copy oci:... docker-daemon:...\n\nWith skopeo built from master (b08350db15cd208e73971baed26ae7d9651a4158) the problem is easily reproduced:\n```\nmkdir tmp\n./skopeo copy docker://registry.access.redhat.com/openshift3/ose-recycler:v3.7 oci:tmp:v3.7\n./skopeo copy docker://registry.access.redhat.com/openshift3/ose-recycler:v3.7 oci:tmp:v3.7\n```\nExpected behaviour is that the second command would not download any blobs since they are already present. ",
+    "comments": [
+        {
+            "user": "pquq12",
+            "body": "The workaround I use at the moment is to first \"docker pull\" the image from the upstream provider and then use skopeo locally to get the image into oci format. Docker knows what layers it already has so no duplicate downloads.\n```\ndocker pull ...\nskopeo docker-daemon:... oci:...\n```"
+        },
+        {
+            "user": "runcom",
+            "body": "/cc @mtrmac"
+        },
+        {
+            "user": "mtrmac",
+            "body": "Well, that particular line is exactly the fix for `docker-daemon:`.\n\nThe input image `docker://registry.access.redhat.com/openshift3/ose-recycler:v3.7` uses the schema1 format, which records the digest of the compressed layers but not the decompressed layers (“DiffID”s); both the schema2 format (required as input to `docker-daemon:`) and the OCI format (required as input to `oci:`) contains digests of both the compressed and decompressed layers, so we must determine the decompressed layer digests somehow.\n\nThe only way to obtain the decompressed layer digest in general is to actually read all of the layer and decompress it, whether or not it exists on the destination, so that’s what is happening.\n\n---\n\nThere are two broad ways to improve upon this:\n\n- Some kind of upload history/cache storage, where we can say “the layer with compressed digest $a is known to have DiffID $b” (for this case), and more importantly “the layer with DiffID $b is already known to exist at the destination, with compressed digest $a” (for uploading compressed blobs to remote registries).\n- Expand the existing `HasBlob` check to obtain the DiffID value somehow; in most cases it is not directly available from the image storage, so perhaps by heuristically parsing other available images in the same destination, and checking whether they happen to use the same layer and know the DiffID.\n\nThe former one would be generally useful; the latter one feels much more brittle and narrowly targeted at the schema1 case. The difficulty with the former one is where to maintain the cache and how much to trust it. (Docker does have such a cache, which is why `docker pull` is an improvement.)\n\n---\n\nOutside of containers/image changes, it would be simplest to modify the code which creates those images to create schema2 images instead of schema1, if at all possible. That would also give you the ability to refer to images using immutable manifest digests (which don’t change when uploading the same image to a different location)."
+        },
+        {
+            "user": "pquq12",
+            "body": "Ok, but since you have the compressed layer digest in both v1 and v2, wouldn't it be possible to use that to check if the layer is present at the oci-destination and if so decompress that layer and calculate the DiffID? Then it would not be necessary to download that layer again from the source.\n\nA cache would improve the speed of the whole process but maybe it's acceptable that processing v1 images are slower since that format (hopefully) is going to be phased out."
+        },
+        {
+            "user": "mtrmac",
+            "body": "> Ok, but since you have the compressed layer digest in both v1 and v2, wouldn't it be possible to use that to check if the layer is present at the oci-destination and if so decompress that layer and calculate the DiffID? Then it would not be necessary to download that layer again from the source.\n\nThat only works in the narrow case where the destination is a local disk and not a remote repository (and a faster local disk than the remote repository, at that). And the code to compute the `DiffID`s is  already horribly convoluted, I’d rather not add another, pretty big, special case, to it if it can be avoided at all.\n\nAnd if the cache is ever added, we would probably want to drop this specific special case handling again, which makes it even less attractive."
+        },
+        {
+            "user": "pquq12",
+            "body": "So the cache is the most likely option. Where to put the cache maybe could be given on the command line, just as with the --src-shared-blob-dir, like --src-cache-dir."
+        },
+        {
+            "user": "mtrmac",
+            "body": "The cache, once implemented, would be most useful if it were always used, and for that we need to choose a default location.\n\nBut you’re right that we would probably have an option eventually, and the option would allow interested users to benefit from the cache without having to block on choosing the default."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@pquq12 @mtrmac @vrothberg What is the state of this issue? Is this still something we want?"
+        },
+        {
+            "user": "mtrmac",
+            "body": "@rhatdan Did you at least try the steps to reproduce?\n\n---\n\n(For the record, this nowaways needs to be properly tested with `docker://registry.access.redhat.com/openshift3/ose-recycler:v3.7.14`, current `v3.7` is no longer a schema1 image.)\n\nThe metadata cache mentioned in https://github.com/containers/skopeo/issues/484#issuecomment-376573381 as the proper fix was implemented in https://github.com/containers/image/pull/536 , so the second copy does not download/decompress all the blobs any more."
+        },
+        {
+            "user": "rhatdan",
+            "body": "Nope, I am just going through huge lists of issues and trying to get rid of the easily seen as fixed issue, and then figure out if people still want the issue.  No time to check and figure out if has been fixed when reviewing hundreds of PRS and issues."
+        }
+    ],
+    "cross_references": []
+}

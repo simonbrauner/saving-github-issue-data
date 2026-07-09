@@ -1,0 +1,108 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "skopeo",
+    "number": 2576,
+    "type": "issue",
+    "title": "proxy: images with DockerV2Schema2MediaType produce incorrect config",
+    "state": "closed",
+    "labels": [
+        "locked - please file new issue/PR"
+    ],
+    "user": "jeckersb",
+    "body": "In `GetManifest` currently, when handling DockerV2Schema2MediaType images we convert the manifest to OCI and return that (along with the original manifest digest).  When fetching the manifest we first cache the original image, and then create a new copy of the image converted to OCI.  However, the cached image is not updated to use the derived OCI image.  A subsequent call to `GetConfig` will read the *original* image from the cache and return the *original* config.  This obviously does not match the config digest referenced in the prior OCI manifest, and attempting to validate the digest against the manifest fails.\n\nThere's a related issue here which I will keep here for now but may split into a separate issue -- the ordering of proxy client operations matters.  Right now we do the conversion to OCI within `GetManifest`, but really this conversion should happen as part of the cache setup.  The problem now is that if you call `GetManifest` (and we fix the first bug above) and then `GetFullConfig`, everything works.  However calling `GetFullConfig` first would not do the conversion and you would get the config based on the original image, and then subsequently calling `GetManifest` would get the converted config.",
+    "comments": [
+        {
+            "user": "jeckersb",
+            "body": "I don't have permissions to take this, but it can be assigned to me, I have WIP patch(es) for this."
+        },
+        {
+            "user": "mtrmac",
+            "body": "Thanks!\n\nHum, I don’t think we anticipated the conversion to create a “consistent converted snapshot”, with digests matching among components. \n\nThis is just doing conversions of manifests / config one item at a time, with the expectation that the client is _parsing_ that data, and can only implement an OCI parser instead of all the formats.\n\n---\n\nCc: @cgwalters \n\nWhat is the ultimate goal? Originally `skopeo proxy` has been created so that code can “read images the way c/image and `podman pull` does”, primarily reusing authentication and mirrors and the like.\n\nIf this were to evolve into a much fuller `skopeo copy` equivalent, with format conversions and I don’t know what, that would need to be a much larger conversation. The way the codebase is setup, it would be much more natural to keep the existing copy pipeline as is (it is pretty complex and it’s only going to be more so) and to add a new transport into c/image — but I appreciate that that would make experimentation much harder, and pretty much rule out Rust.\n\nOver time, we’ve been making _almost all_ new features of c/image’s transports (and in particular `types.ImageDestination`) private, to keep them out of the public stable API commitment. And many of those features are directly relevant for high-performance copies / pulls / conversions (finding acceptable layer substitutes, depending on desired compression; looking for locally-existing layer matches; staging layer pulls concurrently with other operations), and it’s extremely hard for me to imagine making those things a stable API — as the optimizations change, this will all need changing as well. (And things _are_ increasingly in flux, looking at pulls that hold locks for much shorter times, composefs and overlay layers that can be arbitrarily stacked, and what not). At best, we could probably declare a “simple destination” API that makes things work at a low speed.\n\nThe c/image proxy is mostly built around `types.ImageSource`, because historically the experience was that that part does not need to change much as new features are added and because the exposed feature set of registries is much simpler than the exposed feature set of c/storage (though I’m not sure whether this is structurally guaranteed or more of a historical accident)."
+        },
+        {
+            "user": "cgwalters",
+            "body": "My intuition here is that we should definitely add the ability to access the raw registry returns, including directly accessing manifest lists.\n\nThe client could have API calls to convert raw data to OCI, though perhaps it's really not that much code and we could just reimplement it in callers too.\n\n> add a new transport into c/image — but I appreciate that that would make experimentation much harder, and pretty much rule out Rust.\n\nIt doesn't rule it out, just makes it quite a bit harder. We'd actually need bindings at *two* places; at the toplevel (to e.g. render status of pulls), and at the backend side.\n\nIOW it'd require a control flow like: Rust ⇔ Go ⇔ Rust.\n\nIt's especially hard with Go which is pretty hostile to anything not-Go existing in its address space overall; other GC'd languages force one into the \"multiple GC\" problem which is a nightmare, and C-compatible languages are doable but add nontrivial stack context switch costs and general cgo problems.\n\nOn the backend side though I think it could make sense to support pluggable external backends implemented via an IPC protocol, something like `/usr/lib/containers-storage/backends/$name`. But that of course pushes the need for some sort of API stability to that protocol. \n\n---\n\nI dunno. I don't think we should aim for any big redesigns in *this* issue.\n\n\n"
+        },
+        {
+            "user": "mtrmac",
+            "body": "I’m unsure about the nature of the project — if this is purposely an experiment, one option might be to ~copy the proxy code into the new project, as a private Go component calling c/image. That would allow using the full feature set, and ~full freedom to experiment, without any new features being slowed down by the need to thoughtfully design a stable `skopeo proxy` ABI, or by the release timing of the Skopeo project (and RPMs?)."
+        },
+        {
+            "user": "cgwalters",
+            "body": "> There's a related issue here which I will keep here for now but may split into a separate issue -- the ordering of proxy client operations matters.\n\nYeah definitely we should fix that. To put all things together I'd say we unconditionally always store and cache:\n\n- The original (and converted if need be) manifest list\n- The original (and converted if need be) manifest\n- The original (and converted if need be) config\n\nMaybe we have one `GetMetadata` API that gives you all 6 in one go...the ugly part is while all 6 are JSON, we want to return the bit-for-bit original so we can't just marshal as one single JSON return value.\n"
+        },
+        {
+            "user": "mtrmac",
+            "body": "BTW c/image can produce a “consistent converted snapshot” (`internal/image.memoryImage`), that is not hard to do _as long as no changes to layer format or compression happen_. Layer changes are designed to happen by streaming, and that would strictly require a stateful proxy state (“start copying; get layer stream; update config+manifest; give me config/manifest”)."
+        },
+        {
+            "user": "cgwalters",
+            "body": "> one option might be to ~copy the proxy code into the new project, as a private Go component calling c/image. \n\nYes, I have considered that. However, there's two things that cut against that. \n\n### Size\n\nToday `/bin/skopeo` and `/bin/podman` are by quite a large margin the two largest components of minimal images apart from the Linux kernel. And as far as I know about 80% of that code overlaps. \n\n```\n> podman run --rm -ti quay.io/fedora-testing/fedora-bootc:rawhide-minimal rpm -qa --queryformat='%{SIZE} %{NAME}\\n' | /bin/sort -rn | head\n80057130 kernel-core\n68752052 kernel-modules\n52562467 podman\n40777075 kernel-modules-core\n29363037 skopeo\n19640781 selinux-policy-targeted\n15382692 glib2\n13031545 microcode_ctl\n12632156 systemd\n12464251 systemd-udev\n```\n\nAdding a 3rd copy of that code is quite unappealing. (I think you know I floated in the past this problem is notable enough that it feels like it calls for /bin/podman to basically vendor and replace/superset skopeo if installed)\n\n### CVEs\n\nThere's quite a large stream of CVE fixes in underlying vendored Go dependencies that would now need to now go in *four* separate things (I didn't mention buildah above, we have the kind of weird looming problem that we don't ship that in our \"standard\" (relatively large) base image, but if we added that it'd be the *third* 30+ MB binary of all the same code pretty much)\n"
+        },
+        {
+            "user": "mtrmac",
+            "body": "> The original (and converted if need be) manifest list\n\nI don’t know how _that_ would work. Format conversions happen ~one platform at a time, and mixed-format data (OCI index pointing to v2s2 manifests, or v2s2 manifest list pointing to OCI manifests) are rejected all over the place. So, to create a converted OCI index consistently referring to converted OCI manifests might get us back to some variant of a stateful ~streaming conversion model. Or, I suppose, the proxy could build all that as fresh code in memory, but having that special case…\n\n---\n\n… I mean\n> What is the ultimate goal?\n\nc/image is supposed to enforce digest references when reading data. If it is not doing that, let’s fix it.\n- I can imagine some code pulling images and wanting to preserve exactly the original from (e.g. so that signatures can be included and can prove authenticity). That rules out converting the images.\n- I can imagine some code consuming images for its own purposes, e.g. to turn container image tarballs into on-disk composefs data. That code might be more convenient to write when converted to OCI… but then does that code really need to validate digests for itself?\n- This seems to suggest “we want to convert to OCI _and then publish for the benefit of some third-party consumer_ which will, naturally, assume digests to be correct”. Is that the feature being built?"
+        },
+        {
+            "user": "jeckersb",
+            "body": "> c/image is supposed to enforce digest references when reading data. If it is not doing that, let’s fix it.\n\nWorth noting here as you mentioned above, the proxy is using `types.ImageSource`, which is [documented](https://pkg.go.dev/github.com/containers/image/v5/types#ImageSource) as:\n\n```\nWARNING: Various methods which return an object identified by digest generally do not validate that the returned data actually matches that digest; this is the caller’s responsibility. \n```\n\n... which is what ultimately led us down this route in the first place -- composefs-rs is actually checking those digests."
+        },
+        {
+            "user": "mtrmac",
+            "body": "That’s a fair point, and that _is_ a concern for the output of `GetBlob`. But the manifest/config work via `types.UnparsedImage` or `types.Image`, and those do enforce digest matching."
+        },
+        {
+            "user": "cgwalters",
+            "body": "> one option might be to ~copy the proxy code into the new project, as a private Go component calling c/image.\n\nBut this all said, there's clear large advantages to doing this too. I listed disadvantages above, but a major advantage is it creates a *MUCH* faster feedback cycle and incentive to land c/{image,storage} changes, and that alone may be worth it.\n\nAnd for example we would have only hit https://github.com/bootc-dev/bootc/pull/1140 when we updated our own vendored c/image copy which would have been a bit nicer.\n\nAnother thing cutting against this is tings like https://github.com/bootc-dev/bootc/pull/1110 where even if we end up with a new c/image consumer we may still need to actually fork off podman still anyways for LBIs. Or, try to move some of that stuff into c/storage or a new Go library?\n\nBut yeah...the more I think about it the more in favor I am, but working through the downsides will take some continuous work. I wonder how much low hanging fruit there is in the binary size.\n"
+        },
+        {
+            "user": "mtrmac",
+            "body": "@Luap99 has been looking at Podman’s binary size over the time. There are some known ideas, but the obvious low-hanging fruit is all gone."
+        },
+        {
+            "user": "Luap99",
+            "body": "We have prioritized shirking the binary size this quarter so I will be working on this again for some time. But yes I agree the really simple stuff is long gone.\nSo far my initial investigation shows https://github.com/containers/image/pull/1845 (about 2.5 MB) and making sure we dynamically link sqlite (that could be low hanging fruit but we must test compatibility, etc... there)."
+        },
+        {
+            "user": "cgwalters",
+            "body": "> We have prioritized shirking the binary size this quarter so I will be working on this again for some time. But yes I agree the really simple stuff is long gone.\n\nYeah, no worries. I know it has to be a tedious task. But the thing is even if we shrunk it by 50%, adding another copy of it at ~13M would still be about the size of all of systemd and (again apart from the default kernel) among the largest single components. So I am thinking a bit less on shrinking the binary and a bit more and avoiding *new copies* of all this code; that's the real hit.\n\nOne thing that would probably help here I guess is for us to have the proxy code in both podman *and* skopeo for now, so those who wanted to make smaller systems could omit skopeo.\n"
+        },
+        {
+            "user": "Luap99",
+            "body": "> One thing that would probably help here I guess is for us to have the proxy code in both podman and skopeo for now, so those who wanted to make smaller systems could omit skopeo.\n\nIt would help your use case. It will not help the podman binary size use case. There are likely much more podman users that  never need the proxy code at all so moving it there would be increase the podman binary size then for all other users without any benefit."
+        },
+        {
+            "user": "cgwalters",
+            "body": "That's a valid concern for sure, though I'm a bit surprised at the level of pushback on my proposal. My intuition here was that we're talking about a really tiny amount of code overall, it's just a thin IPC wrapper that doesn't import any new dependencies at all. I decided to actually try it here: https://github.com/cgwalters/podman/tree/proxy (hacky but compiles)\n\n\n```\n> ^ls -l bin/podman\n-rwxr-xr-x. 1 walters walters 66249608 Apr 15 10:08 bin/podman\n> git checkout main\n> make\n...\n> ^ls -l bin/podman\n-rwxr-xr-x. 1 walters walters 66182824 Apr 15 10:19 bin/podman\n> 66249608 / 66182824 \n1.0010090835652465\n```\n\nSo a size increase of a tenth of a percent, as a tradeoff for not requiring bootc systems to always include both skopeo (for the proxy and bootc-ostree storage) and podman (for LBIs because we hit issues (linked above) with just doing that with skopeo). Do you think that's unreasonable?"
+        },
+        {
+            "user": "Luap99",
+            "body": "I have simply commented on the binary size aspect, I have not read the context of the issue and how it got from produce incorrect config to move the proxy in podman! So I cannot answer that really.\n\nSure binary size of the proxy code seems acceptable compared the rest of podman.\nIf you really wanted to move this code I would be more worried about maintenance churn on the podman repo (any new code matters there) and the testing parts, podman CI is already super complex. And then would we not need to keep the existing proxy code in skopeo too? I doubt you could switch all callers when we have a totally different release cycle. So then we end up to duplicate the same code across two projects which is just so much worse.\n\n(Also in general my opinion isn't much about the proxy at all. This is my general opinion about most of the things we add into podman. We keep dumping a lot of stuff there and at the same time totally wonder why our binary is so large, why we have so much dependencies, why podman is so hard to maintain, why podman is slow and so on...)"
+        },
+        {
+            "user": "cgwalters",
+            "body": "> I have not read the context of the issue and how it got from produce incorrect config to move the proxy in podman! \n\nIn summary: \"why not just make a private Go component of bootc that uses c/image directly\" => (worries about size and CVEs) which links to issue: bootc depends on both skopeo and podman, which is pretty silly but a consequence of the evolution so far.\n\n> Sure binary size of the proxy code seems acceptable compared the rest of podman.\nIf you really wanted to move this code I would be more worried about maintenance churn on the podman repo (any new code matters there) and the testing parts, podman CI is already super complex. And then would we not need to keep the existing proxy code in skopeo too? I doubt you could switch all callers when we have a totally different release cycle. So then we end up to duplicate the same code across two projects which is just so much worse.\n\nI think if we chose to do this the most likely thing would be to move the proxy code into c/image right? Or if we really cared to keep it separate a tiny c/containers-image-proxy-go or so.\n\n> (Also in general my opinion isn't much about the proxy at all. This is my general opinion about most of the things we add into podman. We keep dumping a lot of stuff there and at the same time totally wonder why our binary is so large, why we have so much dependencies, why podman is so hard to maintain, why podman is slow and so on...)\n\nYes, that makes sense; it's the cognitive overhead and not the size in bytes. I am pretty sure we could mitigate that cognitive and testing overhead per above, but yes, understood.\n\n---\n\nAnyways...the more I think about this the more in favor I am of following that suggestion of forking the proxy code and adding Go code to bootc (or maybe a shared private dependency of composefs-rs? needs bikeshedding); because it could help accelerate some unification work by lowering barriers."
+        },
+        {
+            "user": "vrothberg",
+            "body": "> [...] the more I think about this the more in favor I am of following that suggestion of forking the proxy code and adding Go code to bootc (or maybe a shared private dependency of composefs-rs?\n\nThere is yet-another dimension to consider: keeping c/image and c/storage in sync across the tools.  In Fedora and RHEL, the containers team (and node team) takes a lot of care to make sure the tools (buildah, podman, cri-o, skopeo) use the same version of c/image and c/storage.  Customer ran into bugs in the past when the versions were not locked.\n\nThe bootc-proxy has a much much lower risk of running into such issues as it boils down to \"just pulling\"."
+        },
+        {
+            "user": "cgwalters",
+            "body": "Yes. We covered that angle before too, it is also an important concern. I think regardless of what's done, coordination between the teams and tools here is a prerequisite to success.\n"
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "mtrmac",
+            "body": "The observed behavior is, _right now_, expected.\n\nI also can’t see an answer to\n> What is the ultimate goal?\n\njust individual snippets of features being discussed. \n\nWhat are the next steps for this issue?"
+        },
+        {
+            "user": "jeckersb",
+            "body": "Yeah this has meandered to a lot of places.  Let me go back to my original concern:\n\n- `GetManifest` returns the manifest for an OCI-converted image.\n- `GetConfig` returns the config for the original, non-OCI image.\n\nIf that's expected, then that's fine.  But as somebody new coming into this ecosystem, I found that to be confusing and unintuitive.  I'll defer to others on next steps because I lack experience and context into how this ties into related things."
+        }
+    ],
+    "cross_references": []
+}

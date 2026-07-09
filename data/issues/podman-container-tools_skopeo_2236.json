@@ -1,0 +1,66 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "skopeo",
+    "number": 2236,
+    "type": "pull_request",
+    "title": "main: return different exit code when an input is not found",
+    "state": "closed",
+    "labels": [
+        "locked - please file new issue/PR"
+    ],
+    "user": "mvo5",
+    "body": "This is a proof of concept that shows how we could do a different exit code in skopeo when an input is not found. The use case is `osbuild` which uses skopeo to inspect images and it would be nice to differenciate between an image that is not found and general skopeo errors (or errors like network issues etc).\n\nFeel free to close if it's not desired, I can also open an issue if that is preferable, it just felt easier this way so that we have something more concrete to discuss :)\n\nNote that this POC is not ideal:\n1. lacks tests (happy to do them if there is a chance this is considered)\n2. The output breaks, it used to start with `FATA[000]` and now starts with `ERRO[0000]`\n\nIt's likely that (2) is a show stopper, it seems there is no way to override the exit code of logrus for logrus.Fatal() so it would require a bit more work if the output must stay identical.\n\nP.S. I also found that for local images that are not found `ErrNotAnImage` is returned so the docstring of `storage.ErrNotAnImage` may need updating (I'm happy to do this separtely if desired).\n\nTo reproduce:\n```\n$ skopeo inspect containers-storage:010101010101\nFATA[0000] Error parsing image name \"containers-storage:010101010101\": reference \"[overlay@/media/space/home/egon/.local/share/containers/storage+/run/user/1000/containers]docker.io/library/010101010101:latest\" does not resolve to an image ID: identifier is not an image\n```\n\nFor references (from storage/errors.go):\n```\nErrNotAnImage = errors.New(\"identifier is not an image\")\nErrImageUnknown = errors.New(\"image not known\")\n```",
+    "comments": [
+        {
+            "user": "cgwalters",
+            "body": "This is very related to https://github.com/containers/skopeo/pull/1757\n\n(with followups in https://github.com/containers/skopeo/pull/2114 etc.)\n\nI suspect your use case (trying to do container inspect/fetching stuff from Python) may also benefit from using the proxy, which is effectively a language-agnostic (though ad-hoc) IPC mechanism to talk to containers/image.  That said, if you use it you would have to implement writing to e.g. `dir` transports on your own.\n\nBut, one could racily use the proxy just for OpenImageOptional, and then just fork off the skopeo binary.\n\nThis all said, the exit code from the binary thing seems OK to me personally (it just doesn't scale very well).\n\n> The output breaks, it used to start with FATA[000] and now starts with ERRO[0000]\n\nDoes this matter?"
+        },
+        {
+            "user": "mtrmac",
+            "body": "> 2. The output breaks, it used to start with `FATA[000]` and now starts with `ERRO[0000]`\n\nI’m not worried about this, the specific text of errors is certainly not an ABI.\n\nReally `ERRO[0000]` is inconvenient nonsense that we should eventually replace, it’s just never been a priority. \n\n---\n\n> P.S. I also found that for local images that are not found `ErrNotAnImage` is returned so the docstring of `storage.ErrNotAnImage` may need updating (I'm happy to do this separtely if desired).\n\nI suspect what you are seeing is `c/image/storage.ErrNoSuchImage`; the way that is defined is long-standing, probably a mistake, but also not something we can change without risk.\n\n---\n\nThe thing I _am_ worried about is the exact semantics of the exit code. The new exit code _would_ be an ABI (and we “only” have ~127 / ~255 of them). Consider the discussion in https://github.com/containers/skopeo/pull/2114 about “archive does not exist” vs. “image within an archive does not exist”.\n\nWould this new exit code be defined for all transports? If so, we would need some kind of ~universally-applicable definition; maybe directly in c/image, or at the very least share it with the proxy’s `OpenImageOptional`.\n\nAlternatively, `skopeo inspect --detect-storage-missing-image` would be a _horribly ugly_ but conceptually acceptable thing, where the caller explicitly opts into a specific behavior (and we aren’t going to run out of horribly ugly long option names). Ugh.\n\n---\n\n_Maybe_ one way to handle this short-term would be to document the _ambition_ for `OpenImageOptional`, and this exit code, to handle all cases, but to only add transports as need arises. Not at all elegant, but also not much worse than `--detect-…` and it would avoid the risk of us getting stuck on defining semantics for a transport we don’t immediately care about."
+        },
+        {
+            "user": "mvo5",
+            "body": "Thanks for the quick and thoughtful feedback!\n\n> > 2. The output breaks, it used to start with `FATA[000]` and now starts with `ERRO[0000]`\n> I’m not worried about this, the specific text of errors is certainly not an ABI.\n[..]\n\nWonderful! Thank you! (FTR I agree but wanted to not oversell my change as transparent when it's not).\n\n[..]\n> The thing I _am_ worried about is the exact semantics of the exit code. The new exit code _would_ be an ABI (and we “only” have ~127 / ~255 of them). Consider the discussion in #2114 about “archive does not exist” vs. “image within an archive does not exist”.\n\nI'm not too worried about this (famous last words) - thinking about the common ones I can think of:\n- not found\n- network error\n- auth error\n- invalid options\n- generic error\n\nAnd just to get an upper bound counting all error in storage types/errors.go I see 40 (and just to get some more data libpod libpod/define/errors.go is 61) - which of course we would never do.\n\nOr am I overlooking something here? \n \n> Would this new exit code be defined for all transports? If so, we would need some kind of ~universally-applicable definition; maybe directly in c/image, or at the very least share it with the proxy’s `OpenImageOptional`.\n[..]\n\nI think it would be good to have a shared helper, I have not read the full backlog (yet) so I'm not familiar with the subtleties but my gut-feeling is that users can always use (real) programming languages and specific error checking when they need fine grained control and the exit codes would just be a (useful) \"hint\". But maybe I'm missing something, I will read the backlog.\n\nI'm happy to work on this (consolidate with the pre-exiting work, add tests) but equally happy to just wait for the discussion. I can also look into the proxy suggestion from Colin (thanks!), I wasn't aware of this feature."
+        },
+        {
+            "user": "mtrmac",
+            "body": "> And just to get an upper bound counting all error in storage types/errors.go I see 40\n\nIt’s not just the count — it’s also the _exclusivity_. We can only return one exit status value.\n\nAt least in the past, there have been registries which respond to any request to an inaccessible repo with “no such image”, even when the image exists but the caller does not have privileges. Suppose we define an exit code for “image does not exist”, and for “insufficient access”; we can’t return both values.\n\nDealing with this in some kind of forward-compatible way seems fairly difficult; we need to, in advance, define the semantics in a specific enough, but also general enough, way. (Admittedly, many UNIX CLI programs do document specific exit codes, and this isn’t widely considered that much of a problem.)\n\nI’m almost tempted to, instead, do `skopeo inspect --json-on-error` with \n```json\n{\n   \"status\": \"failed\",\n   \"storage-image-not-found\": \"true\",\n   \"docker-credentials-rejected\": \"false\",\n   // …\n}\n```\n(modeled after “conditions” in https://github.com/kubernetes/community/blob/master/contributors/devel/sig-architecture/api-conventions.md#typical-status-properties ).\n\nAlmost; that does look like massive overkill."
+        },
+        {
+            "user": "cgwalters",
+            "body": "> At least in the past, there have been registries which respond to any request to an inaccessible repo with “no such image”, even when the image exists but the caller does not have privileges.\n\nI think you have it backwards, it's common to respond with a (using HTTP status codes here for clarity) with a 403 if the caller doesn't have permission to see images in the namespace, even if it's really a 404.\n\nBut for the use cases the people desiring this want, that's understood and not a real problem."
+        },
+        {
+            "user": "mtrmac",
+            "body": "> I think you have it backwards\n\nYes, my mistake.\n\n"
+        },
+        {
+            "user": "mvo5",
+            "body": "Thanks for the detailed explanation! I agree with the general notion and the general issue and I am fine to not use status codes having a --jsonon-error is also fine for my use-case. \n\nHaving said all of this, the specific example about not-found vs not-permission-to-even-see-if-its-there (404 vs 403) seems to be map-able in a relatively straightforward way: no-permission would win here just like with http? But again, sorr,y I understand that there are surely more general cases where it's much more difficult to decide and returning two statues would be desirable. I will look at the proxy code tomorrow to see if that is an option for us. Thanks again for all your help and input!"
+        },
+        {
+            "user": "mtrmac",
+            "body": "IIRC there was a better example of the slippery nature of trying to categorize failure kinds sometime in the past, but I can’t quickly find it.\n\nI do think that a designated exit code is a viable approach, it would primarily require careful thought in the documentation of the semantics."
+        },
+        {
+            "user": "mvo5",
+            "body": "> IIRC there was a better example of the slippery nature of trying to categorize failure kinds sometime in the past, but I can’t quickly find it.\n> \n> I do think that a designated exit code is a viable approach, it would primarily require careful thought in the documentation of the semantics.\n\nI just managed to find a bit of time to look at this again and it seems:\n```\n$ skopeo inspect docker://does-not-exist\nFATA[0001] Error parsing image name \"docker://does-not-exist\": reading manifest latest in docker.io/library/does-not-exist: requested access to the resource is denied\n```\nis one such example. \n\nI updated the commit a bit based on the discussion. There is no clear consensus so I did this best effort :) \n\nFeel free to close if you disagree but I would love to have something like this!"
+        },
+        {
+            "user": "packit-as-a-service[bot]",
+            "body": "Ephemeral COPR build failed. @containers/packit-build please check."
+        },
+        {
+            "user": "mtrmac",
+            "body": "Thanks again!"
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "osbuild",
+            "repository": "osbuild",
+            "number": 1609
+        }
+    ]
+}
