@@ -1,0 +1,33 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 3582,
+    "type": "issue",
+    "title": "Creation of AUFS-style whiteouts is allowed from within container",
+    "state": "closed",
+    "labels": [
+        "kind/bug",
+        "locked - please file new issue/PR"
+    ],
+    "user": "QazerLab",
+    "body": "/kind bug\n\n**Description**\n\nWhen the container filesystem gets committed to the image, whiteout files and opaque directories are translated to AUFS-style whiteouts, as required by [Image spec](https://github.com/opencontainers/image-spec/blob/master/layer.md#whiteouts). Ordinary files and directories are committed as-is, and this means, that if the user created a file or directory, which is named exactly as an AUFS-style whiteout (which is perfectly legal with overlay or, say, vfs drivers), it would also get silently committed to the image, potentially resulting in \"removal\" of some file or directory.\n\nFor example, building the following `Dockerfile`\n\n```\n$ cat Dockerfile-bad \nFROM alpine\nRUN mkdir .wh.sbin\nRUN stat /sbin\n```\n\nresults in the failure:\n\n```\n$ podman build -f Dockerfile-bad .\nSTEP 1: FROM alpine\nSTEP 2: RUN mkdir .wh.sbin\nSTEP 3: RUN stat /sbin\nstat: can't stat '/sbin': No such file or directory\nError: error building at STEP \"RUN stat /sbin\": error while running runtime: exit status 1\n```\n\nFurthermore, there seems to be a corner case, when code being `RUN` by an _unprivileged_ user, may use this trick to \"delete\" the root-owned subdirectory with all its content:\n\n```\n$ cat Dockerfile\nFROM alpine\n\nRUN mkdir /test && \\\n    chown 42:42 /test\n\nRUN mkdir -m 0600 /test/root && \\\n    echo 123 > /test/root/123 && \\\n    chown 0:0 /test/root/123 && \\\n    chmod 0600 /test/root/123\n\nUSER 42\n\nRUN mkdir /test/.wh..wh..opq\n\nUSER 0\n\nRUN cat /test/root/123\n```\n\ncheck:\n\n```\n$ podman build .\n<...>\nSTEP 8: RUN cat /test/root/123\ncat: can't open '/test/root/123': No such file or directory\nError: error building at STEP \"RUN cat /test/root/123\": error while running runtime: exit status 1\n```\n\nAUFS driver rejects attempts to create files/dirs prefixed with `.wh.`, returning `EPERM`. I also do not see any way to forge overlay whiteouts/opaqueues from within the container. That said, allowing the user creating whiteouts from within the container seems to me a bug.\n\nHowever, even Docker behaves the same way. The question is: am I missing something? Is this behavior considered correct, or are there any reasons to avoid checking the upper layer files during commit (e.g. because of potential performance issues)?",
+    "comments": [
+        {
+            "user": "rhatdan",
+            "body": "@nalind @giuseppe WDYT?\nIt would seem that it would cause performance issues when doing a podman commit."
+        },
+        {
+            "user": "giuseppe",
+            "body": "fuse-overlayfs doesn't allow to create `.wh.` prefixed files, as they are used at runtime but I don't see a problem with native overlay, where AUFS-whiteouts are not used.\n\nThe possibility of deleting root-owned files, as in the example above, already need that the parent directory is writeable to the unprivileged user which is not a common case (except `/run` and `/tmp` that are not really useful when building an image), so I don't see how this can be an issue that we should try to prevent, a malicious user can do much worse things than creating whiteout files.\n\nIf we decide to address the issue, we could probably filter these files when we create the tar, I see there is an `ExcludePatterns` option\n"
+        },
+        {
+            "user": "giuseppe",
+            "body": "I don't think there is anything we should do here.  Please add more comments, or re-open the issue if you think there are situations where this could be a security problem."
+        },
+        {
+            "user": "QazerLab",
+            "body": "@giuseppe, I don't insist that this should be fixed (as I did not find any possibility to exploit this behavior in ways other than just corrupting the image), just wanted to see what do you think about this oddity. If you don't consider this to be a bug - I'm completely OK with this."
+        }
+    ],
+    "cross_references": []
+}

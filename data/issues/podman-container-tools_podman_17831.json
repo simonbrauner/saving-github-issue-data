@@ -1,0 +1,638 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 17831,
+    "type": "pull_request",
+    "title": "Ed's pet PR with no flake retries",
+    "state": "open",
+    "labels": [
+        "approved",
+        "do-not-merge/work-in-progress",
+        "machine",
+        "release-note-none"
+    ],
+    "user": "edsantiago",
+    "body": "This should make system tests work with the requested DB\n\nSigned-off-by: Ed Santiago <santiago@redhat.com>\n```release-note\nNone\n```",
+    "comments": [
+        {
+            "user": "openshift-ci[bot]",
+            "body": "[APPROVALNOTIFIER] This PR is **APPROVED**\n\nThis pull-request has been approved by: *<a href=\"https://github.com/containers/podman/pull/17831#\" title=\"Author self-approved\">edsantiago</a>*\n\nThe full list of commands accepted by this bot can be found [here](https://go.k8s.io/bot-commands?repo=containers%2Fpodman).\n\nThe pull request process is described [here](https://git.k8s.io/community/contributors/guide/owners.md#the-code-review-process)\n\n<details >\nNeeds approval from an approver in each of these files:\n\n- ~~[OWNERS](https://github.com/containers/podman/blob/main/OWNERS)~~ [edsantiago]\n\nApprovers can indicate their approval by writing `/approve` in a comment\nApprovers can cancel approval by writing `/approve cancel` in a comment\n</details>\n<!-- META={\"approvers\":[]} -->"
+        },
+        {
+            "user": "edsantiago",
+            "body": "Debian Build barfing with:\n```\ntime=\"2023-03-17T14:06:47Z\"\n    level=error\n    msg=\"reading system config \\\"/etc/containers/containers.conf\\\":\n       decode configuration /etc/containers/containers.conf: toml: line 4: Key 'engine' has already been defined.\"\n```\n...but all other Build tasks (Fedora) pass. What is different about Debian TOML parser? And if Debian is different in this regard, what other Debian differences are there, and maybe one of those explains #17607?"
+        },
+        {
+            "user": "edsantiago",
+            "body": "Oh, never mind; this is probably because Debian gets 'engine ... = runc'. TOML is annoying."
+        },
+        {
+            "user": "edsantiago",
+            "body": "It works! It works! Lots of failures:\n```\nError: adding container id to database: database is locked\n```\n...but these happen in `int` tests, too, except that those get retried, these don't. @mheon PTAL."
+        },
+        {
+            "user": "edsantiago",
+            "body": "Oh, and @vrothberg, this minimizes the need for an envariable"
+        },
+        {
+            "user": "mheon",
+            "body": "The bash here scares me, but LGTM"
+        },
+        {
+            "user": "mheon",
+            "body": "`         # Error: adding container id to database: database is locked`\n\nThat's new"
+        },
+        {
+            "user": "edsantiago",
+            "body": "@mheon no, what I mean is, what do we do with this? Obviously we can't enable it, because sqlite isn't ready. Are these failures helpful to you? (And no, \"database is locked\" is not new, look at `int` tests logs for any PR this week. It's all over the place, just, `int` tests get retried so these are not usually hard failures.)"
+        },
+        {
+            "user": "mheon",
+            "body": "@edsantiago My understanding was that it is ready, and all tests should be passing. The fact that we're flaking frequently is news to me, but I haven't been spending much time in PRs this week."
+        },
+        {
+            "user": "mheon",
+            "body": "Per SQLite docs it looks like internal concurrency issue across the same DB connection, which I thought their locking would handle... Looking further."
+        },
+        {
+            "user": "edsantiago",
+            "body": "Just looking at the very first `int` log I could find today, [here ya go](https://api.cirrus-ci.com/v1/task/5299663176204288/logs/main.log#t--Podman-start-after-signal-kill), search in-page for \"database is locked\". (Weird, though, those tests pass. The \"UNIQUE constraint failed\" errors are hard though. I assume you know all about those."
+        },
+        {
+            "user": "mheon",
+            "body": "We have some pretty clear concurrency issues on display here. The UNIQUE constraint bits look like a DB creation race that I thought would be impossible, but should be fairly easy to code around. The DB locking one is far more problematic. @vrothberg From my reading here, we may need to start using separate DB connections within the same Podman process for each access, or otherwise introduce some sort of locking to prevent more than 1 access to the DB at a time, because the locking on the connection doesn't seem to be sufficient to prevent this sort of thing."
+        },
+        {
+            "user": "edsantiago",
+            "body": "I'm sorry. These errors are everywhere, constant, so I genuinely thought they were part of the WIP sqlite migration. Didn't even bother to file flakes for them.  For the locking, would transactions help?"
+        },
+        {
+            "user": "mheon",
+            "body": "The issue appears to be that SQLite is allowing a write transaction to fire at the same time as another thread is reading the same table, resulting in errors. I don't think we want to wrap all reads in transactions for perf reasons, unfortunately.\n\nThe confusing bit is that this seems to contradict the sqlite docs, which say that by default all accesses through a single connection are sequential only. Simplest fix might just be added a mutex to control access and ensure that remains true."
+        },
+        {
+            "user": "edsantiago",
+            "body": "@vrothberg and I spent a while discussing conf options this week, including the `.d` possibility. The perl script isn't needed for that... but it will be needed at some point for testing containers.conf overrides. I'll follow up on Monday."
+        },
+        {
+            "user": "vrothberg",
+            "body": "Using `.d` should \"just work\" in CI even when a test sets a custom  containers.conf via CONTAINERS_CONF."
+        },
+        {
+            "user": "vrothberg",
+            "body": "> Using `.d` should \"just work\" in CI even when a test sets a custom containers.conf via CONTAINERS_CONF.\n\nActually not.  Whenever CONTAINERS_CONF is set, only this file will be loaded and all system/user configs will be ignored."
+        },
+        {
+            "user": "rhatdan",
+            "body": "We've been talking about CONTAINERS_CONF_D or something where all of the normal CONTAINERS_CONF processing would be done, but the value of then environment variable would be processed at the end, perhaps it is time to add that."
+        },
+        {
+            "user": "vrothberg",
+            "body": "> We've been talking about CONTAINERS_CONF_D or something where all of the normal CONTAINERS_CONF processing would be done, but the value of then environment variable would be processed at the end, perhaps it is time to add that.\n\nI am working on that at the moment :^)"
+        },
+        {
+            "user": "vrothberg",
+            "body": "> [+0666s] not ok 217 events log-file rotation\n\nThis test will likely fail because of CONTAINERS_CONF foo."
+        },
+        {
+            "user": "vrothberg",
+            "body": "> [+0801s] not ok 285 podman userns=auto in config file\n\nThis one as well.\n\n@edsantiago, can we skip these tests for now with sqlite until we extended the containers.conf loading mechanism?"
+        },
+        {
+            "user": "edsantiago",
+            "body": "I've fixed the `userns` test (it was buggy). It should pass on my next push here. logrotate, sure, I can skip on my next push."
+        },
+        {
+            "user": "edsantiago",
+            "body": "I'm a little concerned about the `remote` timing results. Not enough to actually do anything about it, just concerned enough to log for future evaluation.\n\n| type | distro              | user     | DB     |    local |   remote | container |                                                                            \n| ---- | --------            | ----     | --     |    ----: |   -----: | --------: |                                                                            \n| int  | debian-12           | root     |        |    27:42 |    38:59 |                                                                                        \n| int  | fedora-36           | root     |        |    32:28 |    34:56 |     33:13 |                                                                            \n| int  | fedora-37           | root     |        |    27:14 |    34:00 |     27:23 |                                                                            \n| int  | fedora-37           | root     | sqlite |    29:46 |    33:49 |                                                                                        \n| int  | debian-12           | rootless |        |    27:14 |          |                                                                                        \n| int  | fedora-36           | rootless |        |    30:18 |          |                                                                                        \n| int  | fedora-37           | rootless |        |    28:18 |          |\n| int  | fedora-37           | rootless | sqlite |    28:52 |          |\n| sys  | debian-12           | root     |        |    26:18 |    17:43 |\n| sys  | fedora-36           | root     |        |    30:19 |    20:32 |\n| sys  | fedora-37           | root     |        |    29:25 |    19:24 |\n| sys  | fedora-37           | root     | sqlite |    28:37 |    19:35 |\n| sys  | fedora-37-aarch64   | root     |        |    32:40 |    22:35 |\n| sys  | debian-12           | rootless |        |    27:54 |          |\n| sys  | fedora-36           | rootless |        |    30:27 |          |\n| sys  | fedora-37           | rootless |        |    27:36 |    18:01 |\n| sys  | fedora-37           | rootless | sqlite |    27:22 |          |"
+        },
+        {
+            "user": "edsantiago",
+            "body": "@cevich heads-up there's something weird going on with Cirrus or Github. Like, [this job](https://github.com/containers/podman/pull/17831/checks?check_run_id=12252834528) says it took 1h1m to run, but [truth](https://api.cirrus-ci.com/v1/artifact/task/6230048923975680/html/int-remote-fedora-37-root-host-boltdb.log.html) is 32m. And [this other job](https://cirrus-ci.com/task/5096345967525888) is claiming to still be running, at 39m, but that's super improbable. I bet it's finished but something is delaying somewhere. Ah, and in the minutes it took me to type this, the job finished.\n\nAnyhow, seems to be happening on a lot of jobs today. Easy to catch with my `cirrus-pr-timing` script, but unfortunately not easy to spot in the Github UI. "
+        },
+        {
+            "user": "vrothberg",
+            "body": "Restarted the two failed jobs (infra flake with something-something-java)."
+        },
+        {
+            "user": "edsantiago",
+            "body": "With `_sync=FULL`, and with `Eventually()` (i.e. reverting my `Expect()` change): [f36 root](https://api.cirrus-ci.com/v1/artifact/task/4988284657467392/html/int-podman-fedora-36-root-container-sqlite.log.html#t--stop-podman-service--1) and [debian rootless](https://api.cirrus-ci.com/v1/artifact/task/4636440936579072/html/int-podman-debian-12-rootless-host-sqlite.log.html#t--stop-podman-service--1) flaked. Sorry."
+        },
+        {
+            "user": "vrothberg",
+            "body": "```diff\ndiff --git a/libpod/sqlite_state.go b/libpod/sqlite_state.go\nindex 014edd0f462c..a44b5a966088 100644\n--- a/libpod/sqlite_state.go\n+++ b/libpod/sqlite_state.go\n@@ -33,7 +33,7 @@ const (\n        // Deal with timezone automatically.\n        sqliteOptionLocation = \"_loc=auto\"\n        // Force WAL mode to fsync after each transaction (https://www.sqlite.org/pragma.html#pragma_synchronous).\n-       sqliteOptionSynchronous = \"&_sync=FULL\"\n+       sqliteOptionSynchronous = \"&_sync=EXTRA\"\n        // Allow foreign keys (https://www.sqlite.org/pragma.html#pragma_foreign_keys).\n        sqliteOptionForeignKeys = \"&_foreign_keys=1\"\n        // Make sure that transactions happen exclusively.\n```\nThat would be a last resort.  If that doesn't work either, I will get out of the rabbit hole and follow another theory."
+        },
+        {
+            "user": "edsantiago",
+            "body": "[Sorry](https://api.cirrus-ci.com/v1/artifact/task/6633733470552064/html/int-podman-debian-12-root-host-sqlite.log.html#t--stop-podman-service--1)."
+        },
+        {
+            "user": "edsantiago",
+            "body": "@vrothberg I'm keeping this alive for many reasons: ~~WAL testing~~ (no longer needed), sqlite testing (still desired), and because disabling `flakeAttempts` has been so useful at identifying hidden flakes (i.e., getting us closer to solving #18188). Title changed to reflect its new purpose."
+        },
+        {
+            "user": "vrothberg",
+            "body": "Thank you, @edsantiago!\n\nGiven bug week is around the corner, please remind everybody which issues you like to see fixed.\nCc: @mheon "
+        },
+        {
+            "user": "vrothberg",
+            "body": "All good with sqlite?"
+        },
+        {
+            "user": "edsantiago",
+            "body": "@vrothberg uhhhh, no, sorry. See #18356"
+        },
+        {
+            "user": "edsantiago",
+            "body": "@mheon can you give me a hint as to what you're looking for with this `cgroupfs` thing? (see top commit). I'm still seeing flakes here, and one hard failure that I've decided to just skip. If I know what you're looking for, I can be more alert for it."
+        },
+        {
+            "user": "mheon",
+            "body": "@edsantiago Specifically a lack of unlinkat/EBUSY flakes. If we're seeing this then the CI issues are most likely unrelated to what I'm looking at."
+        },
+        {
+            "user": "edsantiago",
+            "body": "@mheon if I'm counting correctly I see 22 or 23 CI runs with the `cgroupfs` commit... and no unlinkat/EBUSY flakes in any of them. That is statistically unlikely to be due to chance."
+        },
+        {
+            "user": "mheon",
+            "body": "@edsantiago Roger, thanks. Feel free to take the commit out if you want, I think we have a solid answer.\n\nAssuming I can actually find an answer to why this is going on, I may have a further commit in a bit to actually fix this, but I don't actually have any idea as to why this is happening yet so that may take a while."
+        },
+        {
+            "user": "packit-as-a-service[bot]",
+            "body": "~~Cockpit tests failed for commit a0ad92f0cae747d85409bf6c02138317cf77c419. @martinpitt, @jelly, @mvollmer please check.~~\n\nPay no attention to this PR. This is my pet try-to-break-everything PR. Never pay any attention to this PR."
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 17858
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 17867
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 17874
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 17902
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 17895
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 10927
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 17904
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 17859
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 17957
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 17903
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 17042
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 17959
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 17966
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 17979
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 18070
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 17946
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 18085
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 18131
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 18132
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 18083
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 17802
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 18056
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 18047
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 17216
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 16272
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 18269
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 17804
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 18358
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 18356
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 18477
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 18484
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 18065
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 18514
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 18519
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 18540
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 18634
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 18631
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 18693
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 18501
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 18507
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 18448
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 15272
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 18948
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 18355
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 17287
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 18831
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 19148
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 19503
+        },
+        {
+            "organization": "containers",
+            "repository": "crun",
+            "number": 1264
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 19576
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 19595
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 19621
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 19733
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 19702
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 19760
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 19863
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 19878
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 20173
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 19721
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 20282
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 20452
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 20470
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 20494
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 20655
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 20485
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 20196
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 20838
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 20898
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 20938
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 20332
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 21191
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 21270
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 21271
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 21298
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 21504
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 21561
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 21563
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 21834
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 21846
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 21871
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 21965
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 22207
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 22569
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 22831
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 22880
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 23339
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 23274
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 23384
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 20044
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 23457
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 23460
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 23456
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 23551
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 23631
+        }
+    ]
+}

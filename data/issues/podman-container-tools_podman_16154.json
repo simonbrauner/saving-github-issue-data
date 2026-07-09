@@ -1,0 +1,111 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 16154,
+    "type": "issue",
+    "title": "kube play: cannot unmarshal ... PodRmReport.RmReport.Err",
+    "state": "open",
+    "labels": [
+        "flakes",
+        "kind/bug",
+        "remote",
+        "kube"
+    ],
+    "user": "edsantiago",
+    "body": "```\n[+1526s] not ok 392 podman kube play - hostport\n...\n$ podman-remote kube down /tmp/podman_bats.rYmm67/testpod.yaml\nError: json: cannot unmarshal string into Go struct field PodRmReport.RmReport.Err of type error\n[ rc=125 (** EXPECTED 0 **) ]\n```\nThree instances, first in August. Root/rootless. Always remote.",
+    "comments": [
+        {
+            "user": "edsantiago",
+            "body": "* fedora-36 : sys remote fedora-36 rootless host [remote]\n  * PR #16105\n    * [10-10 09:45](https://api.cirrus-ci.com/v1/artifact/task/6661751570694144/html/sys-remote-fedora-36-rootless-host.log.html#t--00392)\n  * PR #15407\n    * [08-22-2022 09:34](https://storage.googleapis.com/cirrus-ci-6707778565701632-fcae48/artifacts/containers/podman/6408248566743040/html/sys-remote-fedora-36-rootless-host.log.html#t--00377)\n* ubuntu-2204 : sys remote ubuntu-2204 root host [remote]\n  * PR #15981\n    * [09-28 12:08](https://api.cirrus-ci.com/v1/artifact/task/6372700389113856/html/sys-remote-ubuntu-2204-root-host.log.html#t--00390)\n \nAn interesting side note: two of these three failures are associated with #15367 (the everything-hosed-forever flake): as soon as this `unmarshal` error happens, all future podman invocations fail catastrophically."
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "mtrmac",
+            "body": "A weird thing is that there _is_ no `RmReport` member in `pkg/domain/entities.PodRmReport`."
+        },
+        {
+            "user": "edsantiago",
+            "body": "Three new instances, but slightly different. These are all `VolumeRmReport.VolumeRmReport.Err` instead of `PodRmReport`. And they don't triple-fail, or even single-fail (the test passes), so my flake logger cannot detect them. I have to `cirrus-flake-grep` which will only catch it if it manifests in a *real* flake.\n\n```\n# podman-remote [options] play kube /tmp/podman_test2607771438/kube.yaml\n         Error: error tearing down workloads \"json: cannot unmarshal string into Go struct field VolumeRmReport.VolumeRmReport.Err of type error\" after kube play error \"playing YAML file: importing volumes is not supported for remote requests\"\n```\n\nAll of them in `int remote fedora-37 root host`:\n* [12-20](https://api.cirrus-ci.com/v1/artifact/task/5752294529040384/html/int-remote-fedora-37-root-host.log.html#t--podman-play-kube-persistentVolumeClaim-with-source--1)\n* [12-20](https://api.cirrus-ci.com/v1/artifact/task/4828706640756736/html/int-remote-fedora-37-root-host.log.html#t--podman-play-kube-persistentVolumeClaim-with-source--1)\n* [01-03](https://api.cirrus-ci.com/v1/artifact/task/6639291510554624/html/int-remote-fedora-37-root-host.log.html#t--podman-play-kube-persistentVolumeClaim-with-source--1) (yesterday)"
+        },
+        {
+            "user": "edsantiago",
+            "body": "Seen Jan 27 in [sys remote f37 rootless](https://api.cirrus-ci.com/v1/artifact/task/6487881162686464/html/sys-remote-fedora-37-rootless-host.log.html#t--00511):\n```\nnot ok 511 podman kube play read-only\n...\n$ podman-remote --url unix:/tmp/podman_tmp_dEuC kube down -\nError: json: cannot unmarshal string into Go struct field PodRmReport.RmReport.Err of type error\n[ rc=125 (** EXPECTED 0 **) ]\n```\nSummary so far: happening both **root** and **rootless**, **int** and **sys**, **f36** and **f37**, and still happening many months after first reported."
+        },
+        {
+            "user": "mtrmac",
+            "body": "I _guess_ something like\n```patch\ndiff --git a/pkg/bindings/errors.go b/pkg/bindings/errors.go\nindex d9dfa95a6..af7ab0c45 100644\n--- a/pkg/bindings/errors.go\n+++ b/pkg/bindings/errors.go\n@@ -7,6 +7,7 @@ import (\n        \"io\"\n \n        \"github.com/containers/podman/v4/pkg/errorhandling\"\n+       \"github.com/sirupsen/logrus\"\n )\n \n var (\n@@ -15,7 +16,8 @@ var (\n \n func handleError(data []byte, unmarshalErrorInto interface{}) error {\n        if err := json.Unmarshal(data, unmarshalErrorInto); err != nil {\n-               return err\n+               logrus.Errorf(\"Error unmarshaling into %#v, data %q\", unmarshalErrorInto, data)\n+               panic(\"handleError failed\")\n        }\n        return unmarshalErrorInto.(error)\n }\n@@ -35,7 +37,10 @@ func (h APIResponse) ProcessWithError(unmarshalInto interface{}, unmarshalErrorI\n        }\n        if h.IsSuccess() || h.IsRedirection() {\n                if unmarshalInto != nil {\n-                       return json.Unmarshal(data, unmarshalInto)\n+                       if err := json.Unmarshal(data, unmarshalInto); err != nil {\n+                               logrus.Errorf(\"Error unmarshaling into %#v, data %q\", unmarshalInto, data)\n+                               panic(\"APIResponse.ProcessWithError failed\")\n+                       }\n                }\n                return nil\n        }\n```\ncould help diagnose, but if this is an infrequent flake we can’t trigger, a draft-only PR probably wouldn’t help, and I’m not comfortable with shipping those `panic`s to users.\n\nMaybe we could just log the data and type in the error, and keep that shipped on the main branch until this triggers again…"
+        },
+        {
+            "user": "edsantiago",
+            "body": "Hey, could \"unexpected end of JSON input\" be a variation of this bug? Seen in [podman machine test, f37 aarch64 rootless](https://api.cirrus-ci.com/v1/artifact/task/5479726072987648/html/machine-podman-fedora-37-aarch64-rootless-host.log.html#t--list-machine--check-if-running-while-starting--1):\n```\nMachine init complete\n         To start your machine run:\n         \n         \tpodman machine start 7ad7ab2c8b50\n         \n         output: Image resized. Machine init complete To start your machine run: podman machine start 7ad7ab2c8b50\n         /var/tmp/go/src/github.com/containers/podman/bin/podman-remote machine start 7ad7ab2c8b50\n         /var/tmp/go/src/github.com/containers/podman/bin/podman-remote machine list\n         Migrating machine \"\"\n         Error: checking VM active: unexpected end of JSON input\n         NAME           VM TYPE     CREATED        LAST UP        CPUS        MEMORY      DISK SIZE\n         7ad7ab2c8b50*  qemu        7 seconds ago  7 seconds ago  1           2.147GB     107.4GB\n```"
+        },
+        {
+            "user": "mtrmac",
+            "body": "> Maybe we could just log the data and type in the error, and keep that shipped on the main branch until this triggers again…\n\nLet’s start with that: https://github.com/containers/podman/pull/17282 ."
+        },
+        {
+            "user": "edsantiago",
+            "body": "[Yay!](https://api.cirrus-ci.com/v1/artifact/task/5375733741125632/html/sys-remote-fedora-37-root-host.log.html). Does this help?\n```\n# podman-remote --url unix:/tmp/podman_tmp_PyCl kube down /tmp/podman_bats.yuokza/test.yaml\nError: unmarshaling into &entities.PlayKubeReport{Pods:[]entities.PlayKubePod(nil), Volumes:[]entities.PlayKubeVolume(nil), PlayKubeTeardown:entities.PlayKubeTeardown{StopReport:[]*entities.PodStopReport{(*entities.PodStopReport)(0xc0003b4540)}, RmReport:[]*entities.PodRmReport{(*entities.PodRmReport)(0xc0002701a0)}, VolumeRmReport:[]*entities.VolumeRmReport(nil)}, Secrets:[]entities.PlaySecret(nil)}, data \"{\\\"Pods\\\":null,\\\"Volumes\\\":null,\\\"StopReport\\\":[{\\\"Errs\\\":null,\\\"Id\\\":\\\"23925178e788af05632a6613f214378c0d2a3c64ca078339fc0bd906b3ae4820\\\"}],\\\"RmReport\\\":[{\\\"Err\\\":\\\"1 error occurred:\\\\n\\\\t* removing container 919c374a24cadedcba2d95849dcf5c4aa17d0e757965436b5530d14fa28ab695 from pod 23925178e788af05632a6613f214378c0d2a3c64ca078339fc0bd906b3ae4820: removing container 919c374a24cadedcba2d95849dcf5c4aa17d0e757965436b5530d14fa28ab695 root filesystem: 1 error occurred:\\\\n\\\\t* unlinkat /var/lib/containers/storage/overlay-containers/919c374a24cadedcba2d95849dcf5c4aa17d0e757965436b5530d14fa28ab695/userdata/shm: device or resource busy\\\\n\\\\n\\\\n\\\\n\\\",\\\"Id\\\":\\\"23925178e788af05632a6613f214378c0d2a3c64ca078339fc0bd906b3ae4820\\\"}],\\\"VolumeRmReport\\\":null,\\\"Secrets\\\":null}\\n\": json: cannot unmarshal string into Go struct field PodRmReport.RmReport.Err of type error\n```\n(Sorry for the long line)"
+        },
+        {
+            "user": "mtrmac",
+            "body": "It definitely does.\n\n---\n\nThe underlying cause, in `RmReport`:\n\n```\n1 error occurred:\n\t* removing container 919c374a24cadedcba2d95849dcf5c4aa17d0e757965436b5530d14fa28ab695 from pod 23925178e788af05632a6613f214378c0d2a3c64ca078339fc0bd906b3ae4820: removing container 919c374a24cadedcba2d95849dcf5c4aa17d0e757965436b5530d14fa28ab695 root filesystem: 1 error occurred:\n\t* unlinkat /var/lib/containers/storage/overlay-containers/919c374a24cadedcba2d95849dcf5c4aa17d0e757965436b5530d14fa28ab695/userdata/shm: device or resource busy\n```\n\nThat looks rather like some other flakes, e.g. https://github.com/containers/podman/issues/11594#issuecomment-1276409450\n\n---\n\nAnd then there _seems to be_ a design issue in error handling of the Kube commands: With the disclaimer that I’m very new to this code, and I am just reading it, not testing it in practice:\n\nSummary: The `error` interface can’t be directly transferred over JSON.\n\nE.g. consider how https://github.com/containers/podman/blob/90b18d2d9c6cbd5f2281176452ee74db3b771d70/pkg/domain/infra/tunnel/pods.go#L171 works (outside of Kube): The `PodRmReport.Err` field is manually set by the remote’s client caller, i.e. it is not transferred directly as JSON. (Well, actually it is, https://github.com/containers/podman/blob/90b18d2d9c6cbd5f2281176452ee74db3b771d70/pkg/bindings/pods/pods.go#L212 does end up unmarshaling the `Err` field, but as long as there is no error, the value is `nil` and that is passed through JSON just fine.)\n\nIf the server fails, a different HTTP status triggers transfer not of `PodRmReport`, but of a specialized https://github.com/containers/podman/blob/90b18d2d9c6cbd5f2281176452ee74db3b771d70/pkg/errorhandling/errorhandling.go#L93 JSON format; and the callee detects that and manually populates `PodRmReport.Err`.\n\nThat’s the way this seems to work for the _standalone_ `PodRmReport`. But that mechanism only works at the _top level_ of the request; meanwhile `play kube` just embeds the full `PodRmReport` (and other structs) into the total result, as a single unit, with no special-case handling of error values; because `PodRmReport` can’t _actually_ transfer `Err` through raw JSON, that then breaks.\n\nFixing this seems to mean changing the structure of `entities.PlayKubeTeardown` so that it does not naively embed the top-level “`Report`” structures, but some variant that does not contain a raw `error` field but maybe instances of `errorhandling.ErrorModel`. (That would, in theory, be an API break, but the existing API can’t be correctly consumed by Podman itself in error situations, so…)\n\nAnd as much as I originally looked into this bug because of a stupid oversight (https://github.com/containers/podman/issues/16154#issuecomment-1355306783 mixes up type and field names, there is actually no mystery in _that_), I’d like to leave this `play kube` reorganization to someone familiar with the code."
+        },
+        {
+            "user": "edsantiago",
+            "body": "Seen just now in [f37 remote rootless](https://api.cirrus-ci.com/v1/artifact/task/5658355373441024/html/sys-remote-fedora-37-rootless-host.log.html), and again everything after that is hosed (#17216) even though it's not a \"podman rm\":\n```\nError: unmarshalling into &entities.PlayKubeReport{Pods:[]entities.PlayKubePod(nil),\n   Volumes:[]entities.PlayKubeVolume(nil),\n   PlayKubeTeardown:entities.PlayKubeTeardown{StopReport:[]*entities.PodStopReport{(*entities.PodStopReport)(0xc0005f2810)},\n   RmReport:[]*entities.PodRmReport{(*entities.PodRmReport)(0xc00046e1c0)},\n   VolumeRmReport:[]*entities.VolumeRmReport(nil)},\n   Secrets:[]entities.PlaySecret(nil)},\n   data \"{\\\"Pods\\\":null,\\\"Volumes\\\":null,\\\"StopReport\\\":[{\\\"Errs\\\":null,\\\"Id\\\":\\\"447565dbf1252d30bb7ccee54d90301af053f5c62a8fad9c784c7a8129edaa73\\\"}],\\\"RmReport\\\":[{\\\"Err\\\":\\\"2 errors occurred:\\\n \\\\t* removing container fe02d5e5ad813a31fd7a806006644c7068d5f00b5eb74e1e3e0e3ab3a642225a from pod 447565dbf1252d30bb7ccee54d90301af053f5c62a8fad9c784c7a8129edaa73: removing container fe02d5e5ad813a31fd7a806006644c7068d5f00b5eb74e1e3e0e3ab3a642225a root filesystem: 1 error occurred:\\\n \\\\t* unlinkat /home/some29111dude/.local/share/containers/storage/overlay/b0007db8a5b78536fa46c4d4f06aa36700c48ca3d69f598012993742a7e87f0c/merged: device or resource busy\\\n \\\n \\\n \\\\t* removing container 18fbc78049db4a79ea0cbd24e46c4a3dce60e8fd13bd753160be5be8abaafcaf from pod 447565dbf1252d30bb7ccee54d90301af053f5c62a8fad9c784c7a8129edaa73: removing container 18fbc78049db4a79ea0cbd24e46c4a3dce60e8fd13bd753160be5be8abaafcaf root filesystem: 1 error occurred:\\\n \\\\t* unlinkat /home/some29111dude/.local/share/containers/storage/overlay/64e6dcc8a2ddd7396a85052a892829941bbce37ab9bc367666d7db30e18acc27/merged: device or resource busy\\\n \\\n \\\n \\\n \\\",\\\"Id\\\":\\\"447565dbf1252d30bb7ccee54d90301af053f5c62a8fad9c784c7a8129edaa73\\\"}],\\\"VolumeRmReport\\\":null,\\\"Secrets\\\":null}\n \": json: cannot unmarshal string into Go struct field PodRmReport.RmReport.Err of type error\n```"
+        },
+        {
+            "user": "edsantiago",
+            "body": "Now seen in [debian](https://api.cirrus-ci.com/v1/artifact/task/5757052782379008/html/sys-remote-debian-12-root-host.log.html#t--00528) also. remote, root."
+        },
+        {
+            "user": "edsantiago",
+            "body": "[f37 remote root](https://api.cirrus-ci.com/v1/artifact/task/4979289217564672/html/sys-remote-fedora-37-root-host-sqlite.log.html#t--00535), and once it happens, all future tests are hosed:\n```\nnot ok 535 podman kube play - default log driver\n...\n#  podman-remote --url unix:/tmp/podman_tmp_i1Vb kube down /tmp/podman_bats.8ABmsh/test.yaml\nError: unmarshalling into\n&entities.PlayKubeReport{\n  Pods:[]entities.PlayKubePod(nil),\n      Volumes:[]entities.PlayKubeVolume(nil),\n      PlayKubeTeardown:entities.PlayKubeTeardown{\n          StopReport:[]*entities.PodStopReport{\n                (*entities.PodStopReport)(0xc0006f5b00)},\n                  RmReport:[]*entities.PodRmReport{\n                        (*entities.PodRmReport)(0xc00011c920)\n                    },\n                  VolumeRmReport:[]*entities.VolumeRmReport(nil),\n                  SecretRmReport:[]*entities.SecretRmReport{}\n                },\n              Secrets:[]entities.PlaySecret(nil),\n              ServiceContainerID:\"\"\n            },\n    data \"{\n    \\\"Pods\\\":null,\n    \\\"Volumes\\\":null,\n    \\\"StopReport\\\":[\n        {\n            \\\"Errs\\\":null,\n            \\\"Id\\\":\\\"e99d70f60aaa8182801659dcf1e361cec618ff546de03d48f6d95ed3e74c063c\\\"\n        }\n    ],\n    \\\"RmReport\\\":[\n        {\n            \\\"Err\\\":\\\"1 error occurred:\\\\n\\\\t* removing container 6e4e1af5522f8cade47cb6a01646259df0e629471b38444adb6f8371c153097f from pod e99d70f60aaa8182801659dcf1e361cec618ff546de03d48f6d95ed3e74c063c: removing container 6e4e1af5522f8cade47cb6a01646259df0e629471b38444adb6f8371c153097f root filesystem: 1 error occurred:\\\\n\\\\t* unlinkat /var/lib/containers/storage/overlay/f33f7a528eafe7ccb32652ad381133af5007aafe0c9761f94eb0597cca81414f/merged: device or resource busy\\\\n\\\\n\\\\n\\\\n\\\",\n            \\\"Id\\\":\\\"e99d70f60aaa8182801659dcf1e361cec618ff546de03d48f6d95ed3e74c063c\\\"\n        }\n    ],\n    \\\"VolumeRmReport\\\":null,\n    \\\"SecretRmReport\\\":[],\n    \\\"Secrets\\\":null,\n    \\\"ServiceContainerID\\\":\\\"\\\"}\\n\": json: cannot unmarshal string into Go struct field PodRmReport.RmReport.Err of type error\n```\nI'm really quite certain this is related to #17216"
+        },
+        {
+            "user": "edsantiago",
+            "body": "https://api.cirrus-ci.com/v1/artifact/task/4573957450366976/html/sys-remote-debian-12-root-host-boltdb.log.html"
+        },
+        {
+            "user": "vrothberg",
+            "body": "> I'm really quite certain this is related to https://github.com/containers/podman/issues/17216\n\nYes, me too.  I close this issue here so we can focus on https://github.com/containers/podman/issues/17216"
+        },
+        {
+            "user": "mtrmac",
+            "body": "My understanding, per the above, is that the #17216 underlying cause is the same, but _on top_, this demonstrates a bug in `PodRmReport` error handling."
+        },
+        {
+            "user": "vrothberg",
+            "body": "That's a fair point.  Let's reopen to look into the error reporting."
+        },
+        {
+            "user": "vrothberg",
+            "body": "Had a quick look.  The underlying issue is that the returned type includes a `type error` which cannot be (un)marshalled.  Those need to be turned into strings and then be converted into errors as done for other endpoints."
+        },
+        {
+            "user": "edsantiago",
+            "body": "Here's a [recent one](https://api.cirrus-ci.com/v1/artifact/task/5884660132085760/html/sys-remote-fedora-38-root-host-boltdb.log.html#t--00635):\n```\n[+1437s] not ok 635 [700] podman play with init container\n...\n<+022ms> # # podman-remote --url unix:///var/tmp/podman_tmp_6K3d kube down /var/tmp/podman_bats.5MGJtt/test.yaml\n<+470ms> # Error: unmarshalling into &types.PlayKubeReport{Pods:[]types.PlayKubePod(nil), Volumes:[]types.PlayKubeVolume(nil), PlayKubeTeardown:types.PlayKubeTeardown{StopReport:[]*types.PodStopReport{(*types.PodStopReport)(0xc00033e510)}, RmReport:[]*types.PodRmReport{(*types.PodRmReport)(0xc00033e810)}, VolumeRmReport:[]*types.VolumeRmReport(nil), SecretRmReport:[]*types.SecretRmReport{}}, Secrets:[]types.PlaySecret(nil), ServiceContainerID:\"\", ExitCode:(*int32)(nil)}, data \"{\\\"Pods\\\":null,\\\"Volumes\\\":null,\\\"StopReport\\\":[{\\\"Errs\\\":null,\\\"Id\\\":\\\"10321db6fad090213edd0e6c34007ec23d487e3f83e3273e3ef9501e486feace\\\"}],\\\"RmReport\\\":[{\\\"RemovedCtrs\\\":{\\\"af19e7c3ea879539cf3b692907da987f2f8375e0f271c15937615b772465096d\\\":\\\"cleaning up container af19e7c3ea879539cf3b692907da987f2f8375e0f271c15937615b772465096d: removing container af19e7c3ea879539cf3b692907da987f2f8375e0f271c15937615b772465096d from runtime: `/usr/bin/crun delete --force af19e7c3ea879539cf3b692907da987f2f8375e0f271c15937615b772465096d` failed: exit status 1\\\",\\\"e6331f85910c1d80bcf0da2bf2432a7ad90933b94f65eee7c78a2a7e63ddf62f\\\":\\\"a container that depends on container e6331f85910c1d80bcf0da2bf2432a7ad90933b94f65eee7c78a2a7e63ddf62f could not be removed: container state improper\\\"},\\\"Err\\\":\\\"not all containers could be removed from pod 10321db6fad090213edd0e6c34007ec23d487e3f83e3273e3ef9501e486feace: removing pod containers\\\",\\\"Id\\\":\\\"10321db6fad090213edd0e6c34007ec23d487e3f83e3273e3ef9501e486feace\\\"}],\\\"VolumeRmReport\\\":null,\\\"SecretRmReport\\\":[],\\\"Secrets\\\":null,\\\"ServiceContainerID\\\":\\\"\\\",\\\"ExitCode\\\":null}\\n\": json: cannot unmarshal string into Go struct field PodRmReport.RmReport.RemovedCtrs of type error\n```"
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 15367
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 17282
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 17216
+        }
+    ]
+}

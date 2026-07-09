@@ -1,0 +1,88 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 20098,
+    "type": "issue",
+    "title": "`--mount type=glob` does not preserve symlinks",
+    "state": "closed",
+    "labels": [
+        "stale-issue",
+        "locked - please file new issue/PR"
+    ],
+    "user": "vrothberg",
+    "body": "Broken out of https://github.com/containers/podman/issues/20000:\n---\nHere's an example.\n\nI'm using this line in my module file to do the `glob` mount:\n\n```\n\"type=glob,source=/usr/lib64/libcuda*,destination=/usr/lib64,ro\",\n```\n\nHere are our target libraries on the host system:\n\n```\nstephey@perlmutter:login24:/usr/lib64> ls -la | grep libcuda\nlrwxrwxrwx  1 root root        29 Mar 28 20:44 libcudadebugger.so.1 -> libcudadebugger.so.525.105.17\n-rwxr-xr-x  1 root root  10490248 Mar 28 20:44 libcudadebugger.so.525.105.17\nlrwxrwxrwx  1 root root        12 Mar 28 20:44 libcuda.so -> libcuda.so.1\nlrwxrwxrwx  1 root root        21 Mar 28 20:44 libcuda.so.1 -> libcuda.so.525.105.17\n-rwxr-xr-x  1 root root  29867944 Mar 28 20:44 libcuda.so.525.105.17\nstephey@perlmutter:login24:/usr/lib64> \n```\n\nHere are the mounted libraries inside the container running with my gpu module:\n\n```\nroot@8dd9e54b936a:/usr/lib64# ls -la | grep libcuda\n-rwxr-xr-x  1 nobody nogroup  29867944 Mar 29 03:44 libcuda.so\n-rwxr-xr-x  1 nobody nogroup  29867944 Mar 29 03:44 libcuda.so.1\n-rwxr-xr-x  1 nobody nogroup  29867944 Mar 29 03:44 libcuda.so.525.105.17\n-rwxr-xr-x  1 nobody nogroup  10490248 Mar 29 03:44 libcudadebugger.so.1\n-rwxr-xr-x  1 nobody nogroup  10490248 Mar 29 03:44 libcudadebugger.so.525.105.17\nroot@8dd9e54b936a:/usr/lib64# \n```\n\nWe'd like the existing symlinks to be preserved.\n\n_Originally posted by @lastephey in https://github.com/containers/podman/issues/20000#issuecomment-1728649786_\n            ",
+    "comments": [
+        {
+            "user": "vrothberg",
+            "body": "Assigning to @giuseppe who has some ideas on how to preserve symlinks."
+        },
+        {
+            "user": "giuseppe",
+            "body": "my comment was unclear, but I don't think we need to change the semantics of how mounts work.\n\nIf we want to preserve symlinks we need a \"copy\" option.\n\nIn any case, I am not able to look into it in the near future, so unassigning myself."
+        },
+        {
+            "user": "vrothberg",
+            "body": "@giuseppe, can you elaborate on the \"copy\" idea?  Maybe somebody else can tackle the issue but I want to make sure it's clear what to do.\n\nSo in addition to `--mount` you envision a `--copy` option that wouldn't mount host data into the container mount NS but create actual copies?"
+        },
+        {
+            "user": "giuseppe",
+            "body": "the mount semantic in Linux is to always follow symlinks for the source, and it makes sense somehow since the symlink could point to a path not present in the new namespace as well as anyway we still need to create the symlink inode before mounting on top of it, so it makes sense to just create it with the right content.\n\nMaybe it could just be an option for the mount command, e.g. `\"type=glob,copy-symlinks,source=/usr/lib64/libcuda*,destination=/usr/lib64,ro\"`\n\nand when Podman encounters it, it creates the symlink inside the rootfs inside of adding a mount for the OCI runtime.\n\nThis must be handled directly from Podman, there is no need to extend the OCI runtime for doing the copy IMO.\n"
+        },
+        {
+            "user": "vrothberg",
+            "body": "> and when Podman encounters it, it creates the symlink inside the rootfs inside of adding a mount for the OCI runtime.\n\nThat sounds fairly straight-forward.  I'd even vote to always re-create symlinks for `type=glob` to prevent users from having to deal with potentially (very) subtle errors coming from broken symlinks."
+        },
+        {
+            "user": "rhatdan",
+            "body": "I agree."
+        },
+        {
+            "user": "vrothberg",
+            "body": "I had another chat with @giuseppe on this issue. We settled on adding a new mount option that will work for all mount types, not only the glob one."
+        },
+        {
+            "user": "vrothberg",
+            "body": "@rhatdan @giuseppe - the below tests reveals some behavior I don't yet grasp.  I somehow expected `--mount type=bind,src=$dir/link,dst=/tmp/link` to behave the same as when glob'ing the same link.  But it doesn't.  With --type=bind, the linked file is copied.  With `glob` not.  Shouldn't it behave the same?\n\n```diff\ndiff --git a/test/system/060-mount.bats b/test/system/060-mount.bats\nindex 4452a5aa59cf..b4afacb5b6aa 100644\n--- a/test/system/060-mount.bats\n+++ b/test/system/060-mount.bats\n@@ -308,4 +308,32 @@ EOF\n     fi\n }\n \n+@test \"podman mount preserve symlinks\" {\n+    dir=$PODMAN_TMPDIR/sub-dir\n+    data_file=$PODMAN_TMPDIR/sub-dir/data\n+    link=$PODMAN_TMPDIR/sub-dir/link\n+\n+    mkdir $dir\n+    random_host=\"on_the_host_$(random_string 15)\"\n+    random_img=\"on_the_image_$(random_string 15)\"\n+    echo \"$random_host\" > $data_file\n+    ln -s $data_file $link\n+\n+    dockerfile=$PODMAN_TMPDIR/Dockerfile\n+    cat >$dockerfile <<EOF\n+FROM $IMAGE\n+RUN echo $random_img > /tmp/data\n+EOF\n+\n+    img=\"localhost/preserve:symlinks\"\n+    run_podman build -t $img -f $dockerfile\n+\n+    run_podman run --mount type=bind,src=$dir/link,dst=/tmp/link --rm --privileged $img cat /tmp/link\n+    assert \"$output\" = \"$random_host\" \"by default, symlink is resolved on the host\"\n+    run_podman run --mount type=glob,src=$dir/lin*,dst=/tmp/link --rm --privileged $img cat /tmp/link\n+    assert \"$output\" = \"$random_host\" \"by default, symlink is resolved on the host\"\n+\n+    run_podman rmi -f $img\n+}\n+\n```"
+        },
+        {
+            "user": "edsantiago",
+            "body": "The failure I see is `cat: read error: Is a directory`\n\nReplacing `cat /tmp/link` with `ls /tmp` shows that `container:/tmp/link` is a directory containing a file named `link`.\n\nDoes that help?"
+        },
+        {
+            "user": "vrothberg",
+            "body": "Thanks, @edsantiago.  I will continue digging.  Something seems off/broken in the glob mounts. "
+        },
+        {
+            "user": "edsantiago",
+            "body": "The behavior I'm seeing looks 100% correct. The simplest way I can describe it is, assuming this:\n```\n...type=glob,src=$dir/lin*,dst=/tmp/link\n```\nYou *cannot* just mount file `$dir/link` as file `/tmp/link`. That would be evil and unreliable and inconsistent, because imagine these situations:\n* There exists one file, `$dir/link`\n* There exist two files, `$dir/link1` and `$dir/link2`\n* ..... one file `$dir/link`, one directory `$dir/lint`\n* no matches for `$dir/lin*`\n\nDoes that make sense?"
+        },
+        {
+            "user": "vrothberg",
+            "body": "makes perfect sense, thanks Ed!\n\nJuggling too many things atm."
+        },
+        {
+            "user": "rhatdan",
+            "body": "GLOB and direct path should be exactly the same."
+        },
+        {
+            "user": "vrothberg",
+            "body": "@rhatdan agreed.  The confusion was on my end.\n\nEd's explanation makes quite some sense.  If I have `/dir/file1` and `/dir/file2` etc. and then glob mount with `src=/dir/file*,dest=/tmp/file` ... `dest=/tmp/file` cannot be a file but must be directory.  So it's just a fart in my test."
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 20000
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 20356
+        }
+    ]
+}

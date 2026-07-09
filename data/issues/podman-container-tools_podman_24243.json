@@ -1,0 +1,76 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 24243,
+    "type": "pull_request",
+    "title": "[WIP] Don't bump RLIMIT_NOFILE in exec sessions with '--ulimit host'",
+    "state": "open",
+    "labels": [
+        "do-not-merge/work-in-progress",
+        "needs-rebase",
+        "release-note"
+    ],
+    "user": "debarshiray",
+    "body": "Starting from commit 9126b45a3f2255b1 (\"Up default Podman rlimits to avoid max open files\"), Podman started bumping its soft limit for the maximum number of open file descriptors (`RLIMIT_NOFILE` or `ulimit -n`) to permit exposing a large number of ports to a container.  This was later fine-tuned in commit a2c1a2df54f3660c (\"podman: bump RLIMIT_NOFILE also without CAP_SYS_RESOURCE\").\n\nUnfortunately, this also increases the limits for 'podman exec' sessions running in containers created with:\n```\n  $ podman create --network host --ulimit host ...\n```\n\nThis is what Toolbx uses to provide a containerized interactive command line environment for software development and troubleshooting the host operating system.\n\nIt confuses developers and system administrators debugging a process that's leaking file descriptors and crashing on the host OS.  The crashes either don't reproduce inside the container or they take a lot longer to reproduce, both of which are frustrating.\n\nTherefore, it will be good to retain the limits, at least for this specific scenario.\n\nIt turns out that since this code was written, the Go runtime has had two interesting changes.\n\nStarting from Go 1.19 [1], the Go runtime bumps the soft limit for `RLIMIT_NOFILE` for all Go programs [2].  This means that there's no longer any need for Podman to bump it's own limits, because it switched from requiring Go 1.18 to 1.20 in commit 4dd58f226d937b83 (\"Move golang requirement from 1.18 to 1.20\").  It's probably good to still log the detected limits, in case Go's behaviour changes.\n\nNot everybody was happy with this [3], because the higher limits got propagated to child processes spawned by Go programs.  Among other things, this can break old programs using `select(2)` [4].  So, Go's behaviour was fine-tuned to restore the original soft limit for `RLIMIT_NOFILE` when forking a child process [5].\n\nWith these two changes in Go, which Podman already uses, if the bumping of `RLIMIT_NOFILE` is left to the Go runtime, then the limits are no longer increased for `podman exec` sessions.  Otherwise, if Podman continues to bump the soft limit for `RLIMIT_NOFILE` on its own, then it prevents the Go runtime from restoring the original limits when forking, and leads to the higher limits in `podman exec` sessions.\n\nThe existing `podman run --ulimit host ... ulimit -Hn` test in `test/e2e/run_test.go` was extended to also check the soft limit.  The similar test for `podman exec` was moved from `test/e2e/toolbox_test.go` to `test/e2e/exec_test.go` for consistency and because there's nothing Toolbx specific about it.  The test was similarly extended, and updated to be more idiomatic.\n\nDue to the behaviour of the Go runtime noted above, and since the tests are written in Go, the current or soft limit for `RLIMIT_NOFILE` returned by `syscall.Getrlimit()` is the same as the hard limit.\n\nThe Alpine Linux image doesn't have a standalone binary for `ulimit` and it's picky about the order in which the options are listed.  The `-H` or `-S` must come first, followed by a space, and then the `-n`.\n\n[1] https://go.dev/doc/go1.19#runtime\n\n[2] Go commit 8427429c592588af (\"os: raise open file rlimit at startup\")\n    https://github.com/golang/go/commit/8427429c592588af\n    https://github.com/golang/go/issues/46279\n\n[3] https://github.com/containerd/containerd/issues/8249\n\n[4] http://0pointer.net/blog/file-descriptor-limits.html\n\n[5] Go commit f5eef58e4381259c (\"syscall: restore original NOFILE ...\")\n    https://github.com/golang/go/commit/f5eef58e4381259c\n    https://github.com/golang/go/issues/46279\n\nFixes: https://github.com/containers/podman/issues/17681\n\n<!--\nThanks for sending a pull request!\n\nPlease make sure you've read our contributing guidelines and how to submit a pull request (https://github.com/containers/podman/blob/main/CONTRIBUTING.md#submitting-pull-requests).\n\nFinally, be sure to sign commits with your real name. Since by opening\na PR you already have commits, you can add signatures if needed with\nsomething like `git commit -s --amend`.\n-->\n\n#### Does this PR introduce a user-facing change?\n\n<!--\nIf no, just write `None` in the release-note block below. If yes, a release note\nis required: Enter your extended release note in the block below. If the PR\nrequires additional action from users switching to the new release, include the\nstring \"action required\".\n\nFor more information on release notes, please follow the Kubernetes model:\nhttps://git.k8s.io/community/contributors/guide/release-notes.md\n-->\n\n```release-note\nRetained the soft limit for the maximum number of open file descriptors (RLIMIT_NOFILE or 'ulimit -n') for containers created with '--ulimit host'.\n```\n",
+    "comments": [
+        {
+            "user": "openshift-ci[bot]",
+            "body": "[APPROVALNOTIFIER] This PR is **NOT APPROVED**\n\nThis pull-request has been approved by: *<a href=\"https://github.com/containers/podman/pull/24243#\" title=\"Author self-approved\">debarshiray</a>*\n**Once this PR has been reviewed and has the lgtm label**, please assign [edsantiago](https://github.com/edsantiago) for approval. For more information see [the Kubernetes Code Review Process](https://git.k8s.io/community/contributors/guide/owners.md#the-code-review-process).\n\nThe full list of commands accepted by this bot can be found [here](https://go.k8s.io/bot-commands?repo=containers%2Fpodman).\n\n<details open>\nNeeds approval from an approver in each of these files:\n\n- **[OWNERS](https://github.com/containers/podman/blob/main/OWNERS)**\n\nApprovers can indicate their approval by writing `/approve` in a comment\nApprovers can cancel approval by writing `/approve cancel` in a comment\n</details>\n<!-- META={\"approvers\":[\"edsantiago\"]} -->"
+        },
+        {
+            "user": "debarshiray",
+            "body": "I don't quite understand what is going on here.\n\nIn my local builds on a Fedora 40 host, this doesn't change the outcome of `podman run ... ulimit -Sn`, but apparently it does for the CI.  I wonder if there's some other piece in the puzzle that's behaving differently."
+        },
+        {
+            "user": "debarshiray",
+            "body": "> Adding the \"do-not-merge/release-note-label-needed\" label because no release-note block was detected, please follow our [release note process](https://git.k8s.io/community/contributors/guide/release-notes.md) to remove it.\n\nI don't know what to do here, because `RELEASE_NOTES.md` in the `main` branch has the release notes for 5.1.0 that was actually released from the `v5.1` branch."
+        },
+        {
+            "user": "Luap99",
+            "body": "> > Adding the \"do-not-merge/release-note-label-needed\" label because no release-note block was detected, please follow our [release note process](https://git.k8s.io/community/contributors/guide/release-notes.md) to remove it.\n> \n> I don't know what to do here, because `RELEASE_NOTES.md` in the `main` branch has the release notes for 5.1.0 that was actually released from the `v5.1` branch.\n\nYou have to add the release note to the PR description, see the template text under ` Does this PR introduce a user-facing change?`"
+        },
+        {
+            "user": "debarshiray",
+            "body": "Thanks for the review!\n\n> This will get a conflict after #24228 merges\n\nYes, I saw it fly by and it reminded me of this problem.\n\n> but fundamentally I do not see this as correct change. We really want to keep the high ulimit for (most?) of our child processes.\n\nRight.  I didn't know if the higher limit is necessary for the child processes or just the `podman(1)` process.\n\nI didn't test the port forwarding with my local builds because `pasta(1)` kept erroring out.  So I had to test with `--network host`.  I need to check if I missed some details for my local build.\n\n> I think to actually solve your issue it would make more sense to store the host limits in a global var and the for `--ulimit host` set them in the container spec accordingly from that.\n\nAs far as I can make out, a Go program can never get the original soft limit for `RLIMIT_NOFILE` with `syscall.Getrlimit()` because the Go runtime has already increased it at start-up.\n\nInstead, it seems what a Go program can do is to not restore the original limit when forking a child process.  One way of doing this is to set the limits in Podman, like we do today.\n\nI am wary of embedding the limits in the immutable persistent definition of the container, because if for some reason the limits change in the host OS, then the container will fail to start.  The limits can change without any intervention from the system administrator.  Just updating the OS and rebooting is enough.  I remember hitting this a few times in the past.\n\nSo, it might be better to do all this at run-time.\n\nOne thing to note, is that the limits for the container's entry point don't matter for Toolbx users.  They always get a `podman exec ...` session.\n\nWe could make this conditional on exec sessions in containers with `--ulimit host`.  However, that information is not going to be available so early to `earlyInitHook()`.  We will have to move the code around for that."
+        },
+        {
+            "user": "Luap99",
+            "body": "> We could make this conditional on exec sessions in containers with --ulimit host. However, that information is not going to be available so early to earlyInitHook(). We will have to move the code around for that.\n\nThat really sucks, we have already some things like that I hate it with a passion. It will also not work for the things like the podman system service.\n\nI have not looked deeply into what the go runtime does with the limts and if there is a way to get the real original limits. If the go runtime does not expose things there is already a work around via pkg/rootless c code that runs before the go runtime kicks in so it would in theory be possible to get and store the limits there and then add our own go function to access the real values."
+        },
+        {
+            "user": "polarathene",
+            "body": "> We really want to keep the high ulimit for (most?) of our child processes.\n\nHey sorry I'm not too familiar with all context and history within the Podman project regarding this (_I am bit short on time to investigate_), but I was involved in pushing the fix for both Docker (v25) and Containerd (v2.0) to revert their usage of `infinity`, but specifically in regards to a soft limit above 1024.\n\nUntil Containerd has the v2.0 release and Docker does a follow-up release to upgrade to that, it still hasn't quite resolved the issue either. For these two projects it was their systemd `.service` files at fault however.\n\n---\n\nWithin the container environment itself `ulimit -Sn` should really be `1024` unless explicitly increased by the user. Just like in the host environment outside of a container behaves. To not do so is known to have caused problems with various software, be that in CPU usage or memory allocation and crashes.\n\nI've only recently used Podman rootless for verifying a docs contribution to a project, where I had to troubleshoot something and was curious if FD limits might be at fault, the container turned out to have `524288:524288`. `524288` is expected for the hard limit it's what systemd will set by default, but the soft limit should remain as `1024`, as per the `0pointer.net` blog post.\n\n---\n\nAny software running within the container itself that needs a higher soft limit should explicitly request that at runtime, which Go software will do on behalf of the user these days (as already mentioned above).\n\nI am aware of Amazon eagerly adopting the change for AWS and reverting it shortly after due to some breakage it introduced for them, similar to Envoy which has also implicitly relied on the container environment to provide excessive FD limits (_a requirement that isn't documented for their software_). These are cases where the software has bugs that they should fix internally, not relying on container runtimes implementing \"fixes\" that negatively impact other software.\n\nFWIW `524288` isn't significantly bad for the resource regression impact (CPU or memory allocation), so you should only have an issue there for software using `select()` (_which many popular software still seem to have in their codebases_).\n\n---\n\nIf you'd like any additional reference links for what I've mentioned above, let me know and I'll dig those up for you 👍 "
+        },
+        {
+            "user": "giuseppe",
+            "body": "I think this is fixed with: https://github.com/containers/podman/pull/24228"
+        },
+        {
+            "user": "Luap99",
+            "body": "> I think this is fixed with: #24228\n\nNo that still bumps the soft limit to the hard limit so --ulimit host will not have the proper soft limit set in the container."
+        },
+        {
+            "user": "giuseppe",
+            "body": "> > I think this is fixed with: #24228\n> \n> No that still bumps the soft limit to the hard limit so --ulimit host will not have the proper soft limit set in the container.\n\nyes, true.  Since we set the values we expect in the OCI configuration, we could probably just drop `setRLimits`.  @debarshiray would you mind rebasing the PR and drop `setRLimits` altogether?"
+        },
+        {
+            "user": "Luap99",
+            "body": "As written above we cannot drop it because then our child processes do not have the high limit, https://github.com/containers/podman/pull/24243#pullrequestreview-2365887018 causing other problems"
+        },
+        {
+            "user": "debarshiray",
+            "body": "I was waiting for https://github.com/containers/podman/pull/24228 to get merged.  I will get back to this pull request now."
+        },
+        {
+            "user": "openshift-merge-robot",
+            "body": "PR needs rebase.\n\n<details>\n\nInstructions for interacting with me using PR comments are available [here](https://git.k8s.io/community/contributors/guide/pull-requests.md).  If you have questions or suggestions related to my behavior, please file an issue against the [kubernetes-sigs/prow](https://github.com/kubernetes-sigs/prow/issues/new?title=Prow%20issue:) repository.\n</details>"
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 26047
+        }
+    ]
+}

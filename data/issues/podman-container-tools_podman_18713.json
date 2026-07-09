@@ -1,0 +1,170 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 18713,
+    "type": "pull_request",
+    "title": "Mapping improvements to add additional groups",
+    "state": "closed",
+    "labels": [
+        "lgtm",
+        "approved",
+        "release-note",
+        "locked - please file new issue/PR"
+    ],
+    "user": "zeehio",
+    "body": "This topic has been discussed at length at https://github.com/containers/podman/issues/18333, with\n@giuseppe, @Luap99 and with the feedback from @rhatdan. The requirements were defined there and\nthis aims to be the implementation.\n\nStatus\n\n- [x] Implementation\n- [x] Unit testing\n- [x] Documentation\n\nThis is my first go contribution and my first podman contribution. I would appreciate help in terms on where to define unit tests and an example on how to define them, as well as pointers to documentation sources so I can improve docs.\n\nI know further work is needed, but I'd rather have some early feedback if possible (and help).\n\nCloses #18333\n\nMotivation\n===========\n\nThese commits aim to make --uidmap and --gidmap easier to use, especially in rootless podman setups.\n\nSo to map our additional GID 1001, that has been subordinated to us, into  GID 100000 in the container, instead of doing:\n\n```\npodman unshare cat /proc/self/gid_map\n# Find that GID 1001 was subordinated to intermediate GID 1\n# Map 1001->1 to 100000\npodman run \\\n  --rm \\\n  --uidmap \"0:0:65535\" \\\n  --gidmap \"0:0:1\" \\\n  --gidmap \"100000:1:1\" \\\n  --gidmap \"1:2:65534\" \\\n  alpine id\n```\n\nWe can just:\n\n```\npodman run \\\n  --rm \\\n  --gidmap \"+100000:@1001:1\" \\\n  alpine\n```\n\nA real use case can be found at: https://rocker-project.org/use/rootless.html#ask-the-system-administrator-to-subordinate-the-group. I hope to eventually simplify the explanation in that page once this is merged and released.\n\n## Long explanation follows\n\n(I will focus here on the --gidmap option, although the same applies for --uidmap.)\n\nIn rootless podman, the user namespace mapping happens in two steps, through an intermediate mapping.\n\nSee https://docs.podman.io/en/latest/markdown/podman-run.1.html#uidmap-container-uid-from-uid-amount\nfor further detail, here is a summary:\n\nFirst the user GID is mapped to 0 (root), and all subordinate GIDs (defined at /etc/subgid, and\nusually >100000) are mapped starting at 1.\n\nIf we want to change it further, we can use the --gidmap option, to map that intermediate mapping\nto the final mapping that will be seen by the container.\n\nAs an example, let's say we have as main GID the group 1000, and we also belong to the additional GID 2000,\nthat we want to make accessible inside the container.\n\nWe first ask the sysadmin to subordinate the group to us, by adding \"$user:2000:1\" to /etc/subgid.\n\nThen we need to use --gidmap to specify that we want to map GID 2000 into some GID inside the container.\n\nAnd here is the first trouble:\n\nSince the --gidmap option operates on the intermediate mapping, we first need to figure out where has\npodman placed our GID 2000 in that intermediate mapping using:\n\n    podman unshare cat /proc/self/gid_map\n\nThen, we may see that GID 2000 was mapped intermediate GID 5. So our --gidmap option should include:\n\n    --gidmap 20000:5:1\n\nThis intermediate mapping may change in the future if further groups are subordinated to us (or we stop\nhaving its subordination), so we are forced to verify the mapping with\n`podman unshare cat /proc/self/gid_map` every time, and parse it if we want to script it.\n\n**The first usability improvement** we agreed on #18333 is to be able to use:\n\n    --gidmap 20000:@2000:1\n\nso podman does this lookup in the parent user namespace for us.\n\nBut this is only part of the problem. We must specify a full gidmap and not only what we want:\n\n    --gidmap 0:0:5 --gidmap 5:6:15000 --gidmap 20000:5:1\n\nThis is becoming complicated. We had to break the gidmap at 5, because the intermediate 5 had to\nbe mapped to another value (20000), and then we had to keep mapping all other subordinate ids... up to\nclose to the maximum number of subordinate ids that we have (or some reasonable value). This is hard\nto explain to someone who does not understand how the mappings work internally.\n\n**The second usability improvement** is to be able to use:\n\n   --gidmap \"+20000:@2000:1\"\n\nwhere the plus sign (`+`) states that we want to start with an identity mapping, and break it where\nnecessary so this mapping gets included.\n\nOne final improvement related to this is the following:\n\nBy default, when podman  gets a --gidmap argument but not a --uidmap argument, it copies the mapping.\nWith the new syntax this copying does not make sense. Having a GID subordinated to us does not imply\nthat the same UID will be subordinated as well. This means, that when we wanted to use:\n\n    --gidmap 0:0:5 --gidmap 5:6:15000 --gidmap 20000:5:1\n\nWe also had to include:\n\n    --gidmap 0:0:5 --gidmap 5:6:15000 --gidmap 20000:5:1 --uidmap 0:0:65000\n\nmaking everything even harder to understand without proper context.\n\nIn this series of patches, when a \"break and insert\" gidmap is given (using the described `+` syntax)\nwithout a --uidmap, we assume that we want the \"identity mapping\" as --uidmap (0:0:65000).\n\nTo preserve backwards compatibility, this different default mapping is only used when the `+` syntax\nis used, so users who rely on the previous behaviour don't suffer any changes.\n\n\n#### Does this PR introduce a user-facing change?\n\n<!--\nIf no, just write `None` in the release-note block below. If yes, a release note\nis required: Enter your extended release note in the block below. If the PR\nrequires additional action from users switching to the new release, include the\nstring \"action required\".\n\nFor more information on release notes, please follow the Kubernetes model:\nhttps://git.k8s.io/community/contributors/guide/release-notes.md\n-->\n\n```release-note\nExtended the syntax of `--uidmap` and `--gidmap` so it accepts flags and becomes more expressive, especially in rootless containers. The \nsyntax has been extended to be able to lookup the parent user namespace, and to extend default\nmappings. Now mapping an additional subordinated group (e.g. GID 2000) can be done with\njust `--gidmap +g102000:@2000:1`. See\nhttps://github.com/containers/podman/blob/main/docs/tutorials/rootless_tutorial.md#giving-access-to-additional-groups \nfor details  (#18333, #18713, @zeehio)\n```\n",
+    "comments": [
+        {
+            "user": "rhatdan",
+            "body": "@giuseppe PTAL"
+        },
+        {
+            "user": "zeehio",
+            "body": "My unit tests are not working due to easy to fix issues and I don't know how to run the tests locally.\n\nIf anyone would be so kind to help me with running the unit tests I guess I can manage. Otherwise I am investing a lot of time on learning those basics.\n\nI can however build podman and check that the code works.\n\n"
+        },
+        {
+            "user": "Luap99",
+            "body": "Unit tests for a single package can be run with `go test ./pkg/util`, if you want to run a specific test only use `go test -run TestBreakInsert ./pkg/util/`"
+        },
+        {
+            "user": "zeehio",
+            "body": "Thanks @Luap99 for the tip on how to run some tests. It helped me to get them running.\n\nI have forced pushed and rebased some times, I hope those force pushes are not noisy.\n\nWhile reviewing my code I came across with an unrelated trivial bug, which I fixed in this same branch. See https://github.com/containers/podman/pull/18713/commits/46a7bdcf94556bcd43137778d4d5c730c0630367. I believe regardless of the outcome of this pull request that commit should be merged.\n\n"
+        },
+        {
+            "user": "giuseppe",
+            "body": "thanks for working on it!\n\nOne question, what is the expected output when you run something like `podman run --rm --uidmap=0:2000:100000  --uidmap +1:100:1 alpine cat /proc/self/uid_map` as root?\n\nWith the current version I get:\n\n```\n# podman run --rm --uidmap=0:2000:100000  --uidmap +1:100:1 alpine cat /proc/self/uid_map\n         0       2000     100000\n    100000          0        100\n    100100        101       1899\n    101999     102000 2147483647\n2147585646 2147585647 2147381648\n```\n\nCould you please squash the commits?  It is fine if you want to split different functionalities in different commits, but commits that fix issues introduced by previous patches in the same PR should just be squashed together."
+        },
+        {
+            "user": "zeehio",
+            "body": "> thanks for working on it!\n> \n\nIt's my itch to scratch, so thanks to you for reviewing!\n\n> One question, what is the expected output when you run something like `podman run --rm --uidmap=0:2000:100000 --uidmap +1:100:1 alpine cat /proc/self/uid_map` as root?\n\nThanks for the question. I may need a bit more work to extend testing and provide well-defined behaviour in all cases. Without considering what is the current behaviour I would expect the following behaviour to happen:\n\n- `--uidmap=0:2000:100000` The host id range [2000-101999] is mapped to the container range [0-99999].\n- `--uidmap +1:100:1` Change the previous range, so the host id 100 becomes container id 1.\n- Do not map any other uidmap.\n\nThe uidmap that would fulfill this specification is something like:\n\n```\ncontainer host size\n0   2000 1\n1  100 1\n2  2002 99998\n```\n\n> \n> With the current version I get:\n> \n> ```\n> # podman run --rm --uidmap=0:2000:100000  --uidmap +1:100:1 alpine cat /proc/self/uid_map\n>          0       2000     100000\n>     100000          0        100\n>     100100        101       1899\n>     101999     102000 2147483647\n> 2147585646 2147585647 2147381648\n> ```\n\nClearly my implementation is not working as it should. I will need more time to fix it and to add more tests, to ensure both root and rootless scenarios are covered as expected. I may need a bit of time.\n\n--------------------------\n\nTo better define the specifications for this improvement, I have a question to you: With that same command you provided, what **g**idmap would you expect?\n\nI ask because the default behaviour when only one of the two mappings are given (like you did, only providing the uidmap) is to copy the uidmap to the gidmap (or viceversa). I don't think that makes much sense, because user ids and group ids are different things. I would suggest to act as follows \"if the user uses the `+` syntax then podman treats user and group mappings independently\", which I believe makes more sense and still preserves backwards compatibility.\n\nWith those specifications, something like:\n\n```\n# podman run --rm --uidmap=0:2000:100000  --uidmap +1:100:1 alpine cat /proc/self/gid_map\n```\n\nShould return the same as:\n\n```\n# podman run --rm alpine cat /proc/self/gid_map\n         0          0 4294967295\n```\n\nWould you agree to that behaviour, or would you prefer that I copy the resulting uidmap over the gidmap?\n\n-------------------------\n\n> \n> Could you please squash the commits? It is fine if you want to split different functionalities in different commits, but commits that fix issues introduced by previous patches in the same PR should just be squashed together.\n\nDone. Note that there is one trivial unrelated bugfix that I have left aside on an independent commit. Anyway I still have to work on this issue. I will change the status to work in progress to reflect that.\n\n"
+        },
+        {
+            "user": "giuseppe",
+            "body": "> To better define the specifications for this improvement, I have a question to you: With that same command you provided, what **g**idmap would you expect?\n> \n> I ask because the default behaviour when only one of the two mappings are given (like you did, only providing the uidmap) is to copy the uidmap to the gidmap (or viceversa). I don't think that makes much sense, because user ids and group ids are different things. I would suggest to act as follows \"if the user uses the `+` syntax then podman treats user and group mappings independently\", which I believe makes more sense and still preserves backwards compatibility.\n\nI'd still expect gidmap to be copied from uidmap if it is not overridden.  Otherwise we will introduce a different behaviour for no apparent reason (the two behaviors have both pro and cons).\n\nDo you disagree?"
+        },
+        {
+            "user": "zeehio",
+            "body": "> > To better define the specifications for this improvement, I have a question to you: With that same command you provided, what **g**idmap would you expect?\n> > I ask because the default behaviour when only one of the two mappings are given (like you did, only providing the uidmap) is to copy the uidmap to the gidmap (or viceversa). I don't think that makes much sense, because user ids and group ids are different things. I would suggest to act as follows \"if the user uses the `+` syntax then podman treats user and group mappings independently\", which I believe makes more sense and still preserves backwards compatibility.\n> \n> I'd still expect gidmap to be copied from uidmap if it is not overridden. Otherwise we will introduce a different behaviour for no apparent reason (the two behaviors have both pro and cons).\n> \n> Do you disagree?\n\nTo be honest I haven't found use cases where copying the mapping is an advantage. My group IDs are not equal to my user IDs so I don't see a reason for mapping both when I type one. On the contrary:\n\nMy typical use case is \"just leave things default but map this additional group\". For that, the specification `--gidmap \"+100000:@2000:1\"` is explicit and quite straightforward (map group 2000 as group 100000).\n\nI find it confusing to create errors in the uid mapping just by changing the gidmap. I just wanted to map my subordinated group 2000, and apparently podman wants to map user 2000 as well... I fail to understand why that happens.\n\nI understand backwards compatibility should be preserved, but since I am introducing an extension of the [ug]idmap syntax I think this is an opportunity to change this behaviour (with + syntax). Do you want to \"extend the uidmap\"? Then use \"--uidmap +...\" And if you want to extend groups then go for it and use `--gidmap` as well.\n\nIf I keep the current default behaviour, then how would you specify \"map group 2000 as group 100000\"? I guess it should be something like:\n\n`--gidmap \"+100000:@2000:1\" --uidmap 0:0:60000`?\n\nBut just try to explain why is it that way to a beginner... Why they would need to provide a uidmap when they want to map a group? Where does the 60000 come from? Why the \"0:0\"? In my opinion it's a bad default.\n\nThinking about this uidmap syntax I would even consider to go beyond this extension and (1) accept \"@groupname\" instead of \"@groupid\", and (2)  assume \":1\" if no map size is given. Then the option could become `--gidmap \"+100000:@shareddata\"`, even more explicit.\n\nIt's your project and I am open to implement whatever you agree to, but if it was up to me I would try to avoid crossing uidmaps with gidmaps as much as backwards compatibility allows me to."
+        },
+        {
+            "user": "giuseppe",
+            "body": "> My typical use case is \"just leave things default but map this additional group\". For that, the specification `--gidmap \"+100000:@2000:1\"` is explicit and quite straightforward (map group 2000 as group 100000).\n> \n> I find it confusing to create errors in the uid mapping just by changing the gidmap. I just wanted to map my subordinated group 2000, and apparently podman wants to map user 2000 as well... I fail to understand why that happens.\n> \n> I understand backwards compatibility should be preserved, but since I am introducing an extension of the [ug]idmap syntax I think this is an opportunity to change this behaviour (with + syntax). Do you want to \"extend the uidmap\"? Then use \"--uidmap +...\" And if you want to extend groups then go for it and use `--gidmap` as well.\n> \n> If I keep the current default behaviour, then how would you specify \"map group 2000 as group 100000\"? I guess it should be something like:\n> \n> `--gidmap \"+100000:@2000:1\" --uidmap 0:0:60000`?\n> \n> But just try to explain why is it that way to a beginner... Why they would need to provide a uidmap when they want to map a group? Where does the 60000 come from? Why the \"0:0\"? In my opinion it's a bad default.\n> \n> Thinking about this uidmap syntax I would even consider to go beyond this extension and (1) accept \"@groupName\" instead of \"@groupId\", and (2) assume \":1\" if no map size is given. Then the option could become `--gidmap \"+100000:@shareddata\"`, even more explicit.\n\nwhen you create a user namespace you still need to provide a mapping for the UIDs, even if you just care about the GIDs.\n\nIn general, it is desirable to provide access to as few IDs as possible to reduce the IDs shared with other containers.\n\nIf you provide a mapping that is not the identity mapping for the groups, it is desirable to do the same for the UIDs.  \nGiven there is no better way to decide what IDs to use, the easiest is to copy the same mapping used for the groups, since in general the additional IDs assigned have the same values for UIDs and GIDs (in this regard your setup is not a typical one).\n"
+        },
+        {
+            "user": "zeehio",
+            "body": "> Given there is no better way to decide what IDs to use, the easiest is to copy the same mapping used for the groups, since in general the additional IDs assigned have the same values for UIDs and GIDs \n\nI understand now. Subordinated uids and gids usually match each other, so it makes sense to copy the mappings.\n\nI was thinking about how to make all use cases behave as we would expect by default. One challenge we currently have is that the `host<->intermediate` mapping treats all entries in `/etc/sub[ug]id` in the same way, even though some entries refer to actual host groups that would benefit from having predictive mappings.\n\nThe approach we agreed so far was to not change the `host<->intermediate` mapping, and improve the expressiveness of the `intermediate<->container` mapping syntax, through the `+` and `@` symbols. I am willing to keep working on that if that's the best we can do.\n\nBut what if instead of the current `host<->intermediate` default mapping 1:n we used a different strategy? Something like:\n\n1. Parse `/etc/login.defs` to get the `SUB_UID_MIN`, `SUB_UID_MAX`, `SUB_GID_MIN`, `SUB_GID_MAX` ranges.\n2. When creating the `host<->intermediate` mapping: \n    1. Map the current UID (or GID) to 0, as we do now\n    2. Map all subordinate ids in the SUB_UID_MIN-SUB_UID_MAX range to 1:n, as we do now\n    3. Map all other subordinate ids to `1 000 000 + id`, so they are predictable\n\nThis is assuming no user would have more than one million of subordinate ids, otherwise there would be a collision, or we could find the first power of ten available if above one million...\n\nWith this approach, we get a default with the best of both worlds. I believe this would make the intermediate namespace predictable for the ids that I believe should be predictable. If we then want to define the `intermediate<->container` mapping in some other way that would be always possible.\n\nWould that work for you? I believe kubernetes is already parsing `/etc/login.defs` for some constants https://github.com/kubernetes/kubernetes/blob/ecf54b8bd5fd7051a0931920a92793716ff82b90/cmd/kubeadm/app/util/users/users_linux.go#L311 so following in that same direction makes sense to me..."
+        },
+        {
+            "user": "giuseppe",
+            "body": "> But what if instead of the current `host<->intermediate` default mapping 1:n we used a different strategy? Something like:\n> \n> 1. Parse `/etc/login.defs` to get the `SUB_UID_MIN`, `SUB_UID_MAX`, `SUB_GID_MIN`, `SUB_GID_MAX` ranges.\n> 2. When creating the `host<->intermediate` mapping:\n>    \n>    1. Map the current UID (or GID) to 0, as we do now\n>    2. Map all subordinate ids in the SUB_UID_MIN-SUB_UID_MAX range to 1:n, as we do now\n>    3. Map all other subordinate ids to `1 000 000 + id`, so they are predictable\n\nI think this is too complicated and it won't work when the system is configured to read the additional IDs from another source, like FreeIPA.  Also at this point, changing the way we do the mappings can be considered breaking change"
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this PR had no activity for 30 days."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@zeehio are you still working on this?"
+        },
+        {
+            "user": "zeehio",
+            "body": "Yes, as much as I can in the early morning or evenings. Time is scarce these days but I am making progress slowly. If anyone else wants to work on this feel free to take over, otherwise I will have something working well in a while, as time allows me."
+        },
+        {
+            "user": "zeehio",
+            "body": "Hi @rhatdan,\n\nThe PR is now ready for review!\n\nIf I were to review it I would first read the [documentation changes](https://github.com/containers/podman/pull/18713/files#diff-29701905da73e5cdb62aeaa1490ebdbfd825c8c933cdfec5f95c3c344f5167f6), where I have explained everything I have done here. Does not need to be said, but everything is open for discussion.\n\nIf the documentation looks reasonable, I would then go to the [`ParseIDMapping` function definition](https://github.com/containers/podman/pull/18713/files#diff-e6e1e278bb9aa45783091135a432cd460a791ad0bca115061d46d6d4c18b4227R862). See now that this function gets the parent namespace definition and calls a custom `ParseIDMap`, instead of the one from `idtools`. The [`ParseIDMap`](https://github.com/containers/podman/pull/18713/files#diff-e6e1e278bb9aa45783091135a432cd460a791ad0bca115061d46d6d4c18b4227R721) function is extended from the idtools package and (1) parses the mapping strings accepting the `@` symbol as well as the `+`, `u` and `g` flags described in the docs, (2) appends the mappings, calling the `breakInsert` function if the `+` flag is used and (3) \"fills the gaps\" with the available subordinated IDs if running rootless.\n\nI have added a reasonable amount of unit tests, with many overlapping ranges, feel free to check those unit tests if you want.\n\nYou will notice there was one failing test. One of the final steps of this pull request is to sort and merge the mappings, so the `uid_map` is sorted by increasing container id and consecutive mappings are merged (e.g. `0:0:1`, `1:1:4998` becomes `0:0:4999`). This made one test fail. I changed it slightly so the mappings do not overlap anymore.\n\nSorry for taking so long to submit this. It took me several attempts to find the most convenient implementation.\n\nLooking forward to your comments"
+        },
+        {
+            "user": "zeehio",
+            "body": "Thanks for the review, @giuseppe. I addressed all your comments and I fixed the size=1 restriction when using the `@<host-id>`. The solution checks the mappings for each id individually. It may not be fast with a large size, but I don't expect large sizes to be used in this context. I guess that if this became a bottleneck then a better algorithm could be used for the checks."
+        },
+        {
+            "user": "zeehio",
+            "body": "Hi @TomSweeneyRedHat \n\nI accepted all your suggestions and I added:\n\n- a80b67bb49ae01103f79d2e7fe5c7fc5225b2a0b\n\nWhich renames flag to option  at the `--gidmap` page as well for consistency.\n\nI can squash all the commits and rebase if needed, just ping me if there is anything else I can do"
+        },
+        {
+            "user": "TomSweeneyRedHat",
+            "body": "@zeehio thanks for the updates, but now Lint is barking:\n\n```\nSkipped directories tunnel: pkg/api\npkg/util/utils.go:379:2: assigned to hidIsParent, but reassigned without using the value (wastedassign)\n\thidIsParent := false\n\t^\nmake: *** [Makefile:277: golangci-lint] Error 1\n```"
+        },
+        {
+            "user": "zeehio",
+            "body": "I fixed the linting issue. I don't easily see why these CI jobs are now failing, could you retry them?\n\nI rebased again just in case"
+        },
+        {
+            "user": "giuseppe",
+            "body": "could you please squash the commits or split them in a way that each of them is a logical change?"
+        },
+        {
+            "user": "zeehio",
+            "body": "I squashed them. I left two commits:\n\nOne with a documentation clarification explaining that if a uidmap is given without gidmap then the mapping is copied.\n\nAnother one with all the other changes.\n\nIf for any reason this pull request were to be reverted (I hope not) it would be easy to leave the initial clarification.\n\nThanks for all the reviews and comments. I am super happy of having the opportunity to contribute to Podman!"
+        },
+        {
+            "user": "zeehio",
+            "body": "It seems the CI randomly fails, but the code should be fine. Could you retry the failing jobs? Thanks!"
+        },
+        {
+            "user": "zeehio",
+            "body": "After the last rebase no CI check failed."
+        },
+        {
+            "user": "openshift-ci[bot]",
+            "body": "[APPROVALNOTIFIER] This PR is **APPROVED**\n\nThis pull-request has been approved by: *<a href=\"https://github.com/containers/podman/pull/18713#pullrequestreview-1599845676\" title=\"Approved\">giuseppe</a>*, *<a href=\"https://github.com/containers/podman/pull/18713#\" title=\"Author self-approved\">zeehio</a>*\n\nThe full list of commands accepted by this bot can be found [here](https://go.k8s.io/bot-commands?repo=containers%2Fpodman).\n\nThe pull request process is described [here](https://git.k8s.io/community/contributors/guide/owners.md#the-code-review-process)\n\n<details >\nNeeds approval from an approver in each of these files:\n\n- ~~[OWNERS](https://github.com/containers/podman/blob/main/OWNERS)~~ [giuseppe]\n\nApprovers can indicate their approval by writing `/approve` in a comment\nApprovers can cancel approval by writing `/approve cancel` in a comment\n</details>\n<!-- META={\"approvers\":[]} -->"
+        },
+        {
+            "user": "giuseppe",
+            "body": "just one question, but we can address it later separately, how should work when you specify something like:\n\n```\n$ bin/podman run --uidmap=0:0:1000  --gidmap \"0:1:100\" --gidmap \"+200000:2:1\"  --rm alpine cat /proc/self/gid_map \nWARN[0000] Additional gid=1 is not present in the user namespace, skip setting it \n         0          1          1\n         2          3         98\n    200000          2          1\n```\n\nwhy isn't gid=1 mapped?"
+        },
+        {
+            "user": "zeehio",
+            "body": "> just one question, but we can address it later separately, how should work when you specify something like:\n> \n> ```\n> $ bin/podman run --uidmap=0:0:1000  --gidmap \"0:1:100\" --gidmap \"+200000:2:1\"  --rm alpine cat /proc/self/gid_map \n> WARN[0000] Additional gid=1 is not present in the user namespace, skip setting it \n>          0          1          1\n>          2          3         98\n>     200000          2          1\n> ```\n> \n> why isn't gid=1 mapped?\n\nThis behaviour works as I meant to, but if you believe it should behave differently we can discuss it and it can be changed. Here is my rationale:\n\nWith `--gidmap 0:1:100` you are explicitly saying \"map 100 IDs starting at intermediate id 1 and at container id 0\" which includes \"map intermediate id 2 to container id 1\". Then with `--gidmap \"+200000:2:1\"` you are overriding that first mapping by saying that intermediate id 2 should map to container id 200000 instead.\n\nSince the `+` flag removes any previously given conflicting mapping, container id `1` becomes unmapped.\n\nThe reason for this behaviour is that it is impossible for podman to know if you would like to:\n\n1. leave container id 1 unmapped\n2.  map intermediate id 101 (unused so far) to container id 1\n3. map intermediate id 100 to container id 1 and leave container id 99 unmapped\n4. Any other idea \n\nOption 1. is safe because \"it does not make assumptions about what you want\" and \"it is likely to give a warning\".\n\nOption 2. maps an additional intermediate id without telling you, and you had specified that 100 intermediate IDs should be mapped (and not 101), so it goes against your given specifications.\n\nOption 3 leaves container id 99 unmapped, against your specifications\n\nAny Option 4 will behave like options 2 and 3.\n\nTherefore only option 1 made sense to me.\n\n-------\n\nA different scenario is when you do not specify \"0:1:100\" and you directly use the \"+200000:2:1\". In such scenario it is clear that you only care about that one mapping and it is up to Podman to decide what to do with the remaining intermediate ids. In such scenario, Podman chooses to fill all unmapped container IDs starting from zero and until intermediate IDs are exhausted.\n\n------\n\n\nMaybe we need a flag `f` to be used like `--gidmap=\"f0:1:100\"` that states \"freely map 100 IDs starting at container id 0 and at intermediate id 1\" and then Podman knows it should go for option 3, out of the described above.\n\nIf that is something interesting to implement I believe we should discuss it on a separate issue/pull request."
+        },
+        {
+            "user": "giuseppe",
+            "body": "thanks for the explanation, no need to change it, it makes sense."
+        },
+        {
+            "user": "TomSweeneyRedHat",
+            "body": "LGTM"
+        },
+        {
+            "user": "rhatdan",
+            "body": "/lgtm\n\nThanks @zeehio \nCare to write a blog explaining this new feature?"
+        },
+        {
+            "user": "zeehio",
+            "body": "> /lgtm\n> \n> Thanks @zeehio Care to write a blog explaining this new feature?\n\nI would love to! Do you have a blog/repo where I could create a PR with my entry? \n\nUpdate: I just sent you an email with a link to a draft. I'd be happy to get feedback"
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 18333
+        },
+        {
+            "organization": "rocker-org",
+            "repository": "website",
+            "number": 93
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 18805
+        },
+        {
+            "organization": "mylar3",
+            "repository": "mylar3",
+            "number": 1378
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 19808
+        },
+        {
+            "organization": "zeehio",
+            "repository": "podman-blog-entry-tmp",
+            "number": 1
+        }
+    ]
+}

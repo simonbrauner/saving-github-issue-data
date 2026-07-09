@@ -1,0 +1,345 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 5431,
+    "type": "issue",
+    "title": "CNI: Make firewalld rules --permanent",
+    "state": "closed",
+    "labels": [
+        "kind/feature",
+        "CNI",
+        "network",
+        "locked - please file new issue/PR"
+    ],
+    "user": "Schrottfresse",
+    "body": "**Is this a BUG REPORT or FEATURE REQUEST? (leave only one on its own line)**\n\n/kind bug\n\n**Description**\n\nI configured CNI to use firewalld as firewall backend and added my podman network interface to the `trusted` zone. When I'm reloading firewalld (`firewall-cmd --reload`) all my podman related rules go missing. I'd like to have the ability to make the podman firewalld rules --permanent.\n(I'm starting my containers as root.)\n\n**Steps to reproduce the issue:**\n\n1. Start container\n\n2. `firewall-cmd --reload`\n\n3. Rules are missing.\n\n**Describe the results you received:**\n\n```\n# podman start pihole\n5d95bb331f8d59c4d7d5da9af98570b3f82dd933aaf22126650e31741f225a6a\n# podman ps\nCONTAINER ID  IMAGE                                   COMMAND  CREATED            STATUS             PORTS  NAMES\n5d95bb331f8d  docker.io/pihole/pihole:latest                   About an hour ago  Up 49 seconds ago         pihole\n# firewall-cmd --zone=trusted --list-all\ntrusted (active)\n  target: ACCEPT\n  icmp-block-inversion: no\n  interfaces:\n  sources: 172.16.21.4/32 fd00:c001::9e/128\n  services:\n  ports:\n  protocols:\n  masquerade: no\n  forward-ports:\n  source-ports:\n  icmp-blocks:\n  rich rules:\n# firewall-cmd --reload\nsuccess\n# firewall-cmd --zone=trusted --list-all\ntrusted\n  target: ACCEPT\n  icmp-block-inversion: no\n  interfaces:\n  sources:\n  services:\n  ports:\n  protocols:\n  masquerade: no\n  forward-ports:\n  source-ports:\n  icmp-blocks:\n  rich rules:\n```\n\n**Describe the results you expected:**\n\nRules don't go missing.\n\n**Additional information you deem important (e.g. issue happens only occasionally):**\n\n**Output of `podman version`:**\n\n```\n# podman version\nVersion:            1.6.4\nRemoteAPI Version:  1\nGo Version:         go1.12.12\nOS/Arch:            linux/amd64\n```\n\n**Output of `podman info --debug`:**\n\n```\n# podman info --debug\ndebug:\n  compiler: gc\n  git commit: \"\"\n  go version: go1.12.12\n  podman version: 1.6.4\nhost:\n  BuildahVersion: 1.12.0-dev\n  CgroupVersion: v1\n  Conmon:\n    package: conmon-2.0.6-1.module_el8.1.0+272+3e64ee36.x86_64\n    path: /usr/bin/conmon\n    version: 'conmon version 2.0.6, commit: 7a4f0dd7b20a3d4bf9ef3e5cbfac05606b08eac0'\n  Distribution:\n    distribution: '\"centos\"'\n    version: \"8\"\n  MemFree: 32140668928\n  MemTotal: 33369112576\n  OCIRuntime:\n    name: runc\n    package: runc-1.0.0-64.rc9.module_el8.1.0+272+3e64ee36.x86_64\n    path: /usr/bin/runc\n    version: 'runc version spec: 1.0.1-dev'\n  SwapFree: 16835932160\n  SwapTotal: 16835932160\n  arch: amd64\n  cpus: 4\n  eventlogger: journald\n  hostname: carter\n  kernel: 4.18.0-147.5.1.el8_1.x86_64\n  os: linux\n  rootless: false\n  uptime: 1h 35m 6.12s (Approximately 0.04 days)\nregistries:\n  blocked: null\n  insecure: null\n  search:\n  - registry.access.redhat.com\n  - registry.fedoraproject.org\n  - registry.centos.org\n  - docker.io\nstore:\n  ConfigFile: /etc/containers/storage.conf\n  ContainerStore:\n    number: 2\n  GraphDriverName: overlay\n  GraphOptions: {}\n  GraphRoot: /var/lib/containers/storage\n  GraphStatus:\n    Backing Filesystem: xfs\n    Native Overlay Diff: \"true\"\n    Supports d_type: \"true\"\n    Using metacopy: \"false\"\n  ImageStore:\n    number: 3\n  RunRoot: /var/run/containers/storage\n  VolumePath: /var/lib/containers/storage/volumes\n```\n\n**Package info (e.g. output of `rpm -q podman` or `apt list podman`):**\n\n```\n# rpm -q podman\npodman-1.6.4-2.module_el8.1.0+272+3e64ee36.x86_64\n```\n\n**Additional environment details (AWS, VirtualBox, physical, etc.):**\n\nphysical server\n",
+    "comments": [
+        {
+            "user": "mheon",
+            "body": "I don't think we can do this because we want the rules to disappear after reboot.\n\nWe've talked about this before, and the best we think we can do is offer a command that forces network reconfiguration for all running containers, recreating the rules."
+        },
+        {
+            "user": "baude",
+            "body": "@mheon doesnt this also make some assumptions about the network stack being exactly the same each time as well?  Given that we have zero interaction with firewalld itself, this seems nearly impossible.\n\nwould it be possible to have something like a run-hook option where an executable could be run once the container state hit running or some such? of course, this could be done nicely with systemd as well and is maybe the more appropriate approach."
+        },
+        {
+            "user": "mheon",
+            "body": "If we do it any later, we end up with a race where traffic after the container started but before the network started will be lost.\n\nWe can probably preserves IP address and MAC address on container recreation, even for non-static IP and MAC (we have a mechanism built-in already for doing this, originally for checkpoint/restore). I think we can probably duplicate the network configuration \"well enough\" with this (it works for checkpoint/restore on a different system, which seems promising)"
+        },
+        {
+            "user": "ttys3",
+            "body": "I've encountered with this problem too.\n\n```\nsudo podman run --name ngxdemo -p 8086:80 nginxdemos/hello\n```\n\n```\n❯ sudo podman inspect ngxdemo | grep IPAddress\n            \"SecondaryIPAddresses\": null,\n            \"IPAddress\": \"10.88.1.5\",\n\n❯ sudo firewall-cmd --zone=trusted --list-all \ntrusted (active)\n  target: ACCEPT\n  icmp-block-inversion: no\n  interfaces: \n  sources: 10.88.1.2/32 10.88.1.1/32 10.88.1.4/32 10.88.1.5/32\n  services: \n  ports: \n  protocols: \n  masquerade: no\n  forward-ports: \n  source-ports: \n  icmp-blocks: \n  rich rules: \n```\n\nreload firewalld rules:\n```\nsudo firewall-cmd --reload\n```\n\nsources empty now:\n```\n❯ sudo firewall-cmd --zone=trusted --list-all                  \ntrusted\n  target: ACCEPT\n  icmp-block-inversion: no\n  interfaces: \n  sources: \n  services: \n  ports: \n  protocols: \n  masquerade: no\n  forward-ports: \n  source-ports: \n  icmp-blocks: \n  rich rules: \n```\n\ntry restart one of the container:\n```\n❯ sudo podman restart ngxdemo\nError: cannot listen on the TCP port: listen tcp4 :8086: bind: address already in use\n```\n\ntry restart again, this time it will success:\n```\n❯ sudo podman restart ngxdemo\nc7a0efe0c7dc540717c301216f01fef7f9eba12315418c16ed554dd8733e2add\n```\n\nand got back:\n```\n❯ sudo podman inspect ngxdemo | grep IPAddress\n            \"SecondaryIPAddresses\": null,\n            \"IPAddress\": \"10.88.1.6\",\n\n❯ sudo firewall-cmd --zone=trusted --list-all  \ntrusted (active)\n  target: ACCEPT\n  icmp-block-inversion: no\n  interfaces: \n  sources: 10.88.1.4/32 10.88.1.1/32 10.88.1.6/32\n  services: \n  ports: \n  protocols: \n  masquerade: no\n  forward-ports: \n  source-ports: \n  icmp-blocks: \n  rich rules: \n```\n\n--------------------------------------------------------------\n\nps: I even use `firewalld` as CNI firewall plugin backend, not the default iptables.\n\n```\n❯ cat /etc/cni/net.d/87-podman-bridge.conflist\n{\n    \"cniVersion\": \"0.4.0\",\n    \"name\": \"podman\",\n    \"plugins\": [\n\t{\n            \"type\": \"bridge\",\n            \"bridge\": \"cni-podman0\",\n            \"isGateway\": true,\n            \"ipMasq\": true,\n            \"ipam\": {\n\t\t\"type\": \"host-local\",\n\t\t\"routes\": [\n\t\t    {\n\t\t\t\"dst\": \"0.0.0.0/0\"\n\t\t    }\n\t\t],\n\t\t\"ranges\": [\n\t\t    [\n\t\t\t{\n\t\t\t    \"subnet\": \"10.88.0.0/16\",\n\t\t\t    \"gateway\": \"10.88.0.1\"\n\t\t\t}\n\t\t    ]\n\t\t]\n            }\n\t},\n\t{\n            \"type\": \"portmap\",\n            \"capabilities\": {\n\t\t\"portMappings\": true\n            }\n\t},\n\t{\n            \"type\": \"firewall\",\n\t    \"backend\": \"firewalld\"\n\t}\n    ]\n}\n```\n"
+        },
+        {
+            "user": "abalage",
+            "body": "Although this is really annoying, as I recall Docker + firewalld worked the very same way.\nI always had to restart docker daemon to recreate its iptables chains and rules after I did a 'firewall-cmd --reload'. I might recall that containers had to be redeployed as well.\n\nFor me what worked is to use a container specific OS (like OpenSUSE MicroOS, Fedora CoreOS) explicitly dedicated for containers and leave network and firewall management to podman alone. I can use firewall rules outside of this VM."
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@mheon Any movement on this one?"
+        },
+        {
+            "user": "mheon",
+            "body": "No. I do want to add a command to do this, but there is no way we'll have time until Podmanv2 is done."
+        },
+        {
+            "user": "KlausThornProgrammfabrik",
+            "body": "To my understanding, firewalld and nftables were designed to solve this exact type of problem:\n\n>   - does not assume complete control of firewall backend\n>   - won’t delete firewall rules installed by other tools or users\n\n  ... from: https://developers.redhat.com/blog/2018/08/10/firewalld-the-future-is-nftables/\n\nI guess podman/CNI would have to use nftables and create own tables. And leave firewalld to the user's local customization, only. Then firewalld-cmd --reload will just affect the user's stuff. \n\nHave you investigated this? Are there plans for this?"
+        },
+        {
+            "user": "dcode",
+            "body": "I just ran into this as well and thinking through it, it makes sense. I'm not familiar enough with the intimate details, but seems like CNI doesn't have any sort of daemon (sort of the point, I guess), would it be possible to use a dbus-activated service (via systemd) that could examine the state of containers and recreate the appropriate entries when firewalld reloads, e.g. when `Reloaded` signal is emitted on `org.fedoraproject.FirewallD1`"
+        },
+        {
+            "user": "sergeiwaigant",
+            "body": "Same here with Podman 1.6.4 on RHEL7.7 EUS.\nI don't understand why this issue is not being tackled.\nWith this situation we would need to disable Firewalld at all to use Podman containers as services - or is there any other workaround to overcome that problem?\n\nWe are using systems maintained by central team with Puppet and they run firewalld --reload every 30 minutes, this is breaking the iptables and the services in the containers are not working anymore."
+        },
+        {
+            "user": "mheon",
+            "body": "As said before, `--permanent` is not an option because it has undesirable side effects - we do not want rules to outlive the container that created them, as would be the case after reboots. We are considering a `podman system` command that will recreate rules after a firewall reload, which I suppose you could run after your `firewalld --reload` though there would be an interruption in connectivity.\n\nCan I ask why you are reloading firewalld on such a regular basis? I don't think I've heard of anyone doing that before, and it's definitely not something I think we (or the CNI maintainers) have considered."
+        },
+        {
+            "user": "sergeiwaigant",
+            "body": "OK. Let's say it differently.\nAny reload, which can happen from tme to time even manualy, should not result in any kind of unavailablity of a service running in a container.\nIf that should be normal, then any kind of system services running in container are just useless."
+        },
+        {
+            "user": "EssGeeEich",
+            "body": "What about adding a `--persistent` flag for the `podman run` command?"
+        },
+        {
+            "user": "mheon",
+            "body": "That doesn't solve the fundamental problem that the rules will survive reboot, and the CNI plugins do not deal well with reboots - we'll leak rules if any container is still running when the system is shut down, and that will break things badly when the IP in question is reused for a fresh container. Podman itself does not directly create the rules, so I can't hack around this during our usual post-reboot cleanup because I don't know what rules need to be changed. The CNI plugins are theoretically safe to call on an already-dead container after a reboot to finalize cleanup of things like these firewall rules, but this has never actually worked for us."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@mccv1r0 @mheon Any new ideas on this one?  Seems to be an issue with CNI Plugins."
+        },
+        {
+            "user": "Masber",
+            "body": "as a workaround, I managed to go over this issue by moving Centos 8 firewall configuration from nftables to iptables"
+        },
+        {
+            "user": "mnsmithuk",
+            "body": "I found the best workaround for now was to run :\n\nfirewall-cmd --permanent --zone=trusted --add-interface=cni-podman0\n\nbut not sure if this introduces a security issue in anyway."
+        },
+        {
+            "user": "mnsmithuk",
+            "body": "My bad.  It does not work because podman populates trusted sources not trusted interfaces.  On a reboot the source disappears and the conatiner is unreachable.  I thought the workaround I suggested had fixed this yesterday but just confirmed it is actually still in the same position."
+        },
+        {
+            "user": "thkukuk",
+            "body": "> Can I ask why you are reloading firewalld on such a regular basis?\n\nI see the same problem that the podman rules go away regular. The reason for the firewalld reload here are intrusion detection tools, which reconfigure the firewall according to entries they find in the logs.\n"
+        },
+        {
+            "user": "mchouque",
+            "body": "Regarding the reload thing, on Fedora, NetworkManager has this postinstall line:\n\ntest -f /usr/bin/firewall-cmd && firewall-cmd --reload --quiet || : \n\nMeaning when you upgrade the package, you lose rules created by podman.\n"
+        },
+        {
+            "user": "rhatdan",
+            "body": "I could swear I saw a pull request that was reloading the network to fix this?  But I can not find it right now.\n@Luap99 @mheon @zhangguanzhang @baude Was I dreaming?"
+        },
+        {
+            "user": "mheon",
+            "body": "@Luap99 was working on it. I believe it merged.\n\nOn Thu, Dec 24, 2020 at 08:02 Daniel J Walsh <notifications@github.com>\nwrote:\n\n> I could swear I saw a pull request that was reloading the network to fix\n> this? But I can not find it right now.\n> @Luap99 <https://github.com/Luap99> @mheon <https://github.com/mheon>\n> @zhangguanzhang <https://github.com/zhangguanzhang> @baude\n> <https://github.com/baude> Was I dreaming?\n>\n> —\n> You are receiving this because you were mentioned.\n> Reply to this email directly, view it on GitHub\n> <https://github.com/containers/podman/issues/5431#issuecomment-750876746>,\n> or unsubscribe\n> <https://github.com/notifications/unsubscribe-auth/AB3AOCC6EKQA3YUHJM4YI3LSWM3WBANCNFSM4LEOX5XQ>\n> .\n>\n"
+        },
+        {
+            "user": "Luap99",
+            "body": "Yes it was #8571. We now have the `podman network reload` command to recreate the iptables rules. This does not make the rules permanent but if they are deleted after a firewall reload you can run this command with the `--all` option to recreate the rules without having to restart containers."
+        },
+        {
+            "user": "rhatdan",
+            "body": "Well that is the best we got for now.  Is this documented in the troublshooting.md?  It would be nice to get a quick blog out on this."
+        },
+        {
+            "user": "skorhone",
+            "body": "@rhatdan I know this issue is closed, but is there a chance someone from your team could write instructions on how to create a systemd based hook for reloading podman network config on firewalld reload. Ideally we would have both documentation and a command: podman system install-firewalld-hook 🙂\n\nSee: https://gist.github.com/patrickwbarnes/c1dce088e3396d4f3ceacd3312c2248b (I'm not the author)"
+        },
+        {
+            "user": "TomSweeneyRedHat",
+            "body": "@vrothberg in case you missed this discussion."
+        },
+        {
+            "user": "vrothberg",
+            "body": "> @vrothberg in case you missed this discussion.\n\nThanks!  I wouldn't trust my networking skills but @baude and @Luap99 are better equipped :)"
+        },
+        {
+            "user": "Luap99",
+            "body": "So I just took the unit file you linked and replaced the firewalld-reload-hook with `podman network reload --all`\n```\n$ cat /etc/systemd/system/podman-network-reload.service \n[Unit]\nDescription=firewalld reload hook - run a hook script on firewalld reload\nWants=dbus-broker.service\nAfter=dbus-broker.service\n\n[Service]\nType=simple\nExecStart=/bin/bash -c '/bin/busctl monitor --system --json=short --match \"interface=org.fedoraproject.FirewallD1,member=Reloaded\" | while read -r line ; do podman network reload --all ; done'\n\n[Install]\nWantedBy=multi-user.target\n```\n`firewall-cmd --reload` did indeed triggered this, however `systemctl restart firewalld.service` did not. I am pretty sure you can expand busctl to also check for the firewalld.service reload event but I do not have the time to look into this at the moment."
+        },
+        {
+            "user": "skorhone",
+            "body": "I think you could use systemd's PartOf=firewalld.service, WantedBy=firewalls.service and After=firewalld.service\n\nPartOf= should cause unit to restart & stop with firewalld\nWantedBy= should cause unit to start with firewalld\nAfter= should guarantee that unit is started after firewalld\n\nYou probably need to add ExecStartPre= to reload podman config.\n\nAnother option would be to listen to dbus for PropertyChanged signal. "
+        },
+        {
+            "user": "esantoro",
+            "body": "Any chance of having this fix  in RHEL 8.x ?\n\nI'm facing this problem on RHEL 8.3, podman version 2.2.1 ."
+        },
+        {
+            "user": "spmfox",
+            "body": "@mheon \n> Can I ask why you are reloading firewalld on such a regular basis? I don't think I've heard of anyone doing that before, and it's definitely not something I think we (or the CNI maintainers) have considered.\n\nJust ran into this today after updating packages on the host, service went down in production and didn't realize it for a few hours. My use case would be automated patching, which was what broke my environment.\n\nI do not have the skills to make this happen, but ideally the 'podman network reload' would happen automatically when systemd detects the service has been restarted, or when firewalld reloads. I do not know the bigger picture but in my mind this should be part of the default configuration, not necessarily something that has to be manually configured.\n\n(Thanks for the hard work; I love podman)"
+        },
+        {
+            "user": "ranjithrajaram",
+            "body": "Test this. Have put together a workaround based on the earlier comments\n\n1. For \"firewall-cmd --reload\", create a systemd unit file with the following\n\n[Unit]\nDescription=firewalld reload hook - run a hook script on firewalld reload\nWants=dbus.service\nAfter=dbus.service\n\n[Service]\nType=simple\nExecStart=/bin/bash -c '/bin/busctl monitor --system --match \"interface=org.fedoraproject.FirewallD1,member=Reloaded\"  --match \"interface=org.fedoraproject.FirewallD1,member=PropertiesChanged\" | while read -r line ; do podman network reload --all ; done'\n\n[Install]\nWantedBy=multi-user.target\n\n\n2. For \"systemctl restart firewalld\", create a systemd unit file with the following\n\n\n[Unit]\nDescription=podman network reload\nWants=firewalld.service\nAfter=firewalld.service\nPartOf=firewalld.service\n\n\n[Service]\nType=simple\nRemainAfterExit=yes\nExecStart=/usr/bin/podman network reload --all\n\n[Install]\nWantedBy=multi-user.target"
+        },
+        {
+            "user": "Hoeze",
+            "body": "Could we have @ranjithrajaram's solution packaged with podman?"
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@mheon @baude @Luap99 @vrothberg WDYT\nShould we just add these services to Podman rpm?"
+        },
+        {
+            "user": "rhatdan",
+            "body": "@nalind Thoughts?"
+        },
+        {
+            "user": "afro-coder",
+            "body": "@rhatdan can I add these to the podman troubleshooting section? This one:\nhttps://github.com/containers/podman/blob/main/troubleshooting.md"
+        },
+        {
+            "user": "rhatdan",
+            "body": "SGTM"
+        },
+        {
+            "user": "yrro",
+            "body": "> ExecStart=/bin/bash -c '/bin/busctl monitor --system --match \"interface=org.fedoraproject.FirewallD1,member=Reloaded\" --match \"interface=org.fedoraproject.FirewallD1,member=PropertiesChanged\" | while read -r line ; do podman network reload --all ; done'\n\nIs listening to `PropertiesChanged` necessary?\n\n> 1. For \"systemctl restart firewalld\", create a systemd unit file with the following\n\nThis one is probably better done by watching for the `NameOwnerChanged` signal sent when `firewalld` starts up.\n\nThese are the two signals that docker listens to so that it can re-apply its iptables rules at the right time: https://github.com/moby/libnetwork/blob/64b7a4574d1426139437d20e81c0b6d391130ec8/iptables/firewalld.go#L124\n\nI've tried to make a service to do this and it's so very nearly easy....\n\nIf you use `busctl monitor` then you can't get machine-readable output on RHEL, since it doesn't have `busctl -j`. So...\n\n```\n[Unit]\nDescription=Redo podman NAT rules after firewalld starts or reloads\nWants=dbus.service\nAfter=dbus.service\n\n[Service]\nType=simple\nExecStart=/bin/bash -c \"dbus-monitor --profile --system 'type=signal,sender=org.freedesktop.DBus,path=/org/freedesktop/DBus,interface=org.freedesktop.DBus,member=NameAcquired,arg0=org.fedoraproject.FirewallD1' 'type=signal,path=/org/fedoraproject/FirewallD1,interface=org.fedoraproject.FirewallD1,member=Reloaded' | sed -u '/^#/d' | while read -r type timestamp serial sender destination path interface member _junk; do if [[ $type = '#'* ]]; then continue; elif [[ $interface = org.freedesktop.DBus && $member = NameAcquired ]]; then echo 'firewalld started'; podman network reload --all; elif [[ $interface = org.fedoraproject.FirewallD1 && $member = Reloaded ]]; then echo 'firewalld reloaded'; podman network reload --all; fi; done\"\n\n[Install]\nWantedBy=multi-user.target\n```\n\n`busctl-monitor` is almost usable, except that it always outputs two bogus events when it starts up, one of which is (in its only machine-readable format) indistinguishable from the `NameOwnerChanged` that you get when firewalld starts up. But a single extra `podman network reload --all` when this unit starts isn't the end of the world...\n"
+        },
+        {
+            "user": "afro-coder",
+            "body": "Hey @yrro \nI was about to create a pull request with the previous systemd scripts I tested yours on a centos 8 machine and it works, now I'm confused if I should add all three systemd scripts, the previous systemd script doesn't work on RHEL?"
+        },
+        {
+            "user": "yrro",
+            "body": "My unit is working on a RHEL 8 machine, I haven't tested on 7. My goal was to write a single unit to replace the two units provided by @ranjithrajaram, using the same D-Bus signals that Docker uses to install its iptables rules after firewalld is started/reloaded.\n\nIf you want to incorporate it, some thoughts:\n\n* I don't know if `Wants=` and `After=` are necessary and/or a good idea. Maybe a systemd & D-Bus expert should be consulted on the correct dependencies...\n* It's probably best to replace the inline shell script with a proper (Python?) program. The lack of any D-Bus monitoring utilities with machine-readable output in RHEL is really annoying here--if `busctl -j` was available then this would be so much simpler...\n* `Restart=always` is probably a good idea"
+        },
+        {
+            "user": "yrro",
+            "body": "Oh, you're just talking about adding it to the troubleshooting section--in that case go ahead with mine if you're happy, maybe add `Restart=always` for good measure. Replacing the inline shell script can wait for the proper solution for this issue. :)"
+        },
+        {
+            "user": "afro-coder",
+            "body": "@yrro you actually got me interested in writing a script 😛 using python, I have zero D-Bus knowledge, however I'm getting there, if I'm unable to complete that I'll add both the solutions and explain the difference between them"
+        },
+        {
+            "user": "afro-coder",
+            "body": "@yrro I was able to write code for this using python3, although I'm not sure about the quality of the code, so anyone out here may add review it and see if it's worth it, I would probably be fine with a one-liner too.\n```\n[Unit]\nDescription=Redo podman NAT rules after firewalld starts or reloads\nWants=dbus.service\nRequires=firewalld.service\nAfter=dbus.service\n\n[Service]\nType=simple\nExecStart=/usr/bin/python  /path/to/python/code/podman-redo-nat.py\nRestart=always\n\n[Install]\nWantedBy=multi-user.target\n```\nThe code\n```\nimport dbus\nfrom gi.repository import GLib\nfrom dbus.mainloop.glib import DBusGMainLoop\nimport subprocess\nimport sys\n\n# I'm a bit confused on the return values in the code\n# Not sure if they are needed.\n\ndef reload_podman_network():\n    try:\n        subprocess.run([\"podman\",\"network\",\"reload\",\"--all\"],timeout=90)\n        # I'm not sure about this part\n        sys.stdout.write(\"podman network reload done\\n\")\n        sys.stdout.flush()\n    except subprocess.TimeoutExpired as t:\n        sys.stderr.write(f\"Podman reload failed due to Timeout {t}\")\n    except subprocess.CalledProcessError as e:\n        sys.stderr.write(f\"Podman reload failed due to {e}\")\n    except Exception as e:\n        sys.stderr.write(f\"Podman reload failed with an Unhandled Exception {e}\")\n\n    return False\n\ndef signal_handler(*args, **kwargs):\n    if kwargs.get('member') == \"Reloaded\":\n        reload_podman_network()\n    elif kwargs.get('member') == \"NameOwnerChanged\":\n        reload_podman_network()\n    else:\n        return None\n    return None\n\ndef signal_listener():\n    try:\n        DBusGMainLoop(set_as_default=True)# Define the loop.\n        loop = GLib.MainLoop()\n        system_bus = dbus.SystemBus()\n        # Listens to systemctl restart firewalld with a filter added, will cause podman network to be reloaded twice\n        system_bus.add_signal_receiver(signal_handler,dbus_interface='org.freedesktop.DBus',arg0='org.fedoraproject.FirewallD1',member_keyword='member')\n        # Listens to firewall-cmd --reload\n        system_bus.add_signal_receiver(signal_handler,dbus_interface='org.fedoraproject.FirewallD1',signal_name='Reloaded',member_keyword='member')\n        loop.run()\n    except KeyboardInterrupt:\n        loop.quit()\n        sys.exit(0)\n    except Exception as e:\n        loop.quit()\n        sys.stderr.write(f\"Error occured {e}\")\n        sys.exit(1)\n\nif __name__ == \"__main__\":\n    signal_listener()\n```\nHowever, I'll be adding the previous solutions too, as they work too except on RHEL. It makes more sense that way."
+        },
+        {
+            "user": "mheon",
+            "body": "I'm going to re-open this, because the Podman team would like to get a solution actually integrated into Podman at some point, and I'd like to use this issue to track that.\n\nNo promises on timeframe (we're just tossing around general ideas as to where it would be done), but it would be nice to have a solution that does not require a separate script and systemd unit."
+        },
+        {
+            "user": "jeefberkey",
+            "body": "I would like to add that since the script is non-blocking, you cannot expect the firewall rules to be correct immediately after a container is started. I resolved this myself by running the same code in an ExecStartPost, but a mature solution would resolve that."
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "skorobogatydmitry",
+            "body": "Up!\nSame issue. I'm running couple containers as a systemd service.\nAnd podman network rule disappear from nft time to time. \nSo it seems that firewalld watch for underlying config (or just reloads on schedule)."
+        },
+        {
+            "user": "SadPencil",
+            "body": "This issue is quite annoying because I can't do `dnf update` in RHEL 8 cause the firewalld service might get restarted and the issue happens.\n\nI think there is a way to at least enable user to workaround this issue:\n- Let user specify `slirp4netns` as the networking mode in root mode through the configuration file, just as the rootless mode.\n\n"
+        },
+        {
+            "user": "skorhone",
+            "body": "One option would be that podman added direct support for firewalld. If\npodman created firewalld service configuration files, firewalld reload\nwouldn't cause any issues. This would work perfectly for those who use\npodman for long running containers.\n\nUpside of this solution would be that tools that are used for auditing\nfirewalld rules, would be able to get data for podman containers.\n\nOn Fri, Dec 3, 2021 at 4:08 AM Sad Pencil ***@***.***> wrote:\n\n> This issue is quite annoying because I can't do dnf update cause the\n> firewalld service might get restarted and the issue happens.\n>\n> I think there is a way to at least enable user to workaround this issue:\n>\n>    - Let user specify slirp4netns as the networking mode in root mode\n>    through the configuration file.\n>\n> —\n> You are receiving this because you commented.\n> Reply to this email directly, view it on GitHub\n> <https://github.com/containers/podman/issues/5431#issuecomment-985154640>,\n> or unsubscribe\n> <https://github.com/notifications/unsubscribe-auth/ABEXVSGOTXGGGLKT52O6IWLUPARDNANCNFSM4LEOX5XQ>\n> .\n> Triage notifications on the go with GitHub Mobile for iOS\n> <https://apps.apple.com/app/apple-store/id1477376905?ct=notification-email&mt=8&pt=524675>\n> or Android\n> <https://play.google.com/store/apps/details?id=com.github.android&referrer=utm_campaign%3Dnotification-email%26utm_medium%3Demail%26utm_source%3Dgithub>.\n>\n>\n"
+        },
+        {
+            "user": "mnsmithuk",
+            "body": "Currently, for me the best solution has been to use the latest version of podman from the Kubic Project ( https://build.opensuse.org/package/show/devel:kubic:libcontainers:stable/podman) and when I restart or reload the  firewall I follow it with the command \"/bin/podman network reload -a\". Alternatively there is probably a way to automatically trigger the same command.  The \"reload\" argument  for podman network came in version 3 I think so this would not work with the older versions of podman."
+        },
+        {
+            "user": "rhatdan",
+            "body": "There is a major rewrite of the podman network stack (called [netavark](https://github.com/containers/netavark)) going on now, which hopefully will address some of this.\n"
+        },
+        {
+            "user": "mheon",
+            "body": "Adding support for a firewalld backend is planned for netavark, but it will not address this. We cannot make our changes to the firewall permanent because that will cause serious issues with restart handling (when the system restarts, we need a clean slate, and having firewall rules lingering from the last boot - and worse, not knowing what they are - is not something we can reasonably support).\n\nWe are investigating integrating a DBus listener script similar to the one listed above in this issue directly into Podman, so we can detect firewall reload events and automatically perform a `podman network reload -a` to recreate firewall rules."
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "jwhonce",
+            "body": "For work-around/current state please see, [29-container-related-firewall-rules-are-lost-after-reloading-firewalld](https://github.com/containers/podman/blob/2cdab5d53923784e72020d70ee9375518f19f9b6/troubleshooting.md#29-container-related-firewall-rules-are-lost-after-reloading-firewalld)\n"
+        },
+        {
+            "user": "githubcek",
+            "body": "Nice solution. On \"Red Hat Enterprise Linux release 8.5 (Ootpa)\" solution with 2 .service files is working for `firewall-cmd --reload` and `systemctl restart firewalld` but not for: `systemctl stop firewalld` and then `systemctl start firewalld`\nI have deleted \"**Requires=firewalld.service**\" and now also works for `systemctl start firewalld` :)\n\n`cat /etc/systemd/system/podman-firewall-cmd-reload.service`\nmy /bash is on different location so I had to change it a little:\n```\n[Unit]\nDescription=firewalld reload hook - run a hook script on firewalld reload\nWants=dbus.service\nAfter=dbus.service\n\n[Service]\nType=simple\nExecStart=/usr/bin/bash -c '/usr/bin/busctl monitor --system --match \"interface=org.fedoraproject.FirewallD1,member=Reloaded\" --match \"interface=org.fedoraproject.FirewallD1,member=PropertiesChanged\" | while read -r line ; do podman network reload --all ; done'\n\n[Install]\nWantedBy=multi-user.target\n```\n`cat /etc/systemd/system/podman-firewalld-restart.service`\nHere I had to change \" and ' characters otherwise it didn't work:\n```\n[Unit]\nDescription=Redo podman NAT rules after firewalld starts or reloads\nWants=dbus.service\nAfter=dbus.service\n\n[Service]\nType=simple\nExecStart=/usr/bin/bash -c '/usr/bin/dbus-monitor --profile --system \"type=signal,sender=org.freedesktop.DBus,path=/org/freedesktop/DBus,interface=org.freedesktop.DBus,member=NameAcquired,arg0=org.fedoraproject.FirewallD1\" \"type=signal,path=/org/fedoraproject/FirewallD1,interface=org.fedoraproject.FirewallD1,member=Reloaded\" | sed -u \"/^#/d\" | while read -r type timestamp serial sender destination path interface member _junk; do if [[ $type = \"#\"* ]]; then continue; elif [[ $interface = org.freedesktop.DBus && $member = NameAcquired ]]; then echo \"firewalld started\"; podman network reload --all; elif [[ $interface = org.fedoraproject.FirewallD1 && $member = Reloaded ]]; then echo \"firewalld reloaded\"; podman network reload --all; fi; done'\nRestart=Always\n\n[Install]\nWantedBy=default.target\n\n```\n```\nsystemctl daemon-reload\nsystemctl start podman-firewall-cmd-reload\nsystemctl start podman-firewalld-restart\nsystemctl enable podman-firewall-cmd-reload\nsystemctl enable podman-firewalld-restart\n```\nThank you all.\n\n"
+        },
+        {
+            "user": "rhatdan",
+            "body": "@edsantiago PTAL\n@mheon Is this something we should ship?"
+        },
+        {
+            "user": "mheon",
+            "body": "I'm not opposed, though I'm still in favor of integrating this into Aardvark at some point in the future (4.1?) so we can automatically handle the reload there, no extra systemd service required."
+        },
+        {
+            "user": "edsantiago",
+            "body": "Sorry, I don't think I can review this: I don't know much about firewalld, and know even less about dbus."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@githubcek Please open a PR to add you firewall script, we can ship this with Podman and not enable it by default, then we can ask people to try it out."
+        },
+        {
+            "user": "yrro",
+            "body": "On my systems I've been using a single service to react to firewalld startup and reload events. This service also parses the output of `dbus-monitor` to ensure that `podman network reload --all` is only run once per event.\n\n(I think I put this into another similar bug already, but don't have the reference handy, sorry about that).\n\nThis seems to work fine for me but I think condensing it into a single linen shell script is... not great. A short Python script would be much clearer. If you'd accept it in Podman then I can work on a PR--let me know.\n\n(I forget why I didn't use `busctl monitor` -- either at the time it needed a feature that RHEL's `busctl` lacked, or maybe it was easier to parse the output of `dbus-montor`?)\n\n```\n# /etc/systemd/system/podman-firewalld-reload.service\n[Unit]\nDescription=Redo podman NAT rules after firewalld starts or reloads\nWants=dbus.service\nAfter=dbus.service\n\n[Service]\nType=simple\nEnvironment=LC_CTYPE=C.utf8\nExecStart=/bin/bash -c \"dbus-monitor --profile --system 'type=signal,sender=org.freedesktop.DBus,path=/org/freedesktop/DBus,interface=org.freedesktop.DBus,member=NameAcquired,arg0=org.fedoraproject.FirewallD1' 'type=signal,path=/org/fedoraproject/FirewallD1,interface=org.fedoraproject.FirewallD1,member=Reloaded' | sed -u '/^#/d' | while read -r type timestamp serial sender destination path interface member _junk; do if [[ $type = '#'* ]]; then continue; elif [[ $interface = org.freedesktop.DBus && $member = NameAcquired ]]; then echo 'firewalld started'; podman network reload --all; elif [[ $interface = org.fedoraproject.FirewallD1 && $member = Reloaded ]]; then echo 'firewalld reloaded'; podman network reload --all; fi; done\"\nRestart=always\n#ExecStart=/bin/bash -c \"busctl monitor --system --match type=signal,sender=org.freedesktop.DBus,path=/org/freedesktop/DBus,interface=org.freedesktop.DBus,member=NameAcquired,arg0=org.fedoraproject.FirewallD1 --match type=signal,path=/org/fedoraproject/FirewallD1,interface=org.fedoraproject.FirewallD1,member=Reloaded | while read line; do if [[ $line = ‣* ]]; then podman network reload --all; fi; echo \"$line\"; done\"\n\n[Install]\nWantedBy=multi-user.target\n```"
+        },
+        {
+            "user": "puppetjoy",
+            "body": "I've been waiting for a one-file, no-script workaround to this issue before making the switch to firewalld and @yrro's service has been working well for me. Thanks! Hope to see a proper solution integrated soon."
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "rhatdan",
+            "body": "Not likely to happen on CNI, but maybe netavark."
+        },
+        {
+            "user": "jritter",
+            "body": "I just ran into this issue on RHEL8, `podman network reload --all` helped. Is there a solution on the horizon for this?"
+        },
+        {
+            "user": "mheon",
+            "body": "Aside from the linked systemd/scripting workaround, there are no immediate plans, though we have ideas about integrating a DBus listener into Aardvark to handle reload events."
+        },
+        {
+            "user": "jritter",
+            "body": "Thanks @mheon, we'll keep using the workaround for now then."
+        },
+        {
+            "user": "danishprakash",
+            "body": "While work on this is going on, is it okay if we add the systemd unit file within podman.spec?"
+        },
+        {
+            "user": "Luap99",
+            "body": "This is fixed with netavark v1.9 and a new systemd service: https://blog.podman.io/2023/11/new-netavark-firewalld-reload-service/\n\nThus I am going to close this issue, we will not fix this for CNI."
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 8048
+        },
+        {
+            "organization": "southalc",
+            "repository": "podman",
+            "number": 4
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 8309
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 11245
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 11249
+        },
+        {
+            "organization": "bluebanquise",
+            "repository": "community",
+            "number": 38
+        },
+        {
+            "organization": "containers",
+            "repository": "netavark",
+            "number": 230
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 20249
+        },
+        {
+            "organization": "ublue-os",
+            "repository": "ucore",
+            "number": 90
+        }
+    ]
+}

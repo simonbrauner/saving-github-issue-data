@@ -1,0 +1,50 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 28803,
+    "type": "pull_request",
+    "title": "fix: Handle healthcheck log corruption gracefully",
+    "state": "closed",
+    "labels": [],
+    "user": "simek-m",
+    "body": "The healthcheck log could be corrupted if the\npodman heathcheck process was interrupted mid-write leading to Podman crashing when trying to read it.\n\n### Steps to reproduce\n\n```sh\n# Run a container with a health check.\nTMPDIR=$(mktemp -d)\npodman run -d --name hc-test \\\n  --health-cmd \"true\" \\\n  --health-interval 1s \\\n  --health-log-destination \"$TMPDIR\" \\\n  alpine sleep infinity\n\n# Run a health check.\npodman healthcheck run hc-test\n\n# Corrupt the log.\nCID=$(podman inspect --format '{{.Id}}' hc-test)\necho \"{invalid json{\" > $TMPDIR/${CID}-healthcheck.log\n\n# The podman healthcheck command fails.\npodman healthcheck run hc-test \n# so does podman ps\npodman ps\n```\n\n*Output:*\n\n```\n➜  podman git:(main) ✗ podman ps\nError: unable to get healthcheck log for 405cdfae215c478036f7f6cc7eed08fb866076654995fc70e14ec59c08164197: failed to unmarshal existing healthcheck results in /tmp/tmp.OvthY1k4nP/405cdfae215c478036f7f6cc7eed08fb866076654995fc70e14ec59c08164197-healthcheck.log: define.HealthCheckResults.ReadString: expects \" or n, but found i, error found in #2 byte of ...|{invalid jso|..., bigger context ...|{invalid json{\n|...\n```\n\n```\n➜  podman git:(main) ✗ podman healthcheck run hc-test\n\nError: unable to update health check log /tmp/tmp.OvthY1k4nP/405cdfae215c478036f7f6cc7eed08fb866076654995fc70e14ec59c08164197-healthcheck.log for 405cdfae215c478036f7f6cc7eed08fb866076654995fc70e14ec59c08164197: failed to unmarshal existing healthcheck results in /tmp/tmp.OvthY1k4nP/405cdfae215c478036f7f6cc7eed08fb866076654995fc70e14ec59c08164197-healthcheck.log: define.HealthCheckResults.ReadString: expects \" or n, but found i, error found in #2 byte of ...|{invalid jso|..., bigger context ...|{invalid json{\n```\n\n- Alternatively, it can be reproduced by killing the health check command when it writes to the log. I couldn't get \"lucky\" with this way, but it should be achievable with creating many systemd units like this script does:\n```python\n#!/usr/bin/python3\nfor x in range(50):\n  with open(f'/etc/containers/systemd/marshall-{x}.container', 'w') as f:\n    f.write(f'''\n[Unit]\nDescription=The marshall container {x}\nAfter=local-fs.target\n[Container]\nImage=registry.access.redhat.com/ubi9-minimal:latest\nExec=sleep infinity\nHealthCmd=printf '%%01000d' 0\nHealthInterval=1s\nPodmanArgs=--health-max-log-size 0 --health-max-log-count 100\n[Install]\nWantedBy=multi-user.target default.target\n''')\n```\n\nRunning them:\n```sh\npython create-quadlets.py\nsystemctl daemon-reload\nsystemctl start marshall-{0..49}\n```\nand trying to kill the healtcheck repeatedly until it corrupts the log:\n```sh\npkill -9 -f \"podman.*healthcheck\"\n```\n\n### Fix\n- Uses [ioutils.AtomicWriteFile](https://pkg.go.dev/go.podman.io/storage@v1.63.0/pkg/ioutils#AtomicWriteFile) to write the health check logs to handle atomic writes with tmpfiles/renames and flushing.\n- It also changes the behavior when reading a corrupted log file in `readFromFileHealthCheckLog` and instead of a hard error, it logs a warning and continues with an empty log. The corrupted one gets overwritten on a next write. The error could be propagated in `readFromFileHealthCheckLog` and handled by callers, but this change is localized to a single place instead of multiple callers.\n- **Testing**: it adds a new system test that intentionally corrupts the log file and checks that Podman recovers (fails with the `main` version ).\n\nFixes: https://redhat.atlassian.net/browse/RHEL-178222\n\n#### Checklist\n\nEnsure you have completed the following checklist for your pull request to be reviewed:\n<!-- Use [x] to mark as done, or click the checkbox after opening PR -->\n\n- [x] Certify you wrote the patch or otherwise have the right to pass it on as an open-source patch by signing all\ncommits. (`git commit -s`). (If needed, use `git commit -s --amend`).  The author email must match\nthe sign-off email address. See [CONTRIBUTING.md](https://github.com/containers/podman/blob/main/CONTRIBUTING.md#sign-your-prs)\nfor more information.\n- [x] Referenced issues using `Fixes: #00000` in commit message (if applicable)\n- [x] [Tests](https://github.com/containers/podman/tree/main/test#readme) have been added/updated (or no tests are needed)\n- [x] [Documentation](https://github.com/containers/podman/blob/main/docs/README.md) has been updated (or no documentation changes are needed)\n- [x] All commits pass `make validatepr` (format/lint checks)\n- [x] [Release note](https://github.com/kubernetes/community/blob/master/contributors/guide/release-notes.md) entered in the section below (or `None` if no user-facing changes)\n\n#### Does this PR introduce a user-facing change?\nNone. Unless ignoring and overwriting the corrupted log while logging a warning instead of failing is a user-facing change?\n\n<!--\nWrite `None` if there are no user-facing changes, otherwise enter your release note below.\nInclude \"action required\" if users need to take action when upgrading.\n-->\n\n```release-note\n\n```\n",
+    "comments": [
+        {
+            "user": "packit-as-a-service[bot]",
+            "body": "tmt tests failed for commit 3183136332803d5a9000f04f391ffca38ed9bce2. @lsm5, @psss, @thrix please check."
+        },
+        {
+            "user": "simek-m",
+            "body": "PTAL @podman-container-tools/podman-maintainers @podman-container-tools/podman-reviewers\n\n(There's an [open question](https://github.com/podman-container-tools/podman/pull/28803#discussion_r3395855598) if the permission should be changed to `0o600`.)"
+        },
+        {
+            "user": "simek-m",
+            "body": "@Luap99 Thank you. Sorry, I completely missed the remote tests failing. I thought it was a flakiness here. I hope it's correct now (tried locally) and all your suggestions are reflected."
+        },
+        {
+            "user": "Honny1",
+            "body": "This PR needs to be rebased on upstream main to make the work windows tests. "
+        },
+        {
+            "user": "simek-m",
+            "body": "@Honny1 \n> This PR needs to be rebased on upstream main to make the work windows tests.\n\nRebased, thanks."
+        },
+        {
+            "user": "simek-m",
+            "body": "@Honny1 I found out that my test introduced flakiness when running in parallel that I didn't see locally. After pondering some overcomplicated solutions, I simply moved it to a new file without `file_tags=ci:parallel`. I hope it solves it."
+        },
+        {
+            "user": "Luap99",
+            "body": "@simek-m Do you have an example log of the flake? As general rule if it this flakes in parallel then it likely also flakes when not run in parallel. Yes the timings and likelihood changes of course but if there is anything that depends on timing it will flake in CI eventually so that should be fixed "
+        },
+        {
+            "user": "simek-m",
+            "body": "> @simek-m Do you have an example log of the flake? As general rule if it this flakes in parallel then it likely also flakes when not run in parallel. Yes the timings and likelihood changes of course but if there is anything that depends on timing it will flake in CI eventually so that should be fixed\n\n@Luap99 \nThe jobs are:\n- https://github.com/podman-container-tools/podman/actions/runs/28172289212/job/83445503920?pr=28803 \n- https://github.com/podman-container-tools/podman/actions/runs/28172289212/job/83445503893?pr=28803\n- https://github.com/podman-container-tools/podman/actions/runs/28172289212/job/83445503863?pr=28803\n\nBut it could have been wrong to phrase as flakiness - it was my mistake not taking into account the parallel runs and other tests encountering a warning for the corrupted log on `podman ps`."
+        },
+        {
+            "user": "Luap99",
+            "body": "> But it could have been wrong to phrase as flakiness - it was my mistake not taking into account the parallel runs and other tests encountering a warning for the corrupted log on podman ps.\n\nAh yes of course, in this case it is right and incompatible with parallel test"
+        }
+    ],
+    "cross_references": []
+}

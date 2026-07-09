@@ -1,0 +1,77 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 12404,
+    "type": "pull_request",
+    "title": "libpod: leave thread locked on errors",
+    "state": "closed",
+    "labels": [
+        "lgtm",
+        "approved",
+        "locked - please file new issue/PR"
+    ],
+    "user": "giuseppe",
+    "body": "if the SELinux label could not be restored correctly, leave the OS\nthread locked so that it is terminated once it returns to the threads\npool.\n\n[NO NEW TESTS NEEDED] the failure is hard to reproduce\n\nSigned-off-by: Giuseppe Scrivano <gscrivan@redhat.com>\n",
+    "comments": [
+        {
+            "user": "adrianreber",
+            "body": "Sounds very reasonable to me. LGTM."
+        },
+        {
+            "user": "openshift-ci[bot]",
+            "body": "[APPROVALNOTIFIER] This PR is **APPROVED**\n\nThis pull-request has been approved by: *<a href=\"https://github.com/containers/podman/pull/12404#pullrequestreview-814721162\" title=\"Approved\">flouthoc</a>*, *<a href=\"https://github.com/containers/podman/pull/12404#\" title=\"Author self-approved\">giuseppe</a>*\n\nThe full list of commands accepted by this bot can be found [here](https://go.k8s.io/bot-commands?repo=containers%2Fpodman).\n\nThe pull request process is described [here](https://git.k8s.io/community/contributors/guide/owners.md#the-code-review-process)\n\n<details >\nNeeds approval from an approver in each of these files:\n\n- ~~[OWNERS](https://github.com/containers/podman/blob/main/OWNERS)~~ [giuseppe]\n\nApprovers can indicate their approval by writing `/approve` in a comment\nApprovers can cancel approval by writing `/approve cancel` in a comment\n</details>\n<!-- META={\"approvers\":[]} -->"
+        },
+        {
+            "user": "rhatdan",
+            "body": "I am not sure what this buys you, but there is other code in oci-conmon-linux that this should apply to also.\nSetProcessLabel."
+        },
+        {
+            "user": "giuseppe",
+            "body": "If we unlock the thread on errors then it keeps running with the wrong label and we don't what other tasks it will be running "
+        },
+        {
+            "user": "Luap99",
+            "body": "/lgtm"
+        },
+        {
+            "user": "rhatdan",
+            "body": "The second call is just setting back the default label, it does only effects any new sockets that get created. If the \"\" call fails, then Podman will continue creating sockets with the label of the previous container.  \nIn both SELinux calls, we are setting the label for _future_ sockets or _future_ processes. Calling with \"\" tells the kernel to remove the transition rules, meaning sockets and fork/exec processes will get set with the current process label. (I'm simplifying it for clarity)."
+        },
+        {
+            "user": "rhatdan",
+            "body": "BTW the chance of \"\" failing and \"...container_t...\" succeeded is just about impossible."
+        },
+        {
+            "user": "giuseppe",
+            "body": "> The second call is just setting back the default label, it does only effects any new sockets that get created. If the \"\" call fails, then Podman will continue creating sockets with the label of the previous container.\n> In both SELinux calls, we are setting the label for _future_ sockets or _future_ processes. Calling with \"\" tells the kernel to remove the transition rules, meaning sockets and fork/exec processes will get set with the current process label. (I'm simplifying it for clarity).\n\nif we fail to set it back to `\"\"` in `CheckpointContainer`, won't it be kept as the default label for the thread, so every new process created by that thread will inherit it (e.g., common, slirp4netns) and create sockets with that label?  I think it would cause the same issues we've seen in #12388 since the thread will be scheduled to take care of other goroutines.\n"
+        },
+        {
+            "user": "rhatdan",
+            "body": "Sadly these are not thread settings, but process settings.  So we only want to set them right before we exec and then setting it back to default right afterwards. we don't set the label confined label on slirp4netns or on conmon.\n```\n $ ps -eZ | grep slirp\nunconfined_u:system_r:container_runtime_t:s0-s0:c0.c1023 682337 pts/2 00:00:00 slirp4netns\n$ ps -eZ | grep conmon\nunconfined_u:system_r:container_runtime_t:s0 682340 ? 00:00:00 conmon\n$ ps -eZ | grep top\nsystem_u:system_r:container_t:s0:c121,c653 682349 ? 00:00:00 top\n```\nThe labels are not set for the ociruntime either, the OCI runtimes set the label just for the container.\nOther tools like conmon and slirp4netns and crun need a lot more privs then we give to the container."
+        },
+        {
+            "user": "giuseppe",
+            "body": "> Sadly these are not thread settings, but process settings.\n\nif that is the case, then don't we need to fork+exec each time we want to set any of those?  `runtime.LockOSThread` only prevents the current OS thread to be re-used by other goroutines while it is locked, but it doesn't prevent other threads from running.\n\nHow can we prevent other threads for using the wrong label while it is set?\n\n> we don't set the label confined label on slirp4netns or on conmon.\n\nright.  But if we fail to reset to the default label, then they will inherit the one we set."
+        },
+        {
+            "user": "giuseppe",
+            "body": "> > Sadly these are not thread settings, but process settings.\n\none good news: `selinux.Set*Label` uses `/proc/thread-self/attr` instead of `/proc/self` and it seems to affect only the calling thread.\n\nI've tested it with this program:\n\n```go\npackage main\n\nimport (\n\t\"time\"\n\t\"runtime\"\n\t\"io/ioutil\"\n\n\t\"github.com/opencontainers/selinux/go-selinux/label\"\n)\n\nfunc main() {\n\truntime.LockOSThread()\n\tif err := label.SetFileCreateLabel(\"system_u:system_r:container_t:s0:c285,c463\"); err != nil {\n\t\tpanic(err)\n\t}\n\n\tif err := ioutil.WriteFile(\"file\", []byte(\"\"), 600); err != nil {\n\t\tpanic(err)\n\t}\n\n\tgo func() {\n\t\tioutil.WriteFile(\"file-2\", []byte(\"\"), 600)\t\t\n\t}()\n\t\n\ttime.Sleep(time.Second)\n}\n```\nand I get:\n\n```sh\n$ go build && ./test && ls -1Z file*\nsystem_u:system_r:container_t:s0:c285,c463 file\n       unconfined_u:object_r:user_tmp_t:s0 file-2\n```\n\nI can confirm it by reading all the `/proc/$PID/task/$TID/attr/` files and they are different per-thread."
+        },
+        {
+            "user": "rhatdan",
+            "body": "Great, I thought this was per process but having it per thread is much better."
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 12388
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 9597
+        }
+    ]
+}

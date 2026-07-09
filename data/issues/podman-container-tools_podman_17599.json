@@ -1,0 +1,89 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 17599,
+    "type": "issue",
+    "title": "podman run: add ability to store files written inside a container in host's tmpfs.",
+    "state": "closed",
+    "labels": [
+        "kind/feature",
+        "locked - please file new issue/PR"
+    ],
+    "user": "socketpair",
+    "body": "### Feature request description\n\nSoftware I run in a container scatters different files everywhere. Everything works, but slow because these changes are stored in the same FS where layers of the image are (disk). I need podman to make final overlayfs with `workdir` and `upperdir` in tmpfs. I don't need any files stored in the container after its death.\n\n",
+    "comments": [
+        {
+            "user": "rhatdan",
+            "body": "@giuseppe @vrothberg WDYT?\n\nUsing tmpfs for this could be risky since you have limited disk space.  Specifying where to store the upper/Container directory might be useful."
+        },
+        {
+            "user": "socketpair",
+            "body": "Yes, I know. I have plenty of memory on the host. The software I run writes many files inside the container in random places (actually installs packages) and then run some process reading these files. I can not preinstall these packages before `podman run`. I need to make everyting to run as fast as possible, and tmpfs is only option. Right now, I have to run --privileged in order to mount overlayfs+tmpfs inside container for root dirs like /usr, /bin, /etc and so on"
+        },
+        {
+            "user": "giuseppe",
+            "body": "could you try if `--transient-store` is what you are looking for?\n\n`$ podman --transient-store run ....`"
+        },
+        {
+            "user": "socketpair",
+            "body": "@giuseppe \ninside container:\n\n```\n# mount\noverlay on / type overlay (rw,relatime,\nlowerdir=\n/var/lib/containers/storage/overlay/l/TVA2BXPFKGVD54KOM7JNLTNIK6:\n/var/lib/containers/storage/overlay/l/ABGGV3KRCWNXXQFARGPMDGM22Y:\n/var/lib/containers/storage/overlay/l/R72KYFYKHAQMOLTBI5WEEJGOYE,\nupperdir=/var/lib/containers/storage/overlay/d5967391751856893e2618aa54f7223ec557b91a3029796bc99f8f38e543a189/diff,\n workdir=/var/lib/containers/storage/overlay/d5967391751856893e2618aa54f7223ec557b91a3029796bc99f8f38e543a189/work,\nmetacopy=on,volatile)\n```\n\nI added newlines for readability.\nAs you can see, upperdir and workdir on HDD. Note, podman is run under root user."
+        },
+        {
+            "user": "socketpair",
+            "body": "`podman --graphroot` might help, but seems this command line disappeared. \n\n```\n$ podman --version\npodman version 4.4.1\n```\n"
+        },
+        {
+            "user": "giuseppe",
+            "body": "thanks for verifying that.  Another option could be to pull the images in your store on `/var/lib` then use a different store to create these containers.  You need to configure the store in `/var/lib` as an additional store for that work.\n\n```\n# podman pull fedora\n# podman --root /tmp/root --storage-opt AdditionalImageStore=/var/lib/containers/storage run --rm fedora grep \"overlay overlay\" /proc/self/mountinfo\n2636 2598 0:98 / / rw,relatime - overlay overlay rw,context=\"system_u:object_r:container_file_t:s0:c433,c999\",lowerdir=/var/lib/containers/storage/overlay/l/R4BMMC7ZTAKM7US6IT53BTBBCY,upperdir=/tmp/root/overlay/97a79d68c590dbeab36cf9988e661fc86d82fea36a3f6dd7beaa4ba423532105/diff,workdir=/tmp/root/overlay/97a79d68c590dbeab36cf9988e661fc86d82fea36a3f6dd7beaa4ba423532105/work,volatile\n\n```"
+        },
+        {
+            "user": "rhatdan",
+            "body": "I like that idea, Perhaps a small blog on it."
+        },
+        {
+            "user": "socketpair",
+            "body": "Unbelievable! It works!\n\nSo, I suggest some standard option that do this. Because it's really non-trivial. For example, I still don't understand why it stops working if I remove  `AdditionalImageStore=`.\n\nIt will be very useful for `podman` to mount `tmpfs` for this case (in separate mount namespace?) + some tmpfs options like `size=` and others. "
+        },
+        {
+            "user": "giuseppe",
+            "body": "if you drop the `AdditionalImageStore=` option it won't try to use the existing store to read images.\n\nI wouldn't make it too easy for users to end up in this setup, we can document or better as @rhatdan suggested have a blog but users must be sure of what they do.  Using tmpfs for the upper layer is an unusual configuration, you can easily run out of memory and the entire container storage is lost on a power cycle.\n\nOne thing I'd like to mention is that if you specify `--rm` to your container, then overlay is mounted with `volatile=on` as it seems to be in your case, and it already speeds up the I/O in some cases, since any sync/fsync syscall is inhibited.  If you play around with the writeback timeouts, you can then force Linux to keep dirty pages longer in memory, getting similar performance as using tmpfs as the backing store."
+        },
+        {
+            "user": "socketpair",
+            "body": "Hmm. What approach/method is used to inhibit fsyncs ?!"
+        },
+        {
+            "user": "giuseppe",
+            "body": "the `volatile=on` mount option to the overlay file system"
+        },
+        {
+            "user": "socketpair",
+            "body": "@giuseppe\n1. do you know how to achieve the same (or similar) on containerd?\n2. why not to add new command line key/config parameter to podman - where to create runtime layer ? By default – in main storage."
+        },
+        {
+            "user": "giuseppe",
+            "body": "1. no idea\n2. we are investigating that as part of containers/storage.  Although it is not tracked upstream.  One risk compared to the solution I've proposed is that the layers will still be referenced from the main storage but they could have been dropped from tmpfs causing all sort of corruption in the storage.\n\nSince there is a working solution for the problem, I am closing the issue."
+        },
+        {
+            "user": "socketpair",
+            "body": "@giuseppe \nadding `--transient-store` yields:\n\n```\nError: database libpod root directory (staticdir) \"/var/lib/containers/storage/libpod\" does not match our libpod root directory (staticdir) \"/tmp/layer/libpod\": database configuration mismatch\n```\n\nIs it a bug? Do I need transient store in this case ?\n\nhttps://github.com/containers/podman/pull/16371\n>  The end result of this is that all metadata that is stored related to containers and volumes (but not images) end up on tmpfs.\n\nDoes `--rm` implicitly mean `--transient-store` ? If it does not, I think it should.\n\nAlso, I guess `--transient-store` mounts some tmpfs for storing data. I want some option to use this directory as last layer storage, as I asked earlier. It will be much easier to people who may want the fastest containers possible.\n\n`--transient-store`, `--transient-store=even-layer` ? Or something like.\n\nNow I run podman this way:\n\n```bash\nstorage_dir=$(sudo podman image inspect \"$image:$BRANCH\" | jq -r '.[0].GraphDriver.Data.UpperDir' | sed -E 's|/overlay/[a-f0-9]+/diff$||')\n\nsudo unshare --mount -- sh -c 'mount none -t tmpfs /tmp && mkdir /tmp/layer && exec \"$@\"' -- podman run --root /tmp/layer --storage-opt AdditionalImageStore=$storage_dir \"$image:$BRANCH\" ...\n```\n\nIt's not straightforward, but works."
+        },
+        {
+            "user": "rhatdan",
+            "body": "I think you need to reset your system to change to a transient store.\npodman system reset\n"
+        },
+        {
+            "user": "socketpair",
+            "body": "@rhatdan I can, but these scripts used by many developers in my company. Should they all reset? Why reset is needed ?"
+        },
+        {
+            "user": "rhatdan",
+            "body": "You want many users to use tmpfs for store, Are these for all containers or only for a few and then use traditional storage for others?"
+        },
+        {
+            "user": "socketpair",
+            "body": "Reasonable question. Unfortunately, only for SOME containers. If I needed all, I would just change main configuration of podman to store layers in tmpfs.\n\nThe main idea is to store everything I get using `podman image pull` on a permanent storage (to survive reboots), and everything is generated during short-lived stateless containers -- in tmpfs. Because IOPS are expensive comparing to memory in my case.\n\n@rhatdan "
+        }
+    ],
+    "cross_references": []
+}

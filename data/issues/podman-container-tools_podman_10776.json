@@ -1,0 +1,84 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 10776,
+    "type": "issue",
+    "title": "Volume mounting changes owner of existing directory",
+    "state": "closed",
+    "labels": [
+        "Good First Issue",
+        "locked - please file new issue/PR"
+    ],
+    "user": "matejvasek",
+    "body": "`podman` volume mounting doesn't preserve original directory owner. it changes owner to user that is currently running the container. `docker` preserves the original owner.\n\n```\n# quay.io/boson/faas-go-builder:v0.8.3 contains /workspace directory ownd by `cnb` user.\n\n~> docker run -it --rm -v someVol:/workspace quay.io/boson/faas-go-builder:v0.8.3 ls -la /workspace\ntotal 0\ndrwxr-xr-x. 1 cnb  cnb    0 Jan  1  1980 .\ndr-xr-xr-x. 1 root root 242 Jun 24 15:29 ..\n~> podman run -it --rm -v someVol:/workspace quay.io/boson/faas-go-builder:v0.8.3 ls -la /workspace\ntotal 0\ndrwxr-xr-x.  1 root root 0 Jun 24 15:29 .\ndr-xr-xr-x. 22 root root 0 Jun 24 15:29 ..\n```",
+    "comments": [
+        {
+            "user": "matejvasek",
+            "body": "> it changes owner to user that is currently running the container\n\nI think that's all right only if the directory is not yet existing in the image."
+        },
+        {
+            "user": "rhatdan",
+            "body": "Care to open a PR for this.  Basically you believe that the destination directory in an image should match the existing directory UID/GID/Permissions if a named volume is created and mounted on the container.\n\nI thought I had a similar bug like this and fixed it. but maybe not."
+        },
+        {
+            "user": "matejvasek",
+            "body": "For more context we need this to use [`pack`](https://github.com/buildpacks/pack) for building buildpacks.\n\nThe tool spawns container that is running as a `root` and it is mounting new volume (it is created together with the container) to `/workspace`, the `/workspace` already exits in the base image (owned by `cnb` user). Latter the container switches from `root` to the `cnb` user and tries to do stuff with `/workspace`.  With `docker` it works since the mounted volume is owned by `cnb`. With `podman` the `/workspace` is owned by `root` as it it was initial user for the container. This leads to access denied when it tries to write stuff to `/workspace`."
+        },
+        {
+            "user": "rhatdan",
+            "body": "Yes this makes total sense that it should work this way."
+        },
+        {
+            "user": "cardil",
+            "body": "To play a devil advocate here, the [manpage of mount(8)](https://man7.org/linux/man-pages/man8/mount.8.html) says:\n\n> The previous contents (if any) and owner and mode of dir become invisible, and as long as this filesystem remains mounted, the pathname dir refers to the root of the filesystem on device.\n\nThat's why if the first command is run as user `root` the volume is created, and mounted with that user UID. Subsequent calls with different user, are trying to reuse that volume, but they see it is owned by root.\n\nAll this can be avoided by calling run with proper user for each time:\n\n```\n$ podman volume rm someVol || true\n$ podman run --rm \\\n  --user cnb \\\n  -v someVol:/workspace \\\n  quay.io/boson/faas-go-builder:v0.8.3 \\\n  ls -ld /workspace\ndrwxr-xr-x. 2 cnb cnb 6 Jun 24 19:05 /workspace\n```\n\nIt seems that, Podman closer mimics the standard `mount` behavior. Docker is doing the opposite, by preserving owner for some strange reason.\n\nDespite this, I think Podman should follow Docker in his behavior, as it's marketed as a Docker drop-in replacement."
+        },
+        {
+            "user": "mheon",
+            "body": "I think the patches from @rhatdan may have changed the behavior on main - @matejvasek are you testing with the latest code?\n\n@cardil Unfortunately, while I tend to agree with you, our compatibility promise with Docker means we are largely tied to their decisions, including bad ones. As @rhatdan says - \"Bug for bug compatible\""
+        },
+        {
+            "user": "matejvasek",
+            "body": "@mheon What patches? I run code from `master` the issue is still present."
+        },
+        {
+            "user": "mheon",
+            "body": "They're already merged (I just backported them for 3.2.2), so if master is broken, the issue isn't fixed."
+        },
+        {
+            "user": "rhatdan",
+            "body": "I fixed the permissions, but not the ownership, I guess."
+        },
+        {
+            "user": "rhatdan",
+            "body": "I had thought that it already worked."
+        },
+        {
+            "user": "matejvasek",
+            "body": "@rhatdan @mheon I tried to hackaround this in our software by creating the volume in advance.\n\nI am doing something like `docker volume create --opt device=tmpfs --opt type=tmpfs --opt o=uid=1000,gid=1001 someVol` but not via CLI but via Go client library.\n\nThere is an issues with this approach:\n\nThe thing is that for `docker` daemon the `device` and `type` options are mandatory, however if I set these to `tmpfs` then `podman` daemon fails to mount it: `Error: error mounting volume someVol for container 6e4eda11ca302227085c46295d3b2296766ca93756d9698d59ecd175463e1788: cannot mount volumes without root privileges: operation requires root privileges`, meaning with `podman` I have to leave there options empty. What are valid values for the two options?\n\nEven if I fix the problem above there is another problem:\n`podman cp` seems to be broken, it doesn't preserve uid/gid from tar, it chowns everything to `root` probably because it's present user of the container."
+        },
+        {
+            "user": "matejvasek",
+            "body": "That chown is probably deliberate but that's not what docker does."
+        },
+        {
+            "user": "matejvasek",
+            "body": "@rhatdan can you give me some pointer where to fix this?"
+        },
+        {
+            "user": "rhatdan",
+            "body": "This should fix the problem,  you can grab it and add tests, if you want.\n```\ndiff --git a/libpod/container_internal_linux.go b/libpod/container_internal_linux.go\nindex 850af235f..b69ad4105 100644\n--- a/libpod/container_internal_linux.go\n+++ b/libpod/container_internal_linux.go\n@@ -2490,6 +2490,11 @@ func (c *Container) fixVolumePermissions(v *ContainerNamedVolume) error {\n                // https://github.com/containers/podman/issues/10188\n                st, err := os.Lstat(filepath.Join(c.state.Mountpoint, v.Dest))\n                if err == nil {\n+                       if stat, ok := st.Sys().(*syscall.Stat_t); ok {\n+                               if err := os.Lchown(mountPoint, int(stat.Uid), int(stat.Gid)); err != nil {\n+                                       return err\n+                               }\n+                       }\n                        if err := os.Chmod(mountPoint, st.Mode()|0111); err != nil {\n                                return err\n                        }\n```"
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "containers",
+            "repository": "image",
+            "number": 1179
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 10905
+        }
+    ]
+}

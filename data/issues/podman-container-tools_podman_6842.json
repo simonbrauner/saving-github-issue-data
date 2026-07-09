@@ -1,0 +1,133 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 6842,
+    "type": "pull_request",
+    "title": "Pids-limit should only be set if the user set it",
+    "state": "closed",
+    "labels": [
+        "lgtm",
+        "approved",
+        "locked - please file new issue/PR"
+    ],
+    "user": "rhatdan",
+    "body": "Currently we are sending over pids-limits from the user even if they\nnever modified the defaults.  The pids limit should be set at the server\nside unless modified by the user.\n\nThis issue has led to failures on systems that were running with cgroups V1.\n\nSigned-off-by: Daniel J Walsh <dwalsh@redhat.com>",
+    "comments": [
+        {
+            "user": "rhatdan",
+            "body": "@giuseppe @mheon PTAL"
+        },
+        {
+            "user": "mheon",
+            "body": "I don't like this because it disables the default PID limit entirely, even for root containers. We should preserve the default limit where possible (root and cgroups v2 rootless)"
+        },
+        {
+            "user": "rhatdan",
+            "body": "@mheon The default limit should be handled on the server side, if the user does not specify a root limit then pkg/specgen should use the default."
+        },
+        {
+            "user": "mheon",
+            "body": "I don't see code for that anywhere. `pkg/specgen` takes the resource limits as they were given and uses them unmodified."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@mheon Added  the defaults."
+        },
+        {
+            "user": "goochjj",
+            "body": "Does not work.\n```\n(focal)mrwizard@FocalCG1Dev:~/src/podman\n$ bin/podman --runtime /usr/local/bin/crun-debug run --rm -it alpine sh\nError: cannot set limits without cgroups: OCI runtime error\njq .linux.resources /run/user/1000/crun/config.json\n{\n  \"pids\": {\n    \"limit\": 4096\n  }\n}\n```\n"
+        },
+        {
+            "user": "mheon",
+            "body": "Confirmed here as well."
+        },
+        {
+            "user": "mheon",
+            "body": "Ah, I think I know what's going on here. The code in containers/common for determining default limit is broken.\n\n```\nfunc (c *Config) PidsLimit() int64 {\n        if unshare.IsRootless() {\n                if c.Engine.CgroupManager == SystemdCgroupsManager {\n                        cgroup2, _ := cgroupv2.Enabled()\n                        if cgroup2 {\n                                return c.Containers.PidsLimit\n                        }\n                        return 0\n                }\n        }\n        return sysinfo.GetDefaultPidsLimit()\n}\n```\n\nNotice that if cgroup manager is set to cgroupfs, we will drop through the conditionals and return `sysinfo.GetDefaultPidsLimit` - and v1 rootless defaults to cgroupfs."
+        },
+        {
+            "user": "goochjj",
+            "body": "> Ah, I think I know what's going on here. The code in containers/common for determining default limit is broken.\n> \n> ```\n> func (c *Config) PidsLimit() int64 {\n>         if unshare.IsRootless() {\n>                 if c.Engine.CgroupManager == SystemdCgroupsManager {\n>                         cgroup2, _ := cgroupv2.Enabled()\n>                         if cgroup2 {\n>                                 return c.Containers.PidsLimit\n>                         }\n>                         return 0\n>                 }\n>         }\n>         return sysinfo.GetDefaultPidsLimit()\n> }\n> ```\n> \n> Notice that if cgroup manager is set to cgroupfs, we will drop through the conditionals and return `sysinfo.GetDefaultPidsLimit` - and v1 rootless defaults to cgroupfs.\n\nif it's cgroupfs, we return 0 - that's what I see\n"
+        },
+        {
+            "user": "goochjj",
+            "body": "> > Ah, I think I know what's going on here. The code in containers/common for determining default limit is broken.\n> > ```\n> > func (c *Config) PidsLimit() int64 {\n> >         if unshare.IsRootless() {\n> >                 if c.Engine.CgroupManager == SystemdCgroupsManager {\n> >                         cgroup2, _ := cgroupv2.Enabled()\n> >                         if cgroup2 {\n> >                                 return c.Containers.PidsLimit\n> >                         }\n> >                         return 0\n> >                 }\n> >         }\n> >         return sysinfo.GetDefaultPidsLimit()\n> > }\n> > ```\n> > \n> > \n> > Notice that if cgroup manager is set to cgroupfs, we will drop through the conditionals and return `sysinfo.GetDefaultPidsLimit` - and v1 rootless defaults to cgroupfs.\n> \n> if it's cgroupfs, we return 0 - that's what I see\n\nNVM you're right.\n"
+        },
+        {
+            "user": "goochjj",
+            "body": "> > > Ah, I think I know what's going on here. The code in containers/common for determining default limit is broken.\n> > > ```\n> > > func (c *Config) PidsLimit() int64 {\n> > >         if unshare.IsRootless() {\n> > >                 if c.Engine.CgroupManager == SystemdCgroupsManager {\n> > >                         cgroup2, _ := cgroupv2.Enabled()\n> > >                         if cgroup2 {\n> > >                                 return c.Containers.PidsLimit\n> > >                         }\n> > >                         return 0\n> > >                 }\n> > >         }\n> > >         return sysinfo.GetDefaultPidsLimit()\n> > > }\n> > > ```\n> > > \n> > > \n> > > Notice that if cgroup manager is set to cgroupfs, we will drop through the conditionals and return `sysinfo.GetDefaultPidsLimit` - and v1 rootless defaults to cgroupfs.\n> > \n> > \n> > if it's cgroupfs, we return 0 - that's what I see\n> \n> NVM you're right.\n\nThe return 0 needs to move out one level probably.\n"
+        },
+        {
+            "user": "goochjj",
+            "body": "Confirmed this fixes it:\n```\n--- a/vendor/github.com/containers/common/pkg/config/default.go\n+++ b/vendor/github.com/containers/common/pkg/config/default.go\n@@ -489,8 +489,8 @@ func (c *Config) PidsLimit() int64 {\n                        if cgroup2 {\n                                return c.Containers.PidsLimit\n                        }\n-                       return 0\n                }\n+               return 0\n        }\n        return sysinfo.GetDefaultPidsLimit()\n }\n```"
+        },
+        {
+            "user": "goochjj",
+            "body": "Though I'm not sure why cgroups v2 can't set a pids limit in cgroupfs mode - if the pids controller is in our cgroup, and we have write access to it, why can't we?\n"
+        },
+        {
+            "user": "rhatdan",
+            "body": "@goochjj Ask @giuseppe I don't remember why.\nAnyways lets get this in."
+        },
+        {
+            "user": "goochjj",
+            "body": "This merges a bunch of vendor dependencies which breaks the build.\n\nCould you remove the runc bump from 1.0.0-rc90 to rc91?  It breaks things in buildah due to changes in libcontainer...\n\nIMHO that bump should be a separate PR, allowing for fixes to that issue to be tracked under their own issue/PR.\n\nI've verified removing the runc bump fixes the compile.\n\n"
+        },
+        {
+            "user": "goochjj",
+            "body": "https://github.com/rhatdan/libpod/pull/6"
+        },
+        {
+            "user": "goochjj",
+            "body": "@rhatdan https://github.com/goochjj/libpod/tree/rhatdan-pids-limit\n\nRebased, with runc rc90 and common 0.15.2\n\n"
+        },
+        {
+            "user": "goochjj",
+            "body": "My branch updated and ready if #6897 is merged.\n"
+        },
+        {
+            "user": "openshift-ci-robot",
+            "body": "[APPROVALNOTIFIER] This PR is **APPROVED**\n\nThis pull-request has been approved by: *<a href=\"https://github.com/containers/podman/pull/6842#pullrequestreview-441564730\" title=\"Approved\">giuseppe</a>*, *<a href=\"https://github.com/containers/podman/pull/6842#\" title=\"Author self-approved\">rhatdan</a>*\n\nThe full list of commands accepted by this bot can be found [here](?repo=containers%2Fpodman).\n\nThe pull request process is described [here](https://git.k8s.io/community/contributors/guide/owners.md#the-code-review-process)\n\n<details >\nNeeds approval from an approver in each of these files:\n\n- ~~[OWNERS](https://github.com/containers/podman/blob/master/OWNERS)~~ [giuseppe,rhatdan]\n\nApprovers can indicate their approval by writing `/approve` in a comment\nApprovers can cancel approval by writing `/approve cancel` in a comment\n</details>\n<!-- META={\"approvers\":[]} -->"
+        },
+        {
+            "user": "mheon",
+            "body": "I'm going to give this a final test on Debian to verify it fixes v1, but LGTM based on what I see now."
+        },
+        {
+            "user": "mheon",
+            "body": "Confirmed working on Debian with v1\n/lgtm"
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 6837
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 6834
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 6668
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 6882
+        },
+        {
+            "organization": "coreos",
+            "repository": "fedora-coreos-tracker",
+            "number": 560
+        },
+        {
+            "organization": "coreos",
+            "repository": "fedora-coreos-tracker",
+            "number": 575
+        }
+    ]
+}

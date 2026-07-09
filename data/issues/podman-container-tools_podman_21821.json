@@ -1,0 +1,89 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 21821,
+    "type": "issue",
+    "title": "Windows contribution problems",
+    "state": "closed",
+    "labels": [
+        "kind/bug",
+        "windows",
+        "locked - please file new issue/PR"
+    ],
+    "user": "l0rd",
+    "body": "These are some notes of the issues faced while trying to follow the contributing instructions for windows (`build_windows.md`). The goal was to be able to build podman from source on windows and execute `podman run` on both WSL and Hyper-v.\n\nThe main question is if MSYS2 is still a requirement today as it complicates the setup of the dev environment. And if it is required how can we provide instructions to expose the tools installed via MSYS2 externally (to the IDE and Powershell).\n\n### Troubles when installing msys2 with chocolately\n\n[chocolately](https://chocolatey.org/) is a popular package manager for windows. I have used to install msys2 (`choco install msys2`) and started a mintty shell running `msys2` from a terminal. [But then the environment is `MSYS2` rather then `UCRT64`](https://www.msys2.org/docs/environments/) and I spent some time to understand why commands were not working (e.g. go could not be found). \n\n### MSYS2 VS Code integration (or other IDEs)\n\n[This is worth linking](https://www.msys2.org/docs/ides-editors/#visual-studio-code). And it's still unclear how to configure the golang VS Code extension to use the go version installed in MSYS2 environment.\n\n### build - RELEASE_NUMBER / RELEASE_VERSION issue\n\nThe first issue issue I faced trying to run `make podman-remote` was:\n\n```\nMakefile:754: *** Required variable RELEASE_NUMBER value is undefined, whitespace, or empty.  Stop.\n```\n\nI resolved that executing `export RELEASE_VERSION=5.0.0-dev`\n\n### build - \"file contains a virus\" issue\n\n```\ngithub.com/containers/podman/v5/test/version: go build github.com/containers/podman/v5/test/version: open C:\\msys64\\tmp\\go-build700477625\\b001\\exe\\a.out.exe: Operation did not complete successfully because the file contains a virus or potentially unwanted software.\nmake: *** [Makefile:303: test/version/version] Error 1\n```\n\nTo fix that \"C:\\msys64\\tmp\" should be added in the exlusions list in the Windows Security Virus & threat protection settings\n\n### hyper-v\n\nIt's difficult to find out how to configure podman to use hyper-v instead of the default wsl. Looking at the source code I found that we need to set `$env:CONTAINERS_MACHINE_PROVIDER=\"hyperv\"`. Also hyper-v should be enabled first ([doc](https://techcommunity.microsoft.com/t5/educator-developer-blog/step-by-step-enabling-hyper-v-for-use-on-windows-11/ba-p/3745905)).\n\n### policy.json\n\nThe file `[/etc/containers/policy.json](https://podman.io/docs/installation#policyjson)` is required for `machine init` to work when the provider is hyper-v. Interestingly it's not needed when the provider is wsl:\n\n```\nError: obtaining default signature policy: open /etc/containers/policy.json: The system cannot find the path specified.\n```\n\nTo overcome that I had to use the powershell (not the MSYS2 shell) and create the file C:\\etc\\containers\\policy.json copying https://src.fedoraproject.org/rpms/containers-common/raw/main/f/default-policy.json.\n\n### makefile and winmake.ps1\n\nI found that CI uses `./winmake localmachine` (pkg\\machine\\e2e\\README.md). The script ./winmake.ps1 requires powershell (rather than MSYS2) and it's not clear why there are 2 makefiles.\n\nAnyway I faced 2 problems to run it:\n\n```\nPS C:\\Users\\mario\\Git\\podman> ./winmake localmachine\n./winmake : File C:\\Users\\mario\\Git\\podman\\winmake.ps1 cannot be loaded. The file C:\\Users\\mario\\Git\\podman\\winmake.ps1 is not digitally signed. You cannot run this script on the current system. For more\ninformation about running scripts and setting execution policy, see about_Execution_Policies at https:/go.microsoft.com/fwlink/?LinkID=135170.\nAt line:1 char:1\n+ ./winmake localmachine\n+ ~~~~~~~~~\n    + CategoryInfo          : SecurityError: (:) [], PSSecurityException\n    + FullyQualifiedErrorId : UnauthorizedAccess\n```\n\nThis was fixed by `Set-ExecutionPolicy -ExecutionPolicy Bypass`. \n\nAnd then I had another error because golang is missing (Powershell doesn't see the version installed by MSYS2):\n\n```\nBuilding Ginkgo\ngo build -o build/ginkgo.exe ./vendor/github.com/onsi/ginkgo/v2/ginkgo\nInvoke-Expression : The term 'go' is not recognized as the name of a cmdlet, function, script file, or operable program. Check the spelling of the name, or if a path was included, verify that the path is correct\nand try again.\nAt C:\\Users\\mario\\Git\\podman\\contrib\\cirrus\\win-lib.ps1:74 char:5\n+     Invoke-Expression $command\n+     ~~~~~~~~~~~~~~~~~~~~~~~~~~\n    + CategoryInfo          : ObjectNotFound: (go:String) [Invoke-Expression], CommandNotFoundException\n    + FullyQualifiedErrorId : CommandNotFoundException,Microsoft.PowerShell.Commands.InvokeExpressionCommand\n```\n\nI installed golang (`choco install golang`) and I was able to run `./winmake podman-remote`.\n\n### Could not find gvproxy\n\nAfter running `$env:CONTAINERS_MACHINE_PROVIDER=\"hyperv\"; ./podman.exe machine init`, `./podman.exe machine start` fails:\n\n```\n./podman.exe machine start\nStarting machine \"podman-machine-default\"\nError: could not find \"gvproxy\" in one of {[C:\\Program Files\\RedHat\\Podman] {<nil>}}.  To resolve this error, set the helper_binaries_dir key in the `[engine]` section of containers.conf to the directory containing your helper binaries.\n```\n\nI run `make win-gvproxy` (using the MSYS2 shell):\n\n```\n$ make win-gvproxy\nGOARCH=amd64 go build -o test/version/version ./test/version/\nmkdir -p bin/windows/\ncurl -sSL -o bin/windows/gvproxy.exe --retry 5 https://github.com/containers/gvisor-tap-vsock/releases/download/v0.7.3/gvproxy-windowsgui.exe\ncurl -sSL -o bin/windows/win-sshproxy.exe --retry 5 https://github.com/containers/gvisor-tap-vsock/releases/download/v0.7.3/win-sshproxy.exe\n```\n\nBut podman machine start was still failing with the same error so I tried to build podman remote using the HELPER_BINARIES_DIR `make podman-remote HELPER_BINARIES_DIR=\\Users\\mario\\Git\\podman\\bin\\windows` but without success.\n\nFinally I created the following `C:\\etc\\containers\\containers.conf` and the problem disappeared.\n\n```\n[engine]\nhelper_binaries_dir=[\"C:/Users/mario/Git/podman/bin/windows\"]\n```\n\n",
+    "comments": [
+        {
+            "user": "rhatdan",
+            "body": "@n1hility PTAL"
+        },
+        {
+            "user": "l0rd",
+            "body": "To clarify: if those are fair points and the windows dev environment setup isn't already documented somewhere else I would like to work on this issue and specifically improve the windows part of `CONTRIBUTING.md`."
+        },
+        {
+            "user": "baude",
+            "body": "> @n1hility PTAL\n\nthe podman team needs to look at these and solve them.  @l0rd the list is actually much longer because we have no native linting and we should not require any special installs like chocolar or terminal emulators to contribute."
+        },
+        {
+            "user": "baude",
+            "body": "the windows way to build podman is done with `.\\winmake.ps1 podman-remote` ... it looks like that didn't make the docs anywhere"
+        },
+        {
+            "user": "baude",
+            "body": "hyperv should really be enabled via containers.conf where you can define your machine provider ... the environment variable should only be for temporary, ci, or dev usage."
+        },
+        {
+            "user": "baude",
+            "body": "i think #21765 will fix the policy problem."
+        },
+        {
+            "user": "baude",
+            "body": "as for dependencies, we should probably advise folks to download prebuilt binaries as needed instead of building them.  this is a good point you make."
+        },
+        {
+            "user": "n1hility",
+            "body": "You can get Makefile based builds working under msys but there is likely always going to be gotchas with that env. the better appaoach is to, as @baude mentioned above use winmake.ps1, although it is still relatively new, so isnt yet providing a full distribution (just the podman-remote binary). You can also cross compile and build the zip dist on a linux vm, container, or host using `make podman-remote-release-windows_amd64.zip `\n\nWRT to helper binaries, most things are using sibling fs based lookups (helpers located in same dir as executing podman.exe), although there are a few cases whether thats not yet done.\n\nJust so you are aware Podman 5  is still under a high degree of change atm (after a big refactor), so if you work on any build related changes, keep in mind the odds of conflict will be higher than normal until the release is out the door."
+        },
+        {
+            "user": "arixmkii",
+            "body": "I will check the contribution docs, as I was the original author. I've been running MSYS builds in my dev VMs and in GH Actions for over the years w/o noticing any significant issues, so, this should be stable enough, but might be there were some not so well documented parts."
+        },
+        {
+            "user": "arixmkii",
+            "body": "> Finally I created the following C:\\etc\\containers\\containers.conf and the problem disappeared.\n\nThis is the issue with the current work in progress with machine 5. It is very very new and will be sorted out. There is a ticket for this https://github.com/containers/podman/pull/21765\n\nThis is not documented, because it is very new - introduced with the change how machine images are fetched and it is not supposed to lasting, it is going to be fixed/documented when finalized."
+        },
+        {
+            "user": "arixmkii",
+            "body": "> as for dependencies, we should probably advise folks to download prebuilt binaries as needed instead of building them. this is a good point you make.\n\nPlus one to this. I often just install the latest release to get all the needed binaries. May be it should be documented as an option."
+        },
+        {
+            "user": "l0rd",
+            "body": "I have submitted https://github.com/containers/podman/pull/21910 to add a new section to build podman on windows without MSYS."
+        },
+        {
+            "user": "l0rd",
+            "body": "> the podman team needs to look at these and solve them. @l0rd the list is actually much longer because we have no native linting and we should not require any special installs like chocolar or terminal emulators to contribute.\n\nThe instructions in the PR I have submitted don't require anything other than go and git. I have created a [separate issue](https://github.com/containers/podman/issues/21911) to support linting on windows."
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "n1hility",
+            "body": "Current status:\n\n> The main question is if MSYS2 is still a requirement today as it complicates the setup of the dev environment. And if it is required how can we provide instructions to expose the tools installed via MSYS2 externally (to the IDE and Powershell).\n\nCurrent goal is to not require MSYS2 (using winmake instead), require minimal system deps, and add improved portable tasks for specific needs (validation, lint etc)\n\n\n> ### hyper-v\n> It's difficult to find out how to configure podman to use hyper-v instead of the default wsl. Looking at the source code I found that we need to set `$env:CONTAINERS_MACHINE_PROVIDER=\"hyperv\"`. Also hyper-v should be enabled first ([doc](https://techcommunity.microsoft.com/t5/educator-developer-blog/step-by-step-enabling-hyper-v-for-use-on-windows-11/ba-p/3745905)).\n\nCurrent plan is add a Hyper-V option to the installer (in progress - @lord is looking at it)\n\n> \n> ### policy.json\n> The file `[/etc/containers/policy.json](https://podman.io/docs/installation#policyjson)` is required for `machine init` to work when the provider is hyper-v. Interestingly it's not needed when the provider is wsl:\n\nFixed\n\n> This was fixed by `Set-ExecutionPolicy -ExecutionPolicy Bypass`.\n\nThis is one expected, and the error message tells you what to do. Although could also add a doc entry\n\n> \n> And then I had another error because golang is missing (Powershell doesn't see the version installed by MSYS2):\n\nGolang is an expected dependency at the moment.\n\n\n> I installed golang (`choco install golang`) and I was able to run `./winmake podman-remote`.\n> \n> ### Could not find gvproxy\n\nCurrently you need an installation of podman on your system to include this. Although I agree the build should fetch this for you and we should change the search path\n"
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 21910
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 22913
+        }
+    ]
+}

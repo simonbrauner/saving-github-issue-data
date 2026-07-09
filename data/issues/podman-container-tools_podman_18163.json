@@ -1,0 +1,296 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 18163,
+    "type": "pull_request",
+    "title": "update to ginkgo v2",
+    "state": "closed",
+    "labels": [
+        "lgtm",
+        "approved",
+        "release-note-none",
+        "locked - please file new issue/PR"
+    ],
+    "user": "Luap99",
+    "body": "<!--\nThanks for sending a pull request!\n\nPlease make sure you've read our contributing guidelines and how to submit a pull request (https://github.com/containers/podman/blob/main/CONTRIBUTING.md#submitting-pull-requests).\n\nIn case you're only changing docs, make sure to prefix the pull-request title with \"[CI:DOCS]\". That will prevent functional tests from running and save time and energy.\n\nFinally, be sure to sign commits with your real name. Since by opening\na PR you already have commits, you can add signatures if needed with\nsomething like `git commit -s --amend`.\n-->\n\n#### Does this PR introduce a user-facing change?\n\n<!--\nIf no, just write `None` in the release-note block below. If yes, a release note\nis required: Enter your extended release note in the block below. If the PR\nrequires additional action from users switching to the new release, include the\nstring \"action required\".\n\nFor more information on release notes, please follow the Kubernetes model:\nhttps://git.k8s.io/community/contributors/guide/release-notes.md\n-->\n\n```release-note\nnone\n```\n",
+    "comments": [
+        {
+            "user": "vrothberg",
+            "body": "Looks like the issue persists with rootless hanging/not completing."
+        },
+        {
+            "user": "edsantiago",
+            "body": "Not just rootless: debian-12 and fedora-37, root, are at 54 minutes right now. I expect they will time out."
+        },
+        {
+            "user": "edsantiago",
+            "body": "There's something horribly weird and broken in the new ginkgo: it does not seem to show command stderr. Example: [f37 root log](https://api.cirrus-ci.com/v1/task/6121147310276608/logs/main.log), search in-page for \"`--filter takes no arg`\". It shows up jumbled together in a block labeled \"Timeline\", but does not show up next to the actual command that generated it. This makes it impossible to diagnose actual errors. The relevant code, in `ginkgo/v2/reporters/default_reporter.go`, suggests that this is triggered when `--nodes > 1` but at first glance I don't see a way to fix it.\n\nObviously this renders the entire package useless, so there must be a way to override it, and I'm sure one of you lovely people will find the solution much more quickly than I can. I'll keep looking anyway though."
+        },
+        {
+            "user": "Luap99",
+            "body": "@edsantiago There are changes how output now works, I am aware of this. Benchmarks are also broken.\nThis is not mergable like that, thus marked as WIP. For now I want to figure out the hang. I can repoduce locally, the problem is that we are leaking podman processes and the new ginkgo waits for them to be completed.\n\nExample processes that hang:\n```\npholzing  704177  0.1  0.1 1789984 41924 pts/4   Sl+  18:54   0:00 /home/pholzing/go/src/github.com/containers/podman/bin/podman --storage-opt vfs.imagestore=/tmp/imagecachedir --root /tmp/podman_test3608744664/root --runroot /tmp/podman_test3608744664/runroot --runtime crun --conmon /usr/bin/conmon --network-config-dir /home/pholzing/.config/cni/net.d --network-backend cni --cgroup-manager cgroupfs --tmpdir /tmp/podman_test3608744664 --events-backend file --db-backend boltdb --storage-driver vfs run --uts private quay.io/libpod/alpine:latest ls -l /proc/self/ns/uts\npholzing  704463  0.1  0.1 1863716 41976 pts/4   Sl+  18:54   0:00 /home/pholzing/go/src/github.com/containers/podman/bin/podman --storage-opt vfs.imagestore=/tmp/imagecachedir --root /tmp/podman_test2981800605/root --runroot /tmp/podman_test2981800605/runroot --runtime crun --conmon /usr/bin/conmon --network-config-dir /home/pholzing/.config/cni/net.d --network-backend cni --cgroup-manager cgroupfs --tmpdir /tmp/podman_test2981800605 --events-backend file --db-backend boltdb --storage-driver vfs run --pid private quay.io/libpod/alpine:latest ls -l /proc/self/ns/pid\npholzing  704662  0.1  0.1 1863460 40512 pts/4   Sl+  18:54   0:00 /home/pholzing/go/src/github.com/containers/podman/bin/podman --storage-opt vfs.imagestore=/tmp/imagecachedir --root /tmp/podman_test3588093402/root --runroot /tmp/podman_test3588093402/runroot --runtime crun --conmon /usr/bin/conmon --network-config-dir /home/pholzing/.config/cni/net.d --network-backend cni --cgroup-manager cgroupfs --tmpdir /tmp/podman_test3588093402 --events-backend file --db-backend boltdb --storage-driver vfs run --cgroupns private quay.io/libpod/alpine:latest ls -l /proc/self/ns/cgroup\n```\nAs soon as I kill them manually ginkgo returns.\nSo now I need to figure out why this happens."
+        },
+        {
+            "user": "edsantiago",
+            "body": "```diff\ndiff --git a/test/e2e/containers_conf_test.go b/test/e2e/containers_conf_test.go\nindex 125a7bff1..72095d109 100644\n--- a/test/e2e/containers_conf_test.go\n+++ b/test/e2e/containers_conf_test.go\n@@ -233,6 +233,7 @@ var _ = Describe(\"Verify podman containers.conf usage\", func() {\n \t\tExpect(hostNS).To(Equal(ctrNS))\n \n \t\tsession = podmanTest.Podman([]string{\"run\", option, \"private\", ALPINE, \"ls\", \"-l\", nspath})\n+\t\tExpect(session).Should(Exit(0))\n \t\tfields = strings.Split(session.OutputToString(), \" \")\n \t\tctrNS = fields[len(fields)-1]\n \t\tExpect(hostNS).ToNot(Equal(ctrNS))\n```\n\n???"
+        },
+        {
+            "user": "Luap99",
+            "body": "That is a good catch but I don't it is the problem, the podman process is completely stucked and does not respond to any signal (well kill work obv) and it is not listed as zombie.\n\nI can attach with a debugger and it looks like we are deadlocked on a container lock \n```\n(dlv) bt\n0  0x00007f977e506fd3 in ???\n   at ?:-1\n1  0x000000000047c2e0 in runtime.systemstack_switch\n   at /usr/lib/golang/src/runtime/asm_amd64.s:459\n2  0x0000000000415a05 in runtime.cgocall\n   at /usr/lib/golang/src/runtime/cgocall.go:168\n3  0x00000000010aedac in github.com/containers/podman/v4/libpod/lock/shm._Cfunc_lock_semaphore\n   at _cgo_gotypes.go:227\n4  0x00000000010affd8 in github.com/containers/podman/v4/libpod/lock/shm.(*SHMLocks).LockSemaphore\n   at ./go/src/github.com/containers/podman/libpod/lock/shm/shm_lock.go:229\n5  0x00000000010b0ea5 in github.com/containers/podman/v4/libpod/lock.(*SHMLock).Lock\n   at ./go/src/github.com/containers/podman/libpod/lock/shm_lock_manager_linux.go:114\n6  0x000000000123af8e in github.com/containers/podman/v4/libpod.(*Container).Kill\n   at ./go/src/github.com/containers/podman/libpod/container_api.go:271\n7  0x0000000001375b32 in github.com/containers/podman/v4/pkg/domain/infra/abi/terminal.ProxySignals.func1\n   at ./go/src/github.com/containers/podman/pkg/domain/infra/abi/terminal/sigproxy_commn.go:36\n8  0x000000000047e501 in runtime.goexit\n   at /usr/lib/golang/src/runtime/asm_amd64.s:1594\n\n```\n\nBut the thing is how the hell can it deadlock here, I have zero other podman processes running on the system which could be holding a lock, so what is holding the lock."
+        },
+        {
+            "user": "edsantiago",
+            "body": "Yeah... I noticed. Even with `WaitWithDefaultTimeout` it still hangs for me, unkillable except with -9. \n\n>zero other podman processes\n\nSame here. But this is rootless... there's probably no pause process needed when running private namespaces, but could there be something that doesn't know that, and is waiting to join the pause process ns? (Ignore if this is a stupid comment. No need even to respond. Just thinking out loud.)"
+        },
+        {
+            "user": "Luap99",
+            "body": "Actually adding\n```\nsession.WaitWithDefaultTimeout()\nExpect(session).Should(Exit(0))\n```\nseems to fix it for me now. I only run containers_conf_test.go right now and before this change it hang every time now it passed three times in a row."
+        },
+        {
+            "user": "edsantiago",
+            "body": "Weird: I have `WaitWithDefaultTimeout()` also, and `Should()`, just like you cite above .... and I still see the hang. But I'll move on to other things."
+        },
+        {
+            "user": "edsantiago",
+            "body": "Quick suggestion for next time you push: try changing the `.cirrus.yml` timeouts from 90m to 50 or even 45. Maybe not permanently, but it sure would save a lot of time in catching hangs."
+        },
+        {
+            "user": "vrothberg",
+            "body": "Thanks for looking into this, folks!"
+        },
+        {
+            "user": "Luap99",
+            "body": "Ok, hang is definitely fixed. Root cause is `podman rm --fa` (https://github.com/containers/podman/issues/18180) not working in all circumstances. Therefore it starts leaking processes and the ginkgo v2 doesn't like that. I assume the processes keep some std streams open which is tries to read.\n\n\n"
+        },
+        {
+            "user": "edsantiago",
+            "body": "Remote tests failing to compile: `undefined: GinkgoWriter`. But @Luap99 please don't re-push yet, I want some sample logs to download so I can fix logformatter. Should just be a few more minutes."
+        },
+        {
+            "user": "Luap99",
+            "body": "> Remote tests failing to compile: `undefined: GinkgoWriter`. But @Luap99 please don't re-push yet, I want some sample logs to download so I can fix logformatter. Should just be a few more minutes.\n\nhttps://api.cirrus-ci.com/v1/artifact/task/5080120319279104/html/int-podman-fedora-37-root-container-boltdb.log.html"
+        },
+        {
+            "user": "edsantiago",
+            "body": "Got em. (I need raw logs, the Cirrus ones. The logformatted ones are utter garbage right now, that's what I'm trying to fix)"
+        },
+        {
+            "user": "Luap99",
+            "body": "with the added `-p` instead of --nodes 3, `make localintegration` only takes 4-5 mins on my laptop (12 threads)"
+        },
+        {
+            "user": "edsantiago",
+            "body": "Hey, are we expecting PANICs? In the process of updating logformatter, I see a bunch of these panics in `podman unshare` tests:\n```\nS [SKIPPED] [0.001 seconds]\n         Podman unshare [BeforeEach]\n           podman unshare\n           Enter [AfterEach] Podman unshare - /var/tmp/go/src/github.com[/containers/podman/test/e2e/unshare_test.go:37](https://github.com/containers/podman/blob/de55faaecd839ec5f2bbc270ae27f37514de8ea8/test/e2e/unshare_test.go#L37) @ 04/13/23 13:04:41.586\n\n           [PANICKED] Test Panicked\n           In [AfterEach] at: /usr/lib/go-1.19/src/runtime/panic.go:260 @ 04/13/23 13:04:41.586\n         \n           runtime error: invalid memory address or nil pointer dereference\n```\nSee [debian log](https://api.cirrus-ci.com/v1/task/6179631947055104/logs/main.log), search in-page for \"PANIC\". Compare to [current ginkgo log for a PR that merged today](https://api.cirrus-ci.com/v1/artifact/task/4530914328313856/html/int-podman-debian-12-root-host-boltdb.log.html).\n\nThe very weird thing is that the test shows as SKIPPED, and there is no link (at bottom) to the panic. No indication anywhere that there was a panic.\n\nAnyhow, not my highest priority right now but someone should maybe look at it."
+        },
+        {
+            "user": "Luap99",
+            "body": "> Anyhow, not my highest priority right now but someone should maybe look at it.\n\nI take a look."
+        },
+        {
+            "user": "Luap99",
+            "body": "Looks like ginkgo now still runs AfterEach() when we call Skip() in BeforeEach()"
+        },
+        {
+            "user": "Luap99",
+            "body": "> Looks like ginkgo now still runs AfterEach() when we call Skip() in BeforeEach()\n\nPushed a commit which should fix it, I think the new behavior makes sense. Otherwise cleanup was missing which caused us to leak tmp directories.\n"
+        },
+        {
+            "user": "edsantiago",
+            "body": "I have a semi-working logformatter, would you like a copy? It makes reading logs much easier. (I was going to push it to your branch at the end of my day, but as long as you're still around, I can do so now if you want)"
+        },
+        {
+            "user": "Luap99",
+            "body": "I am done for today please push it."
+        },
+        {
+            "user": "edsantiago",
+            "body": "OK, if you're done for the day, I'll wait for the current test run to finish. That will give me better data (logs) from which I can maybe improve the script. Good night!"
+        },
+        {
+            "user": "edsantiago",
+            "body": "Logformatter pushed and sort-of working. Some bugs still with in-page anchors and probably more I haven't found. Sample [remote](https://api.cirrus-ci.com/v1/artifact/task/6048850863980544/html/int-remote-fedora-37-root-host-boltdb.log.html) log shows the new format. I'm confused by the frequent \"unable to connect to podman\" errors in AfterEach when it fails. Can something be killing the server?\n\nSome nice things about ginkgo v2 format:\n* Retries are all done in the same block of the log.\n* The Enter/Exit lines make it easy to gray out boring stuff\n\nOne not-so-nice thing:\n* Flakes are no longer reported, making them very hard to detect\n\nOne thing we need to fix:\n* Lots of \"Captured Stdout/Stderr\" blocks. These should be fixed in the code so the command is shown along with the output, in the proper sequence. (Not necessary in this PR. For later.)\n\nAlso, I screwed up on my push: dragged in the rest of `main`. I trust that's not a huge problem to fix.\n\nHTH."
+        },
+        {
+            "user": "Luap99",
+            "body": ">    Flakes are no longer reported, making them very hard to detect\n\nI am pretty sure we can fix this manually. If you look at https://pkg.go.dev/github.com/onsi/ginkgo/v2/types#SpecReport we can get this info and the print it in any format we want similar to what we already do with the test timings at the bottom."
+        },
+        {
+            "user": "Luap99",
+            "body": "Looks like flakes are still reported it just looks differently:\nhttps://api.cirrus-ci.com/v1/artifact/task/6549968723378176/html/int-podman-fedora-36-rootless-host-boltdb.log.html#t--podman-run-net-container--copies-hosts-and-resolv--1\nat the bottom you see flakes 3, search for `podman cp from ctr chown` which has the nasty `no logs from conmon` flake. The log cleary shows the retry: `Attempt #1 Failed.  Retrying ...`"
+        },
+        {
+            "user": "edsantiago",
+            "body": ">at the bottom you see flakes 3,\n\nYes, I colorized that. The old ginkgo gave links to each flake; now it's necessary to grep for 'Attempt #' which of course also matches on the hard failures. Not a huge deal."
+        },
+        {
+            "user": "Luap99",
+            "body": "Well I can make ginkgo print extra stuff if that makes your log formatter easier.\nIf you look at the AfterEach() nodes I can just read `NumAttempts` there from the SpecReport which tell us how often this was tried."
+        },
+        {
+            "user": "Luap99",
+            "body": "So it looks like the rootless test still hang when run with netavark instead of cni.\nHowever in both cases we leak arrdvark-dns and dnsmasq respectively. I have no idea why ginkgo doesn't hang despite also having the dnsmasq process still there. I cannot spot the difference between aardvark-dns and dnsmasq setup.\nBoth have stdin/out/err set to /dev/null so it cannot hang because of the fds.\n\nAfter attaching via debugger to the ginkgo process it simply waits for a futex. I have no idea how to figue out on what exactly it is waiting. It looks like it just hangs somewhere in the goruntime.\n\nIn any case the reason why we leak these is clearly a bug. Network cleanup is not working when there are some other errors during startup. https://github.com/containers/podman/issues/18205\n\n"
+        },
+        {
+            "user": "vrothberg",
+            "body": "> I have no idea how to figue out on what exactly it is waiting. It looks like it just hangs somewhere in the goruntime.\n\nYou can try send SIGABRT to the ginko process to force it dump the stack.  Maybe the stack trace is sufficiently long to get more hints."
+        },
+        {
+            "user": "Luap99",
+            "body": "> You can try send SIGABRT to the ginko process to force it dump the stack. Maybe the stack trace is sufficiently long to get more hints.\n\nGood point. I tried to attach via debugger but it didn't seem to show the full stack. (or rather I don't know the options to show the thing I wanted)\n\nIt definitely blocks on some IO. \nHere is the full trace: [ginkgov2-hang.txt](https://github.com/containers/podman/files/11248285/ginkgov2-hang.txt)\n"
+        },
+        {
+            "user": "Luap99",
+            "body": "OK I think I fixed the network aardvark-dns leaks issue for the most part, the last networking issue I see locally is #17903.\nI will add the `Serial` decorator and see if this truly fixes the issues once at for all."
+        },
+        {
+            "user": "Luap99",
+            "body": "I will add the `Serial` decorator and see if this truly fixes the issues once at for all.\n\nYes this seems to work, no more `unknown FS magic on` in my local runs."
+        },
+        {
+            "user": "edsantiago",
+            "body": "So.... I'm working some more on logformatter and am noticing that logs have a LOT of nuls in them, in random places. I don't just mean the single nul in `cat /proc/self/attr/current`, I mean hundreds of nuls. Example: [f37 rootless sqlite](https://api.cirrus-ci.com/v1/task/6048164499685376/logs/main.log), search in-page for \"`podman create --pod-id-file`\" or \"`regular capabilities`\". There are many more.\n\nlogformatter already strips those, I added that because of the nasty nuls in the bottom line of each log. It's easy to just keep doing so. But..... why? Could this be a symptom of a larger problem? Is this something that should be investigated, or swept under the rug?"
+        },
+        {
+            "user": "Luap99",
+            "body": "> Could this be a symptom of a larger problem? Is this something that should be investigated, or swept under the rug?\n\nI don't think this is a big deal but I take a look."
+        },
+        {
+            "user": "edsantiago",
+            "body": "One more thing: the `[SLOW TEST]` warning is gone. I don't think anyone other than me ever even looked at those anyway."
+        },
+        {
+            "user": "Luap99",
+            "body": "> One more thing: the `[SLOW TEST]` warning is gone. I don't think anyone other than me ever even looked at those anyway.\n\nFrom ginkgo v2.5 release notes:\n> The --progress, --slow-spec-threshold, --always-emit-ginkgo-writer flags\nand the SuppressProgressReporting decorator have all been deprecated.  Instead\nthe existing -v and -vv flags better capture the level of verbosity to display.  However,\na new --show-node-events flag is added to include node `> Enter` and `< Exit` events\nin the spec timeline.\n\nWe still list the test timings at the bottom so we can use this to look for slow test if needed."
+        },
+        {
+            "user": "Luap99",
+            "body": "The only zero bytes I find locally in my logs are the ones from the `cat /proc/self/attr/current` calls.\n\nEdit: Nevermind, I run the local tests again and there I see a bunch of NULLs as well. This is caused by the podman volume export test which writes a tar to stdout: https://github.com/containers/podman/blob/9676391c4ea9773f5f09feef2691083af8718f2f/test/e2e/volume_create_test.go#L97-L99"
+        },
+        {
+            "user": "edsantiago",
+            "body": "@Luap99 my brain short-circuited while trying to re-push to your branch. So, should you so wish, please cherry-pick the latest logformatter from #18243 ."
+        },
+        {
+            "user": "Luap99",
+            "body": "I included the commit from #18243"
+        },
+        {
+            "user": "Luap99",
+            "body": "I split out my networking fixes into https://github.com/containers/podman/pull/18254 to make review and possible backports easier."
+        },
+        {
+            "user": "edsantiago",
+            "body": "Interesting new failure in [remote f37 root](https://api.cirrus-ci.com/v1/artifact/task/4979598220328960/html/int-remote-fedora-37-root-host-sqlite.log.html#t--add-volumes--1), in a CONTAINERS_CONF test:\n```\nError: preparing container <ID> for attach: lsetxattr /tmp/podman_test2748995835/root/vfs-containers/<ID>/userdata/shm: operation not supported\n```"
+        },
+        {
+            "user": "Luap99",
+            "body": "> `Error: preparing container <ID> for attach: lsetxattr /tmp/podman_test2748995835/root/vfs-containers/<ID>/userdata/shm: operation not supported`\n\nYup I broke it in `test/e2e: fix incorrect usage of CreateTempDirInTempDir() `, it tries to mount the full test tmpdir with :Z so it basically tired to relabel the container store + all the mount points there. Will be fixed in the next push. "
+        },
+        {
+            "user": "Luap99",
+            "body": "Third podman bug reported as https://github.com/containers/podman/issues/18259. This is hopefully the last one."
+        },
+        {
+            "user": "Luap99",
+            "body": "I removed the WIP because I added a workaround for #18180.\n\n@containers/podman-maintainers PTAL, I strongly recommend to look at this commit by commit."
+        },
+        {
+            "user": "edsantiago",
+            "body": "I 100% support lowering the timeout. 45m is safe, I think, but we're likely to hit that within the next year so 50m is fine too.\n\n| type | distro              | user     | DB     |    local |   remote | container |\n| ---- | --------            | ----     | --     |    ----: |   -----: | --------: |\n| int  | debian-12           | root     |        |    32:45 |    40:36 |\n| int  | fedora-37           | root     |        |    40:34 |    40:35 |     39:06 |\n| int  | fedora-38           | root     |        |    38:17 |    40:19 |     35:26 |\n| int  | fedora-38           | root     | sqlite |    37:59 |    36:42 |\n| int  | rawhide             | root     | sqlite |    37:00 |    41:25 |\n| int  | debian-12           | rootless |        |    31:27 |          |\n| int  | fedora-37           | rootless |        |    36:41 |          |\n| int  | fedora-38           | rootless |        |    37:04 |          |\n| int  | fedora-38           | rootless | sqlite |    35:58 |          |\n| int  | rawhide             | rootless | sqlite |    36:52 |          |\n| sys  | debian-12           | root     |        |    27:43 |    19:46 |\n| sys  | fedora-37           | root     |        |    33:05 |    21:02 |\n| sys  | fedora-38           | root     |        |    32:46 |    21:43 |\n| sys  | fedora-38           | root     | sqlite |    30:44 |    21:10 |\n| sys  | fedora-38-aarch64   | root     |        |    33:16 |    22:36 |\n| sys  | rawhide             | root     | sqlite |    31:18 |    20:25 |\n| sys  | debian-12           | rootless |        |    30:10 |          |\n| sys  | fedora-37           | rootless |        |    30:26 |          |\n| sys  | fedora-38           | rootless |        |    29:20 |    19:57 |\n| sys  | fedora-38           | rootless | sqlite |    28:05 |          |\n| sys  | rawhide             | rootless | sqlite |    30:23 |          |\n| bud  | fedora-38           | root     |        |    30:54 |    31:12 |\n\nI could probably write something to fetch timing results for the last 100 PRs and find the max, but I'm not sure it's worth the effort. In my months of looking at (selected) results, I don't remember seeing anything past 41-42.\n\npodman-machine failures look real but I haven't delved too deeply into them."
+        },
+        {
+            "user": "Luap99",
+            "body": "Thanks @edsantiago, I will try to run machine test locally. Likely the same kind of bugs (leaking processes) in the machine code."
+        },
+        {
+            "user": "vrothberg",
+            "body": "I'll grab a fresh coffee before reviewing :^)"
+        },
+        {
+            "user": "edsantiago",
+            "body": "All `int` tests passed, with times of 26:44 to 38:24, but one timed out at 50m. Would presumably also time out at 90m. I don't understand why only one test would time out."
+        },
+        {
+            "user": "Luap99",
+            "body": "I restarted it, my best guess is some flake leaving processes running..."
+        },
+        {
+            "user": "Luap99",
+            "body": "```\n[+0490s]   Running: /var/tmp/go/src/github.com/containers/podman/bin/podman --root /tmp/podman_test1335685339/root --runroot /tmp/podman_test1335685339/runroot --runtime crun --conmon /usr/bin/conmon --network-config-dir /tmp/podman_test1335685339/root/etc/networks --network-backend netavark --cgroup-manager systemd --tmpdir /tmp/podman_test1335685339 --events-backend file --db-backend sqlite --storage-driver vfs ps -q\n[+0490s]   Error: beginning transaction: database is locked\n```\n\nThis is the only failure logged by ginkgo, passed on the retry. However the AfterEach cleanup still fired correctly and looks successful so I don't think it leaked a process."
+        },
+        {
+            "user": "edsantiago",
+            "body": "OMG.... CI is green. I'm still uncomfortable about that one timeout, and expect it to recur... but I am 100% OK with fixing that later if needed. @containers/podman-maintainers PTAL, this will potentially fix many flakes, and make debugging easier (better logs), and much more. (@Luap99 I'm still doing my final review, so, almost-lgtm but not quite yet)."
+        },
+        {
+            "user": "Luap99",
+            "body": "> I'm still uncomfortable about that one timeout, and expect it to recur...\n\nYeah the unfortunate thing is this is really hard to track down. I currently test locally if the ginkgo timeout is helpful here, right now cirrus will loose some output on timeout. However if I can set a little bit lower timeout for ginkgo and it exits (not confirmed yet) then we can add a `ps auxww` to the cirrus script to check for running processes which should help debug what is hanging."
+        },
+        {
+            "user": "edsantiago",
+            "body": ">we can add a ps auxww to the cirrus script\n\nAIUI that's not the way Cirrus works: the Cirrus timeout is a hard stop, kill everything, no grace period or chance for cleanup or handler. @cevich do you know if there's a soft timeout option, where an emergency handler could be run?"
+        },
+        {
+            "user": "Luap99",
+            "body": "> AIUI that's not the way Cirrus works: the Cirrus timeout is a hard stop, kill everything, no grace period or chance for cleanup or handler. @cevich do you know if there's a soft timeout option, where an emergency handler could be run?\n\nI am well aware that is why I am talking about the ginkgo timeout: `ginkgo --timeout 45m ...`. In this case ginkgo should exit after that time assuming it is not effected by the hang as well. If ginkgo timeout 45 min and cirrus timeout 50 min then I have a small window afterwards to run debug commands."
+        },
+        {
+            "user": "edsantiago",
+            "body": "Oops! My bad, I didn't properly understand your use of \"ginkgo timeout\". Yes, using `ginkgo --timeout SHORTERVAL` sounds perfect (but for a later PR). Thanks for the clarification."
+        },
+        {
+            "user": "rhatdan",
+            "body": "/lgtm"
+        },
+        {
+            "user": "cevich",
+            "body": "> cleanup or handler. @cevich do you know if there's a soft timeout option\n\nNo, it's always hard.  If you want soft, you have to do it via soft-ware :grin: (like ginkgo or `timeout` or something)."
+        },
+        {
+            "user": "openshift-ci[bot]",
+            "body": "[APPROVALNOTIFIER] This PR is **APPROVED**\n\nThis pull-request has been approved by: *<a href=\"https://github.com/containers/podman/pull/18163#pullrequestreview-1409251402\" title=\"Approved\">cevich</a>*, *<a href=\"https://github.com/containers/podman/pull/18163#pullrequestreview-1409212993\" title=\"Approved\">edsantiago</a>*, *<a href=\"https://github.com/containers/podman/pull/18163#\" title=\"Author self-approved\">Luap99</a>*\n\nThe full list of commands accepted by this bot can be found [here](https://go.k8s.io/bot-commands?repo=containers%2Fpodman).\n\nThe pull request process is described [here](https://git.k8s.io/community/contributors/guide/owners.md#the-code-review-process)\n\n<details >\nNeeds approval from an approver in each of these files:\n\n- ~~[OWNERS](https://github.com/containers/podman/blob/main/OWNERS)~~ [Luap99,edsantiago]\n\nApprovers can indicate their approval by writing `/approve` in a comment\nApprovers can cancel approval by writing `/approve cancel` in a comment\n</details>\n<!-- META={\"approvers\":[]} -->"
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 17903
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 18180
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 18246
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 18255
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 18283
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 18290
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 18403
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 17216
+        }
+    ]
+}

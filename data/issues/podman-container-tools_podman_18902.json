@@ -1,0 +1,63 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 18902,
+    "type": "issue",
+    "title": "Podman run `--group-entry` substitution `$GROUPNAME` and  `$USERLIST` values empty",
+    "state": "open",
+    "labels": [
+        "kind/bug",
+        "stale-issue"
+    ],
+    "user": "cevich",
+    "body": "### Issue Description\n\nFrom the podman-run man page:\n\n```\n   --group-entry=ENTRY\n       Customize  the  entry that is written to the /etc/group file within the con‐\n       tainer when --user is used.\n\n       The variables $GROUPNAME, $GID, and  $USERLIST  are  automatically  replaced\n       with their value at runtime if present.\n```\n\nHowever, the `$GROUPNAME` and  `$USERLIST` substitution values are always empty inside a container.  Despite my user (on the host) having access to `/etc/group`, and both a group entry and its user-list field are non-empty (the `id` and `getent group <name>` commands work perfectly fine).\n\n### Steps to reproduce the issue\n\nSteps to reproduce the issue\n1. `id`\n2. `podman run -it --rm --user $(id -u):$(id -g) --group-entry '$GROUPNAME:x:$GID:$USERLIST' registry.fedoraproject.org/fedora:latest` ***N/B: single-quotes to protect values from shell***\n3. (inside container) `id`\n4. (inside container) `tail -1 /etc/group`\n\n### Describe the results you received\n\n1. `uid=1234(cevich) gid=1234(cevich) groups=1234(cevich),10(wheel)`\n2. (bash prompt)\n3. `uid=1234(cevich) gid=1234() groups=1234()`\n4. `:x:4179:`\n\n### Describe the results you expected\n\n3. `uid=1234(cevich) gid=1234(cevich) groups=1234(cevich)`\n4. `cevich:x:1234:cevich`\n\n### podman info output\n\n```yaml\nversion:\n  APIVersion: 4.5.0\n  Built: 1681486976\n  BuiltTime: Fri Apr 14 11:42:56 2023\n  GitCommit: \"\"\n  GoVersion: go1.19.7\n  Os: linux\n  OsArch: linux/amd64\n  Version: 4.5.0\n```\n```\n\n\n### Podman in a container\n\nNo\n\n### Privileged Or Rootless\n\nRootless\n\n### Upstream Latest Release\n\nNo\n\n### Additional environment details\n\nFedora 37 host\n\n### Additional information\n\nRunning the container instead with `--group-entry 'cevich:x:1234:cevich'` works perfectly:\n\n```\nbash-5.2$ tail -1 /etc/group\ncevich:x:1234:cevich\n```\n\nThe magic `$GID` token seems to be substituted just fine.  It's only `$GROUPNAME` and  `$USERLIST` that don't seem to be looked up on the host and/or fail to get passed into the container and set in `/etc/group`.",
+    "comments": [
+        {
+            "user": "Luap99",
+            "body": "Looking at the code this fills in values from the container not the hosts /etc/group."
+        },
+        {
+            "user": "cevich",
+            "body": "Ahh okay, so one would need to set those env. vars. on the command-line or in the image?\n\nThe use-case someone was asking on chat for was: An easy way to volume-mount their `$HOME` into a container for development/debugging work w/o screwing up ownership or SELinux labels on the host.  But they wanted their user/group name to be used in the container.\n\nIt's a bit non-intuitive that `--user` **does** grab the username from the host, but not the group name.  I suggested maybe `--group-entry` might make it easy, but the man page isn't very clear.\n\nSo perhaps this could be addressed by a man-page update...though if it (or `--user`) did the group lookup on the host, that would be really cool!  Maybe I should open that as a separate RFE."
+        },
+        {
+            "user": "cevich",
+            "body": "Oh ya, this is very similar to https://github.com/containers/podman/issues/18903"
+        },
+        {
+            "user": "Luap99",
+            "body": "Sorry I really meant this in we read /etc/group from within the container to populate these vars. Although I really do not understand how they are supposed to be used. The whole --group-entry flag seems to be a NOP AFAICT."
+        },
+        {
+            "user": "cevich",
+            "body": "> Sorry I really meant this in we read /etc/group from within the container to populate these vars. Although I really do not understand how they are supposed to be used. \n\nYeah, I don't see much utility in the substitution tokens as well.  Presumably if someone is building a special image anyway, they'd simply encode all the necessary groups/users at build time.  OTOH, if they pulled data from the host (as the man page isn't clear about), I could actually see some useful utility in that.\n\n> The whole --group-entry flag seems to be a NOP AFAICT.\n\nWell it's not completely useless, it's just not well documented and/or operates counter-intuitively.  I'd make a similar argument for the `--user <UID>:<GID>` form, but that's largely discussed in https://github.com/containers/podman/issues/18903.\n\nIf I had to guess, given the inconsistent behaviors/features in both `--group-entry` and `--user`, it almost feels like we've been fighting with ourselves over docker compatibility vs unique features...so basically failing at both :disappointed:\n\nAnyway, I'm okay with fixing up the docs. to resolve this issue...but it doesn't give me good feelings overall.  Perhaps we should bring the `--group-entry` and `--user` oddities to a community cabal and see if we can arrive at a better direction to take them, maybe for 5.0?"
+        },
+        {
+            "user": "danishprakash",
+            "body": "I agree that the documentation is lacking in many regards for `--group-entry` but while I was adding it, the idea was to simply replace the said variables with the user that's running podman if rootless[1], somewhat similar to how we had implemented `--user`.\n\n@cevich if you try `--user` and `--group-entry` in conjunction, does that still give you the same undesirable output? Either way, I'll take a look at this tomorrow."
+        },
+        {
+            "user": "cevich",
+            "body": "> the idea was to simply replace the said variables with the user that's running podman if rootless[1], somewhat similar to how we had implemented --user.\n\nAhh okay.  That doesn't appear to be what's happening, it's taking those substitution values from w/in the container (i.e. `ENV` or `--env` values presumably) [according to Paul's reply above.](https://github.com/containers/podman/issues/18902#issuecomment-1593401780)\n\n> Either way, I'll take a look at this tomorrow.\n\nThanks.  As I mentioned above, a fix would be really cool, if not some updated documentation would also be good (I can help if needed)."
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@danishprakash Are you working on a fix for this?"
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 18903
+        }
+    ]
+}

@@ -1,0 +1,107 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 6549,
+    "type": "issue",
+    "title": "containers killed when restarting a systemd service",
+    "state": "closed",
+    "labels": [
+        "stale-issue",
+        "locked - please file new issue/PR"
+    ],
+    "user": "parmentelat",
+    "body": "I am transitioning a system from docker to podman; my current setup runs on \n\n* fedora32\n* vanilla podman-1.9.3-1.fc32.x86_64 \n* cgroupv2 aka unified hierarchy\n\nI am using this in pre-production and am rather pleased with \n\nIn essence we have\n\n* an main uwsgi application powering a django app, started by systemd\n* the main app forks a bash script that in turn spawns containers with  \n  `podman run --detach --rm ...`\n\nI am surprised to see that restarting the main app with `systemctl restart`, which in turn\nwill trigger `kill -INT` on the uwsgi instance, is causing the containers to be killed in\nturn (which in operations is of course a catastrophic event)\n\nI realize I have the wrong mental model here; in terms of process hierarchy, I can see \neach container materialized as a `conmon` process whose parent process is, as expected, \nsystemd with pid 1; so based on that i thought I'd be safe to kill the `uwsgi` process\nwithout interfering with container execution\n\n```\n# pstree\nsystemd─┬─NetworkManager───2*[{NetworkManager}]\n        ├─3*[abrt-dump-journ]\n        ├─abrtd───2*[{abrtd}]\n        ├─agetty\n        ├─atd\n        ├─auditd───{auditd}\n        ├─chronyd\n        ├─12*[conmon─┬─tini───runuser───jupyter-noteboo─┬─python───39*[{python}]]\n        │            │                                  └─2*[{jupyter-noteboo}]]\n        │            └─{conmon}]\n```\n\nBut that's not what I see; so digging further I noticed that these `conmon` processes \nappeared in the output of \n\n```\n# systemctl status the-main-uwsgi.service\n● nbh-django.service - the nbhosting django app as a uwsgi instance\n     Loaded: loaded (/etc/systemd/system/nbh-django.service; enabled; vendor preset: disabled)\n     Active: active (running) since Tue 2020-06-09 15:22:49 CEST; 18h ago\n   Main PID: 1344921 (uwsgi)\n     Status: \"uWSGI is ready\"\n      Tasks: 153 (limit: 309370)\n     Memory: 366.0M\n        CPU: 3min 35.897s\n     CGroup: /system.slice/nbh-django.service\n             ├─1344921 /usr/sbin/uwsgi --ini /etc/uwsgi.d/nbhosting.ini\n             ├─1344921 /usr/sbin/uwsgi --ini /etc/uwsgi.d/nbhosting.ini\n<snip>\n             ├─1774675 /usr/bin/conmon --api-version 1 -s <snip>\n             ├─1774675 /usr/bin/conmon --api-version 1 -s <snip>\n<snip>\n```\n\nI must say the main reason why I am surprised is that the same architecture based on\ndocker was not exhibiting this behaviour; with the same app based on docker i could\nrestart any part of the system including the web app, or the docker daemon for that\nmatter, without affecting the running containers\n\nSo, my questions :\n\n* why is that so ? am I right to conjecture that it is because the conmon processes\n  are being stored in the same cgroup as the main uwsgi app, that the containers are\n  affected by a kill on uwsgi ?\n\n* so as a wild guess I have tried to add a `--cgroup-parent=MYAPP` to the `podman run` \n  command, but why am I getting the following error message ?\n\n```\nJun 09 15:24:13 thermals uwsgi[1345101]: Error: did not receive systemd slice as cgroup parent when using systemd to manage cgroups: invalid argument\n```\n\nSo, I can tell I'm a bit over my head here, could someone please shed some light on what I\nam doing wrong, and the best angle to take so that the main web app can be restarted on\nits own, without messing with the running containers; I've read about cgroup drivers, and\nhave the intuition it could be part of the solution, but I don't know how to use them...\n\nMany thanks in advance for any tip",
+    "comments": [
+        {
+            "user": "parmentelat",
+            "body": "PS. just out of curiosity I have just confirmed that the same behaviour happens when running the kernel with cgroupv1, i.e. with `systemd.unified_cgroup_hierarchy=0`\n\n"
+        },
+        {
+            "user": "mheon",
+            "body": "It seems like systemd is probably killing all processes in the cgroup, which includes conmon instances for all the containers you've spawned (which is strange, they should be joining separate cgroups). We generally recommend using `KillMode=none` in systemd unit files where Podman is run to prevent it from killing things we don't want it to - most notably conmon."
+        },
+        {
+            "user": "parmentelat",
+            "body": "thanks for pointing me at the `KillMode` setting of `systemd`  \nindeed [the systemd.kill documentation](https://www.freedesktop.org/software/systemd/man/systemd.kill.html) clearly explains that the default setting for `KillMode` is `control-group` - and so that's what was applying to me - and it means to kill all the processes in that control group, so that's for one thing which is explained; my first experimentation shows that adding `KillMode=process` in the service unit file solves the root problem, and my containers survive a `systemctl restart` of the web app, that is cool\n\nwhat I'd really like to better understand though is what you described as strange, which is odd to me too; even with that `KillMode=process` setting, I still see the conmon processes attached in the service control group; is there a way for me to control that ?\n\n```console\n# ps -o cgroup $(pgrep conmon)\nCGROUP\n0::/system.slice/nbh-django.service\n0::/system.slice/nbh-django.service\n0::/system.slice/nbh-django.service\n0::/system.slice/nbh-django.service\n```"
+        },
+        {
+            "user": "mheon",
+            "body": "Can you add `--log-level=debug` to one of your Podman invocations, and then see if there are any errors/warnings from Conmon logged in `journalctl`? They won't be under the `conmon` unit, they are written straight to the journal."
+        },
+        {
+            "user": "parmentelat",
+            "body": "probbaly a red herring but, the first thing that sprung out of there is this\n```\nJun 10 19:51:54 thermals uwsgi[226240]: time=\"2020-06-10T17:51:49Z\" level=debug msg=\"Found deprecated file /usr/share/containers/libpod.conf, please remove. Use /etc/containers/containers.conf to override defaults.\\n\"\n```\n\nwhich is odd because `/usr/share/containers/libpod.conf` comes with the podman rpm  \nshould I be concerned about this ?\n\n****\nvery few lines contain the `group` keyword, of possible interest are\n\n```\nJun 10 19:51:54 thermals uwsgi[226240]: time=\"2020-06-10T17:51:49Z\" level=debug msg=\"New container created \\\"5dc5414620332fdda2fe99a01804cc5e666a513cc310ea4386b0c08ab9c81648\\\"\"\nJun 10 19:51:54 thermals uwsgi[226240]: time=\"2020-06-10T17:51:49Z\" level=debug msg=\"container \\\"5dc5414620332fdda2fe99a01804cc5e666a513cc310ea4386b0c08ab9c81648\\\" has CgroupParent \\\"machine.slice/libpod-5dc5414620332fdda2fe99a01804cc5e666\\\na513cc310ea4386b0c08ab9c81648.scope\\\"\"\n```\n\nand later on\n```\nJun 10 19:51:54 thermals uwsgi[226240]: time=\"2020-06-10T17:51:49Z\" level=debug msg=\"Setting CGroups for container 5dc5414620332fdda2fe99a01804cc5e666a513cc310ea4386b0c08ab9c81648 to machine.slice:libpod:5dc5414620332fdda2fe99a01804cc5e666\\\na513cc310ea4386b0c08ab9c81648\"\n```\n\nand later on among the command line arguments to conmon I can see \n\n```\nJun 10 19:51:54 thermals uwsgi[226240]: time=\"2020-06-10T17:51:49Z\" level=debug msg=\"running conmon: /usr/bin/conmon\" args=\"[--api-version 1 -s <snip> --cgroup-manager --exit-command-arg systemd <snip>\"\n```\n\ncould this  `systemd` cgroup-manager be responsible for what I am seeing ?\n\n****\nI can't see anything else at first sight but I'll look more closely tomorrow  \n\nthanks for the insights !\n\n"
+        },
+        {
+            "user": "goochjj",
+            "body": "If you want to use systemd cgroup-manager, it requires a slice, not a service.  It defaults to /machine.slice/libpod-guid.scope and puts everything there.\n\nIf you want it to show under the service, you have to use the cgroupfs manager.\n\ni.e. in my service file:\n--cgroup-parent=/system.slice/%n --cgroup-manager cgroupfs\n\n"
+        },
+        {
+            "user": "goochjj",
+            "body": "You'll see them in `systemd-cgls`"
+        },
+        {
+            "user": "mheon",
+            "body": "Now that I'm thinking about this more - I think we're deliberately disabling putting Conmon in a separate cgroup in `podman generate systemd` unit files using `--cgroups=no-conmon`, but I forget exactly why (@vrothberg would know)."
+        },
+        {
+            "user": "vrothberg",
+            "body": "@giuseppe added that logic in https://github.com/containers/libpod/pull/4861 for backward compat. Newer Podman versions auto-detect when running in a systemd service and won't create a cgroup as systemd does not like monitoring processes in other cgroups."
+        },
+        {
+            "user": "vrothberg",
+            "body": "@parmentelat, can you share the unit file you are using? There are many potential pitfalls running podman in systemd."
+        },
+        {
+            "user": "parmentelat",
+            "body": "@vrothberg my service unit file is here\nhttps://github.com/parmentelat/nbhosting/blob/podman/systemd/nbh-django.service\n\nIn my use case, the service in question is just a web service that will spawn containers; whether this web service is up or not, should have no incidence on the peaceful continuation of already spawned containers\n\nright now I'm using `KillMode=process`, with which IIUC `systemd` kills the main process subtree and ignores cgroups; with this setting my deployment is going rather nicely, and I can restart the django app with no incidence on running containers, so I'm kind of fine (like in: this issue is less serious to me than it was when I created this entry)\n\nIt'd be nice to have some control on the cgroups where the containers end up though; typically the application is about hosting notebooks for various courses, and one cgroup per course would make perfect sense from a resource management point of view\n\n thanks !"
+        },
+        {
+            "user": "goochjj",
+            "body": "@parmentelat isn't the default that every container gets its own cgroup?  Currently in /machine.slice/libpod-containerid.scope... So you already have container cgroup separation.  If you wanted to adjust the allocation you could, using cgroup-parent.  i.e. with systemd, perhaps --cgroup-parent machine-%{course}.slice or similar.\n\n"
+        },
+        {
+            "user": "parmentelat",
+            "body": "\n\n> On 15 Jun 2020, at 22:30, Joe Gooch <notifications@github.com> wrote:\n> \n> \n> @parmentelat isn't the default that every container gets its own cgroup? Currently in /machine.slice/libpod-containerid.scope... So you already have container cgroup separation. If you wanted to adjust the allocation you could, using cgroup-parent. i.e. with systemd, perhaps --cgroup-parent machine-%{course}.slice or similar.\n\nwell right now I see this\n\n# ps -o cgroup $(pgrep conmon)\nCGROUP\n0::/system.slice/nbh-django.service\n0::/system.slice/nbh-django.service\n<snip…>\n\nso unless I have this very wrong, that means that all my containers end up in the same cgroup, and it’s also the same as the processes involved in the nbh-django service, no ?\n\nI remember I have given this —cgroup-parent a try at the beginning of my investigation, but that did not pan out, I can’t remember exactly how right now,\nI can try again and report back on this channel if that’s worth it\n\nat the time it felt like it had to do with the cgroup manager; \nI still have to find an explanation about what the cgroup manager does exactly, and what are the available options; \nright now it looks like I use the systemd cgroup manager, from the commented contents of /usr/share/containers/containers.conf that reads\n# cgroup_manager = \"systemd\"\n\n\nthanks !\n\n"
+        },
+        {
+            "user": "goochjj",
+            "body": "But that's just conmon - the actual cgroup separation of the container processes is happening I'm guessing.\n\nI'm curious how you're spawning the containers from your main app... You may want --cgroups enabled instead of --cgroups no-conmon - though, if what @vrothberg is saying is true and it'll just magically switch enabled back to \"no-conmon\" because it detects systemd, that would actually be contrary to what you want in this case... without looking at that code I'm not sure off the top of my head.\n\n"
+        },
+        {
+            "user": "goochjj",
+            "body": "Looks like it's detecting INVOCATION_ID in your environment.\n\nWhat happens if you unset that env variable before calling podman run from your web application? i.e. `env -u INVOCATION_ID podman run ....`\n\n\n"
+        },
+        {
+            "user": "parmentelat",
+            "body": "yes this is better\n\nbefore your suggestion I was getting this\n\n```\nroot@thermals ~ (master *) # ps -o cgroup $(psfamily $CONMON)\nCGROUP\n0::/system.slice/nbh-django.service\n0::/machine.slice/libpod-6f2945afaf06226270498ab7ebfe44b3d73e343af5b8376fb56fe84e06695273.scope\n0::/machine.slice/libpod-6f2945afaf06226270498ab7ebfe44b3d73e343af5b8376fb56fe84e06695273.scope\n0::/machine.slice/libpod-6f2945afaf06226270498ab7ebfe44b3d73e343af5b8376fb56fe84e06695273.scope\n0::/machine.slice/libpod-6f2945afaf06226270498ab7ebfe44b3d73e343af5b8376fb56fe84e06695273.scope\n```\n\nand after I unset `INVOCATION_ID` I get this\n\n```\nroot@thermals ~/nbhosting (podman *$=) # ps -o cgroup $(psfamily $CONMON)\nCGROUP\n0::/machine.slice/libpod-conmon-53966c45b575ad73dccd078fa581d55da1f788c4fcb52773c1a8ae27f7829621.scope\n0::/machine.slice/libpod-53966c45b575ad73dccd078fa581d55da1f788c4fcb52773c1a8ae27f7829621.scope\n0::/machine.slice/libpod-53966c45b575ad73dccd078fa581d55da1f788c4fcb52773c1a8ae27f7829621.scope\n0::/machine.slice/libpod-53966c45b575ad73dccd078fa581d55da1f788c4fcb52773c1a8ae27f7829621.scope\n0::/machine.slice/libpod-53966c45b575ad73dccd078fa581d55da1f788c4fcb52773c1a8ae27f7829621.scope\n```\n\nand for the record here's how I gather the process tree\n\n```\nfunction psfamily() {\n    local thispid=\"$1\"; shift\n    echo $thispid\n    local childlist=$(ps --ppid $thispid -o pid h)\n    for pid in $childlist; do psfamily $pid; done\n}\n```\n\nso bottom line, I guess I'm good on this one; thanks !"
+        },
+        {
+            "user": "goochjj",
+            "body": "HTH"
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@goochjj @vrothberg @mheon @parmentelat What is the scoop on this one?  Is it still an issue?"
+        },
+        {
+            "user": "goochjj",
+            "body": "I believe @parmentelat is all set... went with the best combination of options available.\n"
+        },
+        {
+            "user": "parmentelat",
+            "body": "yes I am fine indeed, thinks work fine for me at this point, thanks for checking "
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 19493
+        }
+    ]
+}

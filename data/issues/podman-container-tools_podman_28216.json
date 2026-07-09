@@ -1,0 +1,57 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 28216,
+    "type": "issue",
+    "title": "podman 5.8 database migration bug",
+    "state": "closed",
+    "labels": [
+        "kind/bug",
+        "regression",
+        "jira",
+        "High Impact"
+    ],
+    "user": "Luap99",
+    "body": "There is a major flaw in the podman 5.8 boltdb to sqlite database migration logic. As part of podman 5.8 we added the auto migration on boot from boltdb to sqlite that should trigger automatically on the first podman command but it is not concurrent safe against other parallel podman commands.\n\n\nI have a few containers startup at boot via quadlet, they get started around the the same time by systemd and indeed one unit successfully logged the migration.\n```\nOld database has been renamed to /home/podman/.local/share/containers/storage/libpod/bolt_state.db-old and will no longer be used\n```\n\nHowever the other units started at the same time where all still using botldb and created the containers there. So when I logged onto the system and run podman ps I noticed podman is still using boltdb and one container was missing despite that service being active. That service is the one which trigger the migration as its content was put into the sqlite db.\n\n\n\nThere are at least two different failure modes I can see here\n1. The one I got that we continue using botldb. Looking at the code it seem quite unlikely but clearly can happen. The boltdb file is created by NewBoltState() but if the code does not see a boltdb file it will default to sqlite so naturally since the migration renames the old boltdb file we should expect all new commands to be sqlite but there is a TOCTOU problem here.\nhttps://github.com/containers/podman/blob/06ffb9b3972f3b12634460b08a7636245f93c374/libpod/runtime.go#L312-L326\nProcess A is first and is doing the migration, Process B checks if botldb file exists, it still does, then Process A just finished migration and renames the boltdb file to _old, then Process B calls NewBoltState() and recreates the boltdb file.\n\n2. The other way which I see as more likely is all following commands do use sqlite but the the parallel started commands created their resources in boltdb and thus are invisible. That happens because the db state created early without a lock here: https://github.com/containers/podman/blob/06ffb9b3972f3b12634460b08a7636245f93c374/libpod/runtime.go#L376-L379\nThen we take the lock later here: https://github.com/containers/podman/blob/06ffb9b3972f3b12634460b08a7636245f93c374/libpod/runtime.go#L550-L552\nAnd the actual migration happens as part of of runtime.refresh() here:\nhttps://github.com/containers/podman/blob/06ffb9b3972f3b12634460b08a7636245f93c374/libpod/runtime.go#L642-L644\nThe problem is that the first command does the migration but the other ones that where in the middle, i.e. waiting on the alive lock all still have the boltdb state and thus keep using the wrong one as they do not notice the migration from the other command.\n\n\nI see two ways to fix this:\n\nThe first being some lock over the entire makeRuntime() call, the main problem being it cannot be the alive lock as it depends on some fields we read out of the DB. So we need another lock and hold it for much longer so that will negatively impact concurrent podman commands.\n\nThe other way I think is we first need to switch getDBState() to check if sqlite file exists and then always use sqlite lite. That should at least ensure that point 1 (like I did) is not getting forced on boltdb after the migration happens.\nThen in order to prevent the other commands from not noticing a migration happen they must close the db state again under the alive lock and get a new one with getDBState(), as long as that defaults to sqlite if that db file exists it makes them notice there was a migration and then use the right db backend. In that case there is still the TOCTOU race with getDBState() which causes the boltdb file to be created again but since the sqlite will exists as well and we use that to check that should not longer matter and you just end up with an empty boltdb file which will not cause any problems unless I am overlooking something here.",
+    "comments": [
+        {
+            "user": "mheon",
+            "body": "As part of this we will have to document how people who had a failed upgrade with 5.8.0 can recover.\n\n@Luap99 and I had a conversation on this earlier. If a user has just Quadlet containers, removing the SQLite database file and doing a manual migration with `podman system migrate --migrate-db` should work fine. Mixed usage (Quadlets combined with non-Quadlet managed containers) are more complicated and will need more investigation. Purely unmanaged containers with `podman-restart.service` also need thought, but i don't think we've even confirmed those are a problem."
+        },
+        {
+            "user": "Luap99",
+            "body": "Reproducer\n\n\nDangerous! Only run this on test system.\n\n```\npodman system reset -f\n# create a old boltdb db\nCI_DESIRED_DATABASE=boltdb podman --db-backend boltdb  info\n\n# get testimage\npodman pull quay.io/libpod/testimage:20241011\n\n# remove alive file to trick podman into using the reboot logic\nrm -f /run/libpod/alive\n\n# try to run containers in parallel\nparallel -j 5 podman run --rm quay.io/libpod/testimage:20241011 echo ::: 1 2 3 4 5\n```\n\nOutput\n```\nError: retrieving runtime configuration from database: runtime configuration bucket not found in DB: database configuration mismatch\nError: retrieving runtime configuration from database: runtime configuration bucket not found in DB: database configuration mismatch\ntime=\"2026-03-09T17:08:26+01:00\" level=warning msg=\"The deprecated BoltDB database driver is in use. This driver will be removed in the upcoming Podman 6.0 release in mid 2026. It is advised that you migrate to SQLite to avoid issues when this occurs using the `podman system migrate --migrate-db` command. Set SUPPRESS_BOLTDB_WARNING environment variable to remove this message.\"\nError: containers bucket not found in DB: database configuration mismatch\ntime=\"2026-03-09T17:08:26+01:00\" level=warning msg=\"The deprecated BoltDB database driver is in use. This driver will be removed in the upcoming Podman 6.0 release in mid 2026. It is advised that you migrate to SQLite to avoid issues when this occurs using the `podman system migrate --migrate-db` command. Set SUPPRESS_BOLTDB_WARNING environment variable to remove this message.\"\nError: containers bucket not found in DB: database configuration mismatch\nOld database has been renamed to /var/lib/containers/storage/libpod/bolt_state.db-old and will no longer be used\n2\n```\nResult:\n```\nls /var/lib/containers/storage/libpod/\nbolt_state.db  bolt_state.db-old\nls /var/lib/containers/storage/\ndb.sql  ...\n```"
+        },
+        {
+            "user": "Luap99",
+            "body": "PR: https://github.com/containers/podman/pull/28227\n\nI validated the above reproducer against it and it worked for me. I even tried with 100 containers started with parallel which seem to work as well."
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "coreos",
+            "repository": "fedora-coreos-tracker",
+            "number": 2110
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 27628
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 28227
+        },
+        {
+            "organization": "mikkovihonen",
+            "repository": "quadletman",
+            "number": 32
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 28569
+        }
+    ]
+}

@@ -1,0 +1,112 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 2899,
+    "type": "pull_request",
+    "title": "userns: prevent /sys/kernel/* paths in the container",
+    "state": "closed",
+    "labels": [
+        "lgtm",
+        "approved",
+        "locked - please file new issue/PR"
+    ],
+    "user": "giuseppe",
+    "body": "when we run in a user namespace, there are cases where we have not\nenough privileges to mount a fresh sysfs on /sys.  To circumvent this\nlimitation, we rbind /sys from the host.  This carries inside of the\ncontainer also some mounts we probably don't want to.  We are also\nlimited by the kernel to use rbind instead of bind, as allowing a bind\nwould uncover paths that were not previously visible.\n\nThis is a slimmed down version of the intermediate mount namespace\nlogic we had before, where we only set /sys to slave, so the umounts\ndone to the storage by the cleanup process are propagated back to the\nhost.  We also don't setup any new directory, so there is no\nadditional cleanup to do.\n\nSigned-off-by: Giuseppe Scrivano <gscrivan@redhat.com>",
+    "comments": [
+        {
+            "user": "openshift-ci-robot",
+            "body": "[APPROVALNOTIFIER] This PR is **APPROVED**\n\nThis pull-request has been approved by: *<a href=\"https://github.com/containers/libpod/pull/2899#\" title=\"Author self-approved\">giuseppe</a>*\n\nThe full list of commands accepted by this bot can be found [here](https://go.k8s.io/bot-commands?repo=containers%2Flibpod).\n\nThe pull request process is described [here](https://git.k8s.io/community/contributors/guide/owners.md#the-code-review-process)\n\n<details >\nNeeds approval from an approver in each of these files:\n\n- ~~[OWNERS](https://github.com/containers/libpod/blob/master/OWNERS)~~ [giuseppe]\n\nApprovers can indicate their approval by writing `/approve` in a comment\nApprovers can cancel approval by writing `/approve cancel` in a comment\n</details>\n<!-- META={\"approvers\":[]} -->"
+        },
+        {
+            "user": "rhatdan",
+            "body": "LGTM\n@TomSweeneyRedHat PTAL\n@vrothberg @mheon @baude PTAL"
+        },
+        {
+            "user": "vrothberg",
+            "body": "@giuseppe rootless tests aren't happy"
+        },
+        {
+            "user": "giuseppe",
+            "body": "ah, this wouldn't work with rootless.  An unprivileged user cannot umount these paths.  @rhatdan is it an issue for buildah?"
+        },
+        {
+            "user": "rhatdan",
+            "body": "@giuseppe Yes.\npodman run --net=host fedora mount | grep /sys/kernel\nsecurityfs on /sys/kernel/security type securityfs (rw,nosuid,nodev,noexec,relatime)\nconfigfs on /sys/kernel/config type configfs (rw,relatime)\ndebugfs on /sys/kernel/debug type debugfs (rw,relatime,seclabel)\n"
+        },
+        {
+            "user": "rhatdan",
+            "body": "We might need to mask these in rootless mode.  I am not sure if @TomSweeneyRedHat has tried buildah bud --isolation chroot inside of rootless podman yet.\n\nWe really need this for root running container anyways, especially where if you don't have SELinux running you can potentially modify the kernel.\n\nIn rootless mode this would obviously be blocked."
+        },
+        {
+            "user": "giuseppe",
+            "body": "> @giuseppe Yes.\n> podman run --net=host fedora mount | grep /sys/kernel\n> securityfs on /sys/kernel/security type securityfs (rw,nosuid,nodev,noexec,relatime)\n> configfs on /sys/kernel/config type configfs (rw,relatime)\n> debugfs on /sys/kernel/debug type debugfs (rw,relatime,seclabel)\n\nI think there is no way for an unprivileged user to drop that mounts.  It cannot mount a new sysfs and it cannot umount anything that will reveal what is under the mount point.  On the other hand, is it really a security issue?  The unprivileged user won't have any new privilege that it didn't have on the host."
+        },
+        {
+            "user": "rhatdan",
+            "body": "Right I am worried about information reveal though.  The information in /sys/kernel/debug might be useful to a hacked container.  If we can not umount we should mount a tmpfs over them."
+        },
+        {
+            "user": "giuseppe",
+            "body": "> Right I am worried about information reveal though. The information in /sys/kernel/debug might be useful to a hacked container. If we can not umount we should mount a tmpfs over them.\n\nwe can mask it, altough `/sys/kernel/debug` has mode 0700, an unprivileged user cannot access it"
+        },
+        {
+            "user": "giuseppe",
+            "body": "> Right I am worried about information reveal though. The information in /sys/kernel/debug might be useful to a hacked container. If we can not umount we should mount a tmpfs over them.\n\nI've added a patch to mask `/sys/kernel` if we are bind mounting `/sys` and we are rootless"
+        },
+        {
+            "user": "rhatdan",
+            "body": "Well this looks good.\nfind /sys/kernel/ | wc\nfind: '/sys/kernel/security': Permission denied\nfind: '/sys/kernel/debug': Permission denied\nfind: '/sys/kernel/config': Permission denied\n5615 5615 213373\nSo I think for rootless we can ignore the mounts."
+        },
+        {
+            "user": "rhatdan",
+            "body": "LGTM"
+        },
+        {
+            "user": "giuseppe",
+            "body": "> Well this looks good.\n> find /sys/kernel/ | wc\n> find: '/sys/kernel/security': Permission denied\n> find: '/sys/kernel/debug': Permission denied\n> find: '/sys/kernel/config': Permission denied\n> 5615 5615 213373\n> So I think for rootless we can ignore the mounts.\n\nshould I drop the second patch or is it still a valid additional defense?\n"
+        },
+        {
+            "user": "mheon",
+            "body": "LGTM. I think we keep the masked path - defense in depth is good."
+        },
+        {
+            "user": "mheon",
+            "body": "Holding /lgtm until tests go green"
+        },
+        {
+            "user": "mheon",
+            "body": "/lgtm"
+        },
+        {
+            "user": "edsantiago",
+            "body": "This commit seems to have broken the new unbrivileged-access BATS test:\n```\n# bats test/system/400-unprivileged-access.bats\n ✗ podman container storage is not accessible by unprivileged users\n   (in test file test/system/400-unprivileged-access.bats, line 74)\n     `find $GRAPH_ROOT $RUN_ROOT \\! -type l -perm -o+w -print | while read i; do' failed\n   $ /home/esm/src/atomic/2018-02.podman/libpod/bin/podman rm --all --force\n   $ /home/esm/src/atomic/2018-02.podman/libpod/bin/podman images --all --format {{.Repository}}:{{.Tag}} {{.ID}}\n   quay.io/libpod/alpine_labels:latest   4fab981df737\n   $ /home/esm/src/atomic/2018-02.podman/libpod/bin/podman run --name c_uidmap --uidmap 0:10000:10000 quay.io/libpod/alpine_labels:latest true\n   $ /home/esm/src/atomic/2018-02.podman/libpod/bin/podman run --name c_uidmap_v --uidmap 0:10000:10000 -v foo:/foo quay.io/libpod/alpine_labels:latest true\n   $ /home/esm/src/atomic/2018-02.podman/libpod/bin/podman run --name c_mount quay.io/libpod/alpine_labels:latest sh -c echo hi > /myfile;mkdir -p /mydir/mysubdir; chmod 777 /myfile /mydir /mydir/mysubdir\n   $ /home/esm/src/atomic/2018-02.podman/libpod/bin/podman mount c_mount\n   /var/lib/containers/storage/overlay/1440f9d7c7b5a8fc4bb1f4d699ef156960f89980663357b2481258ca7430b3d1/merged\n   $ /home/esm/src/atomic/2018-02.podman/libpod/bin/podman info --format {{.store.GraphRoot}}\n   /var/lib/containers/storage\n   $ /home/esm/src/atomic/2018-02.podman/libpod/bin/podman info --format {{.store.RunRoot}}\n   /var/run/containers/storage\n   chmod: changing permissions of '/var/lib/containers/storage/overlay/71071cf29c423da6351954badf4aae660aa3ca1ebcdb8fedce8fda7c659b4599/merged': Operation not permitted\n   chmod: changing permissions of '/var/lib/containers/storage/overlay/71071cf29c423da6351954badf4aae660aa3ca1ebcdb8fedce8fda7c659b4599/merged/tmp': Operation not permitted\n   #/vvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv\n   #| FAIL: Able to run 'ls /var/lib/containers/storage/overlay/71071cf29c423da6351954badf4aae660aa3ca1ebcdb8fedce8fda7c659b4599/merged/tmp' without error\n   #\\^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n```\n@giuseppe any suggestions on how to fix it"
+        },
+        {
+            "user": "giuseppe",
+            "body": "> This commit seems to have broken the new unbrivileged-access BATS test:\n\nI think it is related to the new tests that are using a mapping not correct for the unprivileged access tests"
+        },
+        {
+            "user": "giuseppe",
+            "body": "I am surprised how that could happen though, directories under `/var/lib/containers/storage/overlay` have mode `drwx------` that blocks completely access to other users"
+        },
+        {
+            "user": "edsantiago",
+            "body": "Not any more. Immediately after this command, `/var/lib/containers/storage` becomes 711:\n```\n# ./bin/podman run --name c_uidmap   --uidmap 0:10000:10000 alpine_labels true \n```\nFurthermore, I am now stuck in a system where I can no longer remove that directory:\n```\n# rm -rf /var/lib/containers/storage\nrm: cannot remove '/var/lib/containers/storage/overlay/0edc5e399bf04596f445dfaf7073d15699e2327dc45e1f62dca43638fc4095b8/merged': Device or resource busy\n```\n(podman rm -a, podman ps -a, podman images -a, all show nothing).\n\nmaster @ c1e2b583c82261639d6927c9b2a4f19d87a166a7. I don't have time this evening to do a full investigateion but wanted to leave you with something you can check out tomorrow morning."
+        },
+        {
+            "user": "giuseppe",
+            "body": "how do directories under `/var/lib/containers/storage/overlay` look like?\n\n```\n$ sudo ls -l /var/lib/containers/storage/overlay\ntotal 16\ndrwx------. 5 root root  4096 Apr 15 23:39 3f72eff9ab5617186824e3a431489b5bb70fadc3004734b3c66008da3f3f0724\ndrwx------. 6 root root  4096 Apr 15 23:26 a464c54f93a9e88fc1d33df1e0e39cca427d60145a360962e8f19a1dbf900da9\ndrwx------. 7  100 users 4096 Apr 15 23:11 df64d3292fd6194b7865d7326af5255db6d81e9df29f48adde61a918fbd8c332\ndrwx------. 2 root root  4096 Apr 16 09:39 l\n```\n\nThey must have mode `drwx------`."
+        },
+        {
+            "user": "edsantiago",
+            "body": "Sorry for the late reply. I can no longer reproduce this on my system, and OSP10 is down so I can't get a new virt for testing. The only difference on my system is that I'm still stuck with the undeletable directory mentioned above, so instead of `rm -rf /var/lib/containers/storage` I've done `mv ...{,.DELETE-ME}`. There is otherwise no difference: no reboot, no dnf-upgrade. I've tried everything I can to reproduce."
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 2947
+        }
+    ]
+}

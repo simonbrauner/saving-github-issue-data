@@ -1,0 +1,229 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 1911,
+    "type": "issue",
+    "title": "feature: Per-image pull locking for bandwidth efficiency",
+    "state": "open",
+    "labels": [
+        "kind/feature",
+        "planning"
+    ],
+    "user": "wking",
+    "body": "[//]: # **kind feature**\n\n**Description**\n\nIf there is an existing libpod pull in flight for a remote image, new pulls of that image should block until the in-flight pull completes (it may error out) to avoid shipping the same bits over the network twice.\n\n**Steps to reproduce the issue:**\n\n1. In one terminal:\n\n    ```console\n    $ podman pull docker.io/library/centos:6\n    Trying to pull docker.io/library/centos:6...Getting image source signatures\n    Copying blob sha256:9bfcefca2b8da38bbfb8b6178a75f05245688b83fda45578bcdf51f56e4a5a9e\n     66.60 MB / 66.60 MB [=====================================================] 13s\n    Copying config sha256:0cbf37812bff083eb2325468c10aaf82011527c049d66106c3c74298ed239aaf\n     2.60 KB / 2.60 KB [========================================================] 0s\n    Writing manifest to image destination\n    Storing signatures\n    0cbf37812bff083eb2325468c10aaf82011527c049d66106c3c74298ed239aaf\n    ```\n\n2. In another terminal, launched once blob sha256:9bfce... is maybe 10MB into it's pull:\n\n    ```console\n    $ podman run --rm docker.io/library/centos:6 echo hi\n    Trying to pull docker.io/library/centos:6...Getting image source signatures\n    Copying blob sha256:9bfcefca2b8da38bbfb8b6178a75f05245688b83fda45578bcdf51f56e4a5a9e\n     66.60 MB / 66.60 MB [======================================================] 8s\n    Copying config sha256:0cbf37812bff083eb2325468c10aaf82011527c049d66106c3c74298ed239aaf\n     2.60 KB / 2.60 KB [========================================================] 0s\n    Writing manifest to image destination\n    Storing signatures\n    hi\n    ```\n\n**Describe the results you received:**\n\nAs you can see from the console output, both commands seem to have pulled both layers in parallel.\n\n**Describe the results you expected:**\n\nI'd rather have seen the second command print a message about blocking on an existing pull, idle while that pull went through, and then run the command using the blobs pushed into local storage by that first pull.\n\n**Additional information you deem important (e.g. issue happens only occasionally):**\n\nMy end goal is to front-load image pulls for a script that uses several images.  Something like:\n\n```sh\npodman pull image2 image3 &\npodman run image1 some stuff\npodman run image2 other stuff\nwait\npodman run image3 more stuff\n```\n\nThat way, `image2` and `image3` can be trickling in over a slow network while I'm spending CPU time running the `image1` container, etc.\n\nI don't really care about locking parallel manifest pulls, etc., because those are small; this just has to be for layers (possibly only for layers over a given size threshold).  Of course, I'm fine with manifest/config locking if it's easier to just drop the same locking logic onto all CAS blobs.  It doesn't have to be coordinated across multiple layers either.  If process 1 ends up pulling layer 1, and then process 2 comes along, sees the lock on layer 1, and decides to pull layer 2 while it's waiting for the lock to lift on layer 1, that's fine.  Process 1 might find layer 2 locked when it gets around to it, and they may end up leapfrogging through the layer stack.  That means individual layers might come down a bit more slowly, which would have a negative impact on time-to-launch if you were limited by unpack-time.  But I imagine most cases will be limited by network bandwidth, so unpacking-time delays wouldn't be a big deal.\n\nLocking would allow for a denial of service attack by a user on the same machine with access to the lock you'd use, because they could acquire the lock for a particular layer and then idle without actually working to pull that layer down.  I'm not concerned about that in my own usage, but we might want the locks to be soft, and have the caller be able to shove in and start pulling in parallel anyway if they get tired of waiting (you could scale the wait time by blob size, after guessing at some reasonable bandwidth value?).\n\nAnd I realize that this is probably mostly an issue for one of libpod's dependencies, but I haven't spend the time to track down this one, and there didn't seem to be an existing placeholder issue in this repo.  Please link me to the upstream issue if this already has a placeholder there.\n\n**Output of `podman version`:**\n\n```console\n$ podman version\nVersion:       0.11.2-dev\nGo Version:    go1.10.3\nGit Commit:    \"6df7409cb5a41c710164c42ed35e33b28f3f7214\"\nBuilt:         Fri Nov 30 21:32:33 2018\nOS/Arch:       linux/amd64\n```\n\n**Output of `podman info`:**\n\n```console\n$ podman info\nhost:\n  BuildahVersion: 1.5-dev\n  Conmon:\n    package: podman-0.10.1.3-1.gitdb08685.el7.x86_64\n    path: /usr/libexec/podman/conmon\n    version: 'conmon version 1.12.0-dev, commit: 0e7abf050824203d775a20c26ed14f716f7d1aa7-dirty'\n  Distribution:\n    distribution: '\"rhel\"'\n    version: \"7.5\"\n  MemFree: 9789857792\n  MemTotal: 16289890304\n  OCIRuntime:\n    package: runc-1.0.0-52.dev.git70ca035.el7_5.x86_64\n    path: /usr/bin/runc\n    version: 'runc version spec: 1.0.0'\n  SwapFree: 6291070976\n  SwapTotal: 8254386176\n  arch: amd64\n  cpus: 8\n  hostname: trking.remote.csb\n  kernel: 3.10.0-891.el7.x86_64\n  os: linux\n  rootless: false\n  uptime: 986h 7m 57.59s (Approximately 41.08 days)\ninsecure registries:\n  registries: []\nregistries:\n  registries:\n  - registry.access.redhat.com\nstore:\n  ContainerStore:\n    number: 10\n  GraphDriverName: overlay\n  GraphOptions:\n  - overlay.override_kernel_check=true\n  GraphRoot: /var/lib/containers/storage\n  GraphStatus:\n    Backing Filesystem: extfs\n    Native Overlay Diff: \"true\"\n    Supports d_type: \"true\"\n  ImageStore:\n    number: 12\n  RunRoot: /var/run/containers/storage\n```\n",
+    "comments": [
+        {
+            "user": "rhatdan",
+            "body": "@mtrmac PTAL\nI would figure this would have to be in containers/image since doing this for just podman would allow conflict on CRI-O, Skopeo and Buildah."
+        },
+        {
+            "user": "mtrmac",
+            "body": "Well, this is where \\#NOBIGFATDAEMONS makes things more difficult :)\n\n- We would need some kind of inter-process locking mechanism, like the one being built for container state — but with a much larger namespace (blob digests), so we can’t just use a preallocated dense integer table. Maybe that involves a separate, separately-locked, map from digests to lock numbers, or something like that (i.e. it is doable in principle, but better implementation ideas would be nice). That locking mechanism _probably_ should live also, or be very close to, containers/storage, as the data structure being actually locked.\n- It’s not _quite_ obvious which digest to lock on:\n  - We can lock on the compressed digest, but that won’t prevent concurrent pulls of differently-compressed identical layers.\n  - We can lock on the uncompressed guest _if it is known_ (e.g. from the blob info cache), but that won’t always be the case\n  - Locking both is more risky WRT race conditions and the like.\n  I guess the compressed digest would be a starting point.\n- As far as two pulls “racing each other”, that would require layer copy parallelization; right now the code is sequential, so blocking on a lock would just block the pull until the other process finishes.  (Sure, that’s still an improvement because the data is only downloaded and uncompressed once.)"
+        },
+        {
+            "user": "wking",
+            "body": "> Maybe that involves a separate, separately-locked, map from digests to lock numbers, or something like that...\n\nI was imagining flocks on `${PATH_TO_EVENTUAL_BLOB_FILE}.lock` or some such.  While the lock space is large, there will probably never be more than a few dozen acquired at any one time."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@vrothberg Do we have this now?"
+        },
+        {
+            "user": "vrothberg",
+            "body": "There was a very similar discussion recently over at https://github.com/containers/libpod/issues/2551.\n\n@rhatdan, if you want this to work, we can work on that but we need to allocate a bigger chunk of time."
+        },
+        {
+            "user": "rhatdan",
+            "body": "Anything to improve performance, I am always interested in"
+        },
+        {
+            "user": "vrothberg",
+            "body": "I can start looking into this in the next sprint :+1:"
+        },
+        {
+            "user": "rhatdan",
+            "body": "@vrothberg Could you update this issue with your progress."
+        },
+        {
+            "user": "vrothberg",
+            "body": "Sure. The blob-locking mechanism in containers/storage is done. Each blob, when being copied into containers-storage, will receive a dedicated lock file in the storage driver's tmp directory. That's the central mechanism for serialization and synchronization.\n\nThe progress-bar library received some backported features we needed to update the bars on the fly, and we're already making use of them.\n\nCurrently, we are working on rewriting the backend code for containers-storage a bit in order write the layer to storage in `ImageDestination.PutBlob(...)`. Otherwise, the code is subject to deadlocks (ABBA). The CI's for this rewrite are now green, so we can reuse this work for the copy detection.\n\nNote that I lost at least one working week cleaning up breaking builds and tests (unrelated to those PRs) when trying to test the PRs in buildah, libpod and cri-o (and had to do this multiple times)."
+        },
+        {
+            "user": "baude",
+            "body": "what is the latest on this @vrothberg "
+        },
+        {
+            "user": "vrothberg",
+            "body": "Plenty of tears and sweat over here: https://github.com/containers/image/pull/611\n\nIt's working and CI is green but it turned into something really big, so I expect reviewing to still take a while."
+        },
+        {
+            "user": "baude",
+            "body": "going to close, reopen if needed"
+        },
+        {
+            "user": "vrothberg",
+            "body": "Reponing as it's still valid and the PR a c/image has stalled."
+        },
+        {
+            "user": "vrothberg",
+            "body": "@baude @rhatdan if that's still a desired feature, we should revive https://github.com/containers/image/pull/611 and prioritize it or get it on our radar again."
+        },
+        {
+            "user": "rhatdan",
+            "body": "Yes I think this is something we should fix."
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "This issue had no activity for 30 days. In the absence of activity or the \"do-not-close\" label, the issue will be automatically closed within 7 days."
+        },
+        {
+            "user": "vrothberg",
+            "body": "Still something desirable but no progress. I'll add the label."
+        },
+        {
+            "user": "rhatdan",
+            "body": "Ping to bring this back to peoples consciousness.\n"
+        },
+        {
+            "user": "vrothberg",
+            "body": "Needs a priority :^)"
+        },
+        {
+            "user": "wking",
+            "body": "cri-o/cri-o#3409 fixed this issue one level up, for folks who are coming at this down that pipe.  As mentioned there, there will be continued work on getting a fix down lower in the stack for other containers/image consumers, but fixing at those levels is more complicated."
+        },
+        {
+            "user": "rhatdan",
+            "body": "I think this should start moving up the priority list, now that APIv2 has settled down."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@mtrmac PTAL"
+        },
+        {
+            "user": "vrothberg",
+            "body": "> I think this should start moving up the priority list, now that APIv2 has settled down.\n\nSomething for planning. The work required to get that done is comparatively high. We've been working on it last year for a while but priorities changed."
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "rhatdan",
+            "body": "This is still necessary but still getting kicked down the road."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@umohnani8 @baude We need to bump this up the priority list."
+        },
+        {
+            "user": "vrothberg",
+            "body": "> @umohnani8 @baude We need to bump this up the priority list.\n\n:+1: I'd love to get this done.   We talked about this issue during the last team meeting.   There are two parts to get it done:\n\n1. We need to commit layers to the storage as soon as we can.  Currently, we first download all layers in parallel but commit only once all are downloaded. Committing happens in sequence.\n2. Once 1) is done, we have all things in place to detect which layers are currently being pulled (and committed) without running into ABBA locks.\n\nWhile 1) is a technical requirement for 2) it has some other nice side-effects, namely the pulling is more robust.  Assuming the process gets killed mid pulling or when hitting transient network errors, we do not start from scratch again as some layers may already be committed.  Another nice improvement of it is that we squeezed the last remaining bits of performance in c/image.\n\n"
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "rhatdan",
+            "body": "Another month, lets talk about this at planning this week"
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "vrothberg",
+            "body": "We want to tackle this item this year.  We broke it into separate pieces and I am positive we'll get it done."
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@vrothberg did we get some of this with  your containers/image fixes?"
+        },
+        {
+            "user": "vrothberg",
+            "body": "> @vrothberg did we get some of this with your containers/image fixes?\n\nNo, we got the first part addressed. The blob-copy detection is not yet done."
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "rhatdan",
+            "body": "Still open."
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "vrothberg",
+            "body": "Still desired but we need to plan for this work since it'll consume some time."
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "Nukesor",
+            "body": "Hey, thanks for your work on this issue. Can we get an update on the current progress?\n\nWe're running into this issue on a self-hosted Gitlab-runner instance with a pre-baked development image.\nThat image is pretty big (~7GB) and once a new pipeline starts, all 20 jobs try to pull the same image at the same time, completely congesting the link.\n\nSince there's no real way of communicating between different jobs in gitlab runner, a manual lock is sadly no solution for us."
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 2741
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 2551
+        },
+        {
+            "organization": "containers",
+            "repository": "image",
+            "number": 607
+        },
+        {
+            "organization": "openshift",
+            "repository": "installer",
+            "number": 2234
+        },
+        {
+            "organization": "hashicorp",
+            "repository": "nomad-driver-podman",
+            "number": 159
+        },
+        {
+            "organization": "containers",
+            "repository": "image",
+            "number": 2798
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 25862
+        }
+    ]
+}

@@ -1,0 +1,52 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 28491,
+    "type": "pull_request",
+    "title": "wsl: add host DNS fallback to user-mode networking resolv.conf",
+    "state": "open",
+    "labels": [
+        "machine"
+    ],
+    "user": "VedantMadane",
+    "body": "## Problem\n\nWhen user-mode networking is enabled on a WSL-backed podman machine, `createUserModeResolvConf` writes a static `/etc/resolv.conf` containing only `nameserver 192.168.127.1` (the gvproxy/gvforwarder address). The `podman-net-usermode` distro keeps WSL's auto-generated resolv.conf and works fine, but the main machine distro has `generateResolvConf = false` in its `wsl.conf`, so its resolver never updates.\n\nWhen the host connects to a VPN (or any event that changes the host DNS), gvproxy may not forward queries to the new DNS servers. The main distro loses DNS while `podman-net-usermode` continues working — exactly what #28392 describes.\n\nThe workaround found by users is copying `/etc/resolv.conf` from the `podman-net-usermode` distro into the main distro. That works because the networking distro has the host's real DNS servers.\n\n## Fix\n\nAfter writing `nameserver 192.168.127.1` to `/etc/resolv.conf`, also append the host's nameservers from `/mnt/wsl/resolv.conf` (the WSL-shared resolver file). The Linux resolver tries nameservers in order, so:\n\n1. gvproxy (192.168.127.1) remains the primary DNS path — no change for the happy path\n2. If gvproxy is unreachable (VPN, network change, etc.), the resolver falls back to the host DNS\n3. In both NAT and mirrored WSL modes, `/mnt/wsl/resolv.conf` is maintained by WSL and reflects current host DNS\n\nIf `/mnt/wsl/resolv.conf` doesn't exist, the behavior is identical to before (only 192.168.127.1).\n\n## Changes\n\n- **declares.go**: New `createResolvScript` constant — a small bash script that writes the user-mode nameserver then appends host nameservers from `/mnt/wsl/resolv.conf` as fallback.\n- **usermodenet.go**: `createUserModeResolvConf` now pipes the script to bash instead of piping static content. Also fixes a minor style nit (`return err` → `return nil` after the nil-check).\n\n## Testing\n\nTested the script logic on a local WSL setup (Windows 11, WSL 2, mirrored networking). Verified that the resulting `/etc/resolv.conf` contains both the 192.168.127.1 entry and the host DNS servers. With VPN connected, DNS resolves through the fallback servers when gvproxy is unavailable.\n\nFixes: #28392\n\nSigned-off-by: Vedant Madane <vedantmadane@gmail.com>",
+    "comments": [
+        {
+            "user": "packit-as-a-service[bot]",
+            "body": "[NON-BLOCKING] Packit jobs failed. @containers/packit-build please check. Everyone else, feel free to ignore."
+        },
+        {
+            "user": "lstocchi",
+            "body": "@VedantMadane if you use an older version of gvproxy (like https://github.com/containers/gvisor-tap-vsock/releases/tag/v0.8.7 ) do you still face the same issue? There could be a regression there"
+        },
+        {
+            "user": "VedantMadane",
+            "body": "Thanks @lstocchi. I'll test with gvproxy v0.8.7 to see if the issue persists and report back. If it's a regression there, I'll update the PR with the findings."
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this PR had no activity for 30 days."
+        },
+        {
+            "user": "VedantMadane",
+            "body": "@snejus @lstocchi Tested this on a podman 5.8.2 machine with user-mode networking. Injected the v0.8.7 gvproxy binary into both the main distro and the podman-net-usermode sidecar. Forced the pre-PR resolv.conf with just `nameserver 192.168.127.1` . When I flipped the host Wi-Fi adapter DNS to 8.8.8.8, containers forced with `--dns 192.168.127.1` still timed out on nslookup. So the breakage looks like it happens even on 0.8.7. The host fallback in this PR should still help. Let me know if you want more details or a fresh machine run."
+        },
+        {
+            "user": "lstocchi",
+            "body": "@VedantMadane just tried to see if i could replicate it but it seems to work as expected. I also tried with mirrored mode.\nWith the broken gvproxy 0.8.8:\n- i start the vm, ssh in it, ping/nslookup work fine\n- i enable my corp vpn or tailscale, ping/nslookup fails with a time out\n\nWith gvproxy 0.8.9 it works fine without/with vpn\n\nI used gvproxy 0.8.9 as this is the new release which contains the fix for this kind of problems and it will be used by the next podman 5.8.3.\n\nHaving a new machine should not be required but if you can clean your env up and try with a new machine + gvproxy 0.8.9 it would be great. If you modified the podman-net-usermode sidecar also remove it so it get recreated. Let us know. Thanks!!"
+        },
+        {
+            "user": "Honny1",
+            "body": "PTAL @l0rd @lstocchi"
+        },
+        {
+            "user": "l0rd",
+            "body": "The root cause of the issue was a gvproxy problem and has been addressed in v0.8.9. I am unable to reproduce it with the latest podman (I have tested with Tailscale and podman v6 and v5.8.1).\n\n@VedantMadane thank you for your contribution, but I am afraid that's not necessary anymore.\n"
+        },
+        {
+            "user": "VedantMadane",
+            "body": "Thanks @l0rd (and @lstocchi for the 0.8.8 vs 0.8.9 repro earlier).\n\nAgreed that the shipping regression in 5.8.0–5.8.2 was on the gvproxy side (--listen-stdio not applied gvisor-tap-vsock#632 (https://github.com/containers/gvisor-tap-vsock/pull/632) / #28609 (https://github.com/containers/podman/issues/28609)), and that gvproxy v0.8.9 addresses that. That lines up with Podman v5.8.3+ and v6.0 pinning gvisor-tap-vsock v0.8.9 (whereas v5.8.1 / v5.8.2 still pin v0.8.8 in go.mod, so a stock 5.8.1 install would still carry the broken helper unless gvproxy was replaced out of band).\n\nOn necessity: this PR was never meant to fix gvproxy itself but only to add host nameservers from /mnt/wsl/resolv.conf as fallback when the machine distro is stuck on a static nameserver 192.168.127.1 with generateResolvConf = false. If maintainers are happy relying on gvproxy 0.8.9 alone for VPN/Tailscale, I’m fine closing this as superseded.\n\nOne narrow gap I’d like confirmed before we write off fallback DNS: on 2026-06-08 I still saw timeouts with gvproxy v0.8.7 injected and resolv.conf forced to only 192.168.127.1 after changing the host Wi‑Fi DNS (not only connecting VPN). If you’ve rechecked that host DNS change path on 0.8.9 with a clean machine + recreated podman-net-usermode sidecar and it holds, I’m good to close.\n\nWorth updating #28392 (https://github.com/containers/podman/issues/28392) to \"fixed in Podman >=5.8.3 / 6.0 via gvproxy v0.8.9\" so the tracker matches.\n\nThanks again for the retest."
+        }
+    ],
+    "cross_references": []
+}

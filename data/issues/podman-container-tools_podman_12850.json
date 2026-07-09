@@ -1,0 +1,206 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 12850,
+    "type": "issue",
+    "title": "Ordering of `--network` flags is disregarded",
+    "state": "open",
+    "labels": [
+        "kind/feature",
+        "network"
+    ],
+    "user": "dpward",
+    "body": "/kind bug\n\nWhen creating a container, multiple CNI networks can be connected to it, using this syntax (or alternatives):\n```\npodman container create --network=cni-podman2 --network=cni-podman3 --network=cni-podman1\n```\n\nHowever, the ordering is disregarded when [parsing the network flags](https://github.com/containers/podman/blob/v4.0.0-rc1/pkg/specgen/namespaces.go#L330-L445). This happens because it returns the network names as keys in an unordered map. So the networks are always added to the container in alphabetical order, i.e.\n- `eth0` will be created for `cni-podman1`\n- `eth1` will be created for `cni-podman2`\n- `eth2` will be created for `cni-podman3`\n\nThe expected behavior is that\n- `eth0` will be created for `cni-podman2`\n- `eth1` will be created for `cni-podman3`\n- `eth2` will be created for `cni-podman1`\n\nThe most obvious way to accomplish this is to add a fourth return value from `ParseNetworkFlags()`, which is a slice containing the network names in the order they are parsed. (However, there may be other solutions.)\n\ncc: @Luap99",
+    "comments": [
+        {
+            "user": "Luap99",
+            "body": "Is that actually an issue, there was never a guarantee that the interface name is consistent with the ordering of the network names. That this worked before is more of an implementation detail than a feature.\n\nI don't think we should fix this but if you really need predictable interface names you can use `--network net1:interface_name=eth0` and so on. "
+        },
+        {
+            "user": "dpward",
+            "body": "This has never worked, but I think we should fix this. It's possible to re-assign the interface names as you suggested, but it is still reasonable to expect that the interfaces are added to the container in the order given.\n\nDoes the solution I described seem like the best approach here? Rather than changing the existing types?"
+        },
+        {
+            "user": "Luap99",
+            "body": "You can already set the interface name in the `types.PerNetworkOptions` struct so you do not need to alter the function signature at all. But I still do not think we want this. What is your actual use case that would require this?"
+        },
+        {
+            "user": "dpward",
+            "body": "You can do that - but still if you don't, we would expect the interface ordering on the command line to be preserved. This affects the ifindex as well. (We are running routing software in containers.)\n\nCould you please be a bit more clear about why this is a bad idea, rather than something that simply is not implemented?\n\nGenerally speaking, we can infer from other command line options to `podman` that ordering matters. Notice the handling of `--env-file` and `--hooks-dir`."
+        },
+        {
+            "user": "Luap99",
+            "body": "It's not a bad idea I just don't think that guaranteeing this is worth the extra maintenance in the long run. The naming thing can be fixed easily and we could add a test to prevent regressions but this will not fix the ifindex. In the backend we use maps so if we loop over the map the ordering is not deterministic."
+        },
+        {
+            "user": "dpward",
+            "body": "It would be very useful to me. I've examined the backend implementation. All we would need to do is to have a slice containing the interface names in the correct order, and iterate over that to obtain the values from the map in the order we want.\n\nDoes that sound reasonable if I prepare a PR?"
+        },
+        {
+            "user": "Luap99",
+            "body": "Are you talking about only the naming or also the ifindex?\n\nIf you need the stable ifindex, what would be the correct order, interface names sorted ascending?\nI am not sure were you looked to implement this but if you do so you have to do it for both cni and netavark.\nWhat happens with podman network connect/disconnect?\nI still do not think the added complexity is worth the extra maintenance."
+        },
+        {
+            "user": "Luap99",
+            "body": "@mheon WDYT?"
+        },
+        {
+            "user": "dpward",
+            "body": "I'm talking about just adding the interfaces in the order they appear on the command line:\n* If we don't specify the interface names, then the first network automatically becomes `eth0`, the second becomes `eth1`, etc.\n* As a side effect of this, the interface for the first network will have a lower ifindex than the interface for the second network, etc."
+        },
+        {
+            "user": "mheon",
+            "body": "Would the ability to manually set interface names (e.g. `--net cni-podman1:ifname=eth0 --net cni-podman2:ifname=eth1 ...`) be acceptable? I'm a little iffy on making ordering in the CLI a critical part of the interface, but I definitely see how consistent interface naming is useful"
+        },
+        {
+            "user": "dpward",
+            "body": "This wouldn't achieve the same effect (see previous comment).\n\nHere's one example. The `ip link` command displays interfaces in ifindex order. If we add interfaces to the container in the order they appear on the command line, then this command would list the interfaces that order. For containers with dozens of interfaces, this makes a difference. There is no way to achieve this using `--net cni-podman1:ifname=eth0`.\n\n(The exception here is `host-device` networks, which will preserve the existing ifindex from the host.)"
+        },
+        {
+            "user": "dpward",
+            "body": "As I mentioned earlier, we already make command line ordering critical for other things: `--env-file`, `--hooks-dir`, etc. So this wouldn't be new territory."
+        },
+        {
+            "user": "Luap99",
+            "body": "I am not sure how you want to fix this but it is not possible to keep the cli order in the backend since it is stored as a map. You could sort by the interface name but this would still not match the cli ordering if I would use `--network net1:interface_name=eth1 --network net2:interface_name=eth0`.\n\nJust the naming change is simple if that is enough for you."
+        },
+        {
+            "user": "mheon",
+            "body": "I suppose we could automatically add `interface_name` in order when we first parse into the maps (if it's not explicitly set)"
+        },
+        {
+            "user": "Luap99",
+            "body": "@mheon Yes that is easy but he also wants the ifindex to be in the same order and this depends on the order in which the interfaces are created"
+        },
+        {
+            "user": "mheon",
+            "body": "Ahh. Yeah, that would be more difficult."
+        },
+        {
+            "user": "dpward",
+            "body": "In the [libpod API](https://docs.podman.io/en/latest/_static/api.html#operation/ContainerCreateLibpod), we already have the `cni_networks` attribute, which is an ordered list of network names to be used in the container. If we specify that, then we can add the networks in that order.\n\nThe documentation says that the new `Networks` attribute is supposed to be used in favor of that, although `cni_networks` remains for compatibility. I'm actually a bit surprised we wound up with both `Networks` and `network_options` here as the result: those are both maps, where the key is the network name, and the value contains options specific to that network. It seems like it would have made more sense to use `network_options` to carry the attributes found in `Networks`; or to provide a new type that is designed to replace `network_options` and not `cni_networks`. (I realize I haven't been following the development discussions here)"
+        },
+        {
+            "user": "Luap99",
+            "body": "The API level doesn't matter here, we are talking about the backend. It is stored as map in the db so there is no way to keep the order. We would need to change the types and db to make this work which is not worth the effort also podman 4.0 is about to be released very soon so there is no time to change this.\n\n`cni_networks` is for backwards compatibility only\n`network_options` is only used for slirp4netns at the moment, I could have used that for the networks and there is no particular reason why I didn't (maybe that would have made more sense in hindsight I don't know)\n\nNote that just looking at `ip link` output is not an argument for me. We can make the interface naming change but the ifindex things is not a simple as you think."
+        },
+        {
+            "user": "dpward",
+            "body": "I realize it's a bit more involved than at first look, but I'd still like to figure out what a workable solution would be here looking ahead to future releases, so that we can add interfaces in command line order.\n\nTo provide another example, let's say I have two `host-device` networks. If attaching the first one fails, then podman won't attempt to attach the second. When these networks are returned to the host, they don't have the same configuration they had originally. Having determinism in the order that interfaces are added to the container would again be useful here. Just renaming the interfaces after the fact overlooks these kinds of details that may matter in certain cases."
+        },
+        {
+            "user": "daiaji",
+            "body": "This should be helpful for using soft routing in containers."
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@Luap99 Is this still an issue?"
+        },
+        {
+            "user": "Luap99",
+            "body": "Yes"
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@Luap99 What do you think about doing something like the following patch and retaining the order that the user added the objects.\n\n[order.patch.txt](https://github.com/containers/podman/files/8350021/order.patch.txt)\n"
+        },
+        {
+            "user": "Luap99",
+            "body": "I am not a huge fan of adding a new field for this, this will everything more complicated, this can be set by api users so we would need to check for invalid user input.\nIMO if we want to make it deterministic we should sort by the interface name, then we can apply the names in the frontent in the order which --network was given. But adding the names in the frontent would also conflict with https://github.com/containers/podman/issues/13174"
+        },
+        {
+            "user": "rhatdan",
+            "body": "Let discuss this on Monday with @mheon at standup."
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@Luap99 @mheon We never followed up on this.  What do you want to do with this one?"
+        },
+        {
+            "user": "mheon",
+            "body": "I'm OK with fixing but IMO this is low priority. Exact way to implement still requires some discussion."
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "rhatdan",
+            "body": "Since this was low priority and no one ever acted on it, I am going to close.  Reopen if you want to work on it."
+        },
+        {
+            "user": "dpward",
+            "body": "@rhatdan Please keep this open. I still very much have a need for this.\nMy organization has active support agreements from Red Hat, if we need to coordinate this through our TAM."
+        },
+        {
+            "user": "Luap99",
+            "body": "I agree that is a valid feature request, it is just that work for it seems rather high.\nIf you have support agreements then please use them."
+        },
+        {
+            "user": "livelace",
+            "body": "it affects my setup, i need specific network interfaces be placed into specific bridges for multus' proper network mapping. i was confident that `--network` arg is ordered."
+        },
+        {
+            "user": "ashb",
+            "body": "A case where this has just caused me problems.\n\nI have defined a network using macvlan driver with the dhcp IPAM plugin/driver, and when I have a multi-homed container (one network is macvlan, the other is a \"normal\" bridge internal network) _sometimes_ the pod-to-pod DNS works, other times it doesnt.\n\n\"working\":\n\n```\n# cat /etc/resolv.conf\nsearch dns.podman\nnameserver 10.89.1.1\nnameserver 192.168.152.17\nnameserver 192.168.152.3\n```\n\n\"broken\":\n\n```\n# cat /etc/resolv.conf\nsearch dns.podman\nnameserver 192.168.152.17\nnameserver 192.168.152.3\nnameserver 10.89.1.1\n```"
+        },
+        {
+            "user": "Luap99",
+            "body": "This is planned for 6.0, https://github.com/containers/podman/blob/main/contrib/design-docs/podman6hld.md#preserve-network-order\ninternal jira card https://issues.redhat.com/browse/RUN-3573 to track progress\n\nI already patched netavark to allow ordered setup in https://github.com/containers/netavark/pull/1369"
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 13153
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 14262
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 23993
+        },
+        {
+            "organization": "containers",
+            "repository": "netavark",
+            "number": 1146
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 25865
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 26433
+        },
+        {
+            "organization": "vonrobak",
+            "repository": "fedora-homelab-containers",
+            "number": 77
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 28172
+        }
+    ]
+}

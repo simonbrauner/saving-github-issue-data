@@ -1,0 +1,258 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 17305,
+    "type": "pull_request",
+    "title": "Replace Ubuntu -> Debian SID",
+    "state": "closed",
+    "labels": [
+        "lgtm",
+        "approved",
+        "release-note-none",
+        "locked - please file new issue/PR"
+    ],
+    "user": "cevich",
+    "body": "\nRef: https://github.com/containers/automation_images/pull/250\n\n#### Does this PR introduce a user-facing change?\n\n<!--\nIf no, just write `None` in the release-note block below. If yes, a release note\nis required: Enter your extended release note in the block below. If the PR\nrequires additional action from users switching to the new release, include the\nstring \"action required\".\n\nFor more information on release notes, please follow the Kubernetes model:\nhttps://git.k8s.io/community/contributors/guide/release-notes.md\n-->\n\n```release-note\nNone\n```\n",
+    "comments": [
+        {
+            "user": "cevich",
+            "body": "@edsantiago ping - any chance you've seen [this or a similar error (log)](https://cirrus-ci.com/task/4689002125590528) before:\n\n```\n...cut...\n+ make completions  # ./contrib/cirrus/postbuild.sh:25 in main()\n...cut...\n# key = shell, value = completion filename\ndeclare -A outfiles=([bash]=%s [zsh]=_%s [fish]=%s.fish [powershell]=%s.ps1);\\\nfor shell in ${!outfiles[*]}; do \\\n    for remote in \"\" \"-remote\"; do \\\n\tpodman=\"podman$remote\"; \\\n\toutfile=$(printf \"completions/$shell/${outfiles[$shell]}\" $podman); \\\n\t./bin/$podman completion $shell >| $outfile; \\\n    done;\\\ndone\n/bin/sh: 1: Syntax error: \"(\" unexpected\nmake: *** [Makefile:446: completions] Error 2\n\nExit status: 2\n```\n\n***NOTE***: This is on a brand-new Debian SID VM, it seems highly-likely I've screwed something up in the setup."
+        },
+        {
+            "user": "edsantiago",
+            "body": "I was _just_ looking at this PR. The `/bin/sh` concerns me: it really should be `bash`. Can you think of somewhere that is using `sh` instead of `bash`?\n\nAlso, Cirrus or VMs are acting *weird* today. [example](https://api.cirrus-ci.com/v1/task/5997791034474496/logs/df.log)"
+        },
+        {
+            "user": "cevich",
+            "body": "> Can you think of somewhere that is using sh instead of bash?\n\nWhen this was ubuntu, it used something called \"dash\" which it went to great lengths to pass-off as \"bash\".  I just double-checked, and this is something I removed from the debian setup.  Maybe this is to blame?\n\n> Also, Cirrus or VMs are acting weird today.\n\nOkay, that's proper **W-3-1-R-|)**.  Like a git-clone silently failed to obtain all the files....oh! [Look at the WebUI for that task.](https://cirrus-ci.com/task/5997791034474496) it show \"skipped\" for \"clone\", \"setup\" and \"main\".  That can't be right.  Ahh, at the top it says \"PR was closed!\"  So maybe this was simply a task being canceled at a strange point?"
+        },
+        {
+            "user": "cevich",
+            "body": "Maybe dash is it.  I looked in a \"rerun with terminal\" and found:\n\n```\nroot@cirrus-task-6633121018281984:/# echo $CIRRUS_SHELL\n/bin/bash\nroot@cirrus-task-6633121018281984:/# ls -la /bin/sh\nlrwxrwxrwx 1 root root 4 Jan  5 13:20 /bin/sh -> dash\nroot@cirrus-task-6633121018281984:/# \n```\n\nOn Fedora, /bin/sh -> bash, so perhaps the Makefile is using \"sh\" but treating it as if it's really bash?"
+        },
+        {
+            "user": "cevich",
+            "body": "Ahh, [yup make defaults to /bin/sh if $SHELL is unset](https://www.gnu.org/software/make/manual/html_node/Choosing-the-Shell.html).  So that's a simple fix I think - define SHELL in our Makefile."
+        },
+        {
+            "user": "cevich",
+            "body": "Well that's good news, [only 12 test failures and the problem/solution is rather obvious](https://api.cirrus-ci.com/v1/artifact/task/6202657484832768/html/int-podman-debian-12-root-host.log.html#t--podman-Netavark-network-with-multiple-aliases--1) (log):\n\n`msg=\"aardvark-dns binary not found, container dns will not be enabled\"`\n\nI checked the build logs, and indeed the podman package only brings in netavark, not aardvark-dns."
+        },
+        {
+            "user": "cevich",
+            "body": "@siretart ping - On SID, it seems installing the `podman` package doesn't bring in all necessary dependencies.  Debian SID [CI VM Image build-log](https://cirrus-ci.com/task/5019989619507200) shows it only installs netavark and not aardvark-dns.  [The script that sets up the image](https://github.com/containers/automation_images/pull/250/files#diff-727e9289c12e01646bb49f30cb044cfcdf752a05d2137b49235a1a7bcd77da8d) mentions 'podman' and assumes that will haul in everything necessary.  Is this an incorrect assumption for Debian?\n\nThe `netavark` and `aardvark-dns` packages should be basically locked-together-at-the-hip together.  They should always be installed together, with matching versions.  Podman won't work without both, or the alternative `containernetworking-plugins`.\n\nCan you help fix this or is there some packaging policy I'm misunderstanding for Debian?"
+        },
+        {
+            "user": "siretart",
+            "body": "@cevich  I believe you found and oversight on my part, I need to add a package relationship from netavark to aardvark-dns.\n\nCan you please help me decide whether this should be an absolute, unbreakable dependency (meaning, you can't install netavark witout aardvark-dns) or wither there are some situation where instaling netavark makes sense not having aardvark-dns installed (in which case, the relationship should be a recommends)?"
+        },
+        {
+            "user": "cevich",
+            "body": "> Can you please help me decide\n\nHappy to, with the caveat that I'm not a packaging-guy.  IMHO, they should be locked-at-the-hip together.  Their versions need to 100% match and they should always be installed/uninstalled/upgraded together.  They can safely coexist with containernetworking-plugins, but that's a legacy solution.  For new installations, nv/av should be preferred unless the user explicitly wants containernetworking-plugins.\n\nDoes that help?\n\n@lsm5 or @Luap99 anything to add?"
+        },
+        {
+            "user": "Luap99",
+            "body": "@siretart \nYou should be able to install netavark without aardvark-dns, aardvark is only needed when a users wants dns for their container names. Almost all people want this so it should be installed by default, I assume this maps to an recommends in packaging terms."
+        },
+        {
+            "user": "cevich",
+            "body": "@giuseppe got a strange one here:  The new `debian-12` VM is using CgroupsV1 and runc.  The `podman play kube with disabled cgroup` test behaves counter-intuitively (to me at least).  The results are:\n\n* [int podman debian-12 root host](https://api.cirrus-ci.com/v1/artifact/task/4559945404776448/html/int-podman-debian-12-root-host.log.html#t--podman-play-kube-with-disabled-cgroup--1) **FAILS:** `Error: requested OCI runtime runc is not compatible with NoCgroups: invalid argument`\n* [int podman debian-12 rootless host](https://api.cirrus-ci.com/v1/artifact/task/5404370334908416/html/int-podman-debian-12-rootless-host.log.html#t--podman-play-kube-with-disabled-cgroup--1) **FAILS:** /same error/\n* [int remote debian-12 root host](https://api.cirrus-ci.com/v1/artifact/task/6248795265040384/html/int-remote-debian-12-root-host.log.html#t--podman-play-kube-with-disabled-cgroup--1) **PASSES**"
+        },
+        {
+            "user": "cevich",
+            "body": "@containers/podman-maintainers PTAL this odd failure, seems (to me) like it shouldn't have anything to do with runc-vs-crun.  Regardless, it reproduces [on `int podman debian-12 root host`](https://api.cirrus-ci.com/v1/artifact/task/4559945404776448/html/int-podman-debian-12-root-host.log.html#t--podman-uidmapping-and-gidmapping-with-an-idmapped-volume--1) and [`int remote debian-12 root host` too](https://api.cirrus-ci.com/v1/artifact/task/6248795265040384/html/int-remote-debian-12-root-host.log.html#t--podman-uidmapping-and-gidmapping-with-an-idmapped-volume--1):\n\nEdit: Oh, also fails in [the rootless debian test](https://api.cirrus-ci.com/v1/artifact/task/5404370334908416/html/int-podman-debian-12-rootless-host.log.html#t--podman-uidmapping-and-gidmapping-with-an-idmapped-volume--1).\n\n```\npodman uidmapping and gidmapping with an idmapped volume\n...cut...\n         # podman [options] run --uidmap=0:1:500 --gidmap=0:200:5000 -v my-foo-volume:/foo:Z,idmap alpine stat -c #%u:%g# /foo\n         #65534:65534#\n...cut...\n           Expected\n               <string>: #65534:65534#\n           to contain substring\n               <string>: #0:0#\n...cut...\n```\n\nAlso (bad): I don't see any documentation for using an `idmap` option under the `--volume` man page section.  It does show up for `--mount` so maybe the test code is wrong?"
+        },
+        {
+            "user": "edsantiago",
+            "body": "Package versions:\n```\nKernel:  6.1.0-3-cloud-amd64\nCgroups:  tmpfs\ndpkg-query: no packages found matching containers-common\ndpkg-query: no packages found matching cri-o-runc\nconmon-2.1.3+ds1-1-amd64\ncontainernetworking-plugins-1.1.1+ds1-3+b1-amd64\ncriu-3.17.1-2-amd64\ncrun-1.5+dfsg-1+b1-amd64\ngolang-2:1.19~1-amd64\nlibseccomp2-2.5.4-1+b3-amd64\npodman-4.3.1+ds1-5+b1-amd64\nrunc-1.1.4+ds1-1+b1-amd64\nskopeo-1.9.3+ds1-1-amd64\nslirp4netns-1.2.0-1-amd64\n```"
+        },
+        {
+            "user": "cevich",
+            "body": "Thanks Ed.  I smell on the winds of change: \"Upgrade runc\" :rofl: "
+        },
+        {
+            "user": "siretart",
+            "body": "> @siretart ping - On SID, it seems installing the podman package doesn't bring in all necessary dependencies. Debian SID [CI VM Image build-log](https://cirrus-ci.com/task/5019989619507200) shows it only installs netavark and not aardvark-dns. \n\nI've fixed this oversight in version [netavark_1.4.0-3](https://tracker.debian.org/news/1416926/accepted-netavark-140-3-source-into-unstable/), also cf. https://tracker.debian.org/netavark\n\nThanks for pinging me. If I miss a ping in the future, please file a bug in Debian."
+        },
+        {
+            "user": "cevich",
+            "body": "> Thanks for pinging me. If I miss a ping in the future, please file a bug in Debian.\n\nWill do, thanks for the quick fix and update."
+        },
+        {
+            "user": "cevich",
+            "body": "@edsantiago I could use some help examining (or some referrals for) the debian SID system-test results.  Esp. [the `sys podman debian-12 rootless host` generate systemd](https://api.cirrus-ci.com/v1/artifact/task/4612871817003008/html/sys-podman-debian-12-rootless-host.log.html) and quadlet tests.  Those in particular seemed to pass when run as root.\n\nThe `podman buildx - basic test` failure strikes me as possibly related to https://github.com/containers/podman/issues/17433 which also failed on a stat of volumes.\n\nFYI: I've got to rebuild the debian images to get the `systemd-container` package (provider of `machinectl`) installed, so there's going to be a delay before I can run these tests again.\n\nAlso in case it helps, the rerun-in-terminal button may be your best bet.  I'm having trouble with the `hack/get_ci_vm.sh` script on the Debian images for some unknown reason."
+        },
+        {
+            "user": "edsantiago",
+            "body": "```\nnot ok 514 podman kube --network\n...\nResource limits are not supported and ignored on cgroups V1 rootless systems\n```\nWEIRD! This is one of the RHEL8 gating failures, and I just checked, and your PR is rebased on a fixed `main`. (#17262).\n\nThe rest ... no clue. Off to do the rerun-terminal thing."
+        },
+        {
+            "user": "edsantiago",
+            "body": "quadlet error is:\n```\nError: mkdir /sys/fs/cgroup/pids/user.slice/user-2878.slice/user@2878.service/runtime: permission denied\n```\n@giuseppe PTAL"
+        },
+        {
+            "user": "rhatdan",
+            "body": "SELinux or UID Permissions."
+        },
+        {
+            "user": "edsantiago",
+            "body": "This is Debian: no SELinux.\n```console\n$ ls -la /sys/fs/cgroup/pids/user.slice/user-2878.slice/user@2878.service\ntotal 0\ndrwxr-xr-x 2 root root 0 Feb  8 20:53 .\ndrwxr-xr-x 4 root root 0 Feb  8 20:53 ..\n-rw-r--r-- 1 root root 0 Feb  8 21:23 cgroup.clone_children\n-rw-r--r-- 1 root root 0 Feb  8 20:53 cgroup.procs\n-rw-r--r-- 1 root root 0 Feb  8 21:23 notify_on_release\n-r--r--r-- 1 root root 0 Feb  8 21:23 pids.current\n-r--r--r-- 1 root root 0 Feb  8 21:23 pids.events\n-rw-r--r-- 1 root root 0 Feb  8 20:53 pids.max\n-r--r--r-- 1 root root 0 Feb  8 21:23 pids.peak\n-rw-r--r-- 1 root root 0 Feb  8 21:23 tasks\n```\nI don't see anything user-owned under pids:\n```console\n$ find /sys/fs/cgroup/pids \\! -user root -ls\n```"
+        },
+        {
+            "user": "rhatdan",
+            "body": "My thought would be that the mkdir is happening without being root."
+        },
+        {
+            "user": "edsantiago",
+            "body": "`buildx`: I'm not seeing a connection with the issue you linked. That's a uid issue, the buildx problem is a problem with mounts: the built container is not actually mounting the requested volumes. `st_dev` is the same everywhere. I lost my terminal window before I could get very far, but basically `stat -c %D` on anything in the container returns the same value."
+        },
+        {
+            "user": "edsantiago",
+            "body": ">My thought would be that the mkdir is happening without being root.\n\nYeah - this is rootless. I don't know enough about cgroups to know if this mkdir should work (and the bug is in the /cgroup mount) or if the bug is that podman should not be trying to `mkdir`."
+        },
+        {
+            "user": "rhatdan",
+            "body": "I was thinking that it was not happening in the user namespace."
+        },
+        {
+            "user": "giuseppe",
+            "body": "rootless cannot use cgroupvs1:\n\n```\nError: mkdir /sys/fs/cgroup/pids/user.slice/user-2878.slice/user@2878.service/runtime: permission denied\n```\n\nThis looks like we are trying to enforce the default PID limit even for rootless on cgroupv1"
+        },
+        {
+            "user": "edsantiago",
+            "body": ">rootless cannot use cgroupvs1\n\nThank you. I will assume that someone else on this thread can translate that into an actionable task and a way to fix tests."
+        },
+        {
+            "user": "cevich",
+            "body": "> can translate that into an actionable task\n\nAm I wrong in saying the \"action\" here is: Disable the test?"
+        },
+        {
+            "user": "cevich",
+            "body": "Update per further discussion:  I'll open an issue on the rootless CGv1 quadlet breakage and mark the tests to be skipped until a fix can be worked in.\n\nEdit: Opened https://github.com/containers/podman/issues/17456"
+        },
+        {
+            "user": "cevich",
+            "body": "Note to self: [Opened an issue for the rootless buildx test failure.](https://github.com/containers/podman/issues/17520)"
+        },
+        {
+            "user": "edsantiago",
+            "body": "```\n$ podman pod inspect --format {{.InfraContainerID}} Pod:\nError: inspecting object: no such pod Pod:\n```\nCause: tests expect that `podman kube play` will emit a pod ID. The nasty warning interferes with all output.\n\nI suggest skipping this test on Debian until someone fixes the nasty warning."
+        },
+        {
+            "user": "cevich",
+            "body": "Thanks Ed.  By \"nasty warning\" do you mean:\n\n`Resource limits are not supported and ignored on cgroups V1 rootless systems`\n\nI believe I dealt with this same message on another test and Giuseppe said \"nope, can't work\".  I'll try and add this to that issue if I can find it, if not I'll open another one."
+        },
+        {
+            "user": "edsantiago",
+            "body": ">Resource limits are not supported and ignored on cgroups V1 rootless systems\n\nYes, exactly. Podman should not emit nasty warning messages. Tests should not work around nasty warning messages. If there is a condition that emits nast warning messages, the underlying condition should be resolved (or the test skipped)."
+        },
+        {
+            "user": "cevich",
+            "body": "I found it.  It's the nasty warning bypassed in the commit `Fix 'podman kube --network' test for rootless CGv1` test, there's no open issue that I can find.  I'll open one.\n\nEdit: Commit message updated to reference the new issue #17582"
+        },
+        {
+            "user": "edsantiago",
+            "body": "The buildah-bud failure is a [hard failure, not a flake](https://github.com/containers/buildah/pull/4396) and has been disabled in buildah-land. It needs to be disabled here too.  Patch: [disable-failing-bud-test.patch.txt](https://github.com/containers/podman/files/10787827/disable-failing-bud-test.patch.txt)\n\n\n```diff\ndiff --git a/test/buildah-bud/apply-podman-deltas b/test/buildah-bud/apply-podman-deltas\nindex 06d69ed03..0d3aef158 100755\n--- a/test/buildah-bud/apply-podman-deltas\n+++ b/test/buildah-bud/apply-podman-deltas\n@@ -249,5 +249,12 @@ skip_if_remote \"different error messages between podman & podman-remote\" \\\n \n # END   tests which are skipped due to actual podman or podman-remote bugs.\n ###############################################################################\n+# BEGIN temporary workarounds that must be reevaluated periodically\n+\n+skip \"Test is completely broken, see buildah issue 4396\" \\\n+     \"bud-multiple-platform-values\"\n+\n+# END   temporary workarounds that must be reevaluated periodically\n+###############################################################################\n \n exit $RC\n```"
+        },
+        {
+            "user": "cevich",
+            "body": "Thanks @edsantiago "
+        },
+        {
+            "user": "cevich",
+            "body": "Force-push: Rebased, corrected buildx skip, updated VM images to https://github.com/containers/automation_images/pull/256"
+        },
+        {
+            "user": "edsantiago",
+            "body": "Two test failures are flakes, one well known (#17216, currently being ignored), the other a new one (filed #17598).\n\n@containers/podman-maintainers PTAL, let's get this in.\n\n/lgtm\n/hold\n\nNew CI map: ![cirrus-map-pr17305](https://user-images.githubusercontent.com/265639/220454906-86d4a633-7bf9-42ac-89de-9ae0b6454bcf.png)\n"
+        },
+        {
+            "user": "cevich",
+            "body": "Ugh...and more 17598 and 17216 again (re-runs).  These two are bad!  Thanks @edsantiago for tracking them down."
+        },
+        {
+            "user": "edsantiago",
+            "body": "Sigh. pasta tests failing repeatedly despite multiple reruns. @cevich I think you'll need to rebuild VMs and downgrade pasta: older version fails, but it's a flake; this version is a hard fail. Issue being tracked in #17598."
+        },
+        {
+            "user": "edsantiago",
+            "body": "@cevich there's a [new pasta build in progress](https://github.com/containers/podman/issues/17598#issuecomment-1439990574).\n\nThere are also at least two in-flight PRs that I am blocking from merging, because they are runc-related and I don't want more CI disasters. \n\nBuilding new VMs with new pasta will take time and (sigh) introduce new surprise breakages, maybe pasta, maybe some other package.\n\nPROPOSAL: just skip all the pasta tests in this PR (or maybe just the right subset, if you can confidently identify those). Get this to pass, merge it, then do pasta cleanup in a followup PR. That will allow the stuck runc PRs to proceed, and will give time to debug new VMs."
+        },
+        {
+            "user": "cevich",
+            "body": "Thanks @edsantiago working on en-mass skipping now w/ ref: #17598"
+        },
+        {
+            "user": "cevich",
+            "body": "Force-push: Rebased, resolved merge conflict, re-worded temp. -> perm. test skip, added skip for all pasta tests."
+        },
+        {
+            "user": "cevich",
+            "body": "[Restarted `sys podman debian-12 root host` task - autoupdate test failure](https://api.cirrus-ci.com/v1/artifact/task/6064714845782016/html/sys-podman-debian-12-root-host.log.html) (assuming a flake)."
+        },
+        {
+            "user": "cevich",
+            "body": "@containers/podman-maintainers CI is Green!"
+        },
+        {
+            "user": "rhatdan",
+            "body": "/lgtm\n/approve\n/hold cancel"
+        },
+        {
+            "user": "openshift-ci[bot]",
+            "body": "[APPROVALNOTIFIER] This PR is **APPROVED**\n\nThis pull-request has been approved by: *<a href=\"https://github.com/containers/podman/pull/17305#\" title=\"Author self-approved\">cevich</a>*, *<a href=\"https://github.com/containers/podman/pull/17305#issuecomment-1440570966\" title=\"Approved\">rhatdan</a>*\n\nThe full list of commands accepted by this bot can be found [here](https://go.k8s.io/bot-commands?repo=containers%2Fpodman).\n\nThe pull request process is described [here](https://git.k8s.io/community/contributors/guide/owners.md#the-code-review-process)\n\n<details >\nNeeds approval from an approver in each of these files:\n\n- ~~[OWNERS](https://github.com/containers/podman/blob/main/OWNERS)~~ [rhatdan]\n\nApprovers can indicate their approval by writing `/approve` in a comment\nApprovers can cancel approval by writing `/approve cancel` in a comment\n</details>\n<!-- META={\"approvers\":[]} -->"
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 17166
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 17433
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 17456
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 17520
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 16501
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 17589
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 17598
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 17601
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 17607
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 17616
+        }
+    ]
+}

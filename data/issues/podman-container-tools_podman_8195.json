@@ -1,0 +1,87 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 8195,
+    "type": "issue",
+    "title": "DNS queries from router are not forwarded to container's private interface",
+    "state": "closed",
+    "labels": [
+        "kind/bug",
+        "stale-issue",
+        "network",
+        "locked - please file new issue/PR"
+    ],
+    "user": "mfschumann",
+    "body": "**Is this a BUG REPORT or FEATURE REQUEST? (leave only one on its own line)**\n\n/kind bug\n\n**Description**\n\nI am trying to run a pihole DNS server in a rootful container with --net=private on my Fedora server (release 33). My internet gateway router is configured to use this DNS server as upstream, so that clients on my network would usually send their DNS queries to the router who forwards them to the DNS server running in the container.\n\nThe issue is that clients get replies to their DNS requests only if they are contacting the DNS server directly, but never when contacting it via the router.\n\nI've tracked the problem down by tcpdumping the ethernet interface of the Fedora server and the container's private interface while sending DNS queries. I found that both types of DNS queries (direct and via the router) appear on the ethernet interface, but only the direct DNS queries make it to the container's private interface. Some misconfiguration/feature/bug of podman seems to block the router's DNS queries from being forwarded between the two interfaces.\n\n**Steps to reproduce the issue:**\n\n1. Run a rootful container that listens on port 53 of the host with --net=private.\n\n2. Send DNS queries from any network client directly to the host.\n\n3. Send DNS queries from a network client via the internet gateway router to the host.\n\n**Describe the results you received:**\nDNS queries sent via the internet gateway router are not forwarded to the container's private interface, while DNS queries sent directly do reach the private interface.\n\n**Describe the results you expected:**\nBoth DNS queries are forwarded to the container's private interface.\n\n**Additional information you deem important (e.g. issue happens only occasionally):**\nI am using firewalld on the host, but I don't see why it should block traffic depending on source address.\n\n**Output of `podman version`:**\n\n```\nVersion:      2.1.1\nAPI Version:  2.0.0\nGo Version:   go1.15.2\nBuilt:        Wed Oct  7 18:21:20 2020\nOS/Arch:      linux/amd64\n```\n\n**Output of `podman info --debug`:**\n\n```\nhost:\n  arch: amd64\n  buildahVersion: 1.16.1\n  cgroupManager: systemd\n  cgroupVersion: v2\n  conmon:\n    package: conmon-2.0.21-3.fc33.x86_64\n    path: /usr/bin/conmon\n    version: 'conmon version 2.0.21, commit: 0f53fb68333bdead5fe4dc5175703e22cf9882ab'\n  cpus: 2\n  distribution:\n    distribution: fedora\n    version: \"33\"\n  eventLogger: journald\n  hostname: srv\n  idMappings:\n    gidmap: null\n    uidmap: null\n  kernel: 5.8.16-300.fc33.x86_64\n  linkmode: dynamic\n  memFree: 4267311104\n  memTotal: 8328482816\n  ociRuntime:\n    name: crun\n    package: crun-0.15-5.fc33.x86_64\n    path: /usr/bin/crun\n    version: |-\n      crun version 0.15\n      commit: 56ca95e61639510c7dbd39ff512f80f626404969\n      spec: 1.0.0\n      +SYSTEMD +SELINUX +APPARMOR +CAP +SECCOMP +EBPF +YAJL\n  os: linux\n  remoteSocket:\n    exists: true\n    path: /run/podman/podman.sock\n  rootless: false\n  slirp4netns:\n    executable: \"\"\n    package: \"\"\n    version: \"\"\n  swapFree: 4163891200\n  swapTotal: 4163891200\n  uptime: 24m 45.96s\nregistries:\n  search:\n  - registry.fedoraproject.org\n  - registry.access.redhat.com\n  - registry.centos.org\n  - docker.io\n  srv.mfs.name:5000:\n    Blocked: false\n    Insecure: true\n    Location: srv.mfs.name:5000\n    MirrorByDigestOnly: false\n    Mirrors: null\n    Prefix: srv.mfs.name:5000\nstore:\n  configFile: /etc/containers/storage.conf\n  containerStore:\n    number: 1\n    paused: 0\n    running: 0\n    stopped: 1\n  graphDriverName: overlay\n  graphOptions:\n    overlay.mountopt: nodev,metacopy=on\n  graphRoot: /var/lib/containers/storage\n  graphStatus:\n    Backing Filesystem: btrfs\n    Native Overlay Diff: \"false\"\n    Supports d_type: \"true\"\n    Using metacopy: \"true\"\n  imageStore:\n    number: 2\n  runRoot: /var/run/containers/storage\n  volumePath: /var/lib/containers/storage/volumes\nversion:\n  APIVersion: 2.0.0\n  Built: 1602087680\n  BuiltTime: Wed Oct  7 18:21:20 2020\n  GitCommit: \"\"\n  GoVersion: go1.15.2\n  OsArch: linux/amd64\n  Version: 2.1.1\n```\n\n**Package info (e.g. output of `rpm -q podman` or `apt list podman`):**\n\n```\npodman-2.1.1-12.fc33.x86_64\n```\n\n**Have you tested with the latest version of Podman and have you checked the Podman Troubleshooting Guide?**\nYes\n\n**Additional environment details (AWS, VirtualBox, physical, etc.):**\nThe host is running on bare metal.",
+    "comments": [
+        {
+            "user": "usury",
+            "body": "I have some familiarity with firewalld on Fedora 32, @mfschumann. I had to learn some new things regarding kernel api \"netfilter\" (new) vs \"getsocket/setsocket\" (old) and iptables-nft (new) vs iptables-legacy (old). I had been using \"iptables\" since the days of \"FC3\" when we had to recompile our own kernels in order to get certain flexability (like ip masquerade, etc).\n\n**Depending on whether your Fedora is a fresh install or an upgrade over the years, it is _possible_ that something exists in one of \"legacy\" tables that blocks packets before they reach your rules configured in firewalld.**\n\nBy default, firewalld uses the \"netfilter\" backend, which is an important observation if you are accustomed to using \"iptables\" from the commandline to see/modify your ruleset. It took me awhile to understand why I was unable to see my \"firewalld\" rules when using the familiar `root@fedora #> iptables -t filter -nvL`\n\nYou'll notice that /usr/sbin/ no longer has an iptables binary but rather various aliases for iptables, controlled by the \"alternatives\" mechanism\n```\nroot@fedora #> ls -l /usr/sbin/iptables*\nroot@fedora #> ls -l /usr/sbin/ip6tables*\nroot@fedora #> ls -l $(readlink -f $(which iptables))\nroot@fedora #> dnf whatprovides $(readlink -f $(which iptables))\nroot@fedora #> dnf whatprovides /usr/sbin/xtables-nft-multi\n```\nBy default, my fresh install of Fedora 32 had only the `xtables-legacy-multi` binary (wheras my Debian systems have both, installed by the same package even).\n\nHowever, after installing the \"iptables-nft\" packge, I am still unable to use \"iptables-nft\" to see rules configured by firewalld. That's a mystery to me. The man page for \"xtables-nft\" pointed me to `root@fedora #> nft list ruleset`. Of course, I had to install the \"nft\" package first since it also was not installed by default.\n\nAfter installing \"iptables-nft\", you'll probably want to run `root@fedora #> alternatives --config iptables` to select the one `root@fedora #> iptables` invokes.\n\nMaybe you already knew all that. Maybe there are no \"legacy\" rules blocking inbound DNS requests originating from your router. It's worth confirming.\n\nRegardless, you will love the pihole setup once it is working properly. I run it on a stand-alone raspberry pi. It's fantastic."
+        },
+        {
+            "user": "mfschumann",
+            "body": "Tracing the activities of nft with `nft monitor trace` I found that packets coming from a client were designated `daddr 10.88.0.61` (the container's private IP), while packets coming from the router were designated `daddr 192.168.0.50` (the host's LAN IP). This difference was caused by a firewalld rule that opened port 53 on the host. Once I deleted the rule the packets from the router showed up with `daddr 10.88.0.61` and made their way into the container.\n\nIn conclusion: Opening a host port via firewalld while binding that port to a container prevents packets sent by the host's gateway from flowing into the container. Is this behavior expected / wanted?"
+        },
+        {
+            "user": "usury",
+            "body": "> In conclusion: Opening a host port via firewalld while binding that port to a container prevents packets sent by the host's gateway from flowing into the container. Is this behavior expected / wanted?\n\nI'm a relatively new podman user, so I'm in no position to speak with authority.\n\nIf \"podman\" is adding some firewall rule (by calling \"iptables-legacy\", \"iptables-nft\", or some other more direct mechanism) that interfers with otherwise intended behavior, that sounds like something for podman to handle differently or at least document.\n\nIf it is the user adding a rule via \"firewalld\" that interfers with the default behavior of \"podman\" (regarding publishing/forwarding container ports), then that sounds like a problem outside the scope of \"podman\". "
+        },
+        {
+            "user": "rhatdan",
+            "body": "@mccv1r0 @mheon PTAL"
+        },
+        {
+            "user": "rhatdan",
+            "body": "Podman relies on CNI for configuration of the network stack. "
+        },
+        {
+            "user": "mfschumann",
+            "body": "Even with the firewalld port closed, I found that operation was not reliable: Many packets from the router still appeared in the nft trace with the host IP as destination, and when re-running the pihole container (so it got assigned a new private IP), a fraction of the packets was destined to the private IP the container had before the restart. All in all, DNS resolution via the router worked most of the time, but was often very slow.\n\nI ended up replacing the host-local IPAM configuration by a static configuration, so the PiHole container is now assigned a fixed private IP. Also, I added a static route in my router's configuration that sets the Fedora server as a gateway for the private subnet. Like that, I was able to set the upstream DNS server for my router to the now-static private IP of the PiHole container. With this setup, DNS resolution via the router finally works smoothly."
+        },
+        {
+            "user": "mccv1r0",
+            "body": "\nCNI just configures Linux network with parameters supplied by podman, which gets these from user (typically via command line arguments.)\n\n> I am trying to run a pihole DNS server in a rootful container with --net=private on my Fedora server (release 33). My internet gateway router is configured to use this DNS server as upstream, so that clients on my network would usually send their DNS queries to the router who forwards them to the DNS server running in the container.\n> \n> The issue is that clients get replies to their DNS requests only if they are contacting the DNS server directly, but never when contacting it via the router.\n> \n> **Steps to reproduce the issue:**\n> \n> 1. Run a rootful container that listens on port 53 of the host with --net=private.\n> 2. Send DNS queries from any network client directly to the host.\n> 3. Send DNS queries from a network client via the internet gateway router to the host.\n\n`--net=private` could be anything.  Can you supply the configuration?\n\nre 1:  every time you start this container, it's IPv4 address will change.  Unless you make this static you will have to update your router to take account of the new address.  It reads like you have figured this out already. \n\nre: 3: We need to know the topology involved.  What's between the `internet gateway router` and podman `--net=private`\n\nWhat is the default policy for the `FORWARD` chain?\n\nI'm *guessing* that the `FORWARD` chain is dropping any packets from outside to anything on the bridge(???) used by `--net=private` which is a feature.  By design you can connect out (and RELATED) traffic is allowed back.  But traffic from outside to a pod is dropped.    This assumes bridge you are using CNI plugin, your router is reachable via `eth0` of your host where podman runs and your container is on Linux bridge (e.g. `cni0`).   The packets from `eth0` are routed (`eth0`->`cni0`), hitting the `FORWARD` chain as a result.  Without more information I can only guess.\n\nThe output of `iptables -nvL` and `iptables -nvL -t nat` would be helpful; as would the IP address of the container created by podman at the time those commands were run.\n\n> Many packets from the router still appeared in the nft trace with the host IP as destination\n\nThis might be your DNS server configuration?   Not enough info, but what the outside world sends is up to configuration outside of podman.\n\n> and when re-running the pihole container (so it got assigned a new private IP), a fraction of the packets was destined to the private IP the container had before the restart. \n\nSee above\n\n\n\n\n\n\n\n"
+        },
+        {
+            "user": "mfschumann",
+            "body": "\n> `--net=private` could be anything. Can you supply the configuration?\n\nYou can find the CNI config that was active when the issues occured [here](https://pastebin.com/Xx3Leg2U).\n\n> re 1: every time you start this container, it's IPv4 address will change. Unless you make this static you will have to update your router to take account of the new address. It reads like you have figured this out already.\n\nYes, with a static IP for the container things do work now. That means from my side you do not have to chase this issue further. In case you want to make sure it is not a bug that I was hitting I will provide the information you requested below.\n\n> re: 3: We need to know the topology involved. What's between the `internet gateway router` and podman `--net=private`\n\nThe host is connected to the router via its enp0s25 interface with IP 192.168.0.50/24. The container was on a bridge with a host-local IP from the range 10.88.0.0/16.\n\n> What is the default policy for the `FORWARD` chain?\n>\n> I'm _guessing_ that the `FORWARD` chain is dropping any packets from outside to anything on the bridge(???) used by `--net=private` which is a feature. By design you can connect out (and RELATED) traffic is allowed back. But traffic from outside to a pod is dropped. This assumes bridge you are using CNI plugin, your router is reachable via `eth0` of your host where podman runs and your container is on Linux bridge (e.g. `cni0`). The packets from `eth0` are routed (`eth0`->`cni0`), hitting the `FORWARD` chain as a result. Without more information I can only guess.\n\niptables does not have a `FORWARD` chain, but nft has one. And if I read the [output of](https://pastebin.com/7EKr6zcu) `nft list ruleset` correctly, it only forwards new packets with destination 10.88.0.91, but doesn't when they arrive with destination 192.168.0.50. So your guess was a hit it seems.\n\n> The output of `iptables -nvL` and `iptables -nvL -t nat` would be helpful; as would the IP address of the container created by podman at the time those commands were run.\n\n`iptables -nvL` does not show any rules. The output of `iptables -nvL -t nat` can be found [here](https://pastebin.com/Yd3jjUji).\n\nIn case you need further information, I am happy to provide it.\n"
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@baude PTAL"
+        },
+        {
+            "user": "baude",
+            "body": "i need @mccv1r0 on this, it is well beyond simple networking ...."
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@mccv1r0 Any thoughts on this one?"
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@mccv1r0 Reminder?"
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "baude",
+            "body": "I believe this issue should be closed with Podman-4.0.2 and the new network stack.  If you try POdman 4.0.2 from an upgrade to a previous version of podman, please be sure to run podman system reset --force before trying your test again.  Please re-open if new Podman does not resolve your issue."
+        }
+    ],
+    "cross_references": []
+}

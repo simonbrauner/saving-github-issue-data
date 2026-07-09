@@ -1,0 +1,94 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 835,
+    "type": "issue",
+    "title": "Executing commands on bind mounts doesn't always work",
+    "state": "closed",
+    "labels": [
+        "locked - please file new issue/PR"
+    ],
+    "user": "ajacocks",
+    "body": "<!--\n---------------------------------------------------\nBUG REPORT INFORMATION\n---------------------------------------------------\nUse the commands below to provide key information from your environment:\nYou do NOT have to include this information if this is a FEATURE REQUEST\n-->\n\n**Is this a BUG REPORT or FEATURE REQUEST?**:\n\n> Uncomment only one, leave it on its own line:\n>\n/kind bug\n>\n> /kind feature\n\n**Description**\n\nWhen using podman to launch a container, with a bind mount, attachment to the container doesn't always succeed.\n\n**Steps to reproduce the issue:**\n\n1.podman pull registry.access.redhat.com/rhel7\n\n2.podman run -v /usr/sbin:/usr/sbin --rm -it rhel7 /usr/sbin/ip a\n- or -\n2. podman run -v /usr/bin:/usr/bin --rm -it rhel7 /usr/bin/file /etc/hosts\n\n**Describe the results you received:**\n\nWhen it doesn't work, you get:\n```\nerror attaching to container cda641fe922585a52ef37de83533910b684c27a3bbd75cd988a0f7708199ac05: failed to\n connect to container's attach socket: %!v(MISSING): dial unixpacket /var/run/libpod/socket/cda\n```\n**Describe the results you expected:**\n\nWhen it works, you get what you expect:\n```\n1: lo: <LOOPBACK,UP,LOWER_UP> mtu 65536 qdisc noqueue state UNKNOWN group default qlen 1000\n    link/loopback 00:00:00:00:00:00 brd 00:00:00:00:00:00\n    inet 127.0.0.1/8 scope host lo\n       valid_lft forever preferred_lft forever\n    inet6 ::1/128 scope host \n       valid_lft forever preferred_lft forever\n3: eth0@if4: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc noqueue state UP group default \n    link/ether fa:78:6c:23:90:dd brd ff:ff:ff:ff:ff:ff link-netnsid 0\n    inet 10.88.0.11/16 scope global eth0\n       valid_lft forever preferred_lft forever\n    inet6 fe80::f878:6cff:fe23:90dd/64 scope link tentative \n       valid_lft forever preferred_lft forever\n```\n- or-\n```\n/etc/hosts: ASCII text\n```\n**Additional information you deem important (e.g. issue happens only occasionally):**\n\nThe issue seems to happen about 50% of the time.\n\n**Output of `podman version`:**\n\n```\n# podman version\nVersion:       0.4.1\nGo Version:    go1.9.2\nOS/Arch:       linux/amd64\n```\n\n**Output of `podman info`:**\n\n```\n# podman info\nhost:\n  MemFree: 1547030528\n  MemTotal: 1926369280\n  SwapFree: 0\n  SwapTotal: 0\n  arch: amd64\n  cpus: 1\n  hostname: ip-10-0-2-203.ec2.internal\n  kernel: 3.10.0-862.3.2.el7.x86_64\n  os: linux\n  uptime: 6m 31.74s\ninsecure registries:\n  registries: []\nregistries:\n  registries:\n  - registry.access.redhat.com\nstore:\n  ContainerStore:\n    number: 14\n  GraphDriverName: overlay\n  GraphOptions:\n  - overlay.override_kernel_check=true\n  GraphRoot: /var/lib/containers/storage\n  GraphStatus:\n    Backing Filesystem: xfs\n    Native Overlay Diff: \"true\"\n    Supports d_type: \"true\"\n  ImageStore:\n    number: 1\n  RunRoot: /var/run/containers/storage\n```\n\n**Additional environment details (AWS, VirtualBox, physical, etc.):**\n\nThe environment is running on RHEL 7.5, on AWS EC2.",
+    "comments": [
+        {
+            "user": "mheon",
+            "body": "I wonder if we're not seeing a race between `conmon` and the attach part of `podman run` here. Setting up the attach socket in `conmon` happens fairly late in the process of creating the container, after we inform libpod that it's safe to proceed, but `conmon` is generally so lightweight that the timing condition is never hit.\n\nWe could potentially set up the attach socket in `conmon` before we fork off `runc` - it'll potentially leave a socket and a symlink lying around in cases where `runc` fails, though."
+        },
+        {
+            "user": "rhatdan",
+            "body": "Brent can you look into this?"
+        },
+        {
+            "user": "mheon",
+            "body": "@rhatdan I think this has to be a fix in `conmon`"
+        },
+        {
+            "user": "mheon",
+            "body": "@giuseppe Mind taking a look at this one? We'd like `conmon` to make the attach socket earlier in its lifetime, before it starts `runc`, to try and avoid a timing issue."
+        },
+        {
+            "user": "giuseppe",
+            "body": "hm.. I see there is no race in conmon when the attach socket is created, as podman blocks on receiving the container PID which is sent by conmon after the attach socket is created.  I was not able to reproduce this issue.  I wonder if it depends on a change we did in conmon that correctly reports the exit status of a container now (before it was reporting 0 when the container was signaled) and podman still trying to attach to the container.\n\n@ajacocks is it still reproducible for you?  If yes, could you attach the output of `podman --log-level=debug ...` when it fails?"
+        },
+        {
+            "user": "ajacocks",
+            "body": "@giuseppe Yes, indeed, I can still reproduce it on RHEL7.5-current:\n\n```\n$ cat /etc/redhat-release \nRed Hat Enterprise Linux Server release 7.5 (Maipo)\n$  uname -r\n3.10.0-862.3.3.el7.x86_64\n```\nAnd here are the logs, as requested:\n\n```\n# podman --log-level=debug run -v /usr/sbin:/usr/sbin --rm -it rhel7 /usr/sbin/ip a\nDEBU[0000] [graphdriver] trying provided driver \"overlay\" \nDEBU[0000] overlay: override_kernelcheck=true           \nDEBU[0000] overlay test mount with multiple lowers succeeded \nDEBU[0000] backingFs=xfs, projectQuotaSupported=false, useNativeDiff=true \nINFO[0000] CNI network podman (type=bridge) is used from /etc/cni/net.d/87-podman-bridge.conflist \nINFO[0000] Initial CNI setting succeeded                \nDEBU[0000] parsed reference to refname into \"[overlay@/var/lib/containers/storage+/var/run/containers/storage:overlay.override_kernel_check=true]docker.io/library/rhel7:latest\" \nDEBU[0000] reference \"[overlay@/var/lib/containers/storage+/var/run/containers/storage:overlay.override_kernel_check=true]docker.io/library/rhel7:latest\" does not resolve to an image ID \nDEBU[0000] parsed reference to refname into \"[overlay@/var/lib/containers/storage+/var/run/containers/storage:overlay.override_kernel_check=true]docker.io/library/rhel7:latest\" \nDEBU[0000] reference \"[overlay@/var/lib/containers/storage+/var/run/containers/storage:overlay.override_kernel_check=true]docker.io/library/rhel7:latest\" does not resolve to an image ID \nDEBU[0000] parsed reference to id into \"[overlay@/var/lib/containers/storage+/var/run/containers/storage:overlay.override_kernel_check=true]@7a840db7f020be49bb60fb1cc4f1669e83221d61c1af23ff2cac2f870f9deee8\" \nDEBU[0000] exporting opaque data as blob \"sha256:7a840db7f020be49bb60fb1cc4f1669e83221d61c1af23ff2cac2f870f9deee8\" \nDEBU[0000] parsed reference to id into \"[overlay@/var/lib/containers/storage+/var/run/containers/storage:overlay.override_kernel_check=true]@7a840db7f020be49bb60fb1cc4f1669e83221d61c1af23ff2cac2f870f9deee8\" \nDEBU[0000] exporting opaque data as blob \"sha256:7a840db7f020be49bb60fb1cc4f1669e83221d61c1af23ff2cac2f870f9deee8\" \nDEBU[0000] parsed reference to id into \"[overlay@/var/lib/containers/storage+/var/run/containers/storage:overlay.override_kernel_check=true]@7a840db7f020be49bb60fb1cc4f1669e83221d61c1af23ff2cac2f870f9deee8\" \nDEBU[0000] Using bridge netmode                         \nDEBU[0000] parsed reference to id into \"[overlay@/var/lib/containers/storage+/var/run/containers/storage:overlay.override_kernel_check=true]@7a840db7f020be49bb60fb1cc4f1669e83221d61c1af23ff2cac2f870f9deee8\" \nDEBU[0000] created container \"61def006a50630502069ed457e43f75d6910b4496b8129198afe3c3cd451e79b\" \nDEBU[0000] container \"61def006a50630502069ed457e43f75d6910b4496b8129198afe3c3cd451e79b\" has work directory \"/var/lib/containers/storage/overlay-containers/61def006a50630502069ed457e43f75d6910b4496b8129198afe3c3cd451e79b/userdata\" \nDEBU[0000] container \"61def006a50630502069ed457e43f75d6910b4496b8129198afe3c3cd451e79b\" has run directory \"/var/run/containers/storage/overlay-containers/61def006a50630502069ed457e43f75d6910b4496b8129198afe3c3cd451e79b/userdata\" \nDEBU[0000] New container created \"61def006a50630502069ed457e43f75d6910b4496b8129198afe3c3cd451e79b\" \nDEBU[0000] container \"61def006a50630502069ed457e43f75d6910b4496b8129198afe3c3cd451e79b\" has CgroupParent \"/libpod_parent/libpod-conmon-61def006a50630502069ed457e43f75d6910b4496b8129198afe3c3cd451e79b/61def006a50630502069ed457e43f75d6910b4496b8129198afe3c3cd451e79b\" \nDEBU[0000] mounted container \"61def006a50630502069ed457e43f75d6910b4496b8129198afe3c3cd451e79b\" at \"/var/lib/containers/storage/overlay/3b19d27499861f080befd6dac91aeabbb857095bc0d8d43083cb0c85d9e4360b/merged\" \nDEBU[0000] Created root filesystem for container 61def006a50630502069ed457e43f75d6910b4496b8129198afe3c3cd451e79b at /var/lib/containers/storage/overlay/3b19d27499861f080befd6dac91aeabbb857095bc0d8d43083cb0c85d9e4360b/merged \nDEBU[0000] Made network namespace at /var/run/netns/cni-d65d8258-7130-ea13-6aee-3becd5e8bc1e for container 61def006a50630502069ed457e43f75d6910b4496b8129198afe3c3cd451e79b \nINFO[0000] Got pod network {Name:nervous_mayer Namespace:nervous_mayer ID:61def006a50630502069ed457e43f75d6910b4496b8129198afe3c3cd451e79b NetNS:/var/run/netns/cni-d65d8258-7130-ea13-6aee-3becd5e8bc1e PortMappings:[]} \nINFO[0000] About to add CNI network cni-loopback (type=loopback) \nINFO[0000] Got pod network {Name:nervous_mayer Namespace:nervous_mayer ID:61def006a50630502069ed457e43f75d6910b4496b8129198afe3c3cd451e79b NetNS:/var/run/netns/cni-d65d8258-7130-ea13-6aee-3becd5e8bc1e PortMappings:[]} \nINFO[0000] About to add CNI network podman (type=bridge) \nDEBU[0000] Response from CNI plugins: Interfaces:[{Name:cni0 Mac:1a:7e:d7:a1:bf:7e Sandbox:} {Name:veth3e515f33 Mac:32:c4:1a:96:32:f7 Sandbox:} {Name:eth0 Mac: Sandbox:/var/run/netns/cni-d65d8258-7130-ea13-6aee-3becd5e8bc1e}], IP:[{Version:4 Interface:0xc420338660 Address:{IP:10.88.0.28 Mask:ffff0000} Gateway:10.88.0.1}], Routes:[{Dst:{IP:0.0.0.0 Mask:00000000} GW:<nil>}], DNS:{Nameservers:[] Domain: Search:[] Options:[]} \nDEBU[0000] Running iptables command: -t filter -I FORWARD -s 10.88.0.28 ! -o 10.88.0.28 -j ACCEPT \nWARN[0000] file \"/etc/containers/mounts.conf\" not found, skipping... \nDEBU[0000] Creating dest directory: /var/run/containers/storage/overlay-containers/61def006a50630502069ed457e43f75d6910b4496b8129198afe3c3cd451e79b/userdata/run/secrets \nDEBU[0000] Calling TarUntar(/usr/share/rhel/secrets, /var/run/containers/storage/overlay-containers/61def006a50630502069ed457e43f75d6910b4496b8129198afe3c3cd451e79b/userdata/run/secrets) \nDEBU[0000] TarUntar(/usr/share/rhel/secrets /var/run/containers/storage/overlay-containers/61def006a50630502069ed457e43f75d6910b4496b8129198afe3c3cd451e79b/userdata/run/secrets) \nWARN[0000] hooks path: \"/usr/share/containers/oci/hooks.d\" does not exist \nWARN[0000] hooks path: \"/etc/containers/oci/hooks.d\" does not exist \nDEBU[0000] parsed reference to id into \"[overlay@/var/lib/containers/storage+/var/run/containers/storage:overlay.override_kernel_check=true]@7a840db7f020be49bb60fb1cc4f1669e83221d61c1af23ff2cac2f870f9deee8\" \nDEBU[0000] parsed reference to id into \"[overlay@/var/lib/containers/storage+/var/run/containers/storage:overlay.override_kernel_check=true]@7a840db7f020be49bb60fb1cc4f1669e83221d61c1af23ff2cac2f870f9deee8\" \nDEBU[0000] exporting opaque data as blob \"sha256:7a840db7f020be49bb60fb1cc4f1669e83221d61c1af23ff2cac2f870f9deee8\" \nDEBU[0000] parsed reference to id into \"[overlay@/var/lib/containers/storage+/var/run/containers/storage:overlay.override_kernel_check=true]@7a840db7f020be49bb60fb1cc4f1669e83221d61c1af23ff2cac2f870f9deee8\" \nDEBU[0000] exporting opaque data as blob \"sha256:7a840db7f020be49bb60fb1cc4f1669e83221d61c1af23ff2cac2f870f9deee8\" \nDEBU[0000] parsed reference to id into \"[overlay@/var/lib/containers/storage+/var/run/containers/storage:overlay.override_kernel_check=true]@7a840db7f020be49bb60fb1cc4f1669e83221d61c1af23ff2cac2f870f9deee8\" \nDEBU[0000] Created OCI spec for container 61def006a50630502069ed457e43f75d6910b4496b8129198afe3c3cd451e79b at /var/lib/containers/storage/overlay-containers/61def006a50630502069ed457e43f75d6910b4496b8129198afe3c3cd451e79b/userdata/config.json \nDEBU[0000] running conmon: /usr/libexec/podman/conmon    args=[-c 61def006a50630502069ed457e43f75d6910b4496b8129198afe3c3cd451e79b -u 61def006a50630502069ed457e43f75d6910b4496b8129198afe3c3cd451e79b -r /usr/bin/runc -b /var/lib/containers/storage/overlay-containers/61def006a50630502069ed457e43f75d6910b4496b8129198afe3c3cd451e79b/userdata -p /var/run/containers/storage/overlay-containers/61def006a50630502069ed457e43f75d6910b4496b8129198afe3c3cd451e79b/userdata/pidfile -l /var/lib/containers/storage/overlay-containers/61def006a50630502069ed457e43f75d6910b4496b8129198afe3c3cd451e79b/userdata/ctr.log --exit-dir /var/run/libpod/exits --socket-dir-path /var/run/libpod/socket -t]\nDEBU[0000] Received container pid: 11642                \nDEBU[0000] Created container 61def006a50630502069ed457e43f75d6910b4496b8129198afe3c3cd451e79b in OCI runtime \nDEBU[0000] Attaching to container 61def006a50630502069ed457e43f75d6910b4496b8129198afe3c3cd451e79b \nDEBU[0000] connecting to socket /var/run/libpod/socket/61def006a50630502069ed457e43f75d6910b4496b8129198afe3c3cd451e79b/attach \nDEBU[0000] Started container 61def006a50630502069ed457e43f75d6910b4496b8129198afe3c3cd451e79b \nDEBU[0000] Enabling signal proxying                     \nERRO[0000] error attaching to container 61def006a50630502069ed457e43f75d6910b4496b8129198afe3c3cd451e79b: failed to connect to container's attach socket: %!!(MISSING)v(MISSING): dial unixpacket /var/run/libpod/socket/61def006a50630502069ed457e43f75d6910b4496b8129198afe3c3cd451e79b/attach: connect: no such file or directory\n```\nHopefully this helps."
+        },
+        {
+            "user": "giuseppe",
+            "body": "I've tried on RHEL 7.5 with podman version 0.4.1 and I am still unable to reproduce this issue.\n\nCould you please attach any output from conmon that you see in the journal?"
+        },
+        {
+            "user": "ajacocks",
+            "body": "@giuseppe Your wish is my command, sir!\n\n```\nJun 18 21:33:01 ip-10-0-2-174.ec2.internal conmon[22450]: conmon <ninfo>: addr{sun_family=AF_UNIX, sun_path=/tmp/conmon-term.JM3RKZ}\nJun 18 21:33:01 ip-10-0-2-174.ec2.internal conmon[22450]: conmon <ninfo>: about to waitpid: 22451\nJun 18 21:33:01 ip-10-0-2-174.ec2.internal conmon[22450]: conmon <ninfo>: about to accept from console_socket_fd: 9\nJun 18 21:33:01 ip-10-0-2-174.ec2.internal conmon[22450]: conmon <ninfo>: about to recvfd from connfd: 15\nJun 18 21:33:02 ip-10-0-2-174.ec2.internal kernel: SELinux: mount invalid.  Same superblock, different security settings for (dev mqueue, type mqueue)\nJun 18 21:33:02 ip-10-0-2-174.ec2.internal conmon[22450]: conmon <ninfo>: console = {.name = '/dev/ptmx8 21:33:01 conmon: conmon <ninfo>: about to recvfd from connfd: 15 \n                                                          '; .fd = 9}\nJun 18 21:33:02 ip-10-0-2-174.ec2.internal conmon[22450]: conmon <ninfo>: container PID: 22458\nJun 18 21:33:02 ip-10-0-2-174.ec2.internal conmon[22450]: conmon <ninfo>: attach sock path: /var/run/libpod/socket/4e30365196879c256cc6f0bf5bcea63e39acb8929374ae6508ef74f7f4293305/attach\nJun 18 21:33:02 ip-10-0-2-174.ec2.internal conmon[22450]: conmon <ninfo>: addr{sun_family=AF_UNIX, sun_path=/var/run/libpod/socket/4e30365196879c256cc6f0bf5bcea63e39acb8929374ae6508ef74f7f4293305/attach}\nJun 18 21:33:02 ip-10-0-2-174.ec2.internal conmon[22450]: conmon <ninfo>: ctl fifo path: /var/lib/containers/storage/overlay-containers/4e30365196879c256cc6f0bf5bcea63e39acb8929374ae6508ef74f7f4293305/userdata/ctl\nJun 18 21:33:02 ip-10-0-2-174.ec2.internal conmon[22450]: conmon <ninfo>: terminal_ctrl_fd: 16\nJun 18 21:33:02 ip-10-0-2-174.ec2.internal conmon[22450]: conmon <ninfo>: container 22458 exited with status 0\nJun 18 21:33:02 ip-10-0-2-174.ec2.internal conmon[22450]: conmon <nwarn>: stdio_input read failed Input/output error\n```"
+        },
+        {
+            "user": "giuseppe",
+            "body": "@ajacocks thanks a lot!  That helped to understand.  It seems like the container terminates so quickly that conmon deletes the attach socket during the cleanup and podman doesn't find it.  We should handle the ENOENT differently from podman as it means the container was already terminated"
+        },
+        {
+            "user": "giuseppe",
+            "body": "hm.. that should not happen though, as the container is started after the console was attached.  I need to investigate it further"
+        },
+        {
+            "user": "giuseppe",
+            "body": "@rhatdan, @mheon I think the issue is here:\n\nhttps://github.com/projectatomic/libpod/blob/master/libpod/container_api.go#L178-L192\n\nWe do the attach from a goroutine, but the `c.start()` might happen before the `attach` is done.  We'll need to change how  `c.attach()` works and be able to plug the start immediately after the `net.DialUnix` is done."
+        },
+        {
+            "user": "rhatdan",
+            "body": "Please create a patch."
+        },
+        {
+            "user": "mheon",
+            "body": "And we'd just removed the syncronization calls from `attach()`... Damn it."
+        },
+        {
+            "user": "giuseppe",
+            "body": "@mheon is it something we can easily revert?\n"
+        },
+        {
+            "user": "mheon",
+            "body": "@giuseppe Don't think so, I did a large refactor to implement `--attach` and the sync primitives were one of the casualties. Thought they were unnecessary if we just ordered the calls in `StartWithAttach()`"
+        },
+        {
+            "user": "giuseppe",
+            "body": "Ok thanks.  I will work on a patch as tomorrow I am back from PTO"
+        },
+        {
+            "user": "giuseppe",
+            "body": "PR here: https://github.com/projectatomic/libpod/pull/970"
+        },
+        {
+            "user": "ajacocks",
+            "body": "Thanks so much, everyone!"
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 970
+        }
+    ]
+}

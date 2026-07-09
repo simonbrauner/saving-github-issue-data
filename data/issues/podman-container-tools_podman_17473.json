@@ -1,0 +1,268 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 17473,
+    "type": "pull_request",
+    "title": "Implement Unix domain socket support for VLAN",
+    "state": "closed",
+    "labels": [
+        "approved",
+        "do-not-merge/hold",
+        "machine",
+        "release-note",
+        "locked - please file new issue/PR"
+    ],
+    "user": "arixmkii",
+    "body": "Fixes #15852 \n\nThis change adds support for new QEMU stream netdev added in 7.2.0. It is implemented as an opt-in mode for previously supported platforms and the only supported mode on Windows.\n\nOld FD netdev has changes only on podman side. Instead of previously used QMP socket address, it now has VLAN dedicated socket address to make both implementations more similar.\n\nAs VLAN socket address has short lifespan (it exists only after forwarder has been started and before QEMU has finished startup), it is not promoted to persisted machine settings, but is rather calculated inside Start method.\n\nSigned-off-by: Arthur Sengileyev <arthur.sengileyev@gmail.com>\n\nI tried to highlight everything significant in the commit message. This indeed fixes #15852, but it has a lot more added that the change required to fix it. I needed other changes to actually check the desired behavior of the fix for the issue mentioned above, if the team will insist I can split it up into series of commits (I would prefer not to, though 😅 ).\n\nVLAN socket address is not persisted anywhere in machine socket, so, the logic decides on the mode by checking the command line. Actually the way how QEMU command line is stored is dictating a lot of how QEMU and in turn gvproxy and Podman should operate. So, it might look dirty, but to me looked like a reasonable implementation (at least at this point in time).\n\n**Machine Init**\n\nWhen in SOCKET VLAN mode (on platforms, where FD supported it has to be enabled via env var) the Init will create QEMU command line compatible with new QEMU 7.2.0 feature.\n\n**Machine Start**\n\nPodman will ignore the current settings, but will rely on what was create by Machine Init (analyze command line)\n\n**Named pipes**\n\nNow gvproxy will also expose named pipe on Windows (no-op for non-Windows paths). The name of the pipe is of the format `qemu-podman-...` For default machine it will result in `qemu-podman-machine-default`. This prefix is needed\nto prevent name collision with WSL machine. Clients could read pipe name from `podman machine inspect` output (the change is already merged to Podman Desktop).\n\n**Mode switch**\n\nCurrent implementation is using opt-in via env var, but alternative implementations (like checking QEMU version or config files) could exist. Socket VLAN is more cross platform, but it can't replace old implementation, because\nit is only available starting from QEMU 7.2.0 (which means baseline RHEL 10 😅 )\n\n**Configuration mismatch warning**\n\nWhen mode switch has happened between Init and Start - like machine was created with FD settings, but then Start is\ncalled, when SOCKET VLAN usage is requested - there will be WARN output what could be changed to fix the mismatch.\nWorks in both directions.\n\n**Socket VLAN gvproxy readiness check**\n\nIt is impossible to use the Dial, because then we could not pass it forward as FD. The most common reason for failed start\nwould be socket address unavailable. In this case gvproxy will terminate. Readiness check algorithm looks like this:\n1. Initial delay (small sleep) to account for gvproxy starting up in the background.\n2. Start loop for up to max attempts\n3. Check if process is alive using PID\n  3.1. If not, then short circuit to failure\n  3.2. If process is running continue to the next check\n4. Check if we can `os.Stat` the socket address\n 4.1. If not then sleep and go to the next loop iteration\n 4.4. If ok, then break the look and continue\n \nRefactorings\n* startHostNetworking private method is now more sophisticated implementation: accepts input param, returns in addition Process data and has logic changes to account for name pipe functionality.\n\nAdditional fixes\n* use \"reasonable\" UID on Windows (no platform check, but we rather check for the invalid return value)\n* fixed type in Errorf in `checkProcessStatus` in _unix sources\n* use stored `v.ReadySock.Path` instead of making it up again in Start method using the same rules\n\nLocal testing\n\nAcceptance test: start the machine and run nginx with port forwarding to host machine.\n\n* Tested on Windows applying all other pending changes for Windows support first\n* Tested on Apple Silicon Mac\n\nOutput from Apple Silicon Mac:\n**Running FD created machine (created with release version of Podman) w/ FD mode**\n```\npodman % ./bin/darwin/podman --log-level=debug machine start\nINFO[0000] ./bin/darwin/podman filtering at log level debug\nStarting machine \"podman-machine-default\"\n[/Users/username/git/podman/bin/libexec/podman/gvproxy -listen-qemu unix:///var/folders/9n/358_gdmn3fxfnyttwys8k1dm0000gn/T/podman/vlan_podman-machine-default.sock -pid-file /var/folders/9n/358_gdmn3fxfnyttwys8k1dm0000gn/T/podman/podman-machine-default_proxy.pid -ssh-port 64042 -forward-sock /Users/username/.local/share/containers/podman/machine/podman-machine-default/podman.sock -forward-dest /run/user/501/podman/podman.sock -forward-user core -forward-identity /Users/username/.ssh/podman-machine-default --debug]\nDEBU[0000] qemu cmd: [/opt/homebrew/bin/qemu-system-aarch64 -m 8192 -smp 4 -fw_cfg name=opt/com.coreos/config,file=/Users/username/.config/containers/podman/machine/qemu/podman-machine-default.ign -qmp unix:/var/folders/9n/358_gdmn3fxfnyttwys8k1dm0000gn/T/podman/qmp_podman-machine-default.sock,server=on,wait=off -netdev socket,id=vlan,fd=3 -device virtio-net-pci,netdev=vlan,mac=5a:94:ef:e4:0c:ee -device virtio-serial -chardev socket,path=/var/folders/9n/358_gdmn3fxfnyttwys8k1dm0000gn/T/podman/podman-machine-default_ready.sock,server=on,wait=off,id=apodman-machine-default_ready -device virtserialport,chardev=apodman-machine-default_ready,name=org.fedoraproject.port.0 -pidfile /var/folders/9n/358_gdmn3fxfnyttwys8k1dm0000gn/T/podman/podman-machine-default_vm.pid -accel hvf -accel tcg -cpu host -M virt,highmem=on -drive file=/opt/homebrew/share/qemu/edk2-aarch64-code.fd,if=pflash,format=raw,readonly=on -drive file=/Users/username/.local/share/containers/podman/machine/qemu/podman-machine-default_ovmf_vars.fd,if=pflash,format=raw -virtfs local,path=/Users/username,mount_tag=vol0,security_model=mapped-xattr -drive if=virtio,file=/Users/username/.local/share/containers/podman/machine/qemu/podman-machine-default_fedora-coreos-37.20230110.2.0-qemu.aarch64.qcow2] \nWaiting for VM ...\n...\n```\n\n**Running FD created machine (created with release version of Podman) w/ socket VLAN mode**\n```\npodman % CONTAINERS_USE_SOCKET_VLAN=true ./bin/darwin/podman --log-level=debug machine start\nINFO[0000] ./bin/darwin/podman filtering at log level debug \nStarting machine \"podman-machine-default\"\nWARN[0000] Stored Podman Machine configuration doesn't match current settings \nWARN[0000] Consider replacing \"socket,id=vlan,fd=3\" with \"stream,id=vlan,server=off,addr.type=unix,addr.path=/var/folders/9n/358_gdmn3fxfnyttwys8k1dm0000gn/T/podman/vlan_podman-machine-default.sock\" in machine config \n[/Users/username/git/podman/bin/libexec/podman/gvproxy -listen-qemu unix:///var/folders/9n/358_gdmn3fxfnyttwys8k1dm0000gn/T/podman/vlan_podman-machine-default.sock -pid-file /var/folders/9n/358_gdmn3fxfnyttwys8k1dm0000gn/T/podman/podman-machine-default_proxy.pid -ssh-port 64042 -forward-sock /Users/username/.local/share/containers/podman/machine/podman-machine-default/podman.sock -forward-dest /run/user/501/podman/podman.sock -forward-user core -forward-identity /Users/username/.ssh/podman-machine-default --debug]\nDEBU[0000] qemu cmd: [/opt/homebrew/bin/qemu-system-aarch64 -m 8192 -smp 4 -fw_cfg name=opt/com.coreos/config,file=/Users/username/.config/containers/podman/machine/qemu/podman-machine-default.ign -qmp unix:/var/folders/9n/358_gdmn3fxfnyttwys8k1dm0000gn/T/podman/qmp_podman-machine-default.sock,server=on,wait=off -netdev socket,id=vlan,fd=3 -device virtio-net-pci,netdev=vlan,mac=5a:94:ef:e4:0c:ee -device virtio-serial -chardev socket,path=/var/folders/9n/358_gdmn3fxfnyttwys8k1dm0000gn/T/podman/podman-machine-default_ready.sock,server=on,wait=off,id=apodman-machine-default_ready -device virtserialport,chardev=apodman-machine-default_ready,name=org.fedoraproject.port.0 -pidfile /var/folders/9n/358_gdmn3fxfnyttwys8k1dm0000gn/T/podman/podman-machine-default_vm.pid -accel hvf -accel tcg -cpu host -M virt,highmem=on -drive file=/opt/homebrew/share/qemu/edk2-aarch64-code.fd,if=pflash,format=raw,readonly=on -drive file=/Users/username/.local/share/containers/podman/machine/qemu/podman-machine-default_ovmf_vars.fd,if=pflash,format=raw -virtfs local,path=/Users/username,mount_tag=vol0,security_model=mapped-xattr -drive if=virtio,file=/Users/username/.local/share/containers/podman/machine/qemu/podman-machine-default_fedora-coreos-37.20230110.2.0-qemu.aarch64.qcow2] \nWaiting for VM ...\n...\n```\n\n[NO NEW TESTS NEEDED]\n\n<!--\nThanks for sending a pull request!\n\nPlease make sure you've read our contributing guidelines and how to submit a pull request (https://github.com/containers/podman/blob/main/CONTRIBUTING.md#submitting-pull-requests).\n\nIn case you're only changing docs, make sure to prefix the pull-request title with \"[CI:DOCS]\". That will prevent functional tests from running and save time and energy.\n\nFinally, be sure to sign commits with your real name. Since by opening\na PR you already have commits, you can add signatures if needed with\nsomething like `git commit -s --amend`.\n-->\n\n#### Does this PR introduce a user-facing change?\n\n<!--\nIf no, just write `None` in the release-note block below. If yes, a release note\nis required: Enter your extended release note in the block below. If the PR\nrequires additional action from users switching to the new release, include the\nstring \"action required\".\n\nFor more information on release notes, please follow the Kubernetes model:\nhttps://git.k8s.io/community/contributors/guide/release-notes.md\n-->\n\n```release-note\nPodman Machine now supports QEMU 7.2.0 stream netdev for VLAN socket\n```\n",
+    "comments": [
+        {
+            "user": "arixmkii",
+            "body": "It should not alter any default behavior and everything else is ether behind opt-in toggle or not yet supported platform (QEMU on Windows), so, I was leaning towards adding NO NEW TESTS tag, but the changeset is not small/trivial, so, the team might disagree with it.\n\nThis changeset with all other in pending review states is 99% of changes needed to enable QEMU on Windows.\n\nBut yeah, I don't expect this PR would be the fast one to get through."
+        },
+        {
+            "user": "arixmkii",
+            "body": "I'm not sure if this part behaved on Windows as expected, but for sure it didn't affect happy path in my testing. https://github.com/containers/podman/blob/06e85f0f6093081e8707b30e191ba190613090b1/pkg/machine/qemu/machine.go#L502-L512 "
+        },
+        {
+            "user": "arixmkii",
+            "body": "Rebased to main to resolve conflicts from another merged PR."
+        },
+        {
+            "user": "arixmkii",
+            "body": "I'm still a bit lost if it is possible to write a test for this one as one needs to use Windows for it or being able to modify environment variable for a specific test."
+        },
+        {
+            "user": "arixmkii",
+            "body": "@rhatdan may be you can help me to find some reviewers for this one? At least to get some comments if it is ok conceptually."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@baude @Luap99 @n1hility @ashley-cui PTAL"
+        },
+        {
+            "user": "TomSweeneyRedHat",
+            "body": "The changes in general LGTM, but this is all way out of my wheelhouse"
+        },
+        {
+            "user": "n1hility",
+            "body": "> I'm not sure if this part behaved on Windows as expected, but for sure it didn't affect happy path in my testing.\n> \n> https://github.com/containers/podman/blob/06e85f0f6093081e8707b30e191ba190613090b1/pkg/machine/qemu/machine.go#L502-L512\n\nThis should be safe on Windows. The biggest difference is that SIGTERM can't be eaten and the program kept alive, you can only use it for cleanup or exiting with an exit code like this block is doing, so this part looks right to me."
+        },
+        {
+            "user": "rhatdan",
+            "body": "Either add tests or [NO NEW TESTS NEEDED]\n"
+        },
+        {
+            "user": "arixmkii",
+            "body": "I will add  [NO NEW TESTS NEEDED] and force push. My reasoning:\n* Windows QEMU machine is not enabled yet (and it will require additional setup for tests, a bit topic on its own)\n* Alternate mode of FD will be purely opt in and has stricter requirements on minimal supported QEMU version, it looks like it now can only be reliably tested on macOS with brew"
+        },
+        {
+            "user": "arixmkii",
+            "body": "Observed some sort of regression at least in my test Windows build, so, I might apply some fixes to the commits, but the concept is not expect to change.\n\nUpdate: removed additional refactoring for now. Probably that is beyond something I can quickly reimplement in a complex Go lang codebase. Removed commit is available at https://github.com/arixmkii/podman/commit/132172609737592df6821389fc7769f7a5e65c0c"
+        },
+        {
+            "user": "arixmkii",
+            "body": "@TomSweeneyRedHat @n1hility are any additional changes needed?"
+        },
+        {
+            "user": "arixmkii",
+            "body": "Failed \"Verify Win Installer Build\" looks like a flake to me (at least from build log and searching the web for that specific error)."
+        },
+        {
+            "user": "n1hility",
+            "body": "Looking into the verify installer failure, we have other runs where its working and repeated runs are failing here, so looking into why that happens"
+        },
+        {
+            "user": "arixmkii",
+            "body": "@n1hility I can do rebase. Just ping me if it is needed."
+        },
+        {
+            "user": "n1hility",
+            "body": "@arixmkii sure if you have a chance lets try that"
+        },
+        {
+            "user": "n1hility",
+            "body": "FYI I needed to add a debug commit to your branch since I cant reproduce this failure in my local repo via cirrus\n\n/hold"
+        },
+        {
+            "user": "n1hility",
+            "body": "The win installer validation problem triggered by this PR is resolved. There is a separate PR for the fix, but I also put the commit on here in the meantime to reflect the true result of the testing.\n\nI still need to review this in more detail. Promise to do that tomorrow.. "
+        },
+        {
+            "user": "arixmkii",
+            "body": "So, it was me, who failed the build with long PR description 😅  I'm really sorry for that, but this time I felt like the change deserved sort of a cover letter."
+        },
+        {
+            "user": "TomSweeneyRedHat",
+            "body": "Happy green test buttons.  The changes LGTM, but I'd like more eyes on this, especially @n1hility "
+        },
+        {
+            "user": "rhatdan",
+            "body": "@n1hility @arixmkii @baude @Luap99 @mheon What is going on with this one?"
+        },
+        {
+            "user": "rhatdan",
+            "body": "@ashley-cui PTAL"
+        },
+        {
+            "user": "arixmkii",
+            "body": "I addressed comments (except this logging, which could be helpful for migration cases, but it for sure don't have to be a part of this changeset at all costs and could be removed). I would appreciate some definitive list what to change before the next review iteration."
+        },
+        {
+            "user": "arixmkii",
+            "body": "@n1hility could you check this one once again and comment if I should change something additionally."
+        },
+        {
+            "user": "n1hility",
+            "body": "> @n1hility could you check this one once again and comment if I should change something additionally.\n\nJust added some more feedback. Otherwise LGTM. Sorry I didn't reply until just now, I was out of office when you pinged me and just catching up."
+        },
+        {
+            "user": "n1hility",
+            "body": "BTW after addressing that last aspect i mentioned, while I think it looks good @baude and/or @ashley-cui may have thoughts as well. "
+        },
+        {
+            "user": "arixmkii",
+            "body": "Did a rebase (had to re-arrange a number of things, because there were code changes), but now I have some issues running it locally (probably related to something else (including a different test box config)), will push the rebased version, when they are resolved."
+        },
+        {
+            "user": "arixmkii",
+            "body": "Pushed updated version. Some things feel like all over the place (comparing to previous version) because now there is a logic split between machine.go and config.go (this was introduced by some of the refactorings), but I tried to make it reasonable.\n\nWhat I tested locally:\n* FD socket on MacOS arm64\n* VLAN socket on MacOS arm64 (passing env var to init)\n* VLAN socket on Windows amd64\n"
+        },
+        {
+            "user": "arixmkii",
+            "body": "According to test runner logs - machine tests are running on Fedora 38 and according to this page https://src.fedoraproject.org/rpms/qemu Fedora 38 has QEMU 7.2.1 stable version. It should be possible to expand this test with a matrix to test both FD and Unix domain socket modes. But I would prefer to experiment with it in a separate PR and have some hints how to run only minimal subset of jobs, while prototyping (I guess I can just directly hack the cirrus.yml removing parts, but there should be a better option, I guess)."
+        },
+        {
+            "user": "arixmkii",
+            "body": "Rebased to latest main. Had to adapt to the new layout (methods instead of functions) and do some refactoring providing Windows specific alternatives to Unix specific bits."
+        },
+        {
+            "user": "arixmkii",
+            "body": "Will fix linter issues tomorrow and update again.\n\nUpdate: Done"
+        },
+        {
+            "user": "arixmkii",
+            "body": "Rebased and updated for latest codebase changes"
+        },
+        {
+            "user": "arixmkii",
+            "body": "~There is an yet unresolved issue with named pipe forwarding on Windows (not affecting other platforms obviously), because of https://github.com/containers/gvisor-tap-vsock/issues/276~ Error was elsewhere. Not passing pointer. Needed some more debugging. gvproxy is fine.\n\nRed checks seems to be Java related according to error logs, probably some infra related issues."
+        },
+        {
+            "user": "arixmkii",
+            "body": "Added fix for flaky issues during machine stop sequence (how the process kill is called and file access to file owned by another process on Windows platform)."
+        },
+        {
+            "user": "arixmkii",
+            "body": "Added config to execute e2e tests on macOS.\n\nRan both versions w/ fd vlan and w/ UNIX domain socket vlan (actual command line verified during run using `ps` tool).\n\nAll tests passed for both flavors on M1 Pro MBP machine.\n```\nRan 34 of 36 Specs in 813.328 seconds\nSUCCESS! -- 34 Passed | 0 Failed | 0 Pending | 2 Skipped\nPASS\n```\n"
+        },
+        {
+            "user": "packit-as-a-service[bot]",
+            "body": "Ephemeral COPR build failed. @containers/packit-build please check."
+        },
+        {
+            "user": "packit-as-a-service[bot]",
+            "body": "Cockpit tests failed for commit 3b196ff2987078d1f697d36b27f721dc5a173167. @martinpitt, @jelly, @mvollmer please check."
+        },
+        {
+            "user": "packit-as-a-service[bot]",
+            "body": "Ephemeral COPR build failed. @containers/packit-build please check."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@n1hility PTAL"
+        },
+        {
+            "user": "n1hility",
+            "body": "wow @arixmkii  you might be the most patient PR submitter ever. I promise to review this again this weekend"
+        },
+        {
+            "user": "arixmkii",
+            "body": "@n1hility some context how the code evolved. This PR was updated to match the refactoring changes, this also lead to additional fixes, where non cross-platform changes were introduced. If it is desired I can factor these changes into a separate commit or PR for better traceability.\n\nSome other things, which happened, while it was in review. OS version and QEMU versions (we are interested in QEMU > 7.2):\n* Centos 8 stream - 6.2.0\n* Centos 9 stream - 8.1.0\n* Fedora 37 (soon to be EOL) - 7.0.0\n* Fedora 38 - 7.2.6\n* Fedora 39 - 8.1.1\n* Debian Bullseye - 5.2 (7.2 available in backports)\n* Debian Bookworm - 7.2\n* Debian Trixie - 8.1.2\n* MacOS brew - 8.1.2\n* Windows - 8.1.2\n\nSo, it looks like having both FD and UNIX_VLAN could be only necessary for Centos 8 stream/RHEL 8 and it is not clear if it will receive Podman feature releases going forward. May be you if this will target Podman 5 (next major), then it is worth removing conditional options and provide migration path instead.\n"
+        },
+        {
+            "user": "openshift-ci[bot]",
+            "body": "[APPROVALNOTIFIER] This PR is **APPROVED**\n\nThis pull-request has been approved by: *<a href=\"https://github.com/containers/podman/pull/17473#\" title=\"Author self-approved\">arixmkii</a>*, *<a href=\"https://github.com/containers/podman/pull/17473#pullrequestreview-1758518535\" title=\"Approved\">n1hility</a>*\n\nThe full list of commands accepted by this bot can be found [here](https://go.k8s.io/bot-commands?repo=containers%2Fpodman).\n\nThe pull request process is described [here](https://git.k8s.io/community/contributors/guide/owners.md#the-code-review-process)\n\n<details >\nNeeds approval from an approver in each of these files:\n\n- ~~[OWNERS](https://github.com/containers/podman/blob/main/OWNERS)~~ [n1hility]\n\nApprovers can indicate their approval by writing `/approve` in a comment\nApprovers can cancel approval by writing `/approve cancel` in a comment\n</details>\n<!-- META={\"approvers\":[]} -->"
+        },
+        {
+            "user": "n1hility",
+            "body": "Changes LGTM\n\nI think this needs a thumbs up from @baude and @ashley-cui "
+        },
+        {
+            "user": "arixmkii",
+            "body": "Rebased to latest - fixed conflicts in README.md. No code changes."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@baude @ashley-cui PTAL"
+        },
+        {
+            "user": "baude",
+            "body": "Ok, reviewed.  Many of the comments are fairly soft and if you wish to not do them, thats ok, just be sure to respond to the comments so it can be reconciled later.\n\nI have two stronger review comments that I will put in subsequently because then we can respond to them individually."
+        },
+        {
+            "user": "baude",
+            "body": "I would love, where possible, to see more tests that lean heavily on your code.  Unittests where possible as well.  This is a lot of code to change and it is going to get heavily reworked and broken in the very near future.  Would you consider going back and accessing your comfort with tests and that regressions are not introduced?"
+        },
+        {
+            "user": "baude",
+            "body": "And finally, I don't recall seeing any sort of version checking but yet this requires a newer QEMU if I understood things correctly.  Podman, Podman Desktop, Brew, Distros are really struggling with package level interdependencies.  Do you feel that we should somehow do something in your code to avoid this?"
+        },
+        {
+            "user": "baude",
+            "body": "ps.  i think we just about have hyperv and wsl passing tests again (maybe a flake here and there) ... i would prefer that we do not merge this PR until #20953 is merged."
+        },
+        {
+            "user": "arixmkii",
+            "body": "> Would you consider going back and accessing your comfort with tests and that regressions are not introduced?\n\nYes, I will try to add tests after addressing your other comments.\n\n> ps. i think we just about have hyperv and wsl passing tests again (maybe a flake here and there)\n\nI'm counting on it. It was just a coincidence that I needed a rebase (because line endings were changes in README.md from CRLF to LF).\n\n> And finally, I don't recall seeing any sort of version checking but yet this requires a newer QEMU if I understood things correctly.\n\nThat newer version is one, which was released a year ago :) I have a version specific breakdown in this comment https://github.com/containers/podman/pull/17473#issuecomment-1817524290 Also, this code path is enabled unconditionally only for Windows code and is behind Env var feature toggle for others. I will think about if it is viable to add version check within current changes. Will either add them or create an issue for a follow up and assign to me."
+        },
+        {
+            "user": "arixmkii",
+            "body": "Addressed comments. Will try to add unit tests later this week."
+        },
+        {
+            "user": "arixmkii",
+            "body": "@baude I rebased to latest changes and added unit tests, which are similar to existent ones. I see that currently there are not many unit tests and machines are mostly tested e2e.\n\nI wanted to update code to use your new utilities from `sockets`, but I have question. Why is the new ready socket different from qmp socket. The QMP one is using different runtime directory depending on rootless or rootful configurations https://github.com/containers/podman/blob/c324dbb8b4bf094aa6b222bf60ee6fcf5e2f96aa/pkg/machine/qemu/machine.go#L913 but the new Ready socket is always using temp directory w/o any conditional checks on the isRootful state https://github.com/containers/podman/blob/c324dbb8b4bf094aa6b222bf60ee6fcf5e2f96aa/pkg/machine/qemu/config.go#L137 Could you clarify, which one I would use for vlan sort of socket? Or is it a bug introduced with the refactoring to ReadySocket?"
+        },
+        {
+            "user": "arixmkii",
+            "body": "Will be continued in https://github.com/containers/podman/pull/21594"
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 13006
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 18018
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 18314
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 18488
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 19518
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 21252
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 21594
+        }
+    ]
+}

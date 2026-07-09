@@ -1,0 +1,78 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 24211,
+    "type": "pull_request",
+    "title": "WIP TarCompression",
+    "state": "open",
+    "labels": [
+        "do-not-merge/work-in-progress",
+        "needs-rebase",
+        "stale-pr",
+        "do-not-merge/release-note-label-needed"
+    ],
+    "user": "zackattackz",
+    "body": "This is a WIP commit to add tar compression options to containers lib. Will need to be split into several commits across multiple repos.\n\nThis is a proposed feature for #23192\n\nI wanted to share this current WIP though to get some feedback, before I went about the process of splitting this into different PRs and making / fixing tests.\n\nThe overall idea is to add two new options, `TarCompressionFormat / --tar-compression-format` and `TarCompressionLevel / --tar-compression-level` to be used throughout podman's `push`, `save`, and `scp` subcommands. For `push` and `save`, the options are passed to specific transport implementations, in this case the oci-archive and docker-archive transports. They both have different implementation details for enabling compression of the resulting tar file.\n\nFor the `scp` subcommand, it is already using `save` under the hood, so to enable compression we would just pass the new options to the `save` subcommand. This would only work with remote transfers, but this is fine because I don't think(?) there should be a need for compression on local transfers. \n\nI took care to ensure that everything is backwards compatible, however the only one place that couldn't be backwards compatible would be the [change to the `ImageEngine` interface's `Scp` function.](https://github.com/zackattackz/podman/blob/76c21e8159978c73e9e2466820bf1d4abc211184/pkg/domain/entities/engine_image.go#L26)\n\nThis change would be needed to allow for specifying compression options to `Scp`. But, more broadly, adding an options type here would be great for any future changes to SCP options to allow backwards compatibility.\n\nOther than that, I would think everything else is compatible (could be wrong though).\n\nAnother change worth noting is in [common/libimage/save.go](https://github.com/zackattackz/podman/blob/76c21e8159978c73e9e2466820bf1d4abc211184/vendor/github.com/containers/common/libimage/save.go) and [common/libimage/copier.go](https://github.com/zackattackz/podman/blob/76c21e8159978c73e9e2466820bf1d4abc211184/vendor/github.com/containers/common/libimage/copier.go).\n\nIn `save.go`, it was necessary to use the system context AFTER the copy options are set into it. This would normally happen if you used `NewCopier().systemContext`, but in this case a writer is created before the copier is created, and it doesn't get any of the copy options passed into it. So to solve this I just made new functions in copier.go `Runtime.newScWithCopyOpts` and `ScWithCopyOpts`. These methods just abstract away the part of overwriting system context opts with copy opts when `NewCopier` is called\n\nAlso worth noting is the potential confusion between these new options and the existing `Compression` related options. The existing options were designed explicitly for compression layers in docker dir transport, not with any other kind of compression, so I thought it made more sense and was safer to create new options than to repurpose the exiting ones.\n\nAs far as what needs to be done: Of course tests will need to be done. Also, the `scp` command right now just has a forced compression of gzip, but I need to make the command line options for it (they already are working for `save` and `push` though). There probably should be checks added to ensure the options are used correctly. For instance, the `--compress` flag should probably never be allowed to be used with `--tar-compression-format`. Finally, a `--tar-compress` bool flag could be added to just enable gzip format by default. \n\nI appreciate any feedback! I will move forward with trying to separate this into multiple PRs soon.",
+    "comments": [
+        {
+            "user": "openshift-ci[bot]",
+            "body": "Adding the \"do-not-merge/release-note-label-needed\" label because no release-note block was detected, please follow our [release note process](https://git.k8s.io/community/contributors/guide/release-notes.md) to remove it.\n\n<details>\n\nInstructions for interacting with me using PR comments are available [here](https://git.k8s.io/community/contributors/guide/pull-requests.md).  If you have questions or suggestions related to my behavior, please file an issue against the [kubernetes-sigs/prow](https://github.com/kubernetes-sigs/prow/issues/new?title=Prow%20issue:) repository.\n</details>"
+        },
+        {
+            "user": "openshift-ci[bot]",
+            "body": "[APPROVALNOTIFIER] This PR is **NOT APPROVED**\n\nThis pull-request has been approved by: *<a href=\"https://github.com/containers/podman/pull/24211#\" title=\"Author self-approved\">zackattackz</a>*\n**Once this PR has been reviewed and has the lgtm label**, please assign [l0rd](https://github.com/l0rd) for approval. For more information see [the Kubernetes Code Review Process](https://git.k8s.io/community/contributors/guide/owners.md#the-code-review-process).\n\nThe full list of commands accepted by this bot can be found [here](https://go.k8s.io/bot-commands?repo=containers%2Fpodman).\n\n<details open>\nNeeds approval from an approver in each of these files:\n\n- **[OWNERS](https://github.com/containers/podman/blob/main/OWNERS)**\n\nApprovers can indicate their approval by writing `/approve` in a comment\nApprovers can cancel approval by writing `/approve cancel` in a comment\n</details>\n<!-- META={\"approvers\":[\"l0rd\"]} -->"
+        },
+        {
+            "user": "Luap99",
+            "body": "> The overall idea is to add two new options, TarCompressionFormat / --tar-compression-format and TarCompressionLevel / --tar-compression-level to be used throughout podman's push, save, and scp subcommands. For push and save, the options are passed to specific transport implementations, in this case the oci-archive and docker-archive transports. They both have different implementation details for enabling compression of the resulting tar file.\n\n> Also worth noting is the potential confusion between these new options and the existing Compression related options. The existing options were designed explicitly for compression layers in docker dir transport, not with any other kind of compression, so I thought it made more sense and was safer to create new options than to repurpose the exiting ones.\n\nThat seem rather implementation detail specific where a normal user would not really care in particular when there is already a --compression-format option on the push command so having two similar options is just much more confusing IMO.\n\n---\n\nOverall you need to start in c/image to design API changes there first that have to get approved by @mtrmac there. I guess overall the question is why is this needed in podman? Anyone (including podman image scp) could just pipe the output into gzip/zstd, etc.... so I don't think these changes would be needed to add compression support for scp.\n\nWhat I think would be far more interesting in terms of c/image API is to expose a generic writer there https://github.com/containers/container-libs/issues/84 which would have use cases elsewhere, i.e. the HTTP API. And which such a writer the caller could just pass that into the compression function themselves without having to expose all the compression implementation details into the c/image API.\n"
+        },
+        {
+            "user": "zackattackz",
+            "body": "> Anyone (including podman image scp) could just pipe the output into gzip/zstd, etc.\n\nThis is true. I was thinking to show this solution first that tried to reuse the existing logic for compression related stuff, rather than just shell out to another binary.  I thought there could be benefits to reusing that logic and also not requiring additional binaries. But I definitely understand if that way would be preferable. In that case, how do you think it should be used? Just a `--compress` and `--compress-command` flag for `podman image scp`? Using `--compress` would just default to piping to gzip, and `--compress-command` could be used to specify the exact command + args to use.\n\nI'd be down to try that out if you think it's better.\n\n> What I think would be far more interesting in terms of c/image API is to expose a generic writer\n\nOh I do like that idea far better. I could try to look into that. It does seem like a tall order so can't promise anything, but that would be ideal."
+        },
+        {
+            "user": "mtrmac",
+            "body": "First, please https://github.com/containers/podman/blob/main/CONTRIBUTING.md#sign-your-prs ; it’s hard to discuss code with unclear copyright status."
+        },
+        {
+            "user": "zackattackz",
+            "body": "@mtrmac Apologies, did so now!"
+        },
+        {
+            "user": "zackattackz",
+            "body": "On further thought with shelling out: If I were to, it would probably be best to implement as `--encode-command` which would encode the data when saved (compress in this case) and a `--decode-command` to process the data before it is loaded. Would be a little more generic this way, and also would make sense to include an analogue for loading,"
+        },
+        {
+            "user": "zackattackz",
+            "body": "Though an option that would allow running an arbitrary command sounds like it could be a security risk. So will need to consider that."
+        },
+        {
+            "user": "zackattackz",
+            "body": "I made a new PR at #24234 which is implementing the non-breaking changes to add options types to various scp functions. It takes a lot of code from this one, but is a little different."
+        },
+        {
+            "user": "openshift-merge-robot",
+            "body": "PR needs rebase.\n\n<details>\n\nInstructions for interacting with me using PR comments are available [here](https://git.k8s.io/community/contributors/guide/pull-requests.md).  If you have questions or suggestions related to my behavior, please file an issue against the [kubernetes-sigs/prow](https://github.com/kubernetes-sigs/prow/issues/new?title=Prow%20issue:) repository.\n</details>"
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this PR had no activity for 30 days."
+        },
+        {
+            "user": "cyqsimon",
+            "body": "Hi all, just a quick ping to ask if there is any progress on this? Thanks"
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 23192
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 24240
+        }
+    ]
+}

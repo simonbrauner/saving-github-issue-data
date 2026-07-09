@@ -1,0 +1,110 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 19066,
+    "type": "pull_request",
+    "title": "top: do not depend on ps(1) in container ",
+    "state": "closed",
+    "labels": [
+        "lgtm",
+        "approved",
+        "release-note",
+        "kind/api-change",
+        "locked - please file new issue/PR"
+    ],
+    "user": "Luap99",
+    "body": "This ended up more complicated then expected. Lets start first with the\nproblem to show why I am doing this:\n\nCurrently we simply execute ps(1) in the container. This has some\ndrawbacks. First, obviously you need to have ps(1) in the container\nimage. That is no always the case especially in small images. Second,\neven if you do it will often be only busybox's ps which supports far\nless options.\n\nNow we also have psgo which is used by default but that only supports a\nsmall subset of ps(1) options. Implementing all options there is way to\nmuch work.\n\nDocker on the other hand executes ps(1) directly on the host and tries\nto filter pids with `-q` an option which is not supported by busybox's\nps and conflicts with other ps(1) arguments. That means they fall back\nto full ps(1) on the host and then filter based on the pid in the\noutput. This is kinda ugly and fails short because users can modify the\nps output and it may not even include the pid in the output which causes\nan error.\n\nSo every solution has a different drawback, but what if we can combine\nthem somehow?! This commit tries exactly that.\n\nWe use ps(1) from the host and execute that in the container's pid\nnamespace.\nThere are some security concerns that must be addressed:\n- mount the executable paths for ps and podman itself readonly to\n  prevent the container from overwriting it via /proc/self/exe.\n- set NO_NEW_PRIVS, SET_DUMPABLE and PDEATHSIG\n- close all non std fds to prevent leaking files in that the caller had\n  open\n- unset all environment variables to not leak any into the contianer\n\nTechnically this could be a breaking change if somebody does not\nhave ps on the host and only in the container but I find that very\nunlikely so I have removed the in container fallback.\n\nThis updates the docs accordingly, note that podman pod top never falls\nback to executing ps in the container as this makes no sense with\nmultiple containers so I fixed the docs there as well.\n\nFixes https://github.com/containers/podman/issues/19001\nFixes https://bugzilla.redhat.com/show_bug.cgi?id=2215572\n#### Does this PR introduce a user-facing change?\n\n<!--\nIf no, just write `None` in the release-note block below. If yes, a release note\nis required: Enter your extended release note in the block below. If the PR\nrequires additional action from users switching to the new release, include the\nstring \"action required\".\n\nFor more information on release notes, please follow the Kubernetes model:\nhttps://git.k8s.io/community/contributors/guide/release-notes.md\n-->\n\n```release-note\npodman top no longer depends on ps(1) being present in the container image and now uses the one from the host.\n```\n",
+    "comments": [
+        {
+            "user": "Luap99",
+            "body": "@vrothberg @giuseppe PTAL"
+        },
+        {
+            "user": "vrothberg",
+            "body": "It's on my review list for Monday :+1: "
+        },
+        {
+            "user": "rhatdan",
+            "body": "@Luap99 Excellent work.\nLGTM"
+        },
+        {
+            "user": "Luap99",
+            "body": "@giuseppe PTAL, this is a bit different than you diff as I didn't liked the linker hack.\nHowever it should still have all the security options correctly configured."
+        },
+        {
+            "user": "openshift-ci[bot]",
+            "body": "[APPROVALNOTIFIER] This PR is **APPROVED**\n\nThis pull-request has been approved by: *<a href=\"https://github.com/containers/podman/pull/19066#pullrequestreview-1512645212\" title=\"Approved\">giuseppe</a>*, *<a href=\"https://github.com/containers/podman/pull/19066#\" title=\"Author self-approved\">Luap99</a>*\n\nThe full list of commands accepted by this bot can be found [here](https://go.k8s.io/bot-commands?repo=containers%2Fpodman).\n\nThe pull request process is described [here](https://git.k8s.io/community/contributors/guide/owners.md#the-code-review-process)\n\n<details >\nNeeds approval from an approver in each of these files:\n\n- ~~[OWNERS](https://github.com/containers/podman/blob/main/OWNERS)~~ [Luap99,giuseppe]\n\nApprovers can indicate their approval by writing `/approve` in a comment\nApprovers can cancel approval by writing `/approve cancel` in a comment\n</details>\n<!-- META={\"approvers\":[]} -->"
+        },
+        {
+            "user": "Luap99",
+            "body": "/hold\nThere is a bug which causes a go panic because I close the fds to early and might close the ones from the goruntime."
+        },
+        {
+            "user": "giuseppe",
+            "body": "Do you think we should not allow it with SYS_TRACE?  I am having second thoughts that it could still be abused in some cases"
+        },
+        {
+            "user": "Luap99",
+            "body": "\n\n\n> Do you think we should not allow it with SYS_TRACE? I am having second thoughts that it could still be abused in some cases\n\nBut how could we enforce that? We can check for the container config but there can always be exec session created while we start executing ps. So this is a classic TOCTOU race for exec sessions, unless of course we keep the container locked while we run ps."
+        },
+        {
+            "user": "giuseppe",
+            "body": "Only for the container configuration, if an exec session adds that capability, it is a recipe for security issues. The problem is with the container being able to look into the proc/$PID of the new process an be able to escape to the host, even in readonly mode"
+        },
+        {
+            "user": "Luap99",
+            "body": "Ok, so only check for SYS_TRACE? Or is there some other capability as well?\nAnd then as fallback in that case just keep using the old podman exec way?\n\n"
+        },
+        {
+            "user": "giuseppe",
+            "body": "That is the only one I am aware of, not sure without checking in the kernel if there are other setups that could allow accessing /proc/top-pid/root files from the other processes in the container "
+        },
+        {
+            "user": "Luap99",
+            "body": "PTAL again"
+        },
+        {
+            "user": "rhatdan",
+            "body": "@giuseppe PTAL"
+        },
+        {
+            "user": "giuseppe",
+            "body": "LGTM, @Luap99 could you please just confirm on RHEL8 the main process in the container cannot read files under /proc/TOP-PID/root if you add all caps except SYS_TRACE? "
+        },
+        {
+            "user": "giuseppe",
+            "body": "You need to confirm it on the process after the execve, not while it is in the C trampoline code you've added"
+        },
+        {
+            "user": "rhatdan",
+            "body": "I tried your new code with a fedora container running sleep trying to check sched, and I see\n\n```\n ./bin/podman top -l sched\nError: ps(1) failed with exit code 1: error: unsupported option (BSD syntax)\n\nUsage:\n ps [options]\n\n Try 'ps --help <simple|list|output|threads|misc|all>'\n  or 'ps --help <s|l|o|t|m|a>'\n for additional help text.\n\nFor more details see ps(1).\n```"
+        },
+        {
+            "user": "Luap99",
+            "body": "> LGTM, @Luap99 could you please just confirm on RHEL8 the main process in the container cannot read files under /proc/TOP-PID/root if you add all caps except SYS_TRACE?\n\nI did test that by replacing ps with sleep, I cannot access that.\n\n\n\n> I tried your new code with a fedora container running sleep trying to check sched, and I see\n> \n> ```\n>  ./bin/podman top -l sched\n> Error: ps(1) failed with exit code 1: error: unsupported option (BSD syntax)\n> \n> Usage:\n>  ps [options]\n> \n>  Try 'ps --help <simple|list|output|threads|misc|all>'\n>   or 'ps --help <s|l|o|t|m|a>'\n>  for additional help text.\n> \n> For more details see ps(1).\n> ```\n\n`sched` is not a valid ps argument as it tries to parse them as BSD style args, are you trying to use `ps -o sched`?"
+        },
+        {
+            "user": "rhatdan",
+            "body": "Yes, we got a question from a customer, how to check if a container is running with the correct scheduler if running under the real-time kernel.  So I was trying out the podman top command and saw the failure.\n\nAnyways not something to hold up this PR.\n\n"
+        },
+        {
+            "user": "rhatdan",
+            "body": "/lgtm\n/hold cancel"
+        },
+        {
+            "user": "rhatdan",
+            "body": "$ man ps | grep sched\n       -c     Show different scheduler information for the -l option.\n       y     priority     kernel scheduling priority\n       class       CLS       scheduling class of the process.  (alias policy, cls).  Field's possible values\n       cls         CLS       scheduling class of the process.  (alias policy, cls).  Field's possible values\n       policy      POL       scheduling class of the process.  (alias class, cls).  Possible values are:\n       sched       SCH       scheduling policy of the process.  The policies SCHED_OTHER (SCHED_NORMAL),"
+        },
+        {
+            "user": "Luap99",
+            "body": "Because the command is `ps -o sched` not `ps sched`, so use `podman top <name> -o sched`"
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 19176
+        }
+    ]
+}

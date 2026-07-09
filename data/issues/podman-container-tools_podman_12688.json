@@ -1,0 +1,89 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 12688,
+    "type": "issue",
+    "title": "CreateInit is public but requires a private cobra cmd",
+    "state": "closed",
+    "labels": [
+        "stale-issue",
+        "locked - please file new issue/PR"
+    ],
+    "user": "vsoch",
+    "body": "Hiya! So I'm working on integrating podman into one of my applications, and I hit a blocker when trying to do a run, at this point:\nhttps://github.com/containers/podman/blob/85f21fb2bd39d76300ab61a1fb1207405e05f9d2/cmd/podman/containers/run.go#L132\n\nI am poking around and trying to learn and first I saw that [some clients](https://github.com/containers/toolbox/blob/73c53a347b402748b6a12ef9f74cecb7e8528c38/src/pkg/podman/podman.go#L59) are literally just sending commands to the shell. So I was looking into reproducing a podman run, and I stumbled on this issue / question - if I am intended to use the CreateInit function to set things up (which I'd like to do) how can this be easy if it requires a cobra command, and the one that I'd ideally be able to use is private to that module? My only option is to basically copy paste all that logic, which doesn't seem like a good idea. Is there a possibility that we could either:\n\n1. make the cobra command public (capitalized) so I can use it in my library OR (maybe better?)\n2. have the CreateInit not take the cobra command as the argument, but rather the variables it needs from it. That way I can use it as part of the Podman Go API without needing to re-implement your specific client setup.\n\nThis is probably a larger discussion about the exposed developer interface with respect to using podman as a Go API - apologies in advance for all the questions - issues I might bring up. Thank you for your help!\n\ncc @alecbcs ",
+    "comments": [
+        {
+            "user": "flouthoc",
+            "body": "@vsoch I believe `CreateInit` is public so it can be used in other podman packages as well: https://github.com/containers/podman/blob/main/cmd/podman/pods/create.go#L140\n\n> make the cobra command public (capitalized) so I can use it in my library OR (maybe better?)\n\nI don't think `cmd` package was meant to be used directly but does changing imports to `Cobra \"github.com/spf13/cobra\" and using `* Cobra.command` solves your use case ?\n\n"
+        },
+        {
+            "user": "vsoch",
+            "body": "Yes that would technically solve it but why should I need to copy paste your command logic just to use CreateInit? It doesn’t make a lot of sense, hence why I provided the two suggestions to improve the API."
+        },
+        {
+            "user": "vrothberg",
+            "body": "Thanks for reaching out, @vsoch!\n\nThe `cmd/podman` (sub) package(s) is not meant to be used outside of the project. I recommend not to use it since there's absolutely not guarantee of stability.\n\nHave you had a look at the bindings (https://github.com/containers/podman/tree/main/pkg/bindings)? Those are part of the API and subject to semantic versioning."
+        },
+        {
+            "user": "cdoern",
+            "body": "I agree with @vrothberg, cmd/podman isn't supposed to be plucked out of its place and used as a standalone function. When I wrote CreateInit (or heavily modified it for the infra container rework) I made it \"more\" modular. the command is necessary for us to check if the command line flags have been altered, as only cobra can tell us that. \n\nMy only advice @vsoch if you really want to use this logic by itself, is try recreating the proper environment with command line flags. You can easily convert/create flags out of string values and call the function. I do not advise doing this, as using the bindings is how podman and its functions are supposed to be used outside of traditional circumstance.\n\nIf you are getting to the point where you are recreating logic that already exists within the main application, you are probably approaching the usage of podman from the wrong angle, try zooming out a bit and using the tools that already exit for accessing our services from an external application."
+        },
+        {
+            "user": "vsoch",
+            "body": "So Podman isn’t designed to have a Go API for developers? Can you expand upon “zooming out a bit” and point me to the Go APIs that are intended to be used?"
+        },
+        {
+            "user": "rhatdan",
+            "body": "We have a GO REST API, this is the only API we guarantee at this time.  It is under pkg/bindings."
+        },
+        {
+            "user": "vsoch",
+            "body": "Hmm I’m not really wanting my tool to use a rest API - how does that work, Podman runs some kind of service? :/ "
+        },
+        {
+            "user": "vsoch",
+            "body": "Oh I see I found the documentation,\n\nhttps://podman.io/blogs/2020/08/10/podman-go-bindings.html\n\n it’s via a socket. So is this something that a majority of users are running or hugely unlikely to have it running? Eg what percentage of my users using an installation of Podman they do not control will not be able to use a tool that uses this API? \n![C2D31BE8-5D31-4C90-837B-4C90071F927C](https://user-images.githubusercontent.com/814322/147276430-8b089d4c-e197-42ab-925a-94e943a32c51.jpeg)\n"
+        },
+        {
+            "user": "rhatdan",
+            "body": "If you can run the podman command you can run the podman service.  It works in both rootfull and rootless mode."
+        },
+        {
+            "user": "vsoch",
+            "body": "Ok great I’ll give it a try and report back! Thanks @rhatdan."
+        },
+        {
+            "user": "vsoch",
+            "body": "Has anyone ever (via Go) started and stopped the service on behalf of the user so they don’t need these extra steps? "
+        },
+        {
+            "user": "rhatdan",
+            "body": "You can enable it via systemd and it will only run when someone connect to it.  By default it exits 5 seconds after the last connection goes a way."
+        },
+        {
+            "user": "vsoch",
+            "body": "Testing on our clusters - doesn't seem to be a permission I have.\n```\n$ systemctl --user start podman.socket\nFailed to get D-Bus connection: Connection refused\n\n$ podman system service -t 5000\nError: unknown shorthand flag: 't' in -t\n\n$ podman system service -p 5000\nError: unknown shorthand flag: 'p' in -p\n\n$ podman system service        \ncannot clone: Invalid argument\nuser namespaces are not enabled in /proc/sys/user/max_user_namespaces\nError: could not get runtime: cannot re-exec process\n```\nOk - so I understand that the cmd library is not intended to be used outside of the library - but why not libpod? I'd want to be able to use libpod to do all the basics - create a container, run, etc., It sounds like the core library was called libpod but not written in a way to be used by developers. Is this something we could chat about and I could possibly help via PRs? I really think there needs to be some attention placed on a developer API - which is definitely not this socket thing or using the cmd group that wasn't intended for that."
+        },
+        {
+            "user": "rhatdan",
+            "body": "You can use it, but we are not giving any guarantee that on the next release we will not break you.  While the library changes slowly, we do not concentrate on guaranteeing the libpod API is stable.  podman 4.0 there will be major changes which will almost guaranteed to break your code.\n\n"
+        },
+        {
+            "user": "vsoch",
+            "body": "Understood! So thinking about 4.0 - is there a plan underway to improve the developer experience of using libpod, or is this something we should open conversation about what we would like? @alecbcs and I are working on a tool (and were hoping to have Podman be the default container backend) but the socket isn't going to work for our use-case. Ideally we'd like a stable developer Go API, so I think we are definitely willing to help if that's a discussion to have! If not, we are also okay issuing commands to podman via a subprocess/shell and then waiting for 4.0, at which point maybe the issue will be solved or we can start the conversation again. What do you think @rhatdan?"
+        },
+        {
+            "user": "rhatdan",
+            "body": "Sure sounds good.  We have monthly cabal meetings and this should be brought up at one of those.\nhttps://podman.io/community/meeting/\n\nI think this would be best discussed there, with @mheon present."
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "vsoch",
+            "body": "I'm happy to close this - ultimately I'm subprocess calling Podman (or the equivalent in Go) to get around the internal structure. Thanks!"
+        }
+    ],
+    "cross_references": []
+}

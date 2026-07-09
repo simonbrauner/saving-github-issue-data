@@ -1,0 +1,69 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 8498,
+    "type": "issue",
+    "title": "macos: podman asks for login even when remote does not allow password authentications",
+    "state": "closed",
+    "labels": [
+        "kind/bug",
+        "macos",
+        "locked - please file new issue/PR"
+    ],
+    "user": "ssbarnea",
+    "body": "/kind bug\n\n**Description**\n\nIt seams that podman-remote goes into interactive password prompts regardless if remote servers allow them or not, which is different from ssh implementation and also breaks automation.\n\nPlease note that this problem seams to be particular to \"podman\" cli on macos (which is in fact podman-remote), but when trying to reproduce the same login prompt from a linux host while using the podman-remote command, it did fail correctly with a \"no supported methods remain\". Both versions were the same (2.1.1).\n\n**Steps to reproduce the issue:**\n\n```\n# proof server does not allow password authentication\nssbarnea@imac: ~\n$ SSH_AUTH_SOCK= ssh -i /dev/null -F /dev/null -o PubkeyAuthentication=no root@leno\nroot@leno: Permission denied (publickey,gssapi-keyex,gssapi-with-mic).\nFAIL: 255\n\n# proof that podman asks for password when it should not do so\nssbarnea@imac: ~\n$ CONTAINER_HOST=ssh://root@leno/run/podman/podman.sock CONTAINER_SSHKEY=/Users/ssbarnea/.ssh/id_rsa_insecure\n podman --log-level=debug ps\nINFO[0000] podman filtering at log level debug\nDEBU[0000] Called ps.PersistentPreRunE(podman --log-level=debug ps)\nLogin password:\nTime: 0h:00m:06s\n```\n\n**Describe the results you expected:**\n\n\n**Additional information you deem important (e.g. issue happens only occasionally):**\n\n**Output of `podman version`:**\npodman version 2.1.1\n```\n(paste your output here)\n```\n\n**Output of `podman info --debug`:**\nIrellevant because it does not work due to current bug\n```\nLogin password:\n```\n\n**Package info (e.g. output of `rpm -q podman` or `apt list podman`):**\n\n```\n2.1.1 installed with brew on macos\n```\n\n\nRelated: https://github.com/containers/podman/issues/7806",
+    "comments": [
+        {
+            "user": "afbjorklund",
+            "body": "Podman should _only_ fall back to asking for the password, if it can't find any of:\n* identity (in variable)\n* SSH_AUTH_SOCK\n* password (in url)\n\n```go\n        if len(authMethods) == 0 {\n                pass, err := terminal.ReadPassword(\"Login password:\")\n                if err != nil {\n                        return Connection{}, err\n                }\n                authMethods = append(authMethods, ssh.Password(string(pass)))\n        }\n```\n\nIn your case you are passing an identity (CONTAINER_SSHKEY), so it should **not** ask for password.\n\nBut your log output is missing a vital line, ` public key signer enabled for identity`, after parsing it...\n\n\n"
+        },
+        {
+            "user": "jwhonce",
+            "body": "@ssbarnea I'm sorry, I have been unable to reproduce this issue. \n\nI'm using:\n- macOS Big Sur 11.0.1\n- podman 2.1.1 installed via brew\n- `CONTAINER_HOST=ssh://jhonce@podman-service.local:22/run/user/1000/podman/podman.sock CONTAINER_SSHKEY=~/.ssh/id podman --log-level=debug ps`\n\nI have tried:\n- id files that both are authorized and unauthorized on the server, not prompted\n- Setting `CONTAINER_SSHKEY` any value should either result in a error (invalid/missing files) or a log output when valid\n- Setting `CONTAINER_SSHKEY=\"\"` does cause the Login prompt, as expected\n- I have tried both bash and zsh\n\n/cc  @ashley-cui "
+        },
+        {
+            "user": "ssbarnea",
+            "body": "I suspect this is highly dependent on key type and size and apparently there is no debug option to enable to make it more verbose. \n\nConfirmed that my both keys are **4096 rsa**, one of them is encrypted at rest (loaded into agent) and the other one is unencrypted. podman refuses to connect to the bastion host with both, but ssh has no problems connecting.\n\nThe bastion is a fedora 33 machine but i doubt that matters much because ssh works, with RSA keys too!\n\n## Update\n\nNow I do have the confirmation that podman is unable to establish ssh connection using RSA keys, regardless if they are loaded by itself or via ssh-agent, it fails to establish a handshake with them:\n```\nError: Failed to create sshClient: Connection to bastion host (ssh://root@leno:22/var/run/podman/podman.sock) failed.: ssh: handshake failed: ssh: unable to authenticate, attempted methods [none publickey], no supported methods remain\n```\n\nFollowing https://www.ssh.com/ssh/keygen/ I created two other keys `ecdsa` and `ed25519` and they both worked. I skiped testing `dsa` as I mostly considered unsafe/not-recommended/deprecated.\n"
+        },
+        {
+            "user": "ssbarnea",
+            "body": "@afbjorklund the logic in the mentioned code snipped seams flawed at best. An app should not prompt user for a password just because it failed to load other authentication methods. Interactive (challenge) SSH authentication should be taken care of the ssh library and should establish a real connection with the server, not to ask user about a password.\n\nThis is confusing at best, but I would even add that it has some security implications. Also it breaks because it does not support any authentication variations, for example some systems may require multiple answers, like OTP tokens.\n\nI personally do not see much use for that prompt and I would not mind seeing it removed, or at least making it appear only when user explicitly asked for this \"feature\" to be enabled, like a `--prompt` kind of option.\n\nAt this moment if I force podman to run with a non-tty by adding `</dev/null`, I endup with another confusing error, side effect from current implementation:\n```\nError: Failed to create sshClient: EOF\nFAIL: 125\n```\n\nIf I try to pipe the std stream to something else, I still get the interactive prompt, yet another reason for causing breakage in production or CI.\n```\npodman --log-level=debug ps 2>&1 | cat\nLogin password:\n```"
+        },
+        {
+            "user": "afbjorklund",
+            "body": "> @afbjorklund the logic in the mentioned code snipped seams flawed at best. An app should not prompt user for a password just because it failed to load other authentication methods. Interactive (challenge) SSH authentication should be taken care of the ssh library and should establish a real connection with the server, not to ask user about a password.\n\nI didn't _write_ the code, I was just looking at it... (It was added in cbca6253282cc76be74b3005da80b63de94a8180 and 6ff42395d08217d86055456a9130fef8f78d34e2)\n\nhttps://github.com/containers/podman/blob/v2.2.0/pkg/bindings/connection.go#L185_L215\n\nStill don't know why any of it is used though, if you are indeed providing an identity (or agent) ?\n\nMaybe $SSH_AUTH_SOCK is misbehaving ?\n\n> I personally do not see much use for that prompt and I would not mind seeing it removed, or at least making it appear only when user explicitly asked for this \"feature\" to be enabled, like a --prompt kind of option.\n\nSeems reasonable, and this is how `ssh` works I suppose. (`PasswordAuthentication` option)"
+        },
+        {
+            "user": "ssbarnea",
+            "body": "I would not mind removing that code myself but I am waiting for some podman core developer to comment on this as I do not want to propose an unwanted change."
+        },
+        {
+            "user": "afbjorklund",
+            "body": "But it seems like the main difference between and Mac and Linux is the missing ssh-agent (SSH_AUTH_SOCK) ?\n\nHere it has either 2 (identity+agent) or 1 (agent only) auth method, so it never falls back to asking for a password...\n"
+        },
+        {
+            "user": "afbjorklund",
+            "body": "It is possible to change the code to use PasswordCallback (when needed) instead of Password (up front).\n\nYou might still want to have an option to enable/disable, but at least wouldn't ask if not supported by server."
+        },
+        {
+            "user": "afbjorklund",
+            "body": "After PR https://github.com/containers/podman/pull/8596 :\n\nNow it goes directly to failure mode, if server doesn't support passwords. If it does, it will prompt (like before).\n\n`Error: failed to create sshClient: Connection to bastion host (ssh://root@127.0.0.1:39147) failed.: ssh: handshake failed: ssh: unable to authenticate, attempted methods [none], no supported methods remain`\n\nNormally passwords are disabled for root. If they are allowed, but the _wrong_ one is given, it looks more like:\n\n`Login password:`\n`Error: failed to create sshClient: Connection to bastion host (ssh://tc@127.0.0.1:39147) failed.: ssh: handshake failed: ssh: unable to authenticate, attempted methods [none password], no supported methods remain`\n\n----\nFor this particular test, I did:\nunset CONTAINER_SSHKEY\nunset SSH_AUTH_SOCK\n\nNormally would suggest keys..."
+        },
+        {
+            "user": "afbjorklund",
+            "body": "I think it's a bit weird that it is called the \"bastion host\", since as far as I know it only supports unix sockets ?\n\nhttps://en.wikipedia.org/wiki/Bastion_host\n\nSo it's not so much about jumping to _another_ server on the network, the Podman service is probably local...\n\nBut it was only the message, not important."
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 8499
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 8596
+        }
+    ]
+}

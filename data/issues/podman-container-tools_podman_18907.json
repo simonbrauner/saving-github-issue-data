@@ -1,0 +1,54 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 18907,
+    "type": "issue",
+    "title": "Wrong CWD value set when calling OCI poststop hook executable",
+    "state": "closed",
+    "labels": [
+        "kind/bug",
+        "locked - please file new issue/PR"
+    ],
+    "user": "fangpenlin",
+    "body": "### Issue Description\n\nI am figuring out how to use OCI hooks for some custom clean up implementations. But then I realized it's pretty odd that OCI poststop hook is called by podman with a wrong CWD value (I assume it's wrong, see below).\n\nI wrote a simple C++ program for dumping the CWD value and environment variables like this\n\n`dump_env.cpp`\n\n```cpp\n#include <iostream>\n#include <fstream>\n#include <string>\n#include <unistd.h>\n\nusing namespace std;\n\nint main(int argc, char **argv, char **envp){\n  ofstream output_file;\n  output_file.open(string(\"/tmp/\") + argv[0] + \".txt\");\n  output_file << \"--- Environ Vars: ---\" << endl;\n  for (char **env = envp; *env != 0; env++) {\n    char *thisEnv = *env;\n    output_file << thisEnv << \"\\n\";\n  }\n  char cwd[1024];\n  output_file << \"--- CWD: ---\" << endl;\n  output_file << getcwd(cwd, 1024) << endl;\n  output_file.close();\n  return 0;\n}\n```\n\nThen I have two OCI hook json files created like this\n\n`/usr/share/containers/oci/hooks.d/start.json`:\n```JSON\n{\n  \"version\": \"1.0.0\",\n  \"hook\": {\n    \"path\": \"/tmp/dump_env\",\n    \"args\": [\"start\"]\n  },\n  \"when\": {\n    \"always\": true\n  },\n  \"stages\": [\"createRuntime\"]\n}\n```\n\nand this\n\n`/usr/share/containers/oci/hooks.d/stop.json`:\n```JSON\n{\n  \"version\": \"1.0.0\",\n  \"hook\": {\n    \"path\": \"/tmp/dump_env\",\n    \"args\": [\"stop\"]\n  },\n  \"when\": {\n    \"always\": true\n  },\n  \"stages\": [\"poststop\"]\n}\n```\n\nAfter run any `pod run` command, I got output files, for start hook it's like this:\n\n\n```\n--- Environ Vars: ---\n_OCI_SYNCPIPE=3\n_OCI_STARTPIPE=4\nPATH=/usr/local/bin:/usr/local/sbin:/usr/bin:/usr/sbin\nXDG_RUNTIME_DIR=/run/user/1000\n_CONTAINERS_USERNS_CONFIGURED=init\n_CONTAINERS_ROOTLESS_UID=1000\nHOME=/home/user\n_LIBCONTAINER_CLONED_BINARY=1\n--- CWD: ---\n/home/user/.local/share/containers/storage/overlay-containers/b7420ff30555da204e3dbca52edf2d4e5c09fa31d66997d95e7c432b876d4457/userdata\n```\n\nAnd the output of stop env dump looks like this\n\n```\n--- Environ Vars: ---\n--- CWD: ---\n/home/user\n```\n\nAs you can see the CWD for start hook invoked by `crun` is set to the `userdata` folder of container. With that, I can easily read `config.json` and perform the task for my starting hook. But for `poststop`, somehow the CWD value was set to `/home/user`. \n After digging a bit deeper, for the reasons I am not aware of, podman is making the `poststop` call instead of delegate it to `crun` [here](https://github.com/containers/podman/blob/189a74d345386c663b29df0dba19475efbb5b968/libpod/container_internal.go#L2087-L2135).\n\nI haven't look at the code carefully yet, not sure why the cwd is set to home folder instead of container's userdata folder. I also tried my best to read the OCI container runtime spec see if they mention anything about setting the CWD value when calling the hook executable. Unfortunately, I didn't find anything about this part in the documents. So I assume this is an implementation details up to vendor like podman? The behavior is inconsistent between crun invoked calls and the podman invoked calls, plus it's harder to make a poststop hook works without knowing the container userdata folder, I wounder if this should be seen as a bug? I assume it is, but if it's not or this is even intentional, please feel free to close this issue.\n\n### Steps to reproduce the issue\n\nSteps to reproduce the issue\n1. Build a simple hook program for dumping cwd value\n2. Add `createRuntime` and `poststop` hook files to use the dump cwd command to output the value to somewhere\n3. Run `podman run` with any image and exit the container\n4. Read the output cwd value for start and stop\n\n\n### Describe the results you received\n\nDescribe the results you received\n\n### Describe the results you expected\n\nCWD value when poststop executable invoked:\n```\n/home/user\n```\n\n### podman info output\n\n```yaml\nhost:\n  arch: amd64\n  buildahVersion: 1.30.0\n  cgroupControllers: []\n  cgroupManager: cgroupfs\n  cgroupVersion: v1\n  conmon:\n    package: conmon-2.1.7-2.fc37.x86_64\n    path: /usr/bin/conmon\n    version: 'conmon version 2.1.7, commit: '\n  cpuUtilization:\n    idlePercent: 98.6\n    systemPercent: 0.09\n    userPercent: 1.31\n  cpus: 32\n  databaseBackend: boltdb\n  distribution:\n    distribution: fedora\n    variant: container\n    version: \"37\"\n  eventLogger: journald\n  hostname: MY-COMPUTER\n  idMappings:\n    gidmap:\n    - container_id: 0\n      host_id: 1000\n      size: 1\n    - container_id: 1\n      host_id: 524288\n      size: 65536\n    uidmap:\n    - container_id: 0\n      host_id: 1000\n      size: 1\n    - container_id: 1\n      host_id: 524288\n      size: 65536\n  kernel: 5.15.90.1-microsoft-standard-WSL2\n  linkmode: dynamic\n  logDriver: journald\n  memFree: 522428416\n  memTotal: 16720412672\n  networkBackend: netavark\n  ociRuntime:\n    name: crun\n    package: crun-1.8.5-1.fc37.x86_64\n    path: /usr/bin/crun\n    version: |-\n      crun version 1.8.5\n      commit: b6f80f766c9a89eb7b1440c0a70ab287434b17ed\n      rundir: /run/user/1000/crun\n      spec: 1.0.0\n      +SYSTEMD +SELINUX +APPARMOR +CAP +SECCOMP +EBPF +CRIU +LIBKRUN +WASM:wasmedge +YAJL\n  os: linux\n  remoteSocket:\n    exists: true\n    path: /run/user/1000/podman/podman.sock\n  security:\n    apparmorEnabled: false\n    capabilities: CAP_CHOWN,CAP_DAC_OVERRIDE,CAP_FOWNER,CAP_FSETID,CAP_KILL,CAP_NET_BIND_SERVICE,CAP_SETFCAP,CAP_SETGID,CAP_SETPCAP,CAP_SETUID,CAP_SYS_CHROOT\n    rootless: true\n    seccompEnabled: true\n    seccompProfilePath: /usr/share/containers/seccomp.json\n    selinuxEnabled: false\n  serviceIsRemote: false\n  slirp4netns:\n    executable: /usr/bin/slirp4netns\n    package: slirp4netns-1.2.0-8.fc37.x86_64\n    version: |-\n      slirp4netns version 1.2.0\n      commit: 656041d45cfca7a4176f6b7eed9e4fe6c11e8383\n      libslirp: 4.7.0\n      SLIRP_CONFIG_VERSION_MAX: 4\n      libseccomp: 2.5.3\n  swapFree: 4117819392\n  swapTotal: 4294967296\n  uptime: 72h 50m 21.00s (Approximately 3.00 days)\nplugins:\n  authorization: null\n  log:\n  - k8s-file\n  - none\n  - passthrough\n  - journald\n  network:\n  - bridge\n  - macvlan\n  - ipvlan\n  volume:\n  - local\nregistries:\n  search:\n  - docker.io\nstore:\n  configFile: /home/user/.config/containers/storage.conf\n  containerStore:\n    number: 90\n    paused: 0\n    running: 0\n    stopped: 90\n  graphDriverName: overlay\n  graphOptions: {}\n  graphRoot: /home/user/.local/share/containers/storage\n  graphRootAllocated: 1081101176832\n  graphRootUsed: 3099852800\n  graphStatus:\n    Backing Filesystem: extfs\n    Native Overlay Diff: \"true\"\n    Supports d_type: \"true\"\n    Using metacopy: \"false\"\n  imageCopyTmpDir: /var/tmp\n  imageStore:\n    number: 9\n  runRoot: /run/user/1000/containers\n  transientStore: false\n  volumePath: /home/user/.local/share/containers/storage/volumes\nversion:\n  APIVersion: 4.5.0\n  Built: 1681486976\n  BuiltTime: Fri Apr 14 08:42:56 2023\n  GitCommit: \"\"\n  GoVersion: go1.19.7\n  Os: linux\n  OsArch: linux/amd64\n  Version: 4.5.0\n```\n```\n\n\n### Podman in a container\n\nNo\n\n### Privileged Or Rootless\n\nNone\n\n### Upstream Latest Release\n\nNo\n\n### Additional environment details\n\nAdditional environment details\n\n### Additional information\n\nAdditional information like issue happens only occasionally or issue happens with a particular architecture or on a particular setting",
+    "comments": [
+        {
+            "user": "fangpenlin",
+            "body": "I read the code a bit more, the Run method is making the osexec.Cmd struct at\n\nhttps://github.com/containers/podman/blob/189a74d345386c663b29df0dba19475efbb5b968/vendor/github.com/containers/common/pkg/hooks/exec/exec.go#L22C9-L29\n\nAnd according to Go's doc for `Cmd` struct and its `Dir` value\n\nhttps://pkg.go.dev/os/exec\n\n```\n// Dir specifies the working directory of the command.\n// If Dir is the empty string, Run runs the command in the\n// calling process's current directory.\nDir string\n```\n\nthe `Dir` value is not provided, I guess that's why it inherits the cwd value from `podman` daemon process. I was running it remotely, maybe that's why I am seeing the wrong value. Not sure if running podman container locall would make any difference... hmmm 🤔"
+        },
+        {
+            "user": "fangpenlin",
+            "body": "Nope, I just tried, if you run `podman` locally instead or remotely, it will use the current CWD where you kicked start the command. Like, when I run\n\n```\nsudo podman --log-level=debug run --entrypoint=/bin/sh -it alpine -c 'echo hi'\n```\n\nin `/tmp` and I will see this\n\n```\n--- Environ Vars: ---\n--- CWD: ---\n/tmp\n```\n\nShouldn't be too hard to fix, I will probably create a PR tomorrow for this."
+        },
+        {
+            "user": "rhatdan",
+            "body": "Please open a PR to fix."
+        },
+        {
+            "user": "fangpenlin",
+            "body": "@rhatdan I created a PR here\n\nhttps://github.com/containers/podman/pull/18921\n\nalong with one for common\n\nhttps://github.com/containers/common/pull/1514\n\nand one for buildah\n\nhttps://github.com/containers/buildah/pull/4871\n\nAs a first time contributor, I am not sure how the workflow looks like here. I didn't add change in vendor folder in my PR. Please let me know if this is not the correct way to open PR with across repo changes here, thanks! 🙏"
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "containers",
+            "repository": "common",
+            "number": 1514
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "buildah",
+            "number": 4871
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 18921
+        },
+        {
+            "organization": "containers",
+            "repository": "common",
+            "number": 1521
+        }
+    ]
+}

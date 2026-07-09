@@ -1,0 +1,84 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 24419,
+    "type": "pull_request",
+    "title": "DO NOT MERGE: Smoke-test of a costly “always compute old-style IDs” approach",
+    "state": "closed",
+    "labels": [
+        "approved",
+        "do-not-merge/work-in-progress",
+        "release-note-none",
+        "locked - please file new issue/PR"
+    ],
+    "user": "mtrmac",
+    "body": "This is a variant of https://github.com/containers/podman/pull/24287 which reverts (some of) the system test changes to again expect old-style IDs, and includes https://github.com/containers/storage/pull/2155 / https://github.com/containers/image/pull/2613 .\n\n⚠️  WARNING: all of this is a quick sketch, absolutely untested.\n\nThis exists purely to give us options. With this, zstd:chunked loses some of the performance wins, and it should revert to old-style IDs. We then have the _option_ to reintroduce the ID change and performance improvement (perhaps even based on measurements) later.\n\nAnd, separately, this enforces that layers should match against the config’s DiffIDs, resolving the signing ambiguity.\n\nFYI @giuseppe @edsantiago @mheon @baude \n\n#### Does this PR introduce a user-facing change?\n\n```release-note\nNone\n```\n",
+    "comments": [
+        {
+            "user": "openshift-ci[bot]",
+            "body": "[APPROVALNOTIFIER] This PR is **APPROVED**\n\nThis pull-request has been approved by: *<a href=\"https://github.com/containers/podman/pull/24419#\" title=\"Author self-approved\">mtrmac</a>*\n\nThe full list of commands accepted by this bot can be found [here](https://go.k8s.io/bot-commands?repo=containers%2Fpodman).\n\nThe pull request process is described [here](https://git.k8s.io/community/contributors/guide/owners.md#the-code-review-process)\n\n<details >\nNeeds approval from an approver in each of these files:\n\n- ~~[OWNERS](https://github.com/containers/podman/blob/main/OWNERS)~~ [mtrmac]\n\nApprovers can indicate their approval by writing `/approve` in a comment\nApprovers can cancel approval by writing `/approve cancel` in a comment\n</details>\n<!-- META={\"approvers\":[]} -->"
+        },
+        {
+            "user": "packit-as-a-service[bot]",
+            "body": "Ephemeral COPR build failed. @containers/packit-build please check."
+        },
+        {
+            "user": "packit-as-a-service[bot]",
+            "body": "Ephemeral COPR build failed. @containers/packit-build please check."
+        },
+        {
+            "user": "mtrmac",
+            "body": "Note to self: If/after https://github.com/containers/storage/pull/2156 merges, this PR will need to re-enable `enable_partial_images`.\n\nEdit: done."
+        },
+        {
+            "user": "mtrmac",
+            "body": "<s>The test images with all images converted to zstd:chunked are too old. For now I’m leaving that variant in https://github.com/mtrmac/libpod/tree/mitr-zstd-costly-old-ids-integration-chunked-test-images , and reverting to test with the current images here.\n\n⚠️ That significantly decreases the scope of testing; many of the unexpected behavior changes were happening only with most images converted to zstd:chunked. With this, we are mostly back to the test coverage of https://github.com/containers/podman/pull/21903 , which is known to not demonstrate many of the surprises.</s>"
+        },
+        {
+            "user": "edsantiago",
+            "body": ">The test images with all images converted to zstd:chunked are too old\n\nWould you care to follow (and test and review) my new [simplified automation_images doc](https://github.com//containers/automation_images/blob/454288919fb135cb923d4646cdf8a32281167c5a/README-simplified.md)? You will need to import https://github.com/containers/automation_images/pull/388/files but apart from that it really should be fairly simple."
+        },
+        {
+            "user": "mtrmac",
+            "body": "Thanks, I’ll definitely try that."
+        },
+        {
+            "user": "mtrmac",
+            "body": "> The test images with all images converted to zstd:chunked are too old.\n\nNote to self: https://github.com/containers/automation_images/pull/395 ."
+        },
+        {
+            "user": "mtrmac",
+            "body": "<summary>Private notes of manual testing process/outcomes, some problems remain\n<details>\n\n```\nchunked pulls with DiffIDs work\n###\n# bin/podman pull docker://quay.io/libpod/alpine\n# bin/podman --log-level=debug push --tls-verify=false --force-compression --compression-format zstd:chunked quay.io/libpod/alpine   docker://localhost:5000/chunked-normal\n\n# skopeo copy --preserve-digests --all --src-tls-verify=false docker://localhost:5000/chunked-normal dir:t-chunked-normal\nFIXME: originalDigest, originalLen\n# bin/podman system reset\n# bin/podman --log-level=debug pull --tls-verify=false docker://localhost:5000/chunked-normal\nverify log contains \"Created zstd:chunked differ for blob\"\nverify image ID matches config digest\n\nchunked pulls with incorrect DiffIDs fail\n###\n# jq . < t-chunked-normal/$originalDigest > tmp\n# cp -a t-chunked-normal t-chunked-mismatch\nmodify diffID in tmp\n# configDigest=$(sha256sum tmp | cut -d ' ' -f 1)\n# configLen=$(wc --bytes < tmp)\n# mv tmp t-chunked-mismatch/$configDigest\n# sed \"s/$originalDigest/$configDigest/ ; s/:$originalLen}/:$configLen}/\" < t-chunked-normal/manifest.json > t-chunked-mismatch/manifest.json \n# skopeo copy --preserve-digests --all --dest-tls-verify=false dir:t-chunked-mismatch docker://localhost:5000/chunked-mismatch\n# bin/podman --log-level=debug pull --tls-verify=false docker://localhost:5000/chunked-mismatch\n(reuse) verify fails with \"trying to reuse\"…\"does not match config's DiffID\"\n# bin/podman system reset\n# bin/podman --log-level=debug pull --tls-verify=false docker://localhost:5000/chunked-mismatch\n(fresh pull) verify fails with \"uncompressed digest of layer\" … \"config claims\"\n\nchunked pulls with missing DiffIDs fail\n###\n# jq . < t-chunked-normal/$originalDigest > tmp\n# cp -a t-chunked-normal t-chunked-missing\nremove diffID in tmp\n# configDigest=$(sha256sum tmp | cut -d ' ' -f 1)\n# configLen=$(wc --bytes < tmp)\n# mv tmp t-chunked-missing/$configDigest\n# sed \"s/$originalDigest/$configDigest/ ; s/:$originalLen}/:$configLen}/\" < t-chunked-normal/manifest.json > t-chunked-missing/manifest.json \n# skopeo copy --preserve-digests --all --dest-tls-verify=false dir:t-chunked-missing docker://localhost:5000/chunked-missing\n# bin/podman --log-level=debug pull --tls-verify=false docker://localhost:5000/chunked-missing\n(fresh pull) verify fails with \"image config has only 0 DiffID values, but a layer with index 0 exists\"\n# bin/podman --log-level=debug pull --tls-verify=false docker://localhost:5000/chunked-normal\n# bin/podman --log-level=debug pull --tls-verify=false docker://localhost:5000/chunked-missing\n(reuse) verify fails with \"image config has only 0 DiffID values, but a layer with index 0 exists\"\n\nchunked pulls with empty DiffIDs fail\n###\n# jq . < t-chunked-normal/$originalDigest > tmp\n# cp -a t-chunked-normal t-chunked-empty\nset diffID in tmp to \"\"\n# configDigest=$(sha256sum tmp | cut -d ' ' -f 1)\n# configLen=$(wc --bytes < tmp)\n# mv tmp t-chunked-empty/$configDigest\n# sed \"s/$originalDigest/$configDigest/ ; s/:$originalLen}/:$configLen}/\" < t-chunked-normal/manifest.json > t-chunked-empty/manifest.json \n# skopeo copy --preserve-digests --all --dest-tls-verify=false dir:t-chunked-empty docker://localhost:5000/chunked-empty\n# bin/podman --log-level=debug pull --tls-verify=false docker://localhost:5000/chunked-empty\nFIXME FIXME FIXME (reuse) verify succeeds with \"Copying blob 45f92e705e65 skipped: already exists (found by TOC)\"\n# bin/podman system reset\n# bin/podman --log-level=debug pull --tls-verify=false docker://localhost:5000/chunked-empty\n(fresh pull) verify succeeds with \"Failed to retrieve partial blob: DiffID value for layer 0 is unknown or explicitly empty\" and \"Detected compression format zstd\" (falling back to full pull)\n\nnon-chunked preparation\n###\n# for i in t-chunked-*; do j=t-nonchunked-${i#t-chunked-}; cp -a \"$i\" \"$j\" && sed 's/io.github.containers.zstd-chunked/irrelevant-annotation/g' < \"$j\"/manifest.json > tmp &&  mv tmp \"$j\"/manifest.json  && skopeo copy --preserve-digests --all --dest-tls-verify=false dir:$j docker://localhost:5000/nonchunked-${j#t-nonchunked-}; done\n\nnon-chunked pulls with DiffIDs work\n###\n# bin/podman system reset\n# bin/podman --log-level=debug pull --tls-verify=false docker://localhost:5000/nonchunked-normal\n(fresh pull) verify succeeds with \"Failed to retrieve partial blob: no TOC found and convert_images is not configured\"\n# bin/podman system reset\n# bin/podman --log-level=debug pull --tls-verify=false docker://localhost:5000/chunked-normal\n# bin/podman --log-level=debug pull --tls-verify=false docker://localhost:5000/nonchunked-normal\n(reuse did not trigger, no compressed digest match) verify succeeds with \"Failed to retrieve partial blob: no TOC found and convert_images is not configured\" and \"Detected compression format zstd\"\n\nnon-chunked pulls with incorrect DiffIDs fail\n###\n# bin/podman system reset\n# bin/podman --log-level=debug pull --tls-verify=false docker://localhost:5000/nonchunked-mismatch\n(fresh pull) verify fails with \"writing blob\"… \"does not match config's DiffID\"\n# bin/podman --log-level=debug pull --tls-verify=false docker://localhost:5000/chunked-normal\n# bin/podman --log-level=debug pull --tls-verify=false docker://localhost:5000/nonchunked-mismatch\n(reuse) verify fail with \"trying to reuse blob\"…\"does not match config's DiffID\"\n\n\nnon-chunked pulls with missing DiffIDs work\n###\n# bin/podman system reset\n# bin/podman --log-level=debug pull --tls-verify=false docker://localhost:5000/nonchunked-missing\nFIXME FIXME FIXME (fresh pull) fails with \"image config has only 0 DiffID values, but a layer with index 0 exists\"\n# bin/podman --log-level=debug pull --tls-verify=false docker://localhost:5000/chunked-normal\n# bin/podman --log-level=debug pull --tls-verify=false docker://localhost:5000/nonchunked-missing\nFIXME FIXME FIXME (reuse) fails with \"image config has only 0 DiffID values, but a layer with index 0 exists\"\n\nnon-chunked pulls with empty DiffIDs work\n###\n# bin/podman system reset\n# bin/podman --log-level=debug pull --tls-verify=false docker://localhost:5000/nonchunked-empty\n(fresh pull) verify succeeds with \"Failed to retrieve partial blob: no TOC found and convert_images is not configured\"\n# bin/podman system reset\n# bin/podman --log-level=debug pull --tls-verify=false docker://localhost:5000/chunked-normal\n(reuse did not trigger, no compressed digest match) verify succeeds with \"Failed to retrieve partial blob: no TOC found and convert_images is not configured\" and \"Detected compression format zstd\"\n\n\nestargz pulls fall back\n###\nFIXME: this is a random image on the internet\n# bin/podman --log-level=debug pull docker://ghcr.io/stargz-containers/node:13.13.0-esgz\nVerify suceeds with \"Failed to retrieve partial blob: estargz layers don't support partial pulls with guaranteed consistency with non-partial pulls\"\n\n\nedit storage.conf\n###\n# sed 's/pull_options = .*/pull_options = {enable_partial_images = \"true\", use_hard_links = \"false\", ostree_repos=\"\", \"insecure_allow_unpredictable_image_contents\" = \"true\"}/' < /usr/share/containers/storage.conf > /etc/containers/storage.conf\n\nwith option, estargz pulls work\n###\nFIXME: this is a random image on the internet\n# bin/podman system reset\n# bin/podman --log-level=debug pull docker://ghcr.io/stargz-containers/node:13.13.0-esgz\nVerify suceeds with \"Created eStargz differ for blob\"\n\nwith option, chunked pulls with incorrect DiffIDs work\n###\n# bin/podman system reset\n# bin/podman --log-level=debug pull --tls-verify=false docker://localhost:5000/chunked-mismatch\n(fresh pull) Verify succeeds with \"Created zstd:chunked differ for blob\"\nVerify image ID does not match config digest\n# bin/podman --log-level=debug pull --tls-verify=false docker://localhost:5000/chunked-normal\n# bin/podman --log-level=debug pull --tls-verify=false docker://localhost:5000/chunked-mismatch\n(reuse still suceeds, TOC match without diffID known)\n# bin/podman --log-level=debug pull --tls-verify=false docker://localhost:5000/nonchunked-normal\n# bin/podman --log-level=debug pull --tls-verify=false docker://localhost:5000/chunked-mismatch\n(reuse) verify fails on \"does not match config's DiffID\", now known costlessly\n\n\nwith option, chunked pulls with missing DiffIDs work\n###\n# bin/podman system reset\n# bin/podman --log-level=debug pull --tls-verify=false docker://localhost:5000/chunked-missing\nFIXME FIXME FIXME (fresh pull) fails with \"image config has only 0 DiffID values, but a layer with index 0 exists\"\n# bin/podman --log-level=debug pull --tls-verify=false docker://localhost:5000/chunked-normal\n# bin/podman --log-level=debug pull --tls-verify=false docker://localhost:5000/chunked-missing\nFIXME FIXME FIXME (reuse) succeeds, but re-check after bug fixed\n# bin/podman --log-level=debug pull --tls-verify=false docker://localhost:5000/nonchunked-normal\n# bin/podman --log-level=debug pull --tls-verify=false docker://localhost:5000/chunked-missing\nFIXME FIXME FIXME (fresh pull) fails with \"image config has only 0 DiffID values, but a layer with index 0 exists\"\n\n\n\nwith option, chunked pulls with empty DiffIDs work\n###\n# bin/podman system reset\n# bin/podman --log-level=debug pull --tls-verify=false docker://localhost:5000/chunked-empty\n(fresh pull) Verify succeeds with \"Failed to retrieve partial blob: DiffID value for layer 0 is unknown or explicitly empty\"\n# bin/podman --log-level=debug pull --tls-verify=false docker://localhost:5000/chunked-normal\n# bin/podman --log-level=debug pull --tls-verify=false docker://localhost:5000/chunked-empty\n(reuse, FIXME FIXME FIXME re-check later) Verify suceeds with \"Skipping blob\"…\"already present\"\n# bin/podman --log-level=debug pull --tls-verify=false docker://localhost:5000/nonchunked-normal\n# bin/podman --log-level=debug pull --tls-verify=false docker://localhost:5000/chunked-empty\n(reuse, FIXME FIXME FIXME re-check later) Verify suceeds with \"Skipping blob\"…\"already present\"\n\n\n---\n\n- [ ] schema1 pulls work\n- [v] non-chunked pulls with DiffIDs work\n- [v] non-chunked pulls with incorrect DiffIDs fail\n- [X] non-chunked pulls with missing DiffIDs work\n- [v] non-chunked pulls with empty DiffIDs work\n- [v] chunked pulls with DiffIDs work\n- [v] chunked pulls with incorrect DiffIDs fail\n- [v] chunked pulls with missing DiffIDs fail\n- [X] chunked pulls with empty DiffIDs fail\n- [X] estargz pulls fall back\n- [v] with option, estargz pulls work\n- [v] with option, chunked pulls with incorrect DiffIDs work\n- [X] with option, chunked pulls with missing DiffIDs work\n- [v] with option, chunked pulls with empty DiffIDs work\n```\n\n</details></summary>"
+        },
+        {
+            "user": "mtrmac",
+            "body": "This is now on top of #25007, and differs from it by:\n- using a CI image where all images are zstd:chunked\n- enabling partial pulls for the whole Podman test suite\n- updating the tests to work with the unexpectedly-Zstd images"
+        },
+        {
+            "user": "mtrmac",
+            "body": "We now (e.g. with https://github.com/containers/podman/pull/25007 ) always run at least some tests with Zstd; converting every image is a possibility but losing gzip coverage would not be obviously better."
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "containers",
+            "repository": "image",
+            "number": 2613
+        },
+        {
+            "organization": "containers",
+            "repository": "storage",
+            "number": 2155
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 25007
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 24287
+        }
+    ]
+}

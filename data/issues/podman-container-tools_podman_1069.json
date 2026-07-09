@@ -1,0 +1,88 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 1069,
+    "type": "issue",
+    "title": "podman logs: race condition: error joining network namespace",
+    "state": "closed",
+    "labels": [
+        "locked - please file new issue/PR"
+    ],
+    "user": "edsantiago",
+    "body": "This one is hard to reproduce:\n```\nwhile :;do cid=$(podman run -d fedora date);sleep 0.1;podman logs $cid || break;echo $?;podman rm $cid;done\n.....\nERRO[0000] error joining network namespace for container 2ab337d975366ff98692c63b247e9356b7470edb50dd2e2cbefb96018744f0e7 \ncontainer has already been removed\n```\nIt usually fails within 2-3 minutes. If you can't get it to fail, try adjusting the `sleep 0.1` up or down.\n\nYou may also see a handful of these:\n```\nERRO[0000] `iptables -t filter -D FORWARD -s 10.88.17.84 ! -o 10.88.17.84 -j ACCEPT` failed: iptables: Bad rule (does a matching rule exist in that chain?).\n  (exit status 1) \nERRO[0000] Error deleting network: failed to Statfs \"/var/run/netns/cni-15a51d5a-9194-537f-2b20-9d8edb059a19\": no such file or directory \nERRO[0000] Failed to tear down network namespace for container 21acf232d7c18dbff2d868729c75af4a659f6a8755122ec6917c846ad1538f5b: failed to Statfs \"/var/run/netns/cni-15a51d5a-9194-537f-2b20-9d8edb059a19\": no such file or directory \n```\nThey look a lot like #736. I still find these unsettling, but they do not affect exit status.\n\npodman-0.7.1-1.git802d4f2.fc28",
+    "comments": [
+        {
+            "user": "mheon",
+            "body": "I really wonder where this is coming from. Is it the cleanup command from `podman run -d` or `podman rm`? I don't see how it would be `podman rm` since that's the command doing the removing..."
+        },
+        {
+            "user": "edsantiago",
+            "body": "It's coming from `podman logs`. Sorry for not being clear."
+        },
+        {
+            "user": "rhatdan",
+            "body": "I don't think this is coming from logs, I think it is coming from podman container cleanup which conmon is calling out to when you podman rm the container.\n\n@edsantiago Are you seeing lots of left over mountpoints?"
+        },
+        {
+            "user": "edsantiago",
+            "body": ">Are you seeing lots of left over mountpoints?\n```\n# mount | grep /run/netns | wc -l\n158\n```\n...but unfortunately I don't have a baseline from before I started this test.\n\n>I  don't think this is coming from logs\n\nIn the (semi)reproducer above, the only `break` is after `logs`. The loop breaks. That means `podman logs` is emitting that output and exiting; it's not `podman rm`. (I can also get a loop script to hang forever in `podman rm`, but less reliably than this one)."
+        },
+        {
+            "user": "edsantiago",
+            "body": "I just instrumented my reproducer (echo 'about to log'; echo 'about to rm'). Yeah, it's the `podman logs` command that is failing.\n\nmount|grep is now showing 157 (down from 158 above). Am I doing this right? What would you like me to check for leftover mountpoints?"
+        },
+        {
+            "user": "mheon",
+            "body": "The error message is from `getContainerFromDB` which should only being running once, when we initially retrieve the container. I think this is the code from @rhatdan to make retrieving a nonexistant network namespace nonfatal firing."
+        },
+        {
+            "user": "mheon",
+            "body": "At this point, it seems like a CNI and/or network namespace issue - the network ns is not being created and/or stored properly, so we can't open it subsequently. Podman is eating the error to allow you to remove the container, but will not allow you to do anything else with it, because we've gotten into a bad state - we think we have a valid network but we don't."
+        },
+        {
+            "user": "edsantiago",
+            "body": "The following (eventually) triggers a failure in `rm`:\n```\n# while :;do cid=$(podman run -d fedora date);podman logs $cid;timeout 10 podman rm $cid || break;done\n....\nMon Jul 9 22:28:38 UTC 2018\nERRO[0000] error joining network namespace for container 3cc52382b6494f643a34d550632f83a66712d0b8636490a6e860665677c85c25\n```\nThe `timeout` is necessary because, without it, `podman rm` simply hangs (seemingly forever; at least many minutes). The container is not removed. I've been unable to reproduce with just `run+rm` or `run+sleep+rm`."
+        },
+        {
+            "user": "mheon",
+            "body": "Alright, `rm` should be succeeding in that case, but it looks like it's not... I'll look into this tomorrow"
+        },
+        {
+            "user": "mheon",
+            "body": "@edsantiago What kind of environment are you running this on? Local VM, AWS, bare metal? I can't seem to reproduce on bare metal. I think it might be a timing issue, so speed of the local environment could matter."
+        },
+        {
+            "user": "edsantiago",
+            "body": "@mheon it's a VM in our OpenStack. m1.medium, Fedora-Cloud-Base-28-released-latest; I'm not sure what other info is relevant. "
+        },
+        {
+            "user": "mheon",
+            "body": "@edsantiago Thanks, that should be enough to give it a look."
+        },
+        {
+            "user": "edsantiago",
+            "body": "I've just seen what looks like the same failure via a different path: `podman kill` followed by `podman wait`. This one is much less reproducible than the first, but I can get it to fail via:\n```\n# while :;do cid=$(podman run -d fedora sleep 100);podman kill $cid;sleep 0.06;podman wait $cid || break;echo $?;podman rm $cid;done\n05c344c6626e3853ff17c9576b0de781d9f154129977e487bd0b41127d04050b\nERRO[0000] error joining network namespace for container 05c344c6626e3853ff17c9576b0de781d9f154129977e487bd0b41127d04050b \nfailed to wait for the container 05c344c6626e3853ff17c9576b0de781d9f154129977e487bd0b41127d04050b: container has already been removed\n```\npodman-0.7.2-2.git4ca4c5f.fc28.x86_64"
+        },
+        {
+            "user": "mheon",
+            "body": "I think this is related to #1168"
+        },
+        {
+            "user": "mheon",
+            "body": "I was hopeful my netns refactor this week would have fixed this, but I think #1168 is using the latest code, so evidently not. Will look into this next week."
+        },
+        {
+            "user": "pkubatrh",
+            "body": "I hit this (or maybe similar?) issue as well while trying to check if our existing test suite for docker images works using podman. Let me know if this is different enough to be worth creating a separate issue.\n\nMy reproducer:\n```\n# cid=$(podman run -d fedora bash -c \"sleep 100\"); podman stop $cid; podman rm -f $cid\nc4644be4579c120d27c9623c029751b6ba59494ed08b3e0b5ae4688570eafb1c\nERRO[0000] error joining network namespace for container c4644be4579c120d27c9623c029751b6ba59494ed08b3e0b5ae4688570eafb1c\n```\nAfter this the command keeps hanging indefinitely. For a small enough sleep value during the container creation the command does not hang and finishes successfully.\n\nThis is on:\n```\n$ podman --version:\npodman version 0.7.3\n```"
+        },
+        {
+            "user": "mheon",
+            "body": "I believe that #1186 will resolve this"
+        },
+        {
+            "user": "mheon",
+            "body": "#1186 merged. That should have addressed the root cause, so I'm going to close. @edsantiago @pkubatrh Feel free to reopen if this behavior happens again on 0.8.1 once we release it on Friday."
+        }
+    ],
+    "cross_references": []
+}

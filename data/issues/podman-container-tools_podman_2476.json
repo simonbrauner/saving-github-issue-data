@@ -1,0 +1,110 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 2476,
+    "type": "pull_request",
+    "title": "Fix ignored --stop-timeout flag to 'podman create'",
+    "state": "closed",
+    "labels": [
+        "lgtm",
+        "approved",
+        "locked - please file new issue/PR"
+    ],
+    "user": "mheon",
+    "body": "Also add some extra debug information to help figure out what's going on when stop goes bad.",
+    "comments": [
+        {
+            "user": "openshift-ci-robot",
+            "body": "[APPROVALNOTIFIER] This PR is **APPROVED**\n\nThis pull-request has been approved by: *<a href=\"https://github.com/containers/libpod/pull/2476#\" title=\"Author self-approved\">mheon</a>*\n\nThe full list of commands accepted by this bot can be found [here](https://go.k8s.io/bot-commands?repo=containers%2Flibpod).\n\nThe pull request process is described [here](https://git.k8s.io/community/contributors/guide/owners.md#the-code-review-process)\n\n<details >\nNeeds approval from an approver in each of these files:\n\n- ~~[OWNERS](https://github.com/containers/libpod/blob/master/OWNERS)~~ [mheon]\n\nApprovers can indicate their approval by writing `/approve` in a comment\nApprovers can cancel approval by writing `/approve cancel` in a comment\n</details>\n<!-- META={\"approvers\":[]} -->"
+        },
+        {
+            "user": "rhatdan",
+            "body": "LGTM"
+        },
+        {
+            "user": "edsantiago",
+            "body": "Hey, so, in testing (rootless), I'm seeing:\n```\n./bin/podman --log-level=debug stop --timeout=5 foo\nINFO[0000] running as rootless                          \nDEBU[0000] Initializing boltdb state at /home/esm/.local/share/containers/storage/libpod/bolt_state.db \nDEBU[0000] Using graph driver overlay                   \nDEBU[0000] Using graph root /home/esm/.local/share/containers/storage \nDEBU[0000] Using run root /run/user/14904               \nDEBU[0000] Using static dir /home/esm/.local/share/containers/storage/libpod \nDEBU[0000] Using tmp dir /run/user/14904/libpod/tmp     \nDEBU[0000] Using volume path /home/esm/.local/share/containers/storage/volumes \nDEBU[0000] Set libpod namespace to \"\"                   \nDEBU[0000] Not configuring container store              \nDEBU[0000] Setting maximum workers to 24                \nDEBU[0000] Stopping ctr 76bd77687b93a1c15c2c790e920b6bd882a90ca40920d60dde6ff693dd7b5bfc with timeout 5 \nDEBU[0000] Stopping container 76bd77687b93a1c15c2c790e920b6bd882a90ca40920d60dde6ff693dd7b5bfc (PID 24516) \nDEBU[0000] Sending signal 15 to container 76bd77687b93a1c15c2c790e920b6bd882a90ca40920d60dde6ff693dd7b5bfc \nWARN[0005] Timed out stopping container 76bd77687b93a1c15c2c790e920b6bd882a90ca40920d60dde6ff693dd7b5bfc, resorting to SIGKILL \nERRO[0008] Error saving container 76bd77687b93a1c15c2c790e920b6bd882a90ca40920d60dde6ff693dd7b5bfc state: error saving container 76bd77687b93a1c15c2c790e920b6bd882a90ca40920d60dde6ff693dd7b5bfc state: container 76bd77687b93a1c15c2c790e920b6bd882a90ca40920d60dde6ff693dd7b5bfc does not exist in DB: no such container \nERRO[0008] timed out waiting for the condition          \n```"
+        },
+        {
+            "user": "mheon",
+            "body": "How is the container created? With --rm?"
+        },
+        {
+            "user": "edsantiago",
+            "body": "Yes, with --rm: same reproducer as #2472"
+        },
+        {
+            "user": "mheon",
+            "body": "Alright we have an interesting race here.\n\nThe cleanup process from `--rm` gets in and removes the container while `rm` itself is still sleeping, waiting to check if the process died.\n\nIt wakes up and promptly discovers that the container no longer exists.\n\nOf course, I think that our locking ought to be making this impossible, but I have been wrong before."
+        },
+        {
+            "user": "edsantiago",
+            "body": "I'm interpreting this as \"@mheon sees the problem\", and I can stop looking into reproducers? Because I can't reproduce it with 1.0 nor with root, and was getting ready to spend more time looping on it. May I assume now I don't have to?"
+        },
+        {
+            "user": "mheon",
+            "body": "@edsantiago Yeah, I'm fairly certain I know what commit introduced this. I'm just puzzled as to how it defeated out locking (which ought to be preventing this scenario)"
+        },
+        {
+            "user": "mheon",
+            "body": "(Though I have no idea why this reproduces with rootless only... Probably something about fuse-overlay makes the timing work?)"
+        },
+        {
+            "user": "edsantiago",
+            "body": "Distraction: I think `podman restart` might be suffering from the same ailment (default-0 timeout). Does it make sense to address it within this PR?"
+        },
+        {
+            "user": "mheon",
+            "body": "I'll take a look.\n\n@edsantiago I can't reproduce that rootless thing, which makes me sort of convinced it's a race... But one environment question: what's /dev/shm/ look like in your test environment? Any chance files in there are getting wiped between runs of podman?"
+        },
+        {
+            "user": "edsantiago",
+            "body": "```\n$ df -T /dev/shm\nFilesystem     Type  1K-blocks  Used Available Use% Mounted on\ntmpfs          tmpfs   8136264 65172   8071092   1% /dev/shm\n```\nSystem has been up for weeks. To my knowledge there is no aggressive tmp-cleaner. Is that what you're asking?"
+        },
+        {
+            "user": "mheon",
+            "body": "Hmm. Damn. This would make a lot of sense if the second one was grabbing a different set of SHM locks."
+        },
+        {
+            "user": "edsantiago",
+            "body": "Whoops: my bad. I was using an old podman (1.0ish) for the `run` invocation. It's the mix of 1.0 and 1.1 (for the stop command) that causes the error; I can't reproduce when consistently using 1.0 or 1.1. Sorry for the confusion."
+        },
+        {
+            "user": "mheon",
+            "body": "OK that suddenly makes a lot of sense.\n\n(Maybe we should add a note somewhere that mixing 1.0 and 1.1 is bad because of this - locking just stops working, with unusual results)"
+        },
+        {
+            "user": "mheon",
+            "body": "(BTW, restart is (theoretically) also fixed with the latest commit - haven't tested much though)"
+        },
+        {
+            "user": "rhatdan",
+            "body": "LGTM"
+        },
+        {
+            "user": "TomSweeneyRedHat",
+            "body": "LGTM assuming happy tests."
+        },
+        {
+            "user": "rhatdan",
+            "body": "/lgtm"
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 2472
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 2364
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 2521
+        }
+    ]
+}

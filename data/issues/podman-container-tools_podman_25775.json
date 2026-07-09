@@ -1,0 +1,63 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 25775,
+    "type": "pull_request",
+    "title": "Set the IDMappings also when RootfsOverlay is used.",
+    "state": "closed",
+    "labels": [
+        "lgtm",
+        "approved",
+        "release-note-none",
+        "locked - please file new issue/PR"
+    ],
+    "user": "jankaluza",
+    "body": "This is related to #23292 and is needed to replace pause image container with pause container based\non the rootfs.\n\nWithout this change, the GIDs and UIDs are not mapped in the rootfs container which use overlay if --userns=auto is used. This leads to an error mounting /dev/pts with gid=5, becuase GID 5 simply does not exist in the pause container using rootfs.\n\nAll the tests pass with this change, but I have to admit I did not find out why the original code has been introduced.\n\n\n\n#### Does this PR introduce a user-facing change?\n\n```release-note\nNone\n```\n",
+    "comments": [
+        {
+            "user": "jankaluza",
+            "body": "The original code has been introduced in https://github.com/containers/podman/commit/9500e11a8f1c3380c0a6a8e6ca01df862c6d640c."
+        },
+        {
+            "user": "giuseppe",
+            "body": "I think we did that because currently we temporarily leak a mount to the host to create the idmapped mount, and multiple instances (even of different users) could step on that.  We would need to create a private bind mount, or wait for Linux 6.15 so that we can do something like: https://github.com/giuseppe/storage/tree/no-leak-idmapped-lower-layers"
+        },
+        {
+            "user": "jankaluza",
+            "body": "> I think we did that because currently we temporarily leak a mount to the host to create the idmapped mount, and multiple instances (even of different users) could step on that. We would need to create a private bind mount, or wait for Linux 6.15 so that we can do something like: https://github.com/giuseppe/storage/tree/no-leak-idmapped-lower-layers\n\nI don't know all the implications, since this seems to be quite complex, but I need this code to happen only for the new pause container based on rootfs which does not use the idmap afaik. Would it be safer to do it like this for now:\n\n```\ndiff --git a/libpod/container_internal.go b/libpod/container_internal.go\nindex 05b1b869ec..6bdb80e154 100644\n--- a/libpod/container_internal.go\n+++ b/libpod/container_internal.go\n@@ -536,8 +536,13 @@ func (c *Container) setupStorage(ctx context.Context) error {\n                return fmt.Errorf(\"creating container storage: %w\", containerInfoErr)\n        }\n \n-       c.config.IDMappings.UIDMap = containerInfo.UIDMap\n-       c.config.IDMappings.GIDMap = containerInfo.GIDMap\n+       // Only reconfig IDMappings if layer was mounted from storage.\n+       // If it's an external overlay do not reset IDmappings, except of\n+       // infra container.\n+       if !c.config.RootfsOverlay || c.IsInfra() {\n+               c.config.IDMappings.UIDMap = containerInfo.UIDMap\n+               c.config.IDMappings.GIDMap = containerInfo.GIDMap\n+       }\n \n        processLabel, err := c.processLabel(containerInfo.ProcessLabel)\n        if err != nil {\n```\n        \n?\n\nOr it could be even more strict to check that we are really using the internally generated pause container as infra container and not the user-defined infra container which could maybe use idmap?"
+        },
+        {
+            "user": "giuseppe",
+            "body": "what error do you get if you don't do an idmapped mount?  Also that won't work with rootless.\n\nWhat rootfs are you using for the pause process?"
+        },
+        {
+            "user": "jankaluza",
+            "body": "@giuseppe , you can reproduce what I do in code using this command:\n\n`podman run --userns auto  -v /usr/libexec/catatonit/catatonit:/catatonit --rootfs  $(mktemp -d):O /catatonit -P`\n\nIt fails with:\n\n`Error: OCI runtime error: crun: mount `devpts` to `dev/pts`: Invalid argument`\n\nChecking strace, the reason is gid=5 in following mount call:\n\n`2391250 mount(\"devpts\", \"/proc/self/fd/10\", \"devpts\", MS_NOSUID|MS_NOEXEC, \"newinstance,ptmxmode=0666,mode=0620,gid=5,context=\\\"system_u:object_r:container_file_t:s0:c92,c955\\\"\") = -1 EINVAL (Invalid argument)`"
+        },
+        {
+            "user": "jankaluza",
+            "body": "In the code, it is here: https://github.com/jankaluza/podman/commit/29c58751192272a136fb58a745c9111b1adc3de4#diff-edb3bda86436d2a7bc55b34fa48c71156dc5e02d5f452012b1750efb15b3158fR14-R46. Note that this is very WIP code with all debugging I've tried to find out where the issue actually is :-)."
+        },
+        {
+            "user": "giuseppe",
+            "body": "> `podman run --userns auto -v /usr/libexec/catatonit/catatonit:/catatonit --rootfs $(mktemp -d):O /catatonit -P`\n\nwe could run without `:O` and make sure the rootfs has mode 777.  We have another problem with this approach thouh, when is the directory cleaned up?  Even if it is empty with `:O` we still need to rmdir it"
+        },
+        {
+            "user": "Luap99",
+            "body": "\n@giuseppe The issue is without that there is no idmapping at all assigned ever. This code assigned the free auto range we got from c/storage back to the podman config. Without it AFAICT the podman range is simply empty and thus the config.json has no idmappings in it.\n\nI really don't see what not assigning the range would mean in the overlay case. A private userns without valid mappings?"
+        },
+        {
+            "user": "Luap99",
+            "body": "As such I think the mount issue in crun is a red hearing, using runc actually gives the a much more logical error:\n```\nError: OCI runtime error: runc: runc create failed: user namespaces enabled, but no uid mappings found\n```"
+        },
+        {
+            "user": "giuseppe",
+            "body": "ok you are right, I was trying to understand why we did that way, maybe using `--userns=auto` with a preconfigured generic rootfs doesn't work well since the files ownership is wrong.\n\nAnyway, even if this patch breaks users of `--userns=auto --rootfs ...` (probably there are 0 of them), I think we should merge it because ignoring the user namespace setting seems like a bad idea.\n"
+        },
+        {
+            "user": "openshift-ci[bot]",
+            "body": "[APPROVALNOTIFIER] This PR is **APPROVED**\n\nThis pull-request has been approved by: *<a href=\"https://github.com/containers/podman/pull/25775#pullrequestreview-2739727083\" title=\"LGTM\">giuseppe</a>*, *<a href=\"https://github.com/containers/podman/pull/25775#\" title=\"Author self-approved\">jankaluza</a>*, *<a href=\"https://github.com/containers/podman/pull/25775#pullrequestreview-2739706179\" title=\"Approved\">Luap99</a>*\n\nThe full list of commands accepted by this bot can be found [here](https://go.k8s.io/bot-commands?repo=containers%2Fpodman).\n\nThe pull request process is described [here](https://git.k8s.io/community/contributors/guide/owners.md#the-code-review-process)\n\n<details >\nNeeds approval from an approver in each of these files:\n\n- ~~[OWNERS](https://github.com/containers/podman/blob/main/OWNERS)~~ [Luap99,giuseppe]\n\nApprovers can indicate their approval by writing `/approve` in a comment\nApprovers can cancel approval by writing `/approve cancel` in a comment\n</details>\n<!-- META={\"approvers\":[]} -->"
+        }
+    ],
+    "cross_references": []
+}

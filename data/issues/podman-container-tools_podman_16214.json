@@ -1,0 +1,54 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 16214,
+    "type": "issue",
+    "title": "Dangling/unreferenced layers on incomplete pull",
+    "state": "open",
+    "labels": [
+        "kind/bug"
+    ],
+    "user": "kleinweby",
+    "body": "**Is this a BUG REPORT or FEATURE REQUEST? (leave only one on its own line)**\n\n/kind bug\n\n**Description**\n\nInterrupting a large multi-layer pull, can leave layers behind that are not referenced anywhere. These layers can then not be deleted using any command (aside from `podman system reset`). I think the fact that the layer persists after the interrupted pull is okay, and useful if one later continues the pull. However running `podman image prune` or `podman system prune` should remove these unreferenced layers. Currently only a full system reset remove them.\n\n**Steps to reproduce the issue:**\n\n1. (Optional) Start with an empty podman. (E.g. run `podman system reset`). This makes the issue a bit more obvious.\n\n2. Look at the size of the container storage:\n    \n    ```\n    $ du -hs ~/.local/share/containers/\n    28K\t/home/cspeich/.local/share/containers/\n    ```\n\n4. Pull a larger image and interrupt it, once a layer is unpacked:\n\n    ```\n    $ ./bin/podman --log-level debug pull -q mcr.microsoft.com/mssql/server\n    <snip>\n    DEBU[0035] Start untar layer\n    DEBU[0035] Untar time: 0.312338996s\n    ^CINFO[0038] Received shutdown signal \"interrupt\", terminating!  PID=1188955\n    INFO[0038] Invoking shutdown handler \"libpod\"            PID=1188955\n   ```\n\n   The image is just one I had at hand. I used the log-level debug and quite mode to better reproduce the issue. Once you see the `Untar time:` part you know that one layer has been extracted (and saved to disk).\n\n 5. Verify that we actually created a layer but no images:\n     ```\n     $ du -hs ~/.local/share/containers/\n     51M\t/home/cspeich/.local/share/containers/\n     $ podman image list -a\n     REPOSITORY  TAG         IMAGE ID    CREATED     SIZE\n     ```\n\n  6. Run prune (`podman image prune -af` or `podman system prune -af`).\n\n**Describe the results you received:**\n\nThe container storage did not shrink and there is still a layer present.  (`~/.local/share/containers/storage/vfs/dir/b40ed86654e59e1012e1716d5384910f8c3bb58274b7b00fca564a53e` in my case).\n\n**Describe the results you expected:**\n\nThe container storage to shrink and the layer to be deleted.\n\n**Additional information you deem important (e.g. issue happens only occasionally):**\n\nThis happends indepent of the storage backend (tested vfs & overlayfs) and independet of running as root/non-root.\n\n**Output of `podman version`:**\n\n```\nClient:       Podman Engine\nVersion:      4.3.0-dev\nAPI Version:  4.3.0-dev\nGo Version:   go1.18.1\nGit Commit:   84c85f4d9457fb35849fa93ba04814df681b9093\nBuilt:        Tue Oct 18 14:36:11 2022\nOS/Arch:      linux/amd64\n```\n",
+    "comments": [
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "flouthoc",
+            "body": "I think this is still applicable I'm able to reproduce this on this upstream."
+        },
+        {
+            "user": "rhatdan",
+            "body": "The issue is the layer is not part of Podman, as far as podman is concerned this is an external image.\n\nDoes the following command fix the issue?\n\npodman image prune  --external"
+        },
+        {
+            "user": "flouthoc",
+            "body": "@rhatdan Not sure `prune --external` works for this, but instead I found one issue in `c/storage` as well, the GC code does not correctly works for layers, at least for the layers which were downloaded via `pull` was interrupted in between. I am still looking at it and might open a new issue in `c/storage`. Once fixed maybe  `prune` cause also use `c/storage`'s GC part for cleaning these layers."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@flouthoc any update?"
+        },
+        {
+            "user": "dwt",
+            "body": "This seems to be the same issue I am seeing:\n\n```\nroot@zms-demo ~ # df -h\nFilesystem      Size  Used Avail Use% Mounted on\nudev            3.8G     0  3.8G   0% /dev\ntmpfs           776M  740K  775M   1% /run\n/dev/sda1        75G   72G  497M 100% /\ntmpfs           3.8G  1.2M  3.8G   1% /dev/shm\ntmpfs           5.0M     0  5.0M   0% /run/lock\n/dev/sda15      241M  138K  241M   1% /boot/efi\ntmpfs           776M   84K  775M   1% /run/user/1001\ntmpfs           776M     0  776M   0% /run/user/1000\ntmpfs           776M     0  776M   0% /run/user/0\nroot@zms-demo ~ # ncdu /\n\nncdu 1.18 ~ Use the arrow keys to navigate, press ? for help\n--- /home/zope/.local/share/containers/storage/vfs/dir -----------------------------------------------\n                             /..\n    1.5 GiB [##############] /f89a58394d0aca6aa20865d7acc9b1cfbd960471cbc7810dfaa5bbe11c395ab7\n    1.5 GiB [############# ] /54628586f7fb6fe88001827f1d0e5c1ed02b2a931793add8e5e02251b3591493\n    1.5 GiB [############# ] /c1e0bd91609e6915bab641e4f76ead0470b2848db3468fce22f72d22540760ae\n    1.5 GiB [############# ] /5ea448e3dbb63ad105d86841d65e7b5bdb631bd804120313ce5b26531ae0cbaa\n    1.4 GiB [############# ] /c07904296a862e9b2c202accc24ae7097f99d04b24b483b9ed976d001eef5662\n    1.4 GiB [############# ] /18c59a958a098209967b089023bfce29c5deeab9245350ca0c293ef0e5daad91\n    1.4 GiB [############# ] /ce22988ec1cb8e26eb857d94b232238b933fd2fbbbad9b641ef34ab7abd800c6\n    1.4 GiB [############# ] /a9fc678b1a96e9bcbb010426e2d625ddba28677f689de777554159348dadf834\n    1.4 GiB [############# ] /a3178a61cd41bf38dd6d3b9befcdafbee8ea896b07f25e79a23b970d781a479a\n    1.1 GiB [##########    ] /b7daa7b71af4fbfb813258ea5e912cc4402c18525e598830f926e28d69c5e9d5\n    1.1 GiB [##########    ] /ae5d4ed0944538aac171cf40045f3c0c975042804b66967c5bdc18c131391f9c\n    1.1 GiB [##########    ] /fcdacef4a87f58d1ce2ad74a994a1ce3df99c8bbc1c61ebb1d8f577d5f05a670\n    1.1 GiB [##########    ] /10be57f195feba14af7079d8f3945822606f4b5c7f2b07acc12a79b56f87cd79\n    1.1 GiB [##########    ] /2422bd6e33607fd1dfa70c5dde61c79d2c2408b5d01538ff87672f09437665ad\n    1.1 GiB [##########    ] /ccd920de8588b74e099ea63107e2bfcc8cd32d88bd57a3e44860620afffe1ae5\n    1.1 GiB [##########    ] /3f2f5e66dc79dfe80990d89e3f60dd8fee9a3424bb9faf192e1b3ba0fc6cc38d\n    1.1 GiB [##########    ] /bba081d0080fab5c57e7177787ff47344bd7a936d3933a2e519b816ff107791e\n    1.1 GiB [##########    ] /95660eb6b0169f54d22dfdb887cbda77a934ee8e7af7dec021db45c6441da6ee\n    1.1 GiB [##########    ] /6dc9b0234cb1af065975ad421a037ec74bcfcabfc793c6f5486e9ab77b15bc7b\n    1.1 GiB [##########    ] /8ae40b1a01df94d45c6ad9ad60fdb81d2021e26759ef70dfddcf624678431d83\n    1.1 GiB [##########    ] /b41091d666dd4787c534c6c8e378e78962a97ad3d9a8989756b202a0ed5369c7\n    1.1 GiB [##########    ] /d5194601836cf916a02d9fe4a93f6ac82a899454ba356408f3dd437b92ff1e89\n    1.1 GiB [##########    ] /068b329e09380694ac4c25e4b8f7c39ba40a775f683cc5a167978f6b57928d71\n    1.1 GiB [##########    ] /761e126b5ad534287b1de753ca29fc24d73a1aa6fe3f7bbccc3b44e2f04698f8\n    1.1 GiB [##########    ] /f7936b2b536d04275637802b02eb3e30393a4a0b68c058928434b6d96f3728a6\n    1.1 GiB [##########    ] /920e70654e837fcb4ea3d13750d2e41e36fa70e4b80b1a5d1e43311736a6cc47\n    1.1 GiB [##########    ] /4fd37df5cd4ec74afc84dfdd1b6f19aab46869c0cbbfe1c8b6c7b55c1eb7bbfe\n    1.0 GiB [#########     ] /3019fee49f3b325c4442c9f75ab8066cf29d38575854abef819c1c7cdc3a3a1b\n    1.0 GiB [#########     ] /384555bb9d2f46145bbddeb8de3c471263dae3d475c77a6196a0ebe581501cff\n  377.9 MiB [###           ] /362ec5202050d320104d5d36aa7511e99f052a6cd842a8cb758bab66ebcf8490\n  187.4 MiB [#             ] /c68ea17e8fbadf65c6d4a81f3362db6a6f81c645c0194c58b78924a5de5e5273\n  127.7 MiB [#             ] /d16566b6c5a6bd5c45da221a2fc94937d8d503c920c8627f154a2f8a57537da4\n\n Total disk usage:  35.4 GiB  Apparent size:  33.3 GiB  Items: 1156917\n# cat /etc/os-release \nPRETTY_NAME=\"Debian GNU/Linux 12 (bookworm)\"\nNAME=\"Debian GNU/Linux\"\nVERSION_ID=\"12\"\nVERSION=\"12 (bookworm)\"\nVERSION_CODENAME=bookworm\nID=debian\nHOME_URL=\"https://www.debian.org/\"\nSUPPORT_URL=\"https://www.debian.org/support\"\nBUG_REPORT_URL=\"https://bugs.debian.org/\"\n```"
+        },
+        {
+            "user": "dwt",
+            "body": "This looks very similar to #3799 which was sadly closed due to inactivity I think?"
+        },
+        {
+            "user": "dwt",
+            "body": "Some further observations: I had to nuke the whole `~/.local/share/containers` directory structure because the server ran out of disk space. Then after pulling **one** image of https://github.com/zms-publishing/ZMS/pkgs/container/zms (which is about 1,5 gig large) about  27.7 GiB /containers where used in the local storage, most of it looks like many duplicates of the filesystem of that container.  [I've put the file listing into a gist as it's quite large.](https://gist.github.com/dwt/68ea965aa0ccc3cc310f5532dec7693c)\n\nNone the less, 25gig storage to storage for one image of ~2 gig size is a bit much."
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 16215
+        }
+    ]
+}

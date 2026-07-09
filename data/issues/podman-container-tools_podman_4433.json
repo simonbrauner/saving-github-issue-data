@@ -1,0 +1,60 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 4433,
+    "type": "issue",
+    "title": "Feature Request: podman pod start cant yet be used from systemd",
+    "state": "closed",
+    "labels": [
+        "locked - please file new issue/PR"
+    ],
+    "user": "zem",
+    "body": "While i was playing around with podman I wondered why it is that  systemd startup is so overcomplicated. \n\nMy problem is that I can either start single containers by writing a systemd init script for each container or i can use generate, which i have to redo each and every time a container upgrades. \n\nSo why is it that I cant just write an systemd template like so: \n\n```\n[Unit]\nDescription=Podman POD %I\nAfter=network.target\n\n[Service]\nKillMode=none\nExecStartPre=/usr/bin/podman pod exists %i\nExecStart=/usr/bin/podman pod start %i\nExecStop=/usr/bin/podman pod stop -t 10 %i\n\n[Install]\nWantedBy=multi-user.target\n```\n\nOnce I have configured my pods I can just start them by using: systemctl enable pod@foo ; systemctl start pod@foo\n\nIt turns out that systemd needs to stay attached to one container to detect if the service is running, therefore I wrote a little workaround like this: \n\n```\n#!/bin/bash\nPOD=\"${1}\"\necho podman pod start \"${POD}\"\npodman pod start \"${POD}\"\nJSON=$(podman pod inspect \"${POD}\" | grep infraContainerID |  head -n 1)\nID=${JSON%\\\"}\nID=${ID##*: \\\"}\necho \"${JSON}\"\necho podman attach \"${ID}\"\nexec podman attach \"${ID}\"\n```\n\nand modified pod@.service:\n\n```\nExecStart=/etc/podman-pod-start_attached.sh %i\n```\n\nMy proposal for an elegant solution would be to add a parameter --attach_to_infra to podman pod start which attaches STDIN and STDOUT to the Infra container.  And to add pod@.service to the upstream code. \n\n",
+    "comments": [
+        {
+            "user": "vrothberg",
+            "body": "Hi @zem, thanks for reaching out. Have you looked into using [podman generate systemd](https://github.com/containers/libpod/blob/master/docs/source/markdown/podman-generate-systemd.1.md)? It will generate a set of services for a pod. Not only for the infra container but also for the containers, to allow for individual restart policies and proper dependency management via systemd."
+        },
+        {
+            "user": "zem",
+            "body": "Hi @vrothberg  yes I have looked into generate if that was not clear from my second paragraph. \nI have some problems with podman generate systemd:\n\nFirst of all it generated all unit files cat together on stdout, leaving me up with an editor to tear them apart. (i know i can do that with a script, too)\n\nSecondly, those init scripts are pinned to the container-ids and those are changing weekly if not more frequently as containers are immutable. Which means I have to tear down the old container unit files and replace them with the new ones in the process.\n\nNot to mention that the unit file names change with the container IDs.  \n\nYou can now esimate the lines of code a user/sysadmin has to implement to render those service unit files whenever they need to be regenerated. It is probably even easier to write template them from scratch than to use podman generate systemd at all. \n\nAs for the restart policy. podman has one. During container creation you can set --restart=always causing podman to monitor if a container has crashed.  This works more than sufficient for all of my current use cases. I can still write my own units to do dependency management if necessary but that is getting much easier with  --attach_to_infra parameter as suggested. "
+        },
+        {
+            "user": "vrothberg",
+            "body": "> First of all it generated all unit files cat together on stdout, leaving me up with an editor to tear them apart. (i know i can do that with a script, too)\n\nThere's a CLI flag `--files` which instructs Podman to generate files instead of printing on stdout. We added it to make it more user-friendly and to prevent users from having to untangle the big output.\n\n> Secondly, those init scripts are pinned to the container-ids and those are changing weekly if not more frequently as containers are immutable. Which means I have to tear down the old container unit files and replace them with the new ones in the process.\n\nThere's the `--name` flag which will instruct Podman to use the name instead of the ID of a pod/container. However, any generated file will still be specific to each individual (infra) container. This is because we need the `PIDFile` to point to the conmon process of each container, so systemd can actually know if the container/pod is running or not.\n\n```\nPIDFile=/run/user/1000/overlay-containers/63f940a01fce29f1def57ef7babcb82906047e7bc120b7a84af1f3d1809be8bf/userdata/conmon.pid\n```\nThat's a snippet of a service pointing to such a `PIDFile`. I think it would be a nice improvement to be able to also have a path with the container-name embedded (optionally, maybe a symlink?) which would avoid the need to re-generate. @baude @mheon @rhatdan WDYT? This way, we don't need to regenerate the service files if a container gets updated but the name remains.\n\n> You can now esimate the lines of code a user/sysadmin has to implement to render those service unit files whenever they need to be regenerated. It is probably even easier to write template them from scratch than to use podman generate systemd at all.\n\nThe process seems straight forward to me:\n\nWhenever a pod/container is updated, we can run `podman-generate-systemd --files --name` and copy the generated files to the specific systemd (system or user) path (maybe creating a subdir for each pod to ease replacement), then reload the daemon to update the service files to finally start the service.\n\n> As for the restart policy. podman has one. During container creation you can set --restart=always causing podman to monitor if a container has crashed. This works more than sufficient for all of my current use cases.\n\nOne service file for a pod is not sufficient for systemd to know if the pod is running or not. Imagine a service-critical container of the Pod fails. With only one service file, systemd does not know about the failing container and can't enforce the restart policy. A `systemctl status $service` would falsely report the service to be running although maybe all containers except the infra-container have failed. That's why we decided to have one file for the infra-container which serves as the central unit of the pod, and one service for each container."
+        },
+        {
+            "user": "zem",
+            "body": "Oh I somehow overlooked the --file option. \n\ntbh i did not understand immediately why using --restart=always is not sufficient, but you are probably referring to those conmon processes (one for each container) I guess if one of those fails without warning it can cause trouble. \n\nAnyway, having the pid file accessible under the container name sounds very good to me. :) "
+        },
+        {
+            "user": "mheon",
+            "body": "I wonder if adding a container name -> ID symlink somewhere might be worthwhile - an easy filesystem way of identifying the specific container associated with a name... Probably not worth it unless we're going to expose a lot more via the filesystem than we do now, though."
+        },
+        {
+            "user": "vrga",
+            "body": "I'd like to add another potential lovely usecase that would be enabled by being able to just straight run from systemd.\n\n```\n[Unit]\nDescription=\"Pihole container service...\"\nWants=network.target multi-user.target\nAfter=network.target\n\n[Service]\nType=forking\nTimeoutSec=30\nRestartSec=10\nRestart=always\nExecStart=/usr/bin/podman container run \\\n  --rm \\\n  --name=%N \\\n  --network podman \\\n  -p 10.0.0.1:53:53/tcp -p 10.0.0.1:53:53/udp \\\n  -p 10.0.0.1:8091:80 \\\n  -p 10.0.0.1:8092:443 \\\n  -v /etc/localtime:/etc/localtime:ro \\\n  -v /etc/timezone:/etc/timezone:ro \\\n  -v \"/opt/pihole/etc/pihole/:/etc/pihole/\" \\\n  -v \"/opt/pihole/etc/dnsmasq.d/:/etc/dnsmasq.d/\" \\\n  -e ServerIP=\"10.8.0.1\" \\\n  -e DNS1=\"1.1.1.1\" \\\n  -e DNS2=\"8.8.8.8\" \\\n  -e VIRTUAL_HOST=\"<redacted>\" \\\n  pihole/pihole:latest\n```\n\nIgnoring the content of the launch itself, what it allows is running ephemeral containers as system services. \n\nThis pretty much allows me to run these services mostly hands-off, no need to update the units every time i update it or anything like that.\n\nI've had this working _somewhat_ with docker and using this tool, https://github.com/ibuildthecloud/systemd-docker, but it was always flaky.\n\nOne iffy problem with running podman generate is that its a bit iffy when you wish to add some customizations on top.\n\n\nOne idea that comes to mind is to somehow use \n```podman inspect pihole -t container --format \"{{.ConmonPidFile}}\"``` to provide systemd with the location of the pidfile immediately after run, if it'll allow it, but i've not got a faintest clue if systemd will actually allow it.\n\nThe biggest problem is that starting the container through systemd hangs both that invocation of systemctl and podman until some magical timeout gets hit.\n\n\nWill drop a few more comments as i figure things out."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@vrothberg Some of your work/investigation might help out here."
+        },
+        {
+            "user": "ghost",
+            "body": "You can start pods using systemd services but you have to add `RemainAfterExit=yes` to the [Service] section."
+        },
+        {
+            "user": "timmychiu",
+            "body": "> \n> \n> You can start pods using systemd services but you have to add `RemainAfterExit=yes` to the [Service] section.\n\n\nThis ends an hour of research for podman 1.4.2 of Oracle Linux 8.1  \n\nThanks\n\n```\n[root@xxxxx system]# podman version\nVersion:            1.4.2-stable2\nRemoteAPI Version:  1\nGo Version:         go1.12.8\nOS/Arch:            linux/amd64\n```\n"
+        },
+        {
+            "user": "baude",
+            "body": "@vrothberg any update here?"
+        },
+        {
+            "user": "vrothberg",
+            "body": "> @vrothberg any update here?\n\nhttps://github.com/containers/libpod/issues/4433#issuecomment-549163675 should answer the initial issue. It is important to notice that a single service that only starts/stops the Pod is not sufficient to track the health of the entire Pod. `podman generate systemd $pod` is hence generating a set of services for the pod including all containers within this pod.\n\nThe next version of Podman ships with a `--new` flag to let `podman-generate-systemd` generate services files that create a new containers instead of starting/stopping a pre-existing one as we did before. We published a blog at the end of last year which explains in detail those new service files: https://www.redhat.com/sysadmin/podman-shareable-systemd-services"
+        }
+    ],
+    "cross_references": []
+}

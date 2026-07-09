@@ -1,0 +1,247 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 11454,
+    "type": "pull_request",
+    "title": "Implement virtfs volumes for podman machine",
+    "state": "closed",
+    "labels": [
+        "lgtm",
+        "approved",
+        "locked - please file new issue/PR"
+    ],
+    "user": "afbjorklund",
+    "body": "Allow using the built-in 9pfs feature of qemu,\nmounting host directories into vm mountpoints.\n\nhttps://wiki.qemu.org/Documentation/9psetup\n\nWait for the machine to be \"running\", otherwise\nthe SSH function might throw an error instead.\n\nFor #8016\n\nExample usage:\n\n```console\n$ ./bin/podman machine init -v /tmp/one:/mnt/one -v /tmp/two:/mnt/two\nExtracting compressed file\n$ mkdir -p /tmp/one /tmp/two\n$ ./bin/podman machine start\nINFO[0000] waiting for clients...                       \nINFO[0000] listening tcp://0.0.0.0:7777                 \nINFO[0000] new connection from @ to /run/user/1000/podman/qemu_podman-machine-default.sock \nWaiting for VM ...\nMounting volume... /tmp/one:/mnt/one\nMounting volume... /tmp/two:/mnt/two\n$ touch /tmp/one/foo\n$ ./bin/podman-remote run -v /mnt/one:/mnt busybox ls /mnt/\nResolved \"busybox\" as an alias (/etc/containers/registries.conf.d/000-shortnames.conf)\nTrying to pull docker.io/library/busybox:latest...\nGetting image source signatures\nCopying blob sha256:8ec32b265e94aafb0d43ab71f1d8f786122c19afb37d25532aea169f414f8881\nCopying blob sha256:8ec32b265e94aafb0d43ab71f1d8f786122c19afb37d25532aea169f414f8881\nCopying config sha256:42b97d3c2ae95232263a04324aaf656dc80e7792dee6629a9eff276cdfb806c0\nWriting manifest to image destination\nStoring signatures\nfoo\n$ touch /tmp/two/bar\n$ ./bin/podman-remote run -v /mnt/two:/mnt busybox ls /mnt/\nbar\n```\n\nNote: tested on Linux (Ubuntu 20.04)\n\nEdit: tested OK on macOS 11.5 as well (works with some problems, see below for details)\n\n----\n\nSome directories (most) are read-only on CoreOS, you can work around this by mounting in another location:\n\n`podman machine init -v /Users:/mnt/Users`\n\nAnd then remember to add this extra prefix, when bind-mounting from the remote filesystem into the container:\n\n`podman --remote run -v /mnt/Users:/Users`\n\n----\n\nThis is a nice document on VirtFS : https://www.kernel.org/doc/ols/2010/ols2010-pages-109-120.pdf\n\n> By the virtue of its design **VirtFS is expected to yield better performance** compared to its alternatives like NFS/CIFS.\n\nNote: CIFS is a dialect of SMB\n\nhttps://en.wikipedia.org/wiki/9P_(protocol)",
+    "comments": [
+        {
+            "user": "rhatdan",
+            "body": "Needs tests or [NO TESTS NEEDED] "
+        },
+        {
+            "user": "afbjorklund",
+            "body": "I'm not sure I could find any tests, related to `podman machine` ? Maybe I didn't look hard enough."
+        },
+        {
+            "user": "rhatdan",
+            "body": "LGTM\n@baude @ashley-cui @jwhonce PTAL"
+        },
+        {
+            "user": "afbjorklund",
+            "body": "Apparently it will need some more QEMU patching, before it (virtfs/9p) will work also on Macs:\n\nhttps://github.com/NixOS/nixpkgs/pull/122420\n\n* [`9p-darwin.patch`](https://raw.githubusercontent.com/NixOS/nixpkgs/416488360b334083743b08d94f7f76c526db0042/pkgs/applications/virtualization/qemu/9p-darwin.patch)\n\nhttps://github.com/afbjorklund/qemu/tree/9p-darwin (`v6.0.0`)\n\n`14 files changed, 368 insertions(+), 27 deletions(-)`\n\nPatches originally from https://lists.nongnu.org/archive/html/qemu-devel/2018-05/msg07325.html"
+        },
+        {
+            "user": "AkihiroSuda",
+            "body": "Anybody tried to submit the patches to the upstream recently?"
+        },
+        {
+            "user": "afbjorklund",
+            "body": "~~I have never tried any of the Mac patches myself.~~\n\n👇"
+        },
+        {
+            "user": "afbjorklund",
+            "body": "I was able to try it with a patched qemu (hvf + 9p-darwin) on Apple Silicon, and it works OK...\n\nThere was some trouble connecting due to ssh not being ready and a performance warning:\n\n`connect tcp 192.168.127.2:22: connection was refused`\n\n`qemu-system-aarch64: warning: 9p: degraded performance`\n\nSo there needs to be a sleep before doing the mkdir + mount, and need to set msize > 8192.\n\n> See https://wiki.qemu.org/Documentation/9psetup#msize for details\n\nBut other than those, it was no issue with running `qemu-system-aarch64` on darwin-arm64. 🤗\n\n```\n../configure --target-list=aarch64-softmmu --enable-hvf -enable-virtfs\n```"
+        },
+        {
+            "user": "afbjorklund",
+            "body": "![darwin-podman](https://user-images.githubusercontent.com/10364051/132929051-81f5a0a1-cc45-4217-a8d6-e1a2b66a62c8.jpg)\n"
+        },
+        {
+            "user": "afbjorklund",
+            "body": "Looks like those ssh errors are problems with the gvproxy implementation, rather than a slowness on Mac.\n\nWill file a separate bug on those, looks like \"gvproxy\" is mostly a quick hack (fixed path, no error handling) ?\n\n* Issue #11531 \n\n* Issue #11532"
+        },
+        {
+            "user": "afbjorklund",
+            "body": "Still fails, so should probably check the VM IP for SSH rather than the `gvproxy` tunnel ?\n\n`error dialing \"192.168.127.2:22\": connect tcp 192.168.127.2:22: connection was refused`\n\nBut it looks extremely hard-coded and early still, so probably wait for next \"gvproxy\"...\n\n```go\n                Forwards: map[string]string{\n                        fmt.Sprintf(\":%d\", sshPort): \"192.168.127.2:22\",\n                },\n```\n\nSome arbitrary workaround like sleep, would probably make it work meanwhile.\n\nEDIT: Opened https://github.com/containers/gvisor-tap-vsock/issues/42"
+        },
+        {
+            "user": "afbjorklund",
+            "body": "Maybe it would be better to issue the `mkdir` and `mount` commands with QMP rather than SSH ?\n\nhttps://github.com/0xef53/qmp-shell\n\nBut it seems like \"human-monitor-command\" might not be the best option either, for the long term:\n\n> This command only exists as a stop-gap. Its use is highly discouraged. The semantics of this command are not guaranteed: this means that command names, arguments and responses can change or be removed at ANY time. Applications that rely on long term stability guarantees should NOT use this command."
+        },
+        {
+            "user": "TomSweeneyRedHat",
+            "body": "LGTM\nbut the tests are complaining that you did not sign the PR?"
+        },
+        {
+            "user": "afbjorklund",
+            "body": ">  but the tests are complaining that you did not sign the PR?\n\nI guess I will squash and rebase it, just added some late night hacks 🌃\n\nWill see if adding a Mac-only sleep will work, then I'll update the PR...\nIt works fine on Linux KVM, but I guess it just takes longer on Mac HVF ?\n\nDid you get a chance to try it yet ? Eventually we need benchmarks, too."
+        },
+        {
+            "user": "afbjorklund",
+            "body": "The sleep didn't seem to help at all, so removing it. Works on Linux, something else is wrong ?\n\nWill try again, once machine/gvisor doesn't hardcode the MAC address and IP address... 🙄"
+        },
+        {
+            "user": "afbjorklund",
+            "body": "Note that \"isRunning\" only checks if the qmp socket is up, not if the machine has started. For that, it needs to run QMP.\n\nAnd that \"isListening\" only checks if the gvproxy is up, not if the ssh server has started. For that, it needs to run SSH."
+        },
+        {
+            "user": "afbjorklund",
+            "body": "Fixed the manpage conflict, will rebase to `main` and address the comments in https://github.com/containers/podman/pull/11699#discussion_r714242490\n\n```\n   --volume, -v=source:target\n       Mounts a volume from source to target.\n```"
+        },
+        {
+            "user": "willcohen",
+            "body": "@afbjorklund I'm trying to replicate this setup (and if it works then perhaps even submit the nix patch set upstream, since it seems like they're happy to have that happen, just don't have the bandwidth. If it gets in in the next few weeks it might even make it to the next point release).\n\nHowever, a question:\nI can reproduce the mounted volume setup you've got going in that screenshot, and touch/modify files inside the podman machine and see that on the volume, so the overall functionality is clearly working. Is there still more work to be done to get this working via Dockerfiles and docker-compose?\n\nI've got a Dockerfile with syntax generally following this model:\n```\nvolumes:\n      - \"./src:/app\"\n```\n\nRunning docker-compose up results in:\n`ERROR: for container-foo  Cannot create container for service container-foo: make cli opts(): error making volume mountpoint for volume /Users/<user>/projectpath/src: mkdir /Users: operation not permitted`. I've also tried initializing the machine with the `-v ./src:/app` preset, in case I need to be setting that beforehand. I've also tried moving the target `/app` to `/tmp/app`, in case the permissions problem is on the CoreOS side. In both cases I am still getting permission errors, and am not quite sure where to go next. I don't want to start messing around with upstream submissions until a path for getting Dockerfile volumes is clear first, since that seems like the big use case that needs to be resolved here that users are recently running into."
+        },
+        {
+            "user": "afbjorklund",
+            "body": "The implementation was partly to get the discussion going on how it would integrate into podman.\n\nThe \"volume\" declaration was meant to be independent of the \"mount\" action happening later.\nOne could envision having multiple ways (\"drivers\"?) of making sure that a directory is mounted.\n\nClearly there are some issues with having a read-only OS, so might need to do the \"prefixing\" ?\n\nBut I think it should work if you mount it under `/mnt`, since it is a symlink to somewhere on `/var`.\nIn the current model, `/tmp` might either be tmpfs or remote - so you probably want to avoid that..."
+        },
+        {
+            "user": "afbjorklund",
+            "body": "Lately I have been using [lima](https://github.com/afbjorklund/fedora-lima) instead, since it has the port publish and the host mounting already fixed.\n\nIt doesn't use any new fancy projects based on vsock, but instead relies on good ole ssh to do the trick...\n\n* Port forwarding uses slirp and `ssh -L`, rather than gvisor-tap-vsock\n\n* Host mounting uses reverse sshfs, rather than virtfs/9p or virtiofs/vsock.\n\nSince it uses Fedora Cloud instead, there are no issues with a read-only OS.\n\nFor my previous project I used Fedora, and a totally different network model.\n\n* https://github.com/boot2podman/machine#accessing-files\n\n* https://github.com/boot2podman/machine#accessing-ports\n\nSince the VM was not \"hiding behind a curtain\", there were no such surprises.\n\nIt had a totally different filesystem and a totally different network address.\n"
+        },
+        {
+            "user": "willcohen",
+            "body": "Interesting, will check. It does seem like they're still eyeing 9p as well, so it wouldn't be a terrible thing to think about upstreaming that either way. Thanks!"
+        },
+        {
+            "user": "afbjorklund",
+            "body": "There was some performance benchmarks done in https://github.com/containers/podman/issues/8016#issuecomment-919477182 (switching to [AES](https://en.wikipedia.org/wiki/AES_instruction_set) did help ssh a little)"
+        },
+        {
+            "user": "willcohen",
+            "body": "Noted on the NixOS PR as well, but I’ve submitted the patch upstream to QEMU: https://lists.nongnu.org/archive/html/qemu-devel/2021-10/msg02902.html"
+        },
+        {
+            "user": "afbjorklund",
+            "body": "Rebased, and added read-only (something like `-v /home/anders:/home/anders:ro` to mount host home)\n\nShould be possible to add more volume types and mount types later on, such as \"sshocker\" and \"reverse sshfs\"."
+        },
+        {
+            "user": "willcohen",
+            "body": "v2 submitted to QEMU at https://lists.gnu.org/archive/html/qemu-devel/2021-11/msg04325.html"
+        },
+        {
+            "user": "fearoffish",
+            "body": "Maybe I'm out of my depth here, but when I follow that mailing list link I only see text not the patch. So I dug around and found a patchwork link (https://patchwork.kernel.org/project/qemu-devel/list/?series=583645) for the series. Is the correct method to just apply this series in order and then compile it? or did I miss something?"
+        },
+        {
+            "user": "afbjorklund",
+            "body": "I put the old patches on a git branch, that made it easier to update and merge..."
+        },
+        {
+            "user": "willcohen",
+            "body": "See https://github.com/NixOS/nixpkgs/pull/122420#issuecomment-976542257 for repo branches I’m working on. The 9p-darwin-v2-archive branch is what got submitted upstream but there’s already some things I know I’ll need to resubmit, so 9p-darwin will be the working branch for v3!"
+        },
+        {
+            "user": "afbjorklund",
+            "body": "Should work fine on Linux, so there is no major reason to hold reviewing the patch until the virtfs support is available for macOS too ? (once it is merged, or if adding the patch, podman will start working on darwin too)\n\n~~Fixing the CoreOS mounts will probably take more effort...~~"
+        },
+        {
+            "user": "afbjorklund",
+            "body": "No reactions on this, so I think I will close the PR until the podman design for file sharing has been settled.\n\n```\npodman machine init -v /Users:/mnt/Users\n```\n\nSince the root directory in CoreOS is read-only, it's not possible to mount anything at `/Users`."
+        },
+        {
+            "user": "afbjorklund",
+            "body": "Will try to rebase instead, and add some more sensible way of choosing the type of volume...\n\n```go\n       // TODO: add to opts\n       volumeType := VolumeTypeVirtfs\n```\n\n```go\n       // TODO: add to opts\n       volumeType := VolumeTypeSshfs\n```\n\nIn Docker it looks like: https://docs.docker.com/desktop/mac/#general\n\n> Use gRPC FUSE for file sharing: Clear this check box to use the legacy osxfs file sharing instead.\n\nMaybe just something simple to start with, like `podman machine init --volume-driver=virtfs`"
+        },
+        {
+            "user": "ghost",
+            "body": "> Maybe just something simple to start with, like podman machine init --volume-driver=virtfs\n\nVery much a fan of this idea. \n\n---\n\nHas anyone messed with the OCI hooks yet? I've noticed that `prestart` is losing to a stat against the path supplied to `--volume`. I'm not sure that this is how it should work."
+        },
+        {
+            "user": "afbjorklund",
+            "body": "> Has anyone messed with the OCI hooks yet?\n\nDo you have an example, what this looks like ?"
+        },
+        {
+            "user": "ghost",
+            "body": "@afbjorklund I actually just filed #12650, I'm convinced the hooks behavior is wrong. An example is there on using the hooks with reference docs. "
+        },
+        {
+            "user": "afbjorklund",
+            "body": "@protosam : since the machine volumes are mounted long before any container is started (i.e. when the VM is booted), and since they are unrelated to the container volumes, I don't understand how those OCI hooks would apply to the VM mounts ?"
+        },
+        {
+            "user": "ghost",
+            "body": "@afbjorklund\n\nUntil very recently I wasn't aware that Docker for Desktop exposes pretty much all of the host file system by mounting paths for parity in the guest, so `/User/...` (and guessing `/mnt/c/...` on windows perhaps?) match up for the runtime inside.\n\nThat's a lot of surface space to expose from a security perspective; so I have been exploring how to be surgical for a grpc+fuse based file system that I'm writing in Go."
+        },
+        {
+            "user": "afbjorklund",
+            "body": "I think the security and performance implications of the Docker model are well known, which was why I _didn't_ want to copy them over at first... As you mention, it is not only your own user but also all other users on the host.\n\nIn this compromise, we made it a parameter (`-v`) so that the user can decide how much of the host they want to expose to the machine and to the containers. It is also possible to mount it as read-only (like Lima), if desired."
+        },
+        {
+            "user": "ghost",
+            "body": "Yeah, I agree with the thought process.\n\nCurious about something, does the 9p implementation that qemu uses on mac not support creating named pipes and unix socket inodes? All of my testing on the custom qemu build has led me to believe it's not implemented. Though going beyond that I've actually not found a 9pfs server that even supports it.\n\nIf 9p doesn't support it, nfs might be a better option to parity docker-desktop.\n\nThis is actually what has led me to writing a fusefs and also I'm targeting gvproxy to deliver file system services. If I can't get my work committed to master when it's done, my backup plan is to just release a drop-in replacement for gvproxy for docker-desktop parity. "
+        },
+        {
+            "user": "afbjorklund",
+            "body": "I think it only support files, and not even symlinks.\n\nCreating sockets and other special files on a network filesystem is a bit weird ? The user would be much better off using a local filesystem for those, same goes with any heavy duty things like databases or whatnot. Create a local volume, for those ?\n\ni.e. `/var/lib/containers`, rather than `/mnt` and 9pfs ?"
+        },
+        {
+            "user": "ghost",
+            "body": "Haven't been able to figure out if 9pfs even supports implementing mknod (I think it is implementable), but it is desirable because you may want to have the same path accessed between two containers. The kernel in the vm does make it possible to share pipes and sockets between containers. \n\nFor example with docker-desktop, open two terminals.\n\nTerminal 1 do the following.\n```\n[protosam@nullhost]$ docker run --rm -it -v `pwd`:/usr/src-shared -w /usr/src-shared alpine\n/usr/src-shared # mkfifo testpipe\n/usr/src-shared # cat testpipe \n```\n\nNow go over to terminal 2 and do this.\n```\n[protosam@nullhost]$ docker run --rm -it -v `pwd`:/usr/src-shared -w /usr/src-shared alpine\n/usr/src-shared # echo hello pipe > testpipe\n/usr/src-shared # \n```\n\nChecking back at terminal 1 you will see:\n```\n/usr/src-shared # cat testpipe \nhello pipe\n```\n\nEdit for clarity: `pwd` was a path in `/Users/${USER}/...` for me."
+        },
+        {
+            "user": "afbjorklund",
+            "body": "I think Docker Desktop is only available for Mac, and anyway I'm not too keen on trying it.\n\nhttps://www.docker.com/blog/accelerating-new-features-in-docker-desktop/"
+        },
+        {
+            "user": "baude",
+            "body": "/approve\n/lgtm\n"
+        },
+        {
+            "user": "openshift-ci[bot]",
+            "body": "[APPROVALNOTIFIER] This PR is **APPROVED**\n\nThis pull-request has been approved by: *<a href=\"https://github.com/containers/podman/pull/11454#\" title=\"Author self-approved\">afbjorklund</a>*, *<a href=\"https://github.com/containers/podman/pull/11454#issuecomment-1006896195\" title=\"LGTM\">baude</a>*\n\nThe full list of commands accepted by this bot can be found [here](https://go.k8s.io/bot-commands?repo=containers%2Fpodman).\n\nThe pull request process is described [here](https://git.k8s.io/community/contributors/guide/owners.md#the-code-review-process)\n\n<details >\nNeeds approval from an approver in each of these files:\n\n- ~~[OWNERS](https://github.com/containers/podman/blob/main/OWNERS)~~ [baude]\n\nApprovers can indicate their approval by writing `/approve` in a comment\nApprovers can cancel approval by writing `/approve cancel` in a comment\n</details>\n<!-- META={\"approvers\":[]} -->"
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 11401
+        },
+        {
+            "organization": "podman-desktop",
+            "repository": "podman-desktop",
+            "number": 158
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 8016
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 11699
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 11397
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 12584
+        },
+        {
+            "organization": "lima-vm",
+            "repository": "lima",
+            "number": 487
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 12650
+        },
+        {
+            "organization": "lima-vm",
+            "repository": "lima",
+            "number": 528
+        },
+        {
+            "organization": "containers",
+            "repository": "podman.io_old",
+            "number": 485
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 13256
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 13784
+        }
+    ]
+}

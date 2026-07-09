@@ -1,0 +1,95 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 9052,
+    "type": "pull_request",
+    "title": "rootlessport: set source IP to slirp4netns device",
+    "state": "closed",
+    "labels": [
+        "lgtm",
+        "approved",
+        "locked - please file new issue/PR"
+    ],
+    "user": "giuseppe",
+    "body": "set the source IP to the slirp4netns address instead of 127.0.0.1 when\nusing rootlesskit.\n\nCloses: https://github.com/containers/podman/issues/5138\n\nSigned-off-by: Giuseppe Scrivano <gscrivan@redhat.com>\n",
+    "comments": [
+        {
+            "user": "openshift-ci-robot",
+            "body": "[APPROVALNOTIFIER] This PR is **APPROVED**\n\nThis pull-request has been approved by: *<a href=\"https://github.com/containers/podman/pull/9052#\" title=\"Author self-approved\">giuseppe</a>*\n\nThe full list of commands accepted by this bot can be found [here](https://go.k8s.io/bot-commands?repo=containers%2Fpodman).\n\nThe pull request process is described [here](https://git.k8s.io/community/contributors/guide/owners.md#the-code-review-process)\n\n<details >\nNeeds approval from an approver in each of these files:\n\n- ~~[OWNERS](https://github.com/containers/podman/blob/master/OWNERS)~~ [giuseppe]\n\nApprovers can indicate their approval by writing `/approve` in a comment\nApprovers can cancel approval by writing `/approve cancel` in a comment\n</details>\n<!-- META={\"approvers\":[]} -->"
+        },
+        {
+            "user": "rhatdan",
+            "body": "@giuseppe You have to add a new test for this.\nLGTM except for the missing test."
+        },
+        {
+            "user": "AkihiroSuda",
+            "body": "CNI-in-slirp4netns mode would need be updated to use container IP as the RootlessKit child IP\n"
+        },
+        {
+            "user": "AkihiroSuda",
+            "body": "Also it should be documented that apps will always see 10.0.2.100 (or CNI IP) as the source address.\n"
+        },
+        {
+            "user": "giuseppe",
+            "body": "> CNI-in-slirp4netns mode would need be updated to use container IP as the RootlessKit child IP\n\nany pointer on how that must be done?"
+        },
+        {
+            "user": "AkihiroSuda",
+            "body": "> > CNI-in-slirp4netns mode would need be updated to use container IP as the RootlessKit child IP\n> \n> \n> \n> any pointer on how that must be done?\n\nThis line would need to be changed to pass child IP from CNI result: https://github.com/containers/podman/blob/d102d02eb1cd135d877d946249a4fa1769ba17d0/libpod/networking_linux.go#L241"
+        },
+        {
+            "user": "edsantiago",
+            "body": "Error looks like a flake:\n```\n[+0998s] not ok 119 podman pod create - hashtag AllTheOptions\n...\n         # # podman-remote --url unix:/tmp/podman.CqfZh5 build -t infra_gyst8obgpd -\n         # time=\"2021-01-21T18:46:25Z\" level=error msg=\"cannot tar container entries [/var/tmp/buildah169026310/Dockerfile /var/tmp/buildah169026310] error: 0 errors occurred:\\n\\t\\n\\n\"\n         # Error: 0 errors occurred:\n         # \t\n         # [ rc=125 (** EXPECTED 0 **) ]\n```\nWill restart."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@AkihiroSuda PTAL"
+        },
+        {
+            "user": "edsantiago",
+            "body": "ARGH! My test is bad: output from 'nc' is not ordered reliably:\n```\n[+0759s] # #/vvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv\n[+0759s] # #|     FAIL: Basic check on received output\n[+0759s] # #| expected: 'listening on .*:54321 .*connect to .*jufhtVkETQ58fsP96HFZF7RU1vnAmG'\n[+0759s] # #|   actual: 'listening on [::]:54321 ...'\n[+0759s] # #|         > 'jufhtVkETQ58fsP96HFZF7RU1vnAmG'\n[+0759s] # #|         > 'connect to [::ffff:10.88.0.132]:54321 from [::ffff:10.88.0.1]:51352 ([::ffff:10.88.0.1]:51352)'\n[+0759s] # #\\^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n```\nI need to rethink this. Will offer a fix soon."
+        },
+        {
+            "user": "edsantiago",
+            "body": "Replacement test (with [downloadable patch](https://github.com/containers/podman/files/5852254/foo.diff.txt)):\n```diff\n\ndiff --git a/test/system/500-networking.bats b/test/system/500-networking.bats\nindex b4548c78a..bcc6737b7 100644\n--- a/test/system/500-networking.bats\n+++ b/test/system/500-networking.bats\n@@ -79,20 +79,17 @@ load helpers\n     echo \"$teststring\" | nc 127.0.0.1 $myport\n\n     run_podman logs $cid\n-    # High-level overview of received output. We also check it line by line\n-    # but this is a basic test; if it fails, we can see full output, which\n-    # is helpful because failure here indicates something is VERY wrong.\n-    is \"$output\" \"listening on .*:$myport .*connect to .*$teststring\" \\\n-       \"Basic check on received output\"\n-\n-    # Line-by-line output check. If any of these fail, we will not see\n-    # the full output of 'nc'. The most important check here is the\n-    # second line, in which we check for a 10.X remote IP (not 127.*)\n-    is \"${lines[0]}\" \"listening on \\[::\\]:$myport ...\" \"First line of output\"\n-    is \"${lines[1]}\" \\\n-       \"connect to \\[::ffff:10\\..*\\]:$myport from \\[::ffff:10\\..*\\]:\" \\\n-       \"Second output line from nc\"\n-    is \"${lines[2]}\" \"$teststring\" \"test string received on container\"\n+    # Sigh. We can't check line-by-line, because 'nc' output order is\n+    # unreliable. We usually get the 'connect to' line before the random\n+    # string, but sometimes we get it after. So, just do substring checks.\n+    is \"$output\" \".*listening on \\[::\\]:$myport .*\" \"nc -v shows right port\"\n+\n+    # This is the truly important check: make sure the remote IP is\n+    # in the 10.X range, not 127.X.\n+    is \"$output\" \\\n+       \".*connect to \\[::ffff:10\\..*\\]:$myport from \\[::ffff:10\\..*\\]:.*\" \\\n+       \"nc -v shows remote IP address in 10.X space (not 127.0.0.1)\"\n+    is \"$output\" \".*${teststring}.*\" \"test string received on container\"\n\n     # Clean up\n     run_podman rm $cid\n```"
+        },
+        {
+            "user": "giuseppe",
+            "body": "> Replacement test (with [downloadable patch](https://github.com/containers/podman/files/5852254/foo.diff.txt)):\n\nthanks!  Just pushed the new version"
+        },
+        {
+            "user": "edsantiago",
+            "body": "Yay, tests are green. LGTM, but I'll let someone more network-knowledgeable do the approving. Thanks @giuseppe, and sorry for my botched first attempt."
+        },
+        {
+            "user": "rhatdan",
+            "body": "/lgtm"
+        },
+        {
+            "user": "AkihiroSuda",
+            "body": "CNI support seems unfixed: https://github.com/containers/podman/issues/9065"
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 5138
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 9065
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 9225
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 10884
+        }
+    ]
+}

@@ -1,0 +1,75 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 19503,
+    "type": "pull_request",
+    "title": "CI: e2e: add delay before podman logs or journalctl",
+    "state": "closed",
+    "labels": [
+        "lgtm",
+        "approved",
+        "release-note-none",
+        "locked - please file new issue/PR"
+    ],
+    "user": "edsantiago",
+    "body": "...to reduce flakes.\n\nReason: journald makes no guarantees. Just because a systemd job\nhas finished, or podman has written+flushed log entries, doesn't\nmean that journald will actually know about them:\n\n   https://github.com/systemd/systemd/issues/28650\n\nWorkaround: Sleep(1) before every 'podman logs' or 'journalctl'.\nBetter ideas welcome.\n\nThis addresses, but does not close, #18501. That's a firehose,\nwith many more failures than I can possibly cross-reference.\nI will leave it open, then keep monitoring missing-logs flakes\nover time, and pick those off as they occur.\n\nSigned-off-by: Ed Santiago <santiago@redhat.com>\n```release-note\nNone\n```",
+    "comments": [
+        {
+            "user": "edsantiago",
+            "body": "[Resubmitted because I'm hammering on this in #17831 and, surprise, it failed in one test that I missed.]"
+        },
+        {
+            "user": "Luap99",
+            "body": "Ah, this sounds looks a bad idea to me. Unconditional sleeps are not great.\nI think it is time to refactor this into a retry logic. Given that we have some flakes it means it works most of time and we would waste a second. And well so far we do not even know if a second is enough and reliable.\nI think the better solution is to try to read logs, if it fails sleep 1 then try gain? Maybe in some back-off loop to retry n times if needed.\n\n"
+        },
+        {
+            "user": "vrothberg",
+            "body": "> [...] Maybe in some back-off loop to retry n times if needed.\n\nThat sounds nice. I think we could use [Eventually](https://pkg.go.dev/github.com/onsi/gomega#Eventually) for that purpose.  I didn't try transforming it into something using Eventually, so I am not sure how easy or hard or possible it is."
+        },
+        {
+            "user": "edsantiago",
+            "body": "As you know, I run `cirrus-pr-timing` on all my PRs. The time difference is undetectable.\n\nI hate it too. I really, really hate it. This just seemed like a low-cost (run time) and low-maintenance way to work around the journald bug. `Eventually` is not going to help here because there are too many variations of the log/journalctl tests."
+        },
+        {
+            "user": "vrothberg",
+            "body": "I am OK to merge as is and try to improve at a later point."
+        },
+        {
+            "user": "edsantiago",
+            "body": "Before merging: one thought I've had repeatedly, but keep dismissing, is to add a log check to `podman wait`, or a `--wait` option to `podman logs`. I dismiss them because I can't find *any* journalctl option for flushing, or checking if buffers are flushed, or any sort of indication that \"yes I gotcha\". But maybe there is and I've missed it?"
+        },
+        {
+            "user": "Luap99",
+            "body": "My understanding is that reading the logs using the `sd_journal` functions just directly operates on the journal files in `/var/log/journal` so no I don't think there is a way to synchronize access.\n\nWhat I find in journald.conf is:\n> SyncIntervalSec=\n           The timeout before synchronizing journal files to disk. After syncing, journal files are placed in the OFFLINE state. Note that syncing is unconditionally done immediately after a log message of\n           priority CRIT, ALERT or EMERG has been logged. This setting hence applies only to messages of the levels ERR, WARNING, NOTICE, INFO, DEBUG. The default timeout is 5 minutes.\n\nAlso there is `journalctl --flush`, but to my understanding this is only about writing from memory (`/run/log/journal`) to persistent disk (`/var/log/journal`) so I don't think that matters for reading logs.\n\nThe think what is causing the race here is that conmon writes the container output to the journald socket, write is done so we can exit. Then the journald process still needs to read from the socket and write to disk before it can be read by us. This happens without our control. Technically we could implement a check conmon to read the logs back and wait for it to appear before conmon exits but this sounds extremely complicated."
+        },
+        {
+            "user": "Luap99",
+            "body": "Also as far as merging this is concerned you are still adding a lot of sleeps to the file logger where it should not be needed and may hide actual flakes. I think the sleeps inside the loop should be conditional on journald. "
+        },
+        {
+            "user": "edsantiago",
+            "body": "Flagging with DO NOT MERGE because latest CI failed in `json-file`, twice."
+        },
+        {
+            "user": "edsantiago",
+            "body": "With #19562 merged, I think this is ready for review again. @Luap99 is this approach more acceptable? (There's still one `Sleep()`, I didn't feel like making that function so complicated)."
+        },
+        {
+            "user": "openshift-ci[bot]",
+            "body": "[APPROVALNOTIFIER] This PR is **APPROVED**\n\nThis pull-request has been approved by: *<a href=\"https://github.com/containers/podman/pull/19503#\" title=\"Author self-approved\">edsantiago</a>*, *<a href=\"https://github.com/containers/podman/pull/19503#pullrequestreview-1571327147\" title=\"Approved\">Luap99</a>*, *<a href=\"https://github.com/containers/podman/pull/19503#pullrequestreview-1562294693\" title=\"Approved\">vrothberg</a>*\n\nThe full list of commands accepted by this bot can be found [here](https://go.k8s.io/bot-commands?repo=containers%2Fpodman).\n\nThe pull request process is described [here](https://git.k8s.io/community/contributors/guide/owners.md#the-code-review-process)\n\n<details >\nNeeds approval from an approver in each of these files:\n\n- ~~[OWNERS](https://github.com/containers/podman/blob/main/OWNERS)~~ [Luap99,edsantiago,vrothberg]\n\nApprovers can indicate their approval by writing `/approve` in a comment\nApprovers can cancel approval by writing `/approve cancel` in a comment\n</details>\n<!-- META={\"approvers\":[]} -->"
+        },
+        {
+            "user": "rhatdan",
+            "body": "/lgtm"
+        },
+        {
+            "user": "edsantiago",
+            "body": "Well, [this did not resolve the bug](https://api.cirrus-ci.com/v1/artifact/task/5711408613031936/html/int-podman-fedora-37-root-host-sqlite.log.html#t--Podman-logs-podman-pod-logs--l--journald--1):\n```\n[FAILED] Timed out after 1.000s.\n           The function passed to Eventually failed at /var/tmp/go/src/github.com[/containers/podman/test/e2e/logs_test.go:531](https://github.com/containers/podman/blob/2e3426a36317b42df78bed059fea03c29fbcdb42/test/e2e/logs_test.go#L531) with:\n           Expected\n               <string>: 28a8701106c0 log1\n           to contain substring\n               <string>: log2\n```"
+        },
+        {
+            "user": "Luap99",
+            "body": "Lets not draw quick conclusions. There are several factors which can effect this. First this PR of course never fixed a bug, it fixes a race condition by retrying the check but who says a second is enough? \n\nSecond there can be different causes here, have a look at the journal:\n```\nAug 11 20:12:18 cirrus-task-5711408613031936 systemd[1]: Started libpod-1b2f53b3bb6290ba50ae320af8a2e18f2ee5bb0d4b808c5e377b692247f7caf6.scope - libcrun container.\nAug 11 20:12:18 cirrus-task-5711408613031936 rsyslogd[706]: imjournal: journal files changed, reloading...  [v8.2204.0-3.fc37 try https://www.rsyslog.com/e/0 ]\nAug 11 20:12:18 cirrus-task-5711408613031936 NetworkManager[743]: <info>  [1691802738.5294] manager: (vethd136e02e): new Veth device (/org/freedesktop/NetworkManager/Devices/1248)\nAug 11 20:12:18 cirrus-task-5711408613031936 conmon[421609]: conmon 1b2f53b3bb6290ba50ae <nwarn>: Failed to open cgroups file: /sys/fs/cgroup/machine.slice/machine-libpod_pod_dccf422d3fe84231baee6ddde72134025a8cbd90bbe9aa58b7233916bc0f4201.slice/libpod-1b2f53b3bb6290ba50ae320af8a2e18f2ee5bb0d4b808c5e377b692247f7caf6.scope/container/memory.events\nAug 11 20:12:18 cirrus-task-5711408613031936 NetworkManager[743]: <info>  [1691802738.5994] device (vethd136e02e): carrier: link connected\nAug 11 20:12:18 cirrus-task-5711408613031936 conmon[421681]: conmon 5955e953fc9ed5e883b8 <nwarn>: Failed to open cgroups file: /sys/fs/cgroup/machine.slice/libpod-5955e953fc9ed5e883b87131d8ed26dc1bba0e726558fbe2f915ea8ac149532b.scope/container/memory.events\nAug 11 20:12:18 cirrus-task-5711408613031936 systemd[1]: libpod-1b2f53b3bb6290ba50ae320af8a2e18f2ee5bb0d4b808c5e377b692247f7caf6.scope: Deactivated successfully.\nAug 11 20:12:19 cirrus-task-5711408613031936 rsyslogd[706]: imjournal: journal files changed, reloading...  [v8.2204.0-3.fc37 try https://www.rsyslog.com/e/0 ]\nAug 11 20:12:18 cirrus-task-5711408613031936 container2[421609]: log2\n```\n\nThe rsyslogd lines definitely sound suspicious. Also note that the timestamps in the journal are not logged chronological so something odd is going on. And why do we have rsyslogd even running in these VMs? This does not seem to be part of my Fedora Workstation install."
+        }
+    ],
+    "cross_references": []
+}

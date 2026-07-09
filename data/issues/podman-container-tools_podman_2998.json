@@ -1,0 +1,103 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 2998,
+    "type": "issue",
+    "title": "Unprivileged overlay attempts to mknod",
+    "state": "closed",
+    "labels": [
+        "rootless",
+        "locked - please file new issue/PR"
+    ],
+    "user": "flx42",
+    "body": "I don't believe #1949 truly got fixed. I'm running podman devel version from d652c8656d7425c34234071eddb55cbba9ac070f,  I have shadow-utils binaries with setuid and UID/GID ranges configured,  and `fuse-overlay` version 0.3\n\nWhen pulling an image with file whiteouts, I get \"permission denied\":\n```\n$ podman --storage-driver=overlay pull docker://ubuntu:18.04\nTrying to pull docker://ubuntu:18.04...Getting image source signatures\nCopying blob 898c46f3b1a1 skipped: already exists\nCopying blob 63366dfa0a50 skipped: already exists\nCopying blob 6e1bee0f8701 done\nCopying blob 041d4cd74a92 done\nCopying config 94e814e2ef done\nWriting manifest to image destination\nStoring signatures\nERRO[0003] Error pulling image ref //ubuntu:18.04: Error committing the finished image: error adding layer with blob \"sha256:041d4cd74a929bc4b66ee955ab5b229de098fa389d1a1fb9565e536d8878e15f\": Error processing tar file(exit status 1): operation not permitted\nFailed\nERRO[0003] error pulling image \"docker://ubuntu:18.04\"\n```\n\nThis is because the following code unconditionally attempts to `mknod` for file whiteouts:\nhttps://github.com/containers/storage/blob/83889dc0b1fb641897591af51318cd8ee3a2b5a1/pkg/archive/archive_linux.go#L131-L132\n\n```\n$ strace -f -e 'mknodat' podman --storage-driver=overlay pull docker://ubuntu:18.04\n[...]\nmknodat(AT_FDCWD, \"/var/lib/apt/lists/archive.ubuntu.com_ubuntu_dists_bionic-updates_InRelease\", S_IFCHR|000, makedev(0, 0)) = -1 EPERM (Operation not permitted)\n```\n\n",
+    "comments": [
+        {
+            "user": "mheon",
+            "body": "@giuseppe PTAL"
+        },
+        {
+            "user": "rhatdan",
+            "body": "@flx42 Could you look at ~/.config/containers/storage.conf\nDoes this include fuse-overlayfs in the file?  And the overlay driver."
+        },
+        {
+            "user": "flx42",
+            "body": "@rhatdan good catch, it wasn't, I installed `fuse-overlayfs` after running a `vfs` container, then nuked my `~/.local/share/containers/` when `podman` complains about a database configuration mismatch, then ran the overlay pull, but with the vfs configuration file, sigh...\n\nSo, it looked like this:\n```\n$ podman --storage-driver=vfs run docker://ubuntu:18.04\n\n$ grep -E 'driver|mount_program'  ~/.config/containers/storage.conf\n  driver = \"vfs\"\n    mount_program = \"\"\n\n$ sudo apt-get install -y fuse-overlayfs\n\n$ podman --storage-driver=overlay run -ti docker://ubuntu:18.04\nError: could not get runtime: database storage graph driver vfs does not match our storage graph driver overlay: database configuration mismatch\n\n$ rm -rf ~/.local/share/containers/\n$ podman --storage-driver=overlay run -ti docker://ubuntu:18.04\n[...]\nERRO[0005] Error pulling image ref //ubuntu:18.04: Error committing the finished image: error adding layer with blob \"sha256:041d4cd74a929bc4b66ee955ab5b229de098fa389d1a1fb9565e536d8878e15f\": Error processing tar file(exit status 1): operation not permitted\nFailed\nError: unable to pull docker://ubuntu:18.04: unable to pull image: Error committing the finished image: error adding layer with blob \"sha256:041d4cd74a929bc4b66ee955ab5b229de098fa389d1a1fb9565e536d8878e15f\": Error processing tar file(exit status 1): operation not permitted\n\n$ rm -rf ~/.config/containers/storage.conf\n$ podman --storage-driver=overlay run -ti docker://ubuntu:18.04\n[now works fine]\n$ grep -E 'driver|mount_program'  ~/.config/containers/storage.conf\n  driver = \"overlay\"\n    mount_program = \"/usr/bin/fuse-overlayfs\"\n```\n\nThanks for the help, but it would helpful to detect this situation if possible.\n "
+        },
+        {
+            "user": "mheon",
+            "body": "Some OSes do allow unprivileged kernel overlayfs (Ubuntu by default, debian by installing a kernel module, I believe), so I don't know if we want to add a warning. Would be nice if we could detect that the kernel supports unprivileged overlay and warn if we don't have a mount option if it doesn't, though."
+        },
+        {
+            "user": "rhatdan",
+            "body": "Container storage should report that ENOSUP for overlay.  So we could easily catch it. And then look to see if there is a mount options for mount program, and report it then."
+        },
+        {
+            "user": "flx42",
+            "body": "> Some OSes do allow unprivileged kernel overlayfs (Ubuntu by default, debian by installing a kernel module, I believe)\n\nBut how is that expected to work with podman? You won't be able to `mknod` or set `xattrs` anyway to convert the whiteouts to overlay format."
+        },
+        {
+            "user": "rhatdan",
+            "body": "Good point, unless Ubuntu has also relaxed the rules and allow users to create the devices that Overlay needs without mknod privs (Perhaps inside of a User Namespace.\n\n@rhvgoyal do you know?"
+        },
+        {
+            "user": "rhvgoyal",
+            "body": "@rhatdan I don't know. My guess is probably they might be carrying a patch which is not upstream."
+        },
+        {
+            "user": "flx42",
+            "body": "I don't think they do, https://lkml.org/lkml/2018/7/5/607 is a revert to upstream."
+        },
+        {
+            "user": "rhatdan",
+            "body": "Well is that the upstream kernel?  If Ubuntu/Debian does not apply that patch it still might work."
+        },
+        {
+            "user": "flx42",
+            "body": "It was reverted by a Canonical engineer, so I doubt it :)\n\nEdit: and I confirm the revert commit is indeed in the kernel sources for 19.04"
+        },
+        {
+            "user": "rhatdan",
+            "body": "Well in that case podman on Kernel Overlay will not work in rootless mode.  You need to use fuse-overlay.  Which seems to work pretty well."
+        },
+        {
+            "user": "flx42",
+            "body": "Right, so back to \n> Some OSes do allow unprivileged kernel overlayfs (Ubuntu by default, debian by installing a kernel module, I believe), so I don't know if we want to add a warning.\n\nIt means we **can** add a warning :)"
+        },
+        {
+            "user": "rhatdan",
+            "body": "So you want to container/storage to warn if overlay is used without a mount_program in rootless mode?"
+        },
+        {
+            "user": "flx42",
+            "body": "I'll let you decide what you deem is best, but that would have helped troubleshooting this particular case."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@nalind What do you think of adding a test of trying to create a whiteout devicenode on the overlay to verify that the overlayfs is working in rootless mode, if the caller does not specify a mount-program"
+        },
+        {
+            "user": "baude",
+            "body": "where do we stand on this one ?"
+        },
+        {
+            "user": "rhatdan",
+            "body": "@giuseppe Could you open a PR against container-storage to verify that the whiteout can be created in non-mount program mode."
+        },
+        {
+            "user": "giuseppe",
+            "body": "> @giuseppe Could you open a PR against container-storage to verify that the whiteout can be created in non-mount program mode.\n\nI've tried on Ubuntu and mknod still doesn't work for unprivileged users (also from a user namespace).  I think it is allowed only from overlay itself, in facts it gets created in the upper dir whenever I delete something from the overlay mount.\n"
+        },
+        {
+            "user": "giuseppe",
+            "body": " I'll close this issue, as checking for `mknod` is not enough on Ubuntu/Debian as well, since an unprivileged user still has no permissions for that."
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "buildah",
+            "number": 1709
+        }
+    ]
+}

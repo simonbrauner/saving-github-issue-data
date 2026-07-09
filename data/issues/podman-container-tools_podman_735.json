@@ -1,0 +1,106 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 735,
+    "type": "issue",
+    "title": "podman exposes udp port on tcp-only image",
+    "state": "closed",
+    "labels": [
+        "locked - please file new issue/PR"
+    ],
+    "user": "edsantiago",
+    "body": "podman with `--publish-all` exposes udp even if image is tcp-only:\n```\n# cat >Dockerfile\nFROM centos\nEXPOSE 8080      ! default is tcp, but you can append '/tcp' if you like; no diff\n^D\n# img=$(podman build --quiet .)\n# cid=$(podman run -d --publish-all $img sleep 60)\n# podman port $cid\n8080/udp -> 0.0.0.0:35365\n8080/tcp -> 0.0.0.0:35365\n```\nIt doesn't seem to be buildah's fault:\n```\n# podman inspect $img|grep -2 8080\n        \"ContainerConfig\": {\n            \"ExposedPorts\": {\n                \"8080/tcp\": {}\n            },\n            \"Cmd\": [\n```\nRPMs:\n```\nbuildah-0.16-1524754276.git83f4830.fc27.x86_64\npodman-0.5.2-1525700809.gitfaa8c3e.fc27.x86_64\n```",
+    "comments": [
+        {
+            "user": "baude",
+            "body": "We talked a little about this on IRC.  @rhatdan , if you recall, when we started enabling the network stack I asked about whether we need to distinguish between the tcp and udp protocols.  At that time, we jointly made the decision to treat them both as one.  This is obviously a departure from what other container runtimes do.\n\nFixing the example that @edsantiago provides may actually be doable ... but if this has to be be extended into -p and friends, it will be a significant amount of work."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@edsantiago WDYT?  Is this a real issue?"
+        },
+        {
+            "user": "edsantiago",
+            "body": "The worst (and least unlikely) scenario I can think of where this matters is 53: I can envision a container running BIND, where the creator wants to expose 53/udp but does not want to allow AXFR on 53/tcp, and they do so by filtering instead of by configuration. It would tick me off if I were to discover that my container was not running as I had crafted it. But I'm not the sort of person who would do that.\n\nIMO this isn't worth five days' effort but if it's easy to do a subset, it's worth considering.\n\nDisclaimer: there are almost certainly other cases I haven't thought of."
+        },
+        {
+            "user": "rhatdan",
+            "body": "Ok lets leave this as an issue, but put it to the bottom of the queue.  Or if some contributor wants to take it on, go for it."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@baude Is this something we should have an intern look at?"
+        },
+        {
+            "user": "baude",
+            "body": "I'd prefer to fix it given the history of this code ... the larger question is if we are going to still assume -P 80 for example is both udp and tcp.  and if we are going to start respecting -P 80/tcp"
+        },
+        {
+            "user": "rhatdan",
+            "body": "Yes I think -P 80 means both and then you have to give specific for tcp and udp."
+        },
+        {
+            "user": "kunalkushwaha",
+            "body": "this issue seems still persist. @baude if you are busy, may I try to fix this?\n\n```\n$ cat Dockerfile.builah \nFROM docker.io/library/centos:latest\nEXPOSE 8080\n\n$ cid=$(sudo podman run -d -p 6061/tcp $img sleep 60)\n\n$ sudo podman port $cid                              \n6061/udp -> 0.0.0.0:34753\n6061/tcp -> 0.0.0.0:34753\n\n```"
+        },
+        {
+            "user": "mheon",
+            "body": "@kunalkushwaha I don't think anyone is actively working on this issue, so feel free"
+        },
+        {
+            "user": "baude",
+            "body": "Yes, feel free"
+        },
+        {
+            "user": "rhatdan",
+            "body": "@kunalkushwaha We would love to have you work on this.  Thanks."
+        },
+        {
+            "user": "kunalkushwaha",
+            "body": "Thanks, I will start looking into this."
+        },
+        {
+            "user": "kunalkushwaha",
+            "body": "Just to review, I have a put down the current and expected behaviour of  `-p` and `-P|--publish-all` output of ports. \n\n|   Options\t|  Now  \t|  Expected \t| \n|---\t|---\t|---\t|\n| `-p 80`   \t|   `80/tcp`, `80/udp`\t|  `80/tcp`  \t|\n| `-p 80/tcp`  \t|  `80/tcp`, `80/udp` \t| `80/tcp`  \t|\n|   `-p 80/udp`\t| `80/tcp`, `80/udp`  \t|  `80/udp` \t|\n|   `-P` with `80` in image \t| `80/tcp`, `80/udp`  \t| `80/tcp`, `80/udp`*\t|\n|   `-P` with `80/udp` in image\t| `80/tcp`, `80/udp`  \t|  `80/udp` \t|\n\n*_In other runtimes like docker ,here `80/tcp` is exposed_\n\nPlease let me  know, if any changes in expected behaviour is required."
+        },
+        {
+            "user": "rhatdan",
+            "body": "LGTM"
+        },
+        {
+            "user": "baude",
+            "body": "When the protocol is not stated, are both udp and tcp ports supposed to be used?"
+        },
+        {
+            "user": "mheon",
+            "body": "Per docker it's just TCP if not specified."
+        },
+        {
+            "user": "baude",
+            "body": "ok, works for me!"
+        },
+        {
+            "user": "edsantiago",
+            "body": "Reference: [EXPOSE](https://docs.docker.com/engine/reference/builder/#expose) is documented as explicitly defaulting to tcp. To my surprise, I've been unable to find a definitive reference for `-p`."
+        },
+        {
+            "user": "kunalkushwaha",
+            "body": "While debugging, I found, in case of no proto defined for exposed ports in Image(Dockerfile), the `tcp` is value we get after Image is parsed as per  `ociV1 Spec`\n- the `tcp`  value is returned from function [`ociv1Image()`](https://github.com/containers/libpod/blob/master/libpod/image/image.go#L787) \n\nAlso I cross checked the [OCI specs](https://github.com/opencontainers/image-spec/blob/master/config.md#properties), and it states\n > __ExposedPorts object, OPTIONAL__\n> A set of ports to expose from a container running this image. Its keys can be in the format of: port/tcp, port/udp, port with __the default protocol being tcp if not specified.__\n\nI feel we should go as per specs i.e. default `tcp` port exposed in case of no proto  specified, so no data is lost in translation from OCI image to container.\nSo updated table of current vs expected will be \n\n|   Options\t|  Now  \t|  Expected \t| \n|---\t|---\t|---\t|\n| `-p 80`   \t|   `80/tcp`, `80/udp`\t|  `80/tcp`  \t|\n| `-p 80/tcp`  \t|  `80/tcp`, `80/udp` \t| `80/tcp`  \t|\n|   `-p 80/udp`\t| `80/tcp`, `80/udp`  \t|  `80/udp` \t|\n|   `-P` with `80` in image \t| `80/tcp`, `80/udp`  \t| `80/tcp`|\n|   `-P` with `80/udp` in image\t| `80/tcp`, `80/udp`  \t|  `80/udp` \t|\n\nPlease let me know WDYT"
+        },
+        {
+            "user": "rhatdan",
+            "body": "SGTM"
+        },
+        {
+            "user": "kunalkushwaha",
+            "body": "This issue can be closed now."
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 1325
+        }
+    ]
+}

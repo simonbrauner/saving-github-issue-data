@@ -1,0 +1,105 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 3834,
+    "type": "pull_request",
+    "title": "Do not glob value of symlink on cp",
+    "state": "closed",
+    "labels": [
+        "approved",
+        "locked - please file new issue/PR"
+    ],
+    "user": "jwhonce",
+    "body": "Fixes #3829\nFixes https://bugzilla.redhat.com/show_bug.cgi?id=1741709\n\nSigned-off-by: Jhon Honce <jhonce@redhat.com>",
+    "comments": [
+        {
+            "user": "mheon",
+            "body": "The * character isn't strictly a glob - it's a wildcard to indicate the\nentire directory should be copied, AFAIK. It is only allowed to exist after\na / and at the very end of the path. I think we can detect and special case\nthat and avoid glob entirely.\n\nOn Fri, Aug 16, 2019, 14:50 Erik Sjölund <notifications@github.com> wrote:\n\n> *@eriksjolund* commented on this pull request.\n> ------------------------------\n>\n> In cmd/podman/cp.go\n> <https://github.com/containers/libpod/pull/3834#discussion_r314847880>:\n>\n> > @@ -210,10 +210,26 @@ func copyBetweenHostAndContainer(runtime *libpod.Runtime, src string, dest strin\n>  \t\t\tsrcPath = cleanedPath\n>  \t\t}\n>  \t}\n> -\tglob, err = filepath.Glob(srcPath)\n> -\tif err != nil {\n> -\t\treturn errors.Wrapf(err, \"invalid glob %q\", srcPath)\n> +\n> +\t// Don't glob srcPath if it's the value of a symlink\n> +\t// Fix for https://bugzilla.redhat.com/show_bug.cgi?id=1741709\n> +\tfi, err := os.Lstat(srcPath)\n> +\tswitch errors.Cause(err).(type) {\n> +\tcase *os.PathError:\n> +\t\tglob = append(glob, srcPath)\n>\n> I would remove the glob functionality. The functionality does not seem to\n> be mentioned in the Podman documentation and it seems the functionality is\n> not present in Docker (please correct me if I'm wrong).\n>\n> If the functionality needs to be kept, to avoid surprises podman should\n> only do globbing on exactly the path that the user provided on the command\n> line. As soon as symlinks have been followed the path could look quite\n> different. I think at this point in the code the variable srcPath could\n> have some other value than what the user provided on the command line.\n>\n> —\n> You are receiving this because your review was requested.\n> Reply to this email directly, view it on GitHub\n> <https://github.com/containers/libpod/pull/3834?email_source=notifications&email_token=AB3AOCC2NIJSFN5RIH5AVMDQE3ZH5A5CNFSM4IMLMFIKYY3PNVWWK3TUL52HS4DFWFIHK3DMKJSXC5LFON2FEZLWNFSXPKTDN5WW2ZLOORPWSZGOCB2SUZQ#discussion_r314847880>,\n> or mute the thread\n> <https://github.com/notifications/unsubscribe-auth/AB3AOCCUQUUPWJD4T6F2U4DQE3ZH5ANCNFSM4IMLMFIA>\n> .\n>\n"
+        },
+        {
+            "user": "jwhonce",
+            "body": "@mheon I'm working on another version of this patch that walks the directory if given path/* \n\nLatest code matches docker cli behavior "
+        },
+        {
+            "user": "mtrmac",
+            "body": "> The * character isn't strictly a glob - it's a wildcard to indicate the entire directory should be copied, AFAIK. It is only allowed to exist after a / and at the very end of the path. I think we can detect and special case that and avoid glob entirely.\n\n…\n> @mheon I'm working on another version of this patch that walks the directory if given path/*\n> \n> Latest code matches docker cli behavior\n\nWhere’s the corresponding code/documentation? I can’t find any code handling `/*` specially, neither in the CLI client nor in the server; everything in there pretty soon does some variant of `.Stat` on the input.  https://docs.docker.com/engine/reference/commandline/cp/ does not document any `/*` handling either."
+        },
+        {
+            "user": "mtrmac",
+            "body": "… now I have finally read all comments and all of that is already known. I’m sorry."
+        },
+        {
+            "user": "edsantiago",
+            "body": "The glob issue looks fixed but the `cp` is still happening in host-space:\n```\n$ podman run --name foo alpine sh -c 'ln -s /etc/machine-id file1'\n$ podman cp foo:/\\* .\n$ ls\nmachine-id\n```"
+        },
+        {
+            "user": "edsantiago",
+            "body": "Hey @jwhonce feel free to use this for testing. The second test (\"will not recognize symlink pointing into host space\" is currently failing, consistent with my comment above. Once that's fixed, it might still fail because I don't know exactly what error message to expect. All other tests pass right now and should continue passing. Feel free to git-add this and include it in your PR. \n\n[065-cp.bats.txt](https://github.com/containers/libpod/files/3516445/065-cp.bats.txt)\n"
+        },
+        {
+            "user": "rhatdan",
+            "body": "@ed so you would expect the above command to create `file1` as a symlink?"
+        },
+        {
+            "user": "edsantiago",
+            "body": "I would expect this to fail because /etc/machine-id does not exist on alpine. What happens instead is that the host's /etc/machine-id gets copied into the current directory. A perhaps-clearer example:\n```\n$ echo \"This file exists only on the host\" >/tmp/hostfile\n$ podman run --name foo alpine sh -c 'ln -s /tmp/hostfile /tmp/link-in-container'\n$ podman cp foo:/tmp/\\* .\n[ succeeds. Should fail.]\n$ cat hostfile\nThis file exists only on the host\n```"
+        },
+        {
+            "user": "rhatdan",
+            "body": "Yes I agree that is bad."
+        },
+        {
+            "user": "edsantiago",
+            "body": "FWIW it's something in the glob expansion because directly specifying the file will (correctly) fail:\n```\n$ podman cp foo:/tmp/link-in-container .\nError: error evaluating symlinks \"\": lstat /home/esm/.local/share/containers/storage/overlay/90222cdf3b4b5b05b493d3e2a6f9ae986c3214d831b0937c270c657b1ff8049b/merged/tmp/hostfile: no such file or directory\n```\n...and, while I'm at it, so does specifying a completely-nonexistent file, but it fails with the same lstat error, which I find disconcerting:\n```\n$ podman cp foo:/sdfsdf .\nError: error evaluating symlinks \"\": lstat /home/esm/.local/share/containers/storage/overlay/90222cdf3b4b5b05b493d3e2a6f9ae986c3214d831b0937c270c657b1ff8049b/merged/sdfsdf: no such file or directory\n[ I did not expect \"error evaluating symlinks\"; I was hoping for \"foo:/sdfsdf: no such file or directory\" ]\n```"
+        },
+        {
+            "user": "mheon",
+            "body": "@edsantiago That should be fine - expected, I'd say. We unconditionally use a scoped symlink resolution function to find the target file in the container, even if no symlinks are present in the path. It's easier to maintain things that way."
+        },
+        {
+            "user": "edsantiago",
+            "body": "@mheon thanks; it's just that, from an end-user perspective, that's a pretty difficult message to grok."
+        },
+        {
+            "user": "jwhonce",
+            "body": "@edsantiago I can add the other \"path\" to the error message.  I.e., the path from the user's POV vs. the containers.  Just giving the input path makes debugging much harder because then the path in the error message is not what really failed on the file system. \n"
+        },
+        {
+            "user": "rhatdan",
+            "body": "What about refusing to copy symlinks, or in just copying the symlink, not the content."
+        },
+        {
+            "user": "edsantiago",
+            "body": "I still think this is solvable with just a little figuring-out of glob expansion. I think that for the most part podman is doing the right thing, it's just that something is wonky with expanding '*'. I don't know how to fix it, but suspect that there's just too much indirection going on: I think `*` is somehow triggering nested processing before podman switches into container mount space. My reasoning:\n```\n$ echo \"This file exists only on the host\" >/tmp/hostfile\n$ podman run --name foo alpine sh -c 'ln -s /tmp/hostfile /tmp/link-in-container'\n\n$ podman cp foo:/sdfsdf .\nError: error evaluating symlinks \"\": lstat /home/esm/.local/share/containers/storage/overlay/90222cdf3b4b5b05b493d3e2a6f9ae986c3214d831b0937c270c657b1ff8049b/merged/sdfsdf: no such file or directory\n! ^^^ GOOD! This shows that podman-cp, when given an explicit path, is correctly\n!     checking in container-mountspace and realizing the symlink is invalid\n\n$ podman cp foo:/tmp/\\* .\n! ^^^ this one not only succeeds, it creates the file >>hostfile<<  (not link-in-container)\n!    ...implying that something has expanded the glob (* -> link-in-container)\n!    **and then run readlink() on that result** (yielding \"hostfile\"). I believe this\n!    is the crux of the incorrect behavior.\n```\nHope this makes sense."
+        },
+        {
+            "user": "mheon",
+            "body": "At present cp does not use the container mount ns. That needs to be fixed.\n\nOn Mon, Aug 19, 2019, 13:58 Ed Santiago <notifications@github.com> wrote:\n\n> I still think this is solvable with just a little figuring-out of glob\n> expansion. I think that for the most part podman is doing the right thing,\n> it's just that something is wonky with expanding '*'. I don't know how to\n> fix it, but suspect that there's just too much indirection going on: I\n> think * is somehow triggering nested processing before podman switches\n> into container mount space. My reasoning:\n>\n> $ echo \"This file exists only on the host\" >/tmp/hostfile\n> $ podman run --name foo alpine sh -c 'ln -s /tmp/hostfile /tmp/link-in-container'\n>\n> $ podman cp foo:/sdfsdf .\n> Error: error evaluating symlinks \"\": lstat /home/esm/.local/share/containers/storage/overlay/90222cdf3b4b5b05b493d3e2a6f9ae986c3214d831b0937c270c657b1ff8049b/merged/sdfsdf: no such file or directory\n> ! ^^^ GOOD! This shows that podman-cp, when given an explicit path, is correctly\n> !     checking in container-mountspace and realizing the symlink is invalid\n>\n> $ podman cp foo:/tmp/\\* .\n> ! ^^^ this one not only succeeds, it creates the file >>hostfile<<  (not link-in-container)\n> !    ...implying that something has expanded the glob (* -> link-in-container)\n> !    **and then run readlink() on that result** (yielding \"hostfile\"). I believe this\n> !    is the crux of the incorrect behavior.\n>\n> Hope this makes sense.\n>\n> —\n> You are receiving this because you were mentioned.\n> Reply to this email directly, view it on GitHub\n> <https://github.com/containers/libpod/pull/3834?email_source=notifications&email_token=AB3AOCFLXO3CICOCX5DV4DTQFLNMBA5CNFSM4IMLMFIKYY3PNVWWK3TUL52HS4DFVREXG43VMVBW63LNMVXHJKTDN5WW2ZLOORPWSZGOD4TZKCA#issuecomment-522687752>,\n> or mute the thread\n> <https://github.com/notifications/unsubscribe-auth/AB3AOCCWMOKHL7H5FS3YQ7TQFLNMBANCNFSM4IMLMFIA>\n> .\n>\n"
+        },
+        {
+            "user": "rhatdan",
+            "body": "I think there is two situations here.  1 is if the container is running. then cp running in the same mount namespace as the container would be good. \nThe question would be what happens if you run podman cp when the container is not running.  Should it mount up the containers mount namespace?"
+        },
+        {
+            "user": "edsantiago",
+            "body": "There's some more serious weirdness when cp'ing into the container: link resolution is taking a wrong turn somewhere, creating files and directories that IMHO it shouldn't.\n```\n$ podman run -d --name foo alpine sh -c 'ln -s nonesuch /tmp/\\*;sleep 60'\n<sha>\n$ podman cp /etc/services foo:/tmp/\\*                 <--- no trailing slash\n$ podman exec foo ls -l /tmp\ntotal 680\nlrwxrwxrwx    1 root     root             8 Aug 20 19:25 * -> nonesuch\n-rw-r--r--    1 root     root        692241 Apr  9 07:47 nonesuch\n```\nIn the above, podman resolved the '\\*' symlink and created the file 'nonesuch'. This is weird; I was expecting podman to overwrite the '\\*' symlink and make it an actual file.\n\n```\n$ podman rm -f foo                      <--- previous container may still be running\n$ !?run                                 <--- run the exact same container again\n$ podman cp /etc/services foo:/tmp/\\*/  <--- this time with trailing slash\n$ podman exec foo ls -lR /tmp\n/tmp:\ntotal 4\nlrwxrwxrwx    1 root     root             8 Aug 20 19:26 * -> nonesuch\ndrwxr-xr-x    2 root     root          4096 Aug 20 19:26 nonesuch\n\n/tmp/nonesuch:\ntotal 680\n-rw-r--r--    1 root     root        692241 Apr  9 07:47 services\n```\nThis one is weirder: podman cp read the '\\*` symlink, resolved it as `nonesuch`, treated it as a directory because of the trailing slash in the command-line cp, created the directory, _and then created a file with the same name as the source file_. This is information leakage from the host to the container, although I can't imagine any scenario in which it's serious.\n\nI believe that the first case should transform '\\*' from a symlink into a file, and the second should fail with ENOTDIR."
+        },
+        {
+            "user": "eriksjolund",
+            "body": "As I understand it Podman aims to be a drop-in replacement for Docker.\nTherefore I think the wildcard functionality (if any) should be enabled by a\ncommand-line flag. Otherwise the functionality will not match 100%. \n\nAnother thing: The handling of `-`  looks strange.\n\n\tfilename := filepath.Base(destPath)\n\tif filename == \"-\" && !isFromHostToCtr {\n\nThat would mean\n\n_somedir/-_\n\nis the same as \n\n_-_\n"
+        },
+        {
+            "user": "rhatdan",
+            "body": "@jwhonce What is the state of this one?  Is it ready for merge?\n"
+        },
+        {
+            "user": "mtrmac",
+            "body": "Still https://github.com/containers/libpod/pull/3834#pullrequestreview-276236587, and Ed’s testing confirms that."
+        },
+        {
+            "user": "openshift-ci-robot",
+            "body": "[APPROVALNOTIFIER] This PR is **APPROVED**\n\nThis pull-request has been approved by: *<a href=\"https://github.com/containers/libpod/pull/3834#\" title=\"Author self-approved\">jwhonce</a>*\n\nThe full list of commands accepted by this bot can be found [here](https://go.k8s.io/bot-commands?repo=containers%2Flibpod).\n\nThe pull request process is described [here](https://git.k8s.io/community/contributors/guide/owners.md#the-code-review-process)\n\n<details >\nNeeds approval from an approver in each of these files:\n\n\nApprovers can indicate their approval by writing `/approve` in a comment\nApprovers can cancel approval by writing `/approve cancel` in a comment\n</details>\n<!-- META={\"approvers\":[]} -->"
+        }
+    ],
+    "cross_references": []
+}

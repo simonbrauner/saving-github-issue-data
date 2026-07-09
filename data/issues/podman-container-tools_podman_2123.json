@@ -1,0 +1,96 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 2123,
+    "type": "issue",
+    "title": "pull: error setting new rlimits: operation not permitted",
+    "state": "closed",
+    "labels": [
+        "kind/bug",
+        "locked - please file new issue/PR"
+    ],
+    "user": "EmilienM",
+    "body": "**Is this a BUG REPORT or FEATURE REQUEST? (leave only one on its own line)**\n\n/kind bug\n\n**Description**\n\nPodman fails to pull an image from a local docker-distribution registry (in non-rootless environment).\n\n**Steps to reproduce the issue:**\n\n1. Deploy a docker-distribution registry and pull docker.io/tripleomaster/centos-binary-haproxy:current-tripleo.\n\n2. Now try to pull the container from the registry to local with podman: ```podman pull --tls-verify=false 192.168.24.1:8787/tripleomaster/centos-binary-haproxy:current-tripleo```\n\n**Describe the results you received:**\n\nPull fails with ```error setting new rlimits: operation not permitted``` error.\n\nLogs:\nhttp://logs.openstack.org/19/616019/23/check/tripleo-ci-centos-7-containers-multinode/5ad3bd8/logs/undercloud/home/zuul/overcloud_deploy.log.txt.gz#_2019-01-08_21_46_18\n\n**Describe the results you expected:**\n\nPull should work, as it does fine with docker pull.\n\n**Additional information you deem important (e.g. issue happens only occasionally):**\n\n**Output of `podman version`:**\n\n```\nVersion:       0.12.1.2\nGo Version:    go1.10.2\nOS/Arch:       linux/amd64\n```\n\n**Output of `podman info`:**\n\n```\nhost:\n  BuildahVersion: 1.6-dev\n  Conmon:\n    package: podman-0.12.1.2-2.git9551f6b.el7.x86_64\n    path: /usr/libexec/podman/conmon\n    version: 'conmon version 1.12.0-dev, commit: 97d5f1232f62307696c8b4b2d430e8b771a45873-dirty'\n  Distribution:\n    distribution: '\"centos\"'\n    version: \"7\"\n  MemFree: 857681920\n  MemTotal: 8364449792\n  OCIRuntime:\n    package: runc-1.0.0-57.dev.git2abd837.el7.centos.x86_64\n    path: /usr/bin/runc\n    version: 'runc version spec: 1.0.0'\n  SwapFree: 4616089600\n  SwapTotal: 8588881920\n  arch: amd64\n  cpus: 8\n  hostname: undercloud.localdomain\n  kernel: 3.10.0-957.1.3.el7.x86_64\n  os: linux\n  rootless: false\n  uptime: 2h 3m 2.36s (Approximately 0.08 days)\ninsecure registries:\n  registries:\n  - 192.168.24.1:8787\n  - 192.168.24.3:8787\nregistries:\n  registries:\n  - registry.centos.org\n  - registry.access.redhat.com\n  - docker.io\n  - quay.io\nstore:\n  ContainerStore:\n    number: 87\n  GraphDriverName: overlay\n  GraphOptions: null\n  GraphRoot: /var/lib/containers/storage\n  GraphStatus:\n    Backing Filesystem: extfs\n    Native Overlay Diff: \"true\"\n    Supports d_type: \"true\"\n  ImageStore:\n    number: 74\n  RunRoot: /var/run/containers/storage\n```\n\n**Additional environment details (AWS, VirtualBox, physical, etc.):**\nhttp://logs.openstack.org/19/616019/23/check/tripleo-ci-centos-7-containers-multinode/5ad3bd8/logs/undercloud/var/log/extra/podman/podman_allinfo.log.txt.gz",
+    "comments": [
+        {
+            "user": "EmilienM",
+            "body": "It probably fails here: https://github.com/containers/libpod/blob/ef29a3071202cc0fcc451ebdcaf948969bfe6306/cmd/podman/main.go#L154-L156"
+        },
+        {
+            "user": "rhatdan",
+            "body": "Are these numbers too large?  Is there a kernel field, we can check to see what the root max is?"
+        },
+        {
+            "user": "EmilienM",
+            "body": "or maybe we need CAP_SYS_RESOURCE capability to perform this task; however I'm confused because we ran the process which run podman pull with sudo."
+        },
+        {
+            "user": "rhatdan",
+            "body": "Does the  number need to be less then pids_max.\ncat /proc/sys/kernel/pid_max\n32768\n"
+        },
+        {
+            "user": "EmilienM",
+            "body": "On fresh centos: 32768\nBut once podman has deployed containers, I have 1048576.\n\nSo since the value is already set, I wonder why it fails during the pull."
+        },
+        {
+            "user": "rhatdan",
+            "body": "Weird.  We could check if the limits are >= 1048576 and only set it in that case."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@giuseppe Any ideas?\n"
+        },
+        {
+            "user": "mheon",
+            "body": "EPERM for setrlimit is defined as:\n```\nAn unprivileged process tried to raise the hard limit; the CAP_SYS_RESOURCE capability is required to do this. Or, the caller tried to increase the hard RLIMIT_NOFILE limit above the current kernel maximum (NR_OPEN). Or, the calling process did not have permission to set limits for the process specified by pid. \n```\n\nThe most likely one here seems to be CAP_SYS_RESOURCE, given that we are successfully setting this value at other points (so it's not above NR_OPEN)."
+        },
+        {
+            "user": "mheon",
+            "body": "Can we easily determine if Podman has CAP_SYS_RESOURCE?"
+        },
+        {
+            "user": "rhatdan",
+            "body": "@EmilienM Says he is just executing sudo podman.  @EmilienM Is this repeatable?  Any chance you attempted this while in a container?"
+        },
+        {
+            "user": "giuseppe",
+            "body": "should we just ignore the error?  In most cases we don't need so many open files"
+        },
+        {
+            "user": "giuseppe",
+            "body": "I'd do something like:\n\n```diff\ndiff --git a/cmd/podman/main.go b/cmd/podman/main.go\nindex 43804ee3..0a9e2c43 100644\n--- a/cmd/podman/main.go\n+++ b/cmd/podman/main.go\n@@ -148,17 +148,17 @@ func main() {\n                        logrus.SetLevel(level)\n                }\n \n-               // Only if not rootless, set rlimits for open files.\n-               // We open numerous FDs for ports opened\n-               if !rootless.IsRootless() {\n-                       rlimits := new(syscall.Rlimit)\n-                       rlimits.Cur = 1048576\n-                       rlimits.Max = 1048576\n+               rlimits := new(syscall.Rlimit)\n+               rlimits.Cur = 1048576\n+               rlimits.Max = 1048576\n+               if err := syscall.Setrlimit(syscall.RLIMIT_NOFILE, rlimits); err != nil {\n+                       if err := syscall.Getrlimit(syscall.RLIMIT_NOFILE, rlimits); err != nil {\n+                               return errors.Wrapf(err, \"error getting rlimits\")\n+                       }\n+                       rlimits.Cur = rlimits.Max\n                        if err := syscall.Setrlimit(syscall.RLIMIT_NOFILE, rlimits); err != nil {\n                                return errors.Wrapf(err, \"error setting new rlimits\")\n                        }\n-               } else {\n-                       logrus.Info(\"running as rootless\")\n                }\n```\n\nif you are fine with this approach, I can open a PR"
+        },
+        {
+            "user": "mheon",
+            "body": "I'd rather just make the Setrlimit error"
+        },
+        {
+            "user": "EmilienM",
+            "body": "> if you are fine with this approach, I can open a PR\n\nWe might want to keep ```if !rootless.IsRootless()``` condition, right? Otherwise lgtm."
+        },
+        {
+            "user": "giuseppe",
+            "body": "> We might want to keep `if !rootless.IsRootless()` condition, right? Otherwise lgtm.\n\nno, it will work with rootless mode as well, an unprivileged process can still bump its rlimits to max.\n\nOpened a PR here: https://github.com/containers/libpod/pull/2126"
+        },
+        {
+            "user": "rhatdan",
+            "body": "Im fine with this, although add some logging about what happened. At least at the Warn level."
+        },
+        {
+            "user": "giuseppe",
+            "body": "> Im fine with this, although add some logging about what happened. At least at the Warn level.\n\nadded the logging"
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 2126
+        },
+        {
+            "organization": "docker-mailserver",
+            "repository": "docker-mailserver",
+            "number": 1414
+        }
+    ]
+}

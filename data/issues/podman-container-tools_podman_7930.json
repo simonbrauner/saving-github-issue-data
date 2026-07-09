@@ -1,0 +1,64 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 7930,
+    "type": "pull_request",
+    "title": "Fix the \"err: cause\" order of OCI runtime errors",
+    "state": "closed",
+    "labels": [
+        "locked - please file new issue/PR"
+    ],
+    "user": "xordspar0",
+    "body": "Previously, the order of OCI error messages was reversed, so that the\ntype of error was listed as the cause. For example:\n\n    Error: writing file `cpu.cfs_quota_us`: Invalid argument: OCI runtime error\n\nThis error message makes it seem like \"OCI runtime error\" is the\nargument that was invalid. In fact, \"OCI runtime error\" is the error and\n\"writing file ...\" is the cause. With this change, the above message\nreads:\n\n    Error: OCI runtime error: writing file `cpu.cfs_quota_us`: Invalid argument\n\nSigned-off-by: Jordan Christiansen <xordspar0@gmail.com>",
+    "comments": [
+        {
+            "user": "openshift-ci-robot",
+            "body": "[APPROVALNOTIFIER] This PR is **NOT APPROVED**\n\nThis pull-request has been approved by: *<a href=\"https://github.com/containers/podman/pull/7930#\" title=\"Author self-approved\">xordspar0</a>*\nTo complete the [pull request process](https://git.k8s.io/community/contributors/guide/owners.md#the-code-review-process), please assign **baude** after the PR has been reviewed.\nYou can assign the PR to them by writing `/assign @baude` in a comment when ready.\n\nThe full list of commands accepted by this bot can be found [here](https://go.k8s.io/bot-commands?repo=containers%2Fpodman).\n\n<details open>\nNeeds approval from an approver in each of these files:\n\n- **[OWNERS](https://github.com/containers/podman/blob/master/OWNERS)**\n\nApprovers can indicate their approval by writing `/approve` in a comment\nApprovers can cancel approval by writing `/approve cancel` in a comment\n</details>\n<!-- META={\"approvers\":[\"baude\"]} -->"
+        },
+        {
+            "user": "xordspar0",
+            "body": "/assign @baude"
+        },
+        {
+            "user": "rhatdan",
+            "body": "@mheon PTAL"
+        },
+        {
+            "user": "rhatdan",
+            "body": "The goal should be to improve the user experience, which means make the error messages easier to decipher.  Of course another huge goal would be to make sure the code continues to work.  Since this does not effect remote, then it would be fairly easy for us to change.  But what about the calls to errors.Cause versus errors.Is for non libpod.Errors?"
+        },
+        {
+            "user": "mheon",
+            "body": "I really don't like forcing a distinction on `errors.Cause()` for some errors versus `errors.Is()` for other errors.\n\nWould it be easier to go about this another way, and when we print the errors in cmd/podman, detect if errors.Cause() is an OCI runtime error, and strip the suffix from the error string if so?"
+        },
+        {
+            "user": "xordspar0",
+            "body": "> a distinction on errors.Cause() for some errors versus errors.Is()\n\nI would vote for using `errors.Is()` for everything. In the official [Go 1.13 errors API](https://blog.golang.org/go1.13-errors) that supersedes github.com/pkg/errors there isn't an equivalent of `errors.Cause()`. You just always check if the error you care about is _anywhere_ in the chain and you don't care if it's in a specific position.\n\nI think this is a better solution because it reduces coupling. It makes it easier to change internal details of libpod without disrupting calling code. For example, let's say I use `errors.Cause()` to detect a `define.ErrOCIRuntimePermissionDenied` error. What if someday the code that generated the error calls a system call and wants to wrap the error returned by the kernel, such as EPERM? That would break code that uses `errors.Cause()`.\n\nAnother issue with using `errors.Cause()` is that there can be only one ultimate cause at the end of the chain. If you want to detect a specific kind of error, you have to put it at the end of the chain, even if it isn't really the cause but more of a description. That's what's happening here with \"Error: writing file `cpu.cfs_quota_us`: Invalid argument: OCI runtime error\".\n\nI'm not the Go or errors expert in the room, and I have a lot to learn, but I can't think of a time when I would want to use `errors.Cause()` when I have `errors.Is()` available.\n\n> Would it be easier to go about this another way, and when we print the errors in cmd/podman, detect if errors.Cause() is an OCI runtime error, and strip the suffix from the error string if so?\n\nWe wouldn't have to think about consequences to the surrounding code if we did it that way. I can do that if that's what you prefer."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@kolyshkin @vrothberg PTAL"
+        },
+        {
+            "user": "vrothberg",
+            "body": "I'm okay with migrating the code base from \"github.com/pkg/errors\" to what newer Go standard libs provide. But that should be separate from tackling the `OCI runtime error` issue addressed in this PR.\n\nI don't like creating a new `LibpodError` type as I see beauty in having consistency across the code base.\n\nHowever, I guess that `pkg/errors` will continue to be used (in new PRs) for a long time as it has been used for a really long time. Go was quite late to improve error handling, and the muscle memory is just so strong :^)"
+        },
+        {
+            "user": "xordspar0",
+            "body": "> Would it be easier to go about this another way, and when we print the errors in cmd/podman, detect if errors.Cause() is an OCI runtime error, and strip the suffix from the error string if so?\n\n> I don't like creating a new LibpodError type as I see beauty in having consistency across the code base.\n\nAlright, then we can fix this at the other end when we print out the error. I'll open a new PR."
+        },
+        {
+            "user": "xordspar0",
+            "body": "Superseded by https://github.com/containers/podman/pull/7968"
+        },
+        {
+            "user": "xordspar0",
+            "body": "In case anyone in the future (probably me) wants to know how we got from \"let's switch the order of these two errors\" to a +72 -53 patch, here's what happened:\n\n```\nerrors.Wrapf(define.ErrOCIRuntime, \"%s\", strings.Trim(runtimeMsg, \"\\n\"))\n```\n\n1. ErrOCIRuntime is listed as the cause, but the runtimeMsg is the real cause. Just switch the arguments.\n2. errors.Wrapf only takes on error argument: the cause. The rest is just a formatted string. Fine, we'll just convert the error to a string with \"%v\".\n3. If we just take the string from define.ErrOCIRuntime instead of inserting the actual error into the chain, then we can't check for it with errors.Is or errors.Cause.\n4. The [Go 1.13 errors API](https://golang.org/pkg/errors/#Is) provides a way to wrap errors and still check for them programatically later: define your own error type and implement the method `func (m MyError) Is(target error) bool`.\n\nSo that's what I did. The error message is in the right order and you can still check if this is an OCI runtime error. But it required a pretty big change, plus callers now need to use `errors.Is()` instead of `errors.Cause()`, which causes a ripple effect through the whole codebase. It was a nice idea but it ended up way too complicated for the problem I wanted to solve."
+        },
+        {
+            "user": "rhatdan",
+            "body": "I agree that we should move to the Golang handling of this, but it will be a massive job, since the code is covered with errors.Cause calls up and down the stack."
+        }
+    ],
+    "cross_references": []
+}

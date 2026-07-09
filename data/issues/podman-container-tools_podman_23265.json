@@ -1,0 +1,83 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 23265,
+    "type": "pull_request",
+    "title": "Expand Quadlet drop-in search paths",
+    "state": "closed",
+    "labels": [
+        "lgtm",
+        "approved",
+        "release-note",
+        "locked - please file new issue/PR"
+    ],
+    "user": "benniekiss",
+    "body": "<!--\nThanks for sending a pull request!\n\nPlease make sure you've read our contributing guidelines and how to submit a pull request (https://github.com/containers/podman/blob/main/CONTRIBUTING.md#submitting-pull-requests).\n\nFinally, be sure to sign commits with your real name. Since by opening\na PR you already have commits, you can add signatures if needed with\nsomething like `git commit -s --amend`.\n-->\n\nThis PR seeks to implement expanded search paths for quadlet drop-in files. It implements the systemd scheme where top-level type drop-ins and truncated unit name drop-ins are supported. More information on the systemd parsing scheme can be found [here](https://www.freedesktop.org/software/systemd/man/latest/systemd.unit.html).\n\nThe major change is the addition of a function, `GetUnitDropinPaths`, to [pkg/systemd/parser/unitfile.go](https://github.com/containers/podman/blob/42fa78b225d5ee52ae5d40bddf33e22089c2d106/pkg/systemd/parser/unitfile.go). `GetTemplateParts` has also been refactored to return the base unit name instead of an empty string when `len(parts) < 2`, and a bool reflecting whether the unit was a template or not, and these changes have been reflected elsewhere in the code base. \n\nThis PR closes #23158\n\nThis is one of my first attempts at go, so please let me know if any refactoring is needed!\n\n#### Does this PR introduce a user-facing change?\n\n<!--\nIf no, just write `None` in the release-note block below. If yes, a release note\nis required: Enter your extended release note in the block below. If the PR\nrequires additional action from users switching to the new release, include the\nstring \"action required\".\n\nFor more information on release notes, please follow the Kubernetes model:\nhttps://git.k8s.io/community/contributors/guide/release-notes.md\n-->\n\n```release-note\nAdded: Expand quadlet drop-in search paths to include top-level type drop-ins (container.d, pod.d) and truncated unit drop-ins (unit-.container.d)\n```\n",
+    "comments": [
+        {
+            "user": "benniekiss",
+            "body": "currently, it looks like there aren't any tests for drop-ins - [test/system/252-quadlet.bats](https://github.com/containers/podman/blob/42fa78b225d5ee52ae5d40bddf33e22089c2d106/test/system/252-quadlet.bats). I'd appreciate some direction in how these should be added. A full suite could test drop-ins loaded from multiple levels (`container.d`, `unit-.container.d`, `unit-name.container.d`), and overriding top-level drop-ins with lower-level drop-ins (`unit-name.container.d/10-base.conf` overrides `container.d/10-base.conf`)"
+        },
+        {
+            "user": "ygalblum",
+            "body": "@benniekiss Thanks for this PR. The code looks good, but indeed requires new tests to make sure that it is not broken by later code changes.\n\nI think I would take two testing approaches here. First, you can add unit tests in `pkg/systemd/parser/unitfile_test.go`\nSecond, as you noted in `test/system/252-quadlet.bats`.\n\nGranted, this is a bit more complicated and I can't say for use that all the required boilerplate functions are implemented. Generally speaking, you will need to create the directory structure on your own, store all the overriding files in their sub directories and then run `run_quadlet` with the actual unit file and the base temporary directory.  I hope this will work as is, but I cannot say for sure.\n\nPlease LMK if you have any specific question I can help with"
+        },
+        {
+            "user": "benniekiss",
+            "body": "> I think I would take two testing approaches here. First, you can add unit tests in `pkg/systemd/parser/unitfile_test.go` \n\n~~Was there a method behind why the current samples were chosen? I would want to add a sample with a more complicated name to test all parts of `GetUnitDropinPaths()`, but I wasn't sure about how to choose the sample. Otherwise, I can go searching for a good existing systemd unit.~~\n\nActually, I realized the file doesn't need to exist, I can just create a test filename without having any real data \n\n"
+        },
+        {
+            "user": "benniekiss",
+            "body": "~~I'm almost down with the system tests, but I'm having trouble actually comparing the expected file to the generated file. How do I get the contents of the generated quadlet file in the `.bats` tests?~~\n\nEDIT: This test seems to have the structure I want: https://github.com/containers/podman/blob/42fa78b225d5ee52ae5d40bddf33e22089c2d106/test/system/252-quadlet.bats#L217"
+        },
+        {
+            "user": "benniekiss",
+            "body": "I updated the docs to describe the full drop-in functionality. It's mostly just copying the systemd docs, but I thought it would be helpful to include."
+        },
+        {
+            "user": "ygalblum",
+            "body": "LGTM for the code. Please squash all commits into one.\n\n@edsantiago PTAL at the test code"
+        },
+        {
+            "user": "benniekiss",
+            "body": "Commits are squashed. Thank you for the review! "
+        },
+        {
+            "user": "edsantiago",
+            "body": "And, actually, I found the long complicated variable names antihelpful. WDYT of a table-driven approach, with less duplication and syntactic sugar?\n```bash\n@test \"quadlet - dropin files\" {\n    local tmp_dir=${PODMAN_TMPDIR}/dropin-$(random_string)\n\n    local quadlet_file=truncated-$(random_string).container\n\n    local -A dirs=(\n        [toplevel]=container.d\n        [truncated]=truncated-.container.d\n        [quadlet]=${quadlet_file}.d\n    )\n\n    # List of .conf files, with their contents. Format is:\n    #\n    #   expect?  dir  filename  [Section]  Content=.....\n    local testfiles=\"\ny | toplevel  | 10 | [Unit]      | Description=Test File for Dropin Configuration\nn | toplevel  | 99 | [Install]   | WantedBy=default.target\ny | truncated | 50 | [Container] | ContainerName=truncated-dropins\nn | truncated | 99 | [Service]   | Restart=always\nn | truncated | 99 | [Install]   | WantedBy=multiuser.target\ny | quadlet   | 99 | [Service]   | RestartSec=60s\n\"\n\n    # Pass 1: create all the conf directories and files\n    while read yn dir conf section content; do\n        local d=\"${tmp_dir}/${dirs[$dir]}\"\n        mkdir -p $d\n\n        local f=\"$d/$conf.conf\"\n        echo \"$section\" >>$f\n        echo \"$content\" >>$f\n    done < <(parse_table \"$testfiles\")\n\n    quadlet_path_in=${PODMAN_TMPDIR}/${quadlet_file}\n    cat > ${quadlet_path_in} <<EOF\n[Container]\nImage=$IMAGE\nEOF\n\n    run_quadlet \"${quadlet_path_in}\" \"${tmp_dir}\"\n\n    # Pass 2: confirm that each of the wanted entries is present,\n    # and the unwanted ones are not\n    while read yn dir conf section content; do\n        if [[ \"$yn\" = \"y\" ]]; then\n            assert \"$output\" =~ \"$content\" \"Set in $dir/$conf.conf\"\n        else\n            assert \"$output\" !~ \"$content\" \"Set in $dir/$conf.conf but should have been overridden\"\n        fi\n    done < <(parse_table \"$testfiles\")\n\n    assert \"${output}\" !~ \"WantedBy=\" \"quadlet should not include WantedBy=\"\n}\n```"
+        },
+        {
+            "user": "benniekiss",
+            "body": "> And, actually, I found the long complicated variable names antihelpful. WDYT of a table-driven approach, with less duplication and syntactic sugar?\n\nPersonally, I'm not that proficient in bash, so this approach would make it more difficult to read and understand what's going on. It also departs from the pattern of the other tests. \n\nI'm not against it entirely, because it does seem like a more streamlined approach, but I think it kind of obfuscates what is being tested.\n"
+        },
+        {
+            "user": "edsantiago",
+            "body": "Understood. I feel the opposite way, that your test code is hard to understand, but I accept your reasoning. Should this test ever fail, we will call on you to investigate and fix.\n\nMy earlier review comments still stand. Thanks again for contributing!"
+        },
+        {
+            "user": "benniekiss",
+            "body": "Of course! I'll be happy to investigate any failed tests should they come up"
+        },
+        {
+            "user": "benniekiss",
+            "body": "@edsantiago After sitting with your suggested version a little longer, I actually like it a lot more and decided to go with it! Rewriting mine to make it clearer required a lot more commenting and made it too long. Thanks for taking the time to review and help me write this test ~~\n\nI'll squash the commits once you think it is good to go"
+        },
+        {
+            "user": "benniekiss",
+            "body": "Actually, one last thing. I based my first draft test on the one below. With the refactored `run_quadlet`, the hard-coded command can take advantage of the `QUADLET_SERVICE_CONTENT` output in the same way. Should I go ahead and adapt this test to clean it up? I think this is the only instance of this pattern in the`252-quadlet.bats` file.\n\nhttps://github.com/containers/podman/blob/42fa78b225d5ee52ae5d40bddf33e22089c2d106/test/system/252-quadlet.bats#L217-L241"
+        },
+        {
+            "user": "benniekiss",
+            "body": "> Thank you for your kind words. Have you considered a career in international diplomacy? ;-)\n\nYou're welcome! You joke, but my background is in law and government, and old habits die hard..."
+        },
+        {
+            "user": "edsantiago",
+            "body": "LGTM. @ygalblum PTANL, merge if you so desire. Thanks again @benniekiss."
+        },
+        {
+            "user": "openshift-ci[bot]",
+            "body": "[APPROVALNOTIFIER] This PR is **APPROVED**\n\nThis pull-request has been approved by: *<a href=\"https://github.com/containers/podman/pull/23265#\" title=\"Author self-approved\">benniekiss</a>*, *<a href=\"https://github.com/containers/podman/pull/23265#pullrequestreview-2184022099\" title=\"Approved\">edsantiago</a>*, *<a href=\"https://github.com/containers/podman/pull/23265#pullrequestreview-2185280453\" title=\"LGTM\">ygalblum</a>*\n\nThe full list of commands accepted by this bot can be found [here](https://go.k8s.io/bot-commands?repo=containers%2Fpodman).\n\nThe pull request process is described [here](https://git.k8s.io/community/contributors/guide/owners.md#the-code-review-process)\n\n<details >\nNeeds approval from an approver in each of these files:\n\n- ~~[OWNERS](https://github.com/containers/podman/blob/main/OWNERS)~~ [edsantiago,ygalblum]\n\nApprovers can indicate their approval by writing `/approve` in a comment\nApprovers can cancel approval by writing `/approve cancel` in a comment\n</details>\n<!-- META={\"approvers\":[]} -->"
+        }
+    ],
+    "cross_references": []
+}

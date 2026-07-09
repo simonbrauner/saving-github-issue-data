@@ -1,0 +1,80 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 23463,
+    "type": "issue",
+    "title": "Processing an image with podman throws away existing layer annotations",
+    "state": "closed",
+    "labels": [
+        "kind/bug",
+        "stale-issue",
+        "locked - please file new issue/PR"
+    ],
+    "user": "antheas",
+    "body": "### Issue Description\n\nIf you upload an image using the compression format zstd:chunked, podman will replace its annotations with the TOC. It should instead add the TOC on top of the existing annotations\n\n\n\n\n\n### Steps to reproduce the issue\n\nSteps to reproduce the issue\n1. Create an image with Annotations or pull one\n2. Example image: ghcr.io/hhd-dev/bazzite-automated-deck\n3. Upload the image using podman push with `--compression-format=zstd:chunked`\n\n### Describe the results you received\n\nThe uploaded image has its annotations stripped and replaced by a TOC:\n![image](https://github.com/user-attachments/assets/8b24693a-4573-4e38-85bc-37336c62c8be)\n\n### Describe the results you expected\n\nEach layer having the existing annotations from the uploaded image:\n![image](https://github.com/user-attachments/assets/ddd73de3-a5ab-4e52-95b0-c570efd1b45b)\n\n\n### podman info output\n\n```yaml\nPodman from the LTS ubuntu 24 action runner. Ran as part of `redhat-actions/push-to-registry@v2` with:\n\nextra-args: |\n              --compression-format=zstd:chunked\n```\n\n\n### Podman in a container\n\nNo\n\n### Privileged Or Rootless\n\nRootless\n\n### Upstream Latest Release\n\nNo\n\n### Additional environment details\n\n_No response_\n\n### Additional information\n\nI will be honest and say the error has not been completely verified 100%, and we will try to run more testing the following days. Opening this issue to keep track of it.\n\nTagging @KyleGospo as this action ran as part of bazzite CI.\n\nI will download an image and replicate with the latest podman over the next 3 hours.\n\nAnd yes, I think I am one of the first to find a use for layer annotations.",
+    "comments": [
+        {
+            "user": "antheas",
+            "body": "After more testing, it was found that GZIP compression also threw away the annotations, so that is irrelevant. \n\nI suspect that maybe only skopeo has the concept of layer annotations, which causes them to be thrown away by podman during e.g., `podman push`.\n\nTo not have to rely on those, I moved the information to an annotation/label key which seems to be always preserved.\n\nIt is quite large (100kb-200kb), which is unfortunate, but seems to be the cost of doing business.\n\nI will leave this issue open as you might want to look into this. I was reusing the `ostree.components` tag by `ostree-rs-ext` so this is something that will affect Kinoite/Silverblue as it moves to an OCI format."
+        },
+        {
+            "user": "cgwalters",
+            "body": "FWIW I think in general issues like this are probably best filed against either c/storage or maybe buildah...podman only vendors that code.\n\nBut anyways I think what's happening here is pretty simple, the process of pull, build, push always creates a new manifest, and what gets inherited there from the base image is an explicit set. (I'd have to dig to find the relevant code, but pretty sure that's what's happening)\n\nThis topic also came up in https://github.com/containers/buildah/issues/5586#issuecomment-2163060937"
+        },
+        {
+            "user": "antheas",
+            "body": "In the example in this thread, I only did pull from `oci:` then push. Not build.\n\nAfter pull, skopeo could see the annotation. Podman inspect did not show it.\n\nUnfortunately I could not test push locally due to connectivity issues.\n\nPerhaps it's `podman push`? On the rechunk action I push with skopeo and the annotation is preserved, on bazzite:unstable `podman push` is used and the annotation is not."
+        },
+        {
+            "user": "cgwalters",
+            "body": "If you do a `podman pull oci:` it's going to unpack it into `containers-storage` i.e. overlay and it's at that point where the original layer annotations are lost because we unpack the tarballs basically. There's a tricky balance here because while it would probably make sense to preserve them if we just repush an image that was originally e.g. gzip back as gzip again...if we're converting from gzip to e.g. zstd:chunked (or vice versa) we shouldn't (right?). Now arguably we could learn to e.g. strip off zstd:chunked annotations only when repushing as gzip, etc.\n\nI guess what probably would have made sense is *two* namespaces for annotations: one which applies to the compressed stream, and one for the tar stream? We could try to standardize such a thing, which would help probably."
+        },
+        {
+            "user": "antheas",
+            "body": "Kind of unfortunate there's no space in the OCI standard to store metadata. The labels is a decent workaround for the time being.\n\n160kb is enough to store all package versions and all layer mappings as far as the rechunk project is concerned. Could also potentially be lowered by compressing the json and base64 encoding it.\n\nThis is enough to use the previous manifest to generate e.g., package changelogs. \n\n### ZSTD chunked opt\nBut it would have been nice to be able to store all files in the image. That would allow, at least for the purposes of zstd chunked, to take all new files that didn't exist on the previous version and place them at the end of the layer. Then consumers would only need to do a range request for the end of the file.\n\nWould also work for multiple updates if the ordering is preserved. Consider updates A, B, C, D. The user when updating to D would get a layer that starts with the remaining files from A, then B, C, and finally the files introduced in D.\n\nThis means that a user without the layer would download all of it, but a user from A would only do a single request for BCD, from B a request for CD, and from C a request from D.\n\nEssentially, you'd get a single file that acts as a static delta for all previous container versions. \n\nIt's also layer structure agnostic as if you sort the hashes it doesn't matter in how many layers you split them, consumers will only need to download the end of each layer. And if a layer has no new files it will still generate the same hash.\n\nBut that means finding around 4-8MB to store the ordered file hashes."
+        },
+        {
+            "user": "cgwalters",
+            "body": "zstd:chunked uses zstd skippable frames to store all sorts of file metadata hidden in the compression (but not tar) stream today; the annotations you see on the layers just tell the client where to find those frames.\n\n(A recent discussion of some issues raised by that fact https://github.com/containers/storage/issues/2014 )"
+        },
+        {
+            "user": "cgwalters",
+            "body": "> . That would allow, at least for the purposes of zstd chunked, to take all new files that didn't exist on the previous version and place them at the end of the layer. Then consumers would only need to do a range request for the end of the file.\n\nRight, see https://github.com/containers/storage/issues/2014#issuecomment-2225133690\n\n(I don't know if @giuseppe is actively working on it, but if someone chooses to dive into it I think we should track it as a dedicated issue to avoid duplicate work and also ensure the design has some bikeshedding)"
+        },
+        {
+            "user": "antheas",
+            "body": "Sure, if I look into it I will open an issue\n\nMtimes wouldn't work most of the time though, as when building an image through GitHub actions they would be wiped anyway\n\nAnd for an OSTree commit we pin the timestamps to 1 to avoid layer hash changes\n\nIt would only work if the image was built entirely using local files.\n\nSo you'd need the previous version files, sorted. Then, assuming podman retains the tar stream ordering, modify the tar stream ordering before pushing to a registry. Then it would work even if an image was converted to gzip and back "
+        },
+        {
+            "user": "cgwalters",
+            "body": "Right, I meant to reply to giuseppe that I despise mtimes and defining tooling around them being meaningful is a Bad Idea.\n\nThe relevant thing (for zstd:chunked) is really \"new chunks\" I think...and obviously the tooling already knows how to check for which chunks are shared, it'd just be factoring that out as a static thing?\n\n*However* there's a caveat here to note that doing things this way necessarily creates [Hysteresis](https://en.wikipedia.org/wiki/Hysteresis)...the state of the current image layout becomes a function of its previous layouts, which makes reproducible builds more complicated."
+        },
+        {
+            "user": "antheas",
+            "body": "Agreed. I am fine with a bit of hysteresis in the packaging format if it is **well** controlled and provides a better experience to my users. \n\nIt is too early to do that for zstd:chunked though, as neither bootc or rpm-ostree support it yet (for deltas that is).\n\nI am happy with using a tag though, so this issue is not applicable to me anymore.\n\nIn addition, it seems like trying to retrofit container storage will be such a pain that it is probably easier for `ostree-rs-ext` to move away from layer annotations to using a tag (for preventing layer shifting) as well.\n\nClose as non-planned?"
+        },
+        {
+            "user": "rhatdan",
+            "body": "@giuseppe @mtrmac PTAL"
+        },
+        {
+            "user": "mtrmac",
+            "body": "> If you do a `podman pull oci:` it's going to unpack it into `containers-storage` i.e. overlay and it's at that point where the original layer annotations are lost because we unpack the tarballs basically.\n\nWe do actually preserve a manifest, _typically_ (but not always) a byte-exact copy of the on-registry one. And, for some features like forensic signature checks, we would want to make preserving a byte-exact copy a promise. (The main case where we fail to do that is https://github.com/containers/container-libs/issues/224 ).\n\nSo that makes most of the conceptual discussion here … true enough as it goes, but not directly relevant to the behavior in question.\n\n(I agree that all bets are off on builds. And, in general, `podman pull && podman push` is almost always a bad way to do a copy; `skopeo` is much more efficient.)\n\n---\n\nAs a _guess_, this is https://github.com/containers/image/blob/da938fa75e55f8cf57d3875ffc3946f011fb86ec/copy/compression.go#L246 and similar code in that file discarding existing annotations during the upload process.\n\nI’d want to see _at least_ detailed steps to reproduce, a precise Podman version number and a `--log-level=debug` log to confirm, though.\n\n---\n\nAssuming that guess is true:  It’s plausible to call that a bug, and we can discuss what to do precisely.\n\n> There's a tricky balance here … preserve them [vs] … we shouldn't\n\nWe can flip from discarding everything to preserving everything; we can hard-code a database of behavior for specific annotations. That is never going to cover custom annotations, and initially/intuitively I find the idea of making that user-configurable for pulls/pushes/copies rather unattractive. I’d lean towards making annotation editing a Buildah feature, and then a push should just preserve everything."
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "antheas",
+            "body": "Since it seems the intention of layer annotations was to aid in packaging of said layers and not to act as metadata for it, and doing otherwise now would be too much work \n\nI'm closing this issue\n\nE.g. fixing this would interfere with zstd chunked "
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "ostreedev",
+            "repository": "ostree-rs-ext",
+            "number": 652
+        }
+    ]
+}

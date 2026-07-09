@@ -1,0 +1,66 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 13075,
+    "type": "pull_request",
+    "title": "Mac API forwarding using a privileged docker socket claim helper",
+    "state": "closed",
+    "labels": [
+        "lgtm",
+        "approved",
+        "locked - please file new issue/PR"
+    ],
+    "user": "n1hility",
+    "body": "This PR provides a comparable low-touch experience to the current windows API forwarding approach by introducing a privileged helper that runs under launchd. \n\nFixes #11462 \nFixes #11397 \nFixes #11389 \nFixes #11422\n\nAdditional changes in this PR\n- podman machine can now be configured to run as rootful or rootless by passing `--rootful=true`|`false` to `init`\n- Added new `podman machine set` command to change this after init (and in the future other settings that can be changed)\n- Switched Windows to rootless default to match mac default\n- `podman machine start` now advises how to switch to rootful \n- Windows is now updated to pull podman4 from the copr repo like on mac\n\nThe reasons for this approach are:\n1.  docker.sock is immediately under /var/run which is not writable to users\n2. /var/run is backed by tmpfs, leading to repeated authentication + reinstallation cycles after reboot\n3. dockerd aggressively reclaims /var/run/docker.sock, forcing it more frequently even after a stable boot\n\nUsing a privileged helper allows podman machine to request relinking to a fixed predetermined location as needed. It executes as a nowait inetd service, so is only briefly active when a switch is required. The control channel is a unix socket maintained by launchd that is only accessible to the podman machine user.  Both the link location and target are fixed by installed configuration, and not influenced by socket input, which is restricted to a simple trigger action. Multiple machine instances are handled by having an intermediate link which is managed by podman machine without involving the helper, since the link is located in the user data directory.\n\nBefore taking control of the socket link, podman machine first checks if it's in use. If so, as is the case in the Windows impl, the system falls back to a machine local socket and prints instructions on how to set DOCKER_HOST. The same occurs if the helper is not available.\n\nThere is a one-time action that `podman machine start` will prompt the user to run.  We could have podman machine init run it automatically via osacript using osx auth processes (biometric auth works for example). However, I assume that everyone would prefer a brew formula action, plus the one sudo launch is straightforward. \n\nThe referenced installation action `sudo podman-mac-helper install` copies the helper into a dedicated fs location and verifies the fs path is sufficiently hardened since the typical brew managed locations are too loose for system processes (user-owned with lots of links so easily swappable). \n\nHere is what it looks like pre helper installation:\n```\nStarting machine \"podman-machine-default\"\nINFO[0000] waiting for clients...                       \nINFO[0000] new connection from  to /var/folders/5p/1gyddrwn4cj6w3ccfy8bj4kr0000gs/T/podman/qemu_podman-machine-default.sock \nWaiting for VM ...\nINFO[0013] Socket forward established: /Users/jason/.local/share/containers/podman/machine/podman-machine-default/podman.sock to /run/user/1000/podman/podman.sock \n\nThis machine is currently configured in rootless mode. If your containers\nrequire root permissions (e.g. ports < 1024), or if you run into compatibility\nissues with non-podman clients, you can switch using the following command: \n\n\tpodman machine set --rootful\n\nAPI forwarding listening on: /Users/jason/.local/share/containers/podman/machine/podman-machine-default/podman.sock\n\nThe system helper service is not installed; the default Docker API socket\naddress can't be used by podman. If you would like to install it run the\nfollowing command:\n\n\tsudo /Users/jason/devel/podman/bin/darwin/podman-mac-helper install\n\nYou can still connect Docker API clients by setting DOCKER_HOST using the\nfollowing command in your terminal session:\n\n\texport DOCKER_HOST='unix:///Users/jason/.local/share/containers/podman/machine/podman-machine-default/podman.sock'\n\nMachine \"podman-machine-default\" started successfully\n```\n\nAfter installing:\n\n```\nStarting machine \"podman-machine-default\"\nINFO[0000] waiting for clients...                       \nINFO[0000] new connection from  to /var/folders/5p/1gyddrwn4cj6w3ccfy8bj4kr0000gs/T/podman/qemu_podman-machine-default.sock \nWaiting for VM ...\nINFO[0013] Socket forward established: /Users/jason/.local/share/containers/podman/machine/podman-machine-default/podman.sock to /run/user/1000/podman/podman.sock \n\nThis machine is currently configured in rootless mode. If your containers\nrequire root permissions (e.g. ports < 1024), or if you run into compatibility\nissues with non-podman clients, you can switch using the following command: \n\n\tpodman machine set --rootful\n\nAPI forwarding listening on: /var/run/docker.sock\nDocker API clients default to this address. You do not need to set DOCKER_HOST.\n\nMachine \"podman-machine-default\" started successfully\n```\n\n\nIf something like dockerd is using the socket:\n\n```\nStarting machine \"podman-machine-default\"\nINFO[0000] waiting for clients...                       \nINFO[0000] new connection from  to /var/folders/5p/1gyddrwn4cj6w3ccfy8bj4kr0000gs/T/podman/qemu_podman-machine-default.sock \nWaiting for VM ...\nINFO[0012] Socket forward established: /Users/jason/.local/share/containers/podman/machine/podman-machine-default/podman.sock to /run/podman/podman.sock \nAPI forwarding listening on: /Users/jason/.local/share/containers/podman/machine/podman-machine-default/podman.sock\n\nAnother process was listening on the default Docker API socket address.\nYou can still connect Docker API clients by setting DOCKER HOST using the\nfollowing command in your terminal session:\n\n\texport DOCKER_HOST='unix:///Users/jason/.local/share/containers/podman/machine/podman-machine-default/podman.sock'\n\nMachine \"podman-machine-default\" started successfully\n```\n\nIn action with API clients:\n\n```\n\njason@Tripel podman (main *) $ docker version\nClient:\n Cloud integration: 1.0.17\n Version:           20.10.8\n API version:       1.40\n Go version:        go1.16.6\n Git commit:        3967b7d\n Built:             Fri Jul 30 19:55:20 2021\n OS/Arch:           darwin/amd64\n Context:           default\n Experimental:      true\n\nServer: linux/amd64/fedora-35\n Podman Engine:\n  Version:          4.0.0-rc5\n  APIVersion:       4.0.0-rc5\n  Arch:             amd64\n  BuildTime:        2022-02-12T07:26:48-06:00\n  Experimental:     false\n  GitCommit:        \n  GoVersion:        go1.16.13\n  KernelVersion:    5.15.18-200.fc35.x86_64\n  MinAPIVersion:    4.0.0-rc5\n  Os:               linux\n\n```\n\n[NO NEW TESTS NEEDED]",
+    "comments": [
+        {
+            "user": "n1hility",
+            "body": " @baude sorry I didn't get this in last night had a hectic Friday Hopefully I didn't disrupt your weekend plans too much in this area. Ill keep an eye on chat and here if you need me."
+        },
+        {
+            "user": "mheon",
+            "body": "@baude @ashley-cui PTAL"
+        },
+        {
+            "user": "n1hility",
+            "body": "i had a few cycles in the evening and addressed a number of loose ends. I'll submit an update tomorrow"
+        },
+        {
+            "user": "n1hility",
+            "body": "Ok this is finally pushed with an update to address TODOs and squashed"
+        },
+        {
+            "user": "baude",
+            "body": "/approve"
+        },
+        {
+            "user": "n1hility",
+            "body": "/hold more commits coming"
+        },
+        {
+            "user": "rhatdan",
+            "body": "LGTM\n/approve\n@baude PTAL\n@containers/podman-maintainers PTAL"
+        },
+        {
+            "user": "openshift-ci[bot]",
+            "body": "[APPROVALNOTIFIER] This PR is **APPROVED**\n\nThis pull-request has been approved by: *<a href=\"https://github.com/containers/podman/pull/13075#issuecomment-1034971844\" title=\"Approved\">baude</a>*, *<a href=\"https://github.com/containers/podman/pull/13075#\" title=\"Author self-approved\">n1hility</a>*, *<a href=\"https://github.com/containers/podman/pull/13075#issuecomment-1041672932\" title=\"Approved\">rhatdan</a>*\n\nThe full list of commands accepted by this bot can be found [here](https://go.k8s.io/bot-commands?repo=containers%2Fpodman).\n\nThe pull request process is described [here](https://git.k8s.io/community/contributors/guide/owners.md#the-code-review-process)\n\n<details >\nNeeds approval from an approver in each of these files:\n\n- ~~[OWNERS](https://github.com/containers/podman/blob/main/OWNERS)~~ [baude,rhatdan]\n\nApprovers can indicate their approval by writing `/approve` in a comment\nApprovers can cancel approval by writing `/approve cancel` in a comment\n</details>\n<!-- META={\"approvers\":[]} -->"
+        },
+        {
+            "user": "n1hility",
+            "body": "only pending item I have (other than changes from review) is to double check machine on linux, will do that ASAP and lift the hold I had on this"
+        },
+        {
+            "user": "n1hility",
+            "body": "/remove-hold\n\nMy local testing of machine on linux shows no regressions"
+        },
+        {
+            "user": "mheon",
+            "body": "Changes LGTM but I'd like @baude to do the final merge"
+        },
+        {
+            "user": "baude",
+            "body": "/lgtm"
+        }
+    ],
+    "cross_references": []
+}

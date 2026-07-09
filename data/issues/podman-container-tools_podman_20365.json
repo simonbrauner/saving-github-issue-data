@@ -1,0 +1,63 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 20365,
+    "type": "pull_request",
+    "title": "fix(API): Catch ErrNetworkConnected for compat",
+    "state": "closed",
+    "labels": [
+        "lgtm",
+        "approved",
+        "release-note",
+        "kind/api-change",
+        "locked - please file new issue/PR"
+    ],
+    "user": "p-fruck",
+    "body": "When trying to connect a container to a network and the connection already exists, an error might be raised. To ensure compatibility with the Docker API, this error is caught and \"Ok\" is returned.\n\nThis problem was discovered when trying to setup Nextcloud AIO which makes extensive use of the Docker Socket. There was an issue previously when trying to create networks that already existed as shown [here](https://github.com/nextcloud/all-in-one/discussions/471)\n\nAfter this was fixed, I was still facing issues because the Podman Socket responded with 500 Internal Server Error when connecting to a container to a network and the connection already existed.\n\nFrom what I found in the [Docker API](https://github.com/moby/moby/blob/master/daemon/container_operations.go#L676) it seems like Docker simply updates the network config and does not care if anything actually changed. The same should theoretically happen when using Podman, however it seems like the second part if [this condition](https://github.com/containers/podman/blob/b5fec41f2673f17162d0f031e29d56114c363afc/libpod/networking_common.go#L533) evaluates to false and `ErrNetworkConnected` is returned.\n\nBy checking for this error in the API handler again, I was able to get Nextcloud AIO to run. I did not dig into the details why the second part of the condition evaluates to false, maybe someone with more expertise than me could have a look at this as this is the first time I am digging through the Podman codebase :) \n\n<!--\nThanks for sending a pull request!\n\nPlease make sure you've read our contributing guidelines and how to submit a pull request (https://github.com/containers/podman/blob/main/CONTRIBUTING.md#submitting-pull-requests).\n\nIn case you're only changing docs, make sure to prefix the pull-request title with \"[CI:DOCS]\". That will prevent functional tests from running and save time and energy.\n\nFinally, be sure to sign commits with your real name. Since by opening\na PR you already have commits, you can add signatures if needed with\nsomething like `git commit -s --amend`.\n-->\n\n#### Does this PR introduce a user-facing change?\n\n<!--\nIf no, just write `None` in the release-note block below. If yes, a release note\nis required: Enter your extended release note in the block below. If the PR\nrequires additional action from users switching to the new release, include the\nstring \"action required\".\n\nFor more information on release notes, please follow the Kubernetes model:\nhttps://git.k8s.io/community/contributors/guide/release-notes.md\n-->\n\n```release-note\nFixed: When trying to connect a container to a network and the connection already exists, 200 Ok is being returned instead of raising 500 internal server error to restore compatibility with the Docker API\n```\n",
+    "comments": [
+        {
+            "user": "p-fruck",
+            "body": "@Luap99 thanks for the input, sound like a good idea. Do you have some sort of guidance how to create the dummy container that I would like to attach to the network? e.g. should I simply run `podman create --name dummy alpine`, attach this container to the network twice and remove it afterwards, or is there a better practice to deal with such dummy containers?"
+        },
+        {
+            "user": "Luap99",
+            "body": "> @Luap99 thanks for the input, sound like a good idea. Do you have some sort of guidance how to create the dummy container that I would like to attach to the network? e.g. should I simply run `podman create --name dummy alpine`, attach this container to the network twice and remove it afterwards, or is there a better practice to deal with such dummy containers?\n\nyes you can just run podman ... in the tests there.\nI am thinking of something like (untested)\n```\npodman network create netcon\npodman create --name c1 $IMAGE top\n# connect c1 to netcon here should not error\nt POST networks/netcon/connect Container=c1 200 OK\npodman start c1\n# connect c1 to netcon here should error as the container is running and it is already connected\n...\npodman stop c1\n# connect c1 to netcon here should not error as container was stopped\n...\npodman rm c1\n```\nThis should cover the created state and the exited state. \n\n"
+        },
+        {
+            "user": "p-fruck",
+            "body": "@Luap99 honestly I don't understand why we do require such a state check at all. Shouldn't it be possible to connect a container to a given network regardless of the state?"
+        },
+        {
+            "user": "Luap99",
+            "body": "> @Luap99 honestly I don't understand why we do require such a state check at all. Shouldn't it be possible to connect a container to a given network regardless of the state?\n\nWell sure you can always connect assuming you are not already connected.\nnot running container == update the db (easy)\nrunning container == update the db and modify the existing network namesapce (much more work)\n\nThe problem here is that you try to connect to something that is already connected. I find it nonsensical to allow the same connect multiple times. So my personal favourite would be to always error out for this.\nHowever the API must be docker compatible and docker does error out but only if the container is running https://github.com/containers/podman/pull/15516#issuecomment-1229265942 so we must match that.\n"
+        },
+        {
+            "user": "p-fruck",
+            "body": "@Luap99 thanks for the explanation! I still don't quite get why we should check for the `define.ContainerStateCreated` state then, as I understood that Docker only raises an error when the container is already running. I tested both the current implementation (without ContainerStateCreated) and your above suggestion (with ContainerStateCreated) and both implementations passed the given tests. Do you have any ideas how this could happen?"
+        },
+        {
+            "user": "p-fruck",
+            "body": "Looking at the [ContainerStateCreated description](https://github.com/containers/podman/blob/b0a45a905b23054f4f3f5bdb46e015ad39fc28f8/libpod/define/containerstate.go#L50) I assume this is some kind of race condition. I wasn't aware `ContainerStateCreated` matches `initialized` and `ContainerStateConfigured` matches `created`. I'll add the transition state to the condition then."
+        },
+        {
+            "user": "p-fruck",
+            "body": "Another update: The previous changes did not fix my nextcloud-aio install. This was the confusing part to me, since my containers were already running when the nextcloud master container tried to connect them (again) to the network. Looking at the [code](https://github.com/jennydaman/nextcloud-all-in-one/blob/9063ce801edba2e9a9e3d127d79d10dfa82b02b7/php/src/Docker/DockerActionManager.php#L812) it seems like docker returns `403` as a status code. I reflected that change in my code and finally nextcloud-aio is working again. I think the fix should be ready to merge now. Sorry for the confusion :smile: "
+        },
+        {
+            "user": "openshift-ci[bot]",
+            "body": "[APPROVALNOTIFIER] This PR is **APPROVED**\n\nThis pull-request has been approved by: *<a href=\"https://github.com/containers/podman/pull/20365#pullrequestreview-1684475291\" title=\"Approved\">Luap99</a>*, *<a href=\"https://github.com/containers/podman/pull/20365#\" title=\"Author self-approved\">p-fruck</a>*, *<a href=\"https://github.com/containers/podman/pull/20365#pullrequestreview-1684486675\" title=\"LGTM\">vrothberg</a>*\n\nThe full list of commands accepted by this bot can be found [here](https://go.k8s.io/bot-commands?repo=containers%2Fpodman).\n\nThe pull request process is described [here](https://git.k8s.io/community/contributors/guide/owners.md#the-code-review-process)\n\n<details >\nNeeds approval from an approver in each of these files:\n\n- ~~[OWNERS](https://github.com/containers/podman/blob/main/OWNERS)~~ [Luap99,vrothberg]\n\nApprovers can indicate their approval by writing `/approve` in a comment\nApprovers can cancel approval by writing `/approve cancel` in a comment\n</details>\n<!-- META={\"approvers\":[]} -->"
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 20468
+        },
+        {
+            "organization": "moby",
+            "repository": "moby",
+            "number": 46713
+        }
+    ]
+}

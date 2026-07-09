@@ -1,0 +1,168 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 6784,
+    "type": "pull_request",
+    "title": "Cirrus: Make efficient and performant",
+    "state": "closed",
+    "labels": [
+        "lgtm",
+        "approved",
+        "do-not-merge/hold",
+        "locked - please file new issue/PR"
+    ],
+    "user": "cevich",
+    "body": "Reimplement CI-automation to remove accumulated technical-debt and\noptimize workflow.  The task-dependency graph designed goal was to\nshorten it's depth and increase width (i.e. more parallelism).  A\nreduction in redundant building (and 3rd party module download) was\nalso realized by caching `$GOPATH` and `$GOCACHE` early on.  This\ncache is then reused in favor of a fresh clone of the repository\n(when possible).\n\nNote: The system tests typically execute MUCH faster than the\nintegration tests.  However, contrary to a fail-fast/fail-early\nprincipal, they are executed last.  This was implemented due to\ndebug-ability related concerns/preferences of the primary\n(golang-centric) project developers.\n\nSigned-off-by: Chris Evich <cevich@redhat.com>",
+    "comments": [
+        {
+            "user": "cevich",
+            "body": "@baude I've stubbed in most of what I think we discussed on IRC.  Ignore all the deleted files, the only file that's important at the moment is https://github.com/containers/libpod/blob/26424fb62d5d522602bf7aa7752b482f1416f3d2/.cirrus.yml\n\n(You may want to [read up on YAML anchors/aliases first](https://cirrus-ci.org/guide/tips-and-tricks/#sharing-configuration-between-tasks))"
+        },
+        {
+            "user": "cevich",
+            "body": "working stubs: https://github.com/containers/libpod/blob/66ac189f285965daf01c9ca3cf0879aae8df8f88/.cirrus.yml"
+        },
+        {
+            "user": "cevich",
+            "body": "@jwhonce What's the name for the \"python tests with a local server\" that you mentioned during scrum?  I want to make sure it's included in the new CI-job structure.\n\n@edsantiago mind taking a peek at the names and comments here.  You spent a lot of time figuring how to make them pretty, I don't want to revert any of your efforts.\n\n@baude This is the set of jobs and parallelism we talked about.  Please let me know what you think."
+        },
+        {
+            "user": "edsantiago",
+            "body": ">names and comments here. You spent a lot of time figuring how to make them pretty\n\nThat work is completely reverted already: Cirrus doesn't work as I had expected, and the effect of my cleanup commit was to disable podman-remote testing. But thanks."
+        },
+        {
+            "user": "cevich",
+            "body": ">That work is completely reverted already:\n\nOh sorry @edsantiago I think this is my bad wording.  I meant the work you did a long while ago so the task names are more human-friendly, without a bunch of numbers and gibberish in them :smiley: "
+        },
+        {
+            "user": "edsantiago",
+            "body": "That's exactly what I meant: all that work is gone. Or at least most of it. 15f273b93"
+        },
+        {
+            "user": "edsantiago",
+            "body": "@rhatdan has been working hard to reenable podman-remote tests (#6570), and made incremental progress, but still no luck."
+        },
+        {
+            "user": "edsantiago",
+            "body": "In the diffs I'm looking at, I see `gating` removed. In the github PR status page, I see:\n```\n* gating Expected - Waiting for status to be reported  (Required)\n```\n(See attached screenshot)\n![gating-missing](https://user-images.githubusercontent.com/265639/86175824-3b171d80-bae1-11ea-85a3-001cfce5846b.png)\n\nWhat am I missing?\n\nBTW there's no way I can review this all in one day; I'll continue tomorrow\n"
+        },
+        {
+            "user": "cevich",
+            "body": "@edsantiago thanks for looking.  \n\n> all that work is gone. Or at least most of it.\n\nAww :cry: Are you sure the `name` changes are necessary?  What you learned about ssh and envvar passing seems **MUCH** more significant.  Maybe the problem you're hitting with it is simply the nested `env` -> `matrix` -> `env` blocks...they don't look valid to me (or maybe I'm seeing things).  Is there a PR I can look at?\n\n> In the github PR status page, I see:\n\nIgnore those. They're added by github due to repository-wide settings we have enabled.  We'll address those when this PR is closer to merging or merged.\n\n> In the diffs I'm looking at, I see gating removed. In the github PR status page, I see:\n\nSorry, I should make that more clear in the description.  This change is in a comment but easily missed: I'm proposing we rename 'gate' -> 'smoke' for several reasons, but primarily so it doesn't cause confusion with the `gating` term used in downstream testing (i.e. RHEL and Fedora modules / dist-git).\n\nFor reference/background, the dependency-graph of the tasks here is based on discussions Brent and I had.  The central idea is to run as much in parallel as possible, counting on CIrrus-CI canceling everything upon the first failure (since `success` task depends on everything passing).  Also note: I'm planning to move all VM and container image building code and configuration into a dedicated repository (so no more multi-mode runtime magic, like `CI:IMG` or `CI:DOC`).\n\n> I can review this all in one day; I'll continue tomorrow\n\nPlease take your time, this is only a prototype for a much larger piece of work I'm **not** eager to rush through :grin: \n"
+        },
+        {
+            "user": "cevich",
+            "body": "**Major problems:** With current container & VM image build workflow\n\n1. _Sometimes_ I read failure notification mails, and go check if there's at least one green build for each branch, on each repo.  Most of the time I can't be bothered.\n2. When something breaks, I scramble to decode what went wrong in the past (sometimes with limited data), and somewhat blindly change the images so they seem to work.\n3. When builds are working okay images are constantly updated on quay.io.  Depending on timing, this can mean somebody's in-flight tests on a PR pull and execute different images, possibly with different behavior, and very little observe-ability.\n4. When someone wants to change a container image, they have to do so locally, push with a \"test\" tag, and fudge a PR to use that image.  Assuming testing passes, they merge the PR, wait for quay.io to build+tag the image and hope nobody's in-flight tests break.\n5. There's a constantly changing 'latest' tag, which may come from a build on a branch nobody cares about currently.  It's super-duper easy to pull and try to use `latest` (for local testing) outside the context it was built for.  i.e. \"latest\" doesn't actually mean latest in all environment-contexts.\n\n-----\n\nWhat I propose is a separate repository with:\n\n1. A standalone CI/CD setup, but authorized with the same google-cloud and quay.io services.\n1. Separate branches that pair with dependent repositories and their release branches.  e.g. libpod-v1.6, buildah-v1.14, etc.\n2. The standard PR -> Merge workflow is used on each branch where:\n    1. We build VM and container images (including in_podman_fedora, gate, imgts, etc.) in every PR, and (maybe) periodically on each branch.\n    2. We run repository specific smoke tests against the produced images.  This will mainly be very simplistic, like running 'make all' and checking the exit status.  Assuming all is well, the container images are tagged and pushed to quay.io.  The VM images simply stay where they are (we use the same imgts + imgprune schemes to maintain \"current\" images).\n    3.  With the images-repo PR still open, a PR is opened in the dependent repo. referencing the just produced/pushed  named/numbered/tagged images.\n    4. Regular/Full CI tests run for the dependent that repo, validating the soundness of the new image for it's purpose.\n    5. If tests fail, adjustments are made in their respective repository PRs, and life goes on.  If everything looks good, the PRs are merged (order doesn't matter), and life goes on.\n3. Independently of any open image PRs, all dependent repos. continue using their defined tagged/numbered images as normal, without interruption or surprises.\n5. Once the image and dependent repo. PRs merge, other PRs need to rebase to use the new images, just as it is today, further limiting developer surprises."
+        },
+        {
+            "user": "rhatdan",
+            "body": "/approve\n@cevich What is happening with this?"
+        },
+        {
+            "user": "cevich",
+            "body": "> @cevich What is happening with this?\n\nLots of \"change YAML\" -> \"Break Cirrus\" cycles :grin:   This PR is my top priority ATM."
+        },
+        {
+            "user": "cevich",
+            "body": "@baude  When u have a mo.  Mind peeking at the task names here?\n\n[ ] Make sure they read okay\n[ ] Everything you want tested, is here\n[ ] Anything permutation(s) that can be dropped?\n\nhttps://github.com/containers/podman/pull/6784/checks"
+        },
+        {
+            "user": "openshift-ci-robot",
+            "body": "[APPROVALNOTIFIER] This PR is **APPROVED**\n\nThis pull-request has been approved by: *<a href=\"https://github.com/containers/podman/pull/6784#\" title=\"Author self-approved\">cevich</a>*, *<a href=\"https://github.com/containers/podman/pull/6784#issuecomment-656165055\" title=\"Approved\">rhatdan</a>*\n\nThe full list of commands accepted by this bot can be found [here](https://go.k8s.io/bot-commands?repo=containers%2Fpodman).\n\nThe pull request process is described [here](https://git.k8s.io/community/contributors/guide/owners.md#the-code-review-process)\n\n<details >\nNeeds approval from an approver in each of these files:\n\n- ~~[OWNERS](https://github.com/containers/podman/blob/master/OWNERS)~~ [rhatdan]\n\nApprovers can indicate their approval by writing `/approve` in a comment\nApprovers can cancel approval by writing `/approve cancel` in a comment\n</details>\n<!-- META={\"approvers\":[]} -->"
+        },
+        {
+            "user": "cevich",
+            "body": "![dependency-graph](https://user-images.githubusercontent.com/1183438/94834325-3a42a000-03de-11eb-98cb-0cae3f1c1322.PNG)\n"
+        },
+        {
+            "user": "edsantiago",
+            "body": "Can you merge [my PR](https://github.com/containers/automation/pull/49) and try again? It might look better."
+        },
+        {
+            "user": "cevich",
+            "body": "![dependency-graph](https://user-images.githubusercontent.com/1183438/94856823-87cf0500-03fe-11eb-9fa9-fc74654c4f1b.PNG)"
+        },
+        {
+            "user": "cevich",
+            "body": "@edsantiago slightly different...I think your tool is plenty past the 80% \"good enough\" mark :smile:\n\nI see there's a typo in the \"Total Success\" task, and I'd like to make at least one pass through all my comments...you know, fixing all the its -> it's :grin:\n\nThen, I know @baude doesn't like bash, and I value your feedback, but man...the diff is HUGE.  Though I'd be perfectly happy with a even a cursory review, is there some way I can make it any easier to look at?"
+        },
+        {
+            "user": "edsantiago",
+            "body": "oh, yuk - that's not what I was expecting. I had it tuned for a different revision :frowning_face: . Oh well.\n\nWe talked about this in Watercooler this week. There's no way to really review it. We just have to take the plunge. I will look at it over the next two hours and give it my best shot, but unfortunately I will be net-unavailable all of tomorrow."
+        },
+        {
+            "user": "cevich",
+            "body": "> We talked about this in Watercooler this week. There's no way to really review it. We just have to take the plunge. I will look at it over the next two hours and give it my best shot, but unfortunately I will be net-unavailable all of tomorrow.\n\nYa, it's a beast, I completely understand, and would greatly appreciate even 30-minutes of your eyeball time :grin: \n\nThanks"
+        },
+        {
+            "user": "cevich",
+            "body": "@edsantiago BTW...for my part, I'm going through and writing up descriptions/comments for each task in .cirrus.yml  I'll keep my hands off of the scripts until tomorrow."
+        },
+        {
+            "user": "edsantiago",
+            "body": "First pass finished (on scripts; I didn't even look at `.cirrus.yml`). It LGTM. Some nits, but nothing I'm even going to bother mentioning. They can be fine-tuned over time. The important thing is that CI passes (mostly) and that it seems to be quicker than our current method. I think we all want to see this go live."
+        },
+        {
+            "user": "cevich",
+            "body": "@baude @mheon PTAL, this is ready to be manually merged.\n\nThe \"Optional release test\" failure is expected.  I triggered it manually to confirm it correctly fails when finding `-dev` in the output of `podman info` (\"2.2.0-dev\").  This is most certainly the case, since this PR is not for a podman release :smile: Normally this task won't run, unless somebody presses the \"trigger\" button in the WebUI.\n\n***note:*** After/before this PR merges, I/we need to update the repo. settings to make the 'smoke' and 'total success' tasks as required (under branch protection).  All in-flight PRs will need to rebase as well, so might be good to merge this during a \"quiet\" period."
+        },
+        {
+            "user": "edsantiago",
+            "body": "(Deleted my earlier comment. Never mind. Let's just get this in, then all of us as a team can take care of making future changes to the parts that affect us)"
+        },
+        {
+            "user": "cevich",
+            "body": "> (Deleted my earlier comment. Never mind. Let's just get this in, then all of us as a team can take care of making future changes to the parts that affect us)\n\nAgreed, parallelize the work :grinning: "
+        },
+        {
+            "user": "edsantiago",
+            "body": "/lgtm\n/hold\n\n@containers/podman-maintainers PTAL, I think it would be prudent to get this merged early in the week"
+        },
+        {
+            "user": "rhatdan",
+            "body": "Needs @baude approval."
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 6781
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 4511
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 7244
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 5278
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 7848
+        },
+        {
+            "organization": "containers",
+            "repository": "automation_images",
+            "number": 28
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 7873
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 7940
+        }
+    ]
+}

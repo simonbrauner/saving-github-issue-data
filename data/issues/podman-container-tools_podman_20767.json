@@ -1,0 +1,135 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 20767,
+    "type": "issue",
+    "title": "Allow passing inheriting PTY from caller",
+    "state": "closed",
+    "labels": [
+        "kind/feature",
+        "locked - please file new issue/PR"
+    ],
+    "user": "chergert",
+    "body": "### Feature request description\n\nFirst off, just to help give context, think of `gnome-terminal` on Fedora where creating a new tab inherits the container of the last tab. Each tab already has it's own PTY created on demand and the terminal tab uses that PTY to answer questions about things like \"what is the foreground process\".\n\nIt would be *very* nice if I had more options than `podman exec --tty` where a _new_ PTY is allocated. I know the \"security implications\" of sharing an existing PTY, but in many cases you don't want/need to deal with that. The loss of having real functional TTY functions like `tcgetpgrp()` is just too much due to the intermediary PTY.\n\n### Suggest potential solution\n\nWe already have `--tty` where a new TTY is allocated. If omitted we already get pipes instead. What would be nice is a middle ground where we can just inherit the current TTY.\n\n### Have you considered any alternatives?\n\nI go through dark arts to peek on containers through PTY ownership and I'd rather not when `tcgetpgrp()` is right there.\n\n### Additional context\n\n_No response_",
+    "comments": [
+        {
+            "user": "giuseppe",
+            "body": "so you'd like the equivalent of `podman run --log-driver passthrough ...` for a TTY?\n\nWe have some checks in place, both in Podman and conmon, to disallow it for security reasons; but we can drop these or add a new mode (`passthrough-tty`) if it turns out to be useful.\n\nI've done a quick test dropping these checks, but that doesn't seem enough:\n\n```\n$ bin/podman --conmon ~/src/conmon/bin/conmon  run --ipc=host --pid=host --log-driver passthrough --rm fedora  bash\nbash: cannot set terminal process group (169877): Inappropriate ioctl for device\nbash: no job control in this shell\n[root@90fbc4aa2da8 /]# ls -l /proc/self/fd\ntotal 0\nlrwx------. 1 root root 64 Nov 23 23:04 0 -> /dev/pts/0\nlrwx------. 1 root root 64 Nov 23 23:04 1 -> /dev/pts/0\nlrwx------. 1 root root 64 Nov 23 23:04 2 -> /dev/pts/0\nlr-x------. 1 root root 64 Nov 23 23:04 3 -> /proc/170062/fd\n```\n"
+        },
+        {
+            "user": "chergert",
+            "body": "Thanks for looking into this so quickly!\n\n> so you'd like the equivalent of podman run --log-driver passthrough ... for a TTY?\n\nI think so? I'm not really familiar with the other parts of podman though.\n\n> I've done a quick test dropping these checks, but that doesn't seem enough:\n\nThis is probably just because your TTY already has a controller. It's not really testable in this fashion unless you create a new PTY from the outside with `O_NOCTTY` and have that bound as stdin/out/err (then do the ioctl() to set it as controller after `fork()`). This would model the behavior you'd see when doing something like a new `VtePty` for a `VteTerminal` in GTK."
+        },
+        {
+            "user": "chergert",
+            "body": "You might try doing something like `screen -dmS test-podman bin/podman ...` then `screen -r test-podman` to see if that works since I think you'd get a new PTY which your podman can pass through to eventually bash which will become the controller of the PTY."
+        },
+        {
+            "user": "Luap99",
+            "body": "I guess this is basically the same issue as https://github.com/containers/podman/issues/18001?"
+        },
+        {
+            "user": "chergert",
+            "body": "When I originally read that issue, it seemed like what they needed might be slightly different. But I think if there was finite control for each of `0..2` then this could implemented using that."
+        },
+        {
+            "user": "giuseppe",
+            "body": "> screen -dmS\n\nyes, thanks.  That works.\n\n`tcgetpgrp(0)` still fails with ENOTTY from the container:\n\n```\n247757 ioctl(0, TIOCGPGRP, 0x7ffc1c75c334) = -1 ENOTTY (Inappropriate ioctl for device)\n```\n\nDo you expect it to work from the container?\n\nIMO, inheriting the TTY could be achieved either by relaxing `passthrough` to accept a TTY, or having a more explicit mode `passthrough-tty` so the user is aware of the risks.  "
+        },
+        {
+            "user": "chergert",
+            "body": "> Do you expect it to work from the container?\n\n`tcgetpgrp()` must be called on the PTY master and would be expected to fail if called on the PTY side mapped into the child process."
+        },
+        {
+            "user": "giuseppe",
+            "body": "I've opened a PR: https://github.com/containers/podman/pull/20774\n\nI still need to figure out a way to test the feature, locally I've used a Python script:\n\n```python\nimport subprocess\nimport sys\nimport os\nimport time\n\ncommand = [\"bin/podman\", \"--conmon\", \"/usr/local/bin/conmon\", \"run\", \"-d\", \"-v/dev:/dev\", \"--log-driver\", \"passthrough-tty\", \"--rm\", \"fedora\", \"sh\"]\n\n(master, slave) = os.openpty()\n\nprocess = subprocess.Popen(command, stdin=slave, stdout=slave, stderr=slave)\n\nprocess.wait()\n\nprint(\"tcgetpgrp: %d\\n\" % os.tcgetpgrp(master))\n\n```\n\nPlease let me know if this does what you were asking for"
+        },
+        {
+            "user": "chergert",
+            "body": "> Please let me know if this does what you were asking for\n\nIf `os.tcgetpgrp()` is giving you the PID of `sh` then yeah that's just perfect."
+        },
+        {
+            "user": "halfline",
+            "body": "> > Do you expect it to work from the container?\n> \n> `tcgetpgrp()` must be called on the PTY master and would be expected to fail if called on the PTY side mapped into the child process.\n\nI don't think that's generally true.  i mean `tcgetpgrp()` is a general use function for all terminals, not just /dev/pts/N but /dev/ttyN, /dev/ttySN etc... (so it would be weird if it only worked on the half of the ptm/pty pair that the other terminal types don't have any equivalent of)\n\nI think it's likely failing in this case because the container has a different `/dev/pts` filesystem mounted than the host, but that's just a guess.\n\nDoes job control in bash work okay in this scenario? i mean jobs/fg/bg etc ?"
+        },
+        {
+            "user": "chergert",
+            "body": "> I think it's likely failing in this case because the container has a different /dev/pts filesystem mounted than the host, but that's just a guess.\n\nYes, if you check out the kernel code, you'll find the sending the pid to the syscall gets converted to 0 because of this. Fun fact, 0 is the only value *not documented to be possible to be returned*.\n\n> Does job control in bash work okay in this scenario? i mean jobs/fg/bg etc?\n\nYeah it works fine. The issue is that we have the PTY from VTE, with the child side mapped to 0/1/2 of the child process. That child process (podman) then spawns the desired process (bash in this case) but with a PTY it has itself created and I believe is proxying. So if you `tcgetpgrp()` on the VTE provided PTY, it will be the pid of the podman process, not the actual foreground process that is a child of podman.\n\nThis is problematic because we would want to close a terminal tab without asking the user if they want to kill the process in the case the *real* foreground process is bash. The intermediary podman process is not interesting to us.\n\nSince there is an extra PTY there, it's difficult to determine what is the real foreground of that sub PTY without looking at `/proc` and making outlandish guesses."
+        },
+        {
+            "user": "halfline",
+            "body": "> > I think it's likely failing in this case because the container has a different /dev/pts filesystem mounted than the host, but that's just a guess.\n> \n> Yes, if you check out the kernel code, you'll find the sending the pid to the syscall gets converted to 0 because of this. Fun fact, 0 is the only value _not documented to be possible to be returned_.\n\nheh, seems like there could be improvement here... i mean the host /dev/pts should be mounted in /run/host so it's not like the device node is completely absent.... \n\n> > Does job control in bash work okay in this scenario? i mean jobs/fg/bg etc?\n> \n> Yeah it works fine. \n\nah okay good.\n\n>The issue is that we have the PTY from VTE, with the child side mapped to 0/1/2 of the child process. That child process (podman) then spawns the desired process (bash in this case) but with a PTY it has itself created and I believe is proxying. \n\nActually i think its conmon and runc not podman directly, but that's neither here nor there...\n\n> So if you `tcgetpgrp()` on the VTE provided PTY, it will be the pid of the podman process, not the actual foreground process that is a child of podman.\n\nright, but i guess my point is `tcgetpgrp` is a useful call for programs running in the container too, and with this change those programs are going to start getting errors when they call it. maybe it doesn't matter much in practice.\n\n> This is problematic because we would want to close a terminal tab without asking the user if they want to kill the process in the case the _real_ foreground process is bash. The intermediary podman process is not interesting to us.\n> \n> Since there is an extra PTY there, it's difficult to determine what is the real foreground of that sub PTY without looking at `/proc` and making outlandish guesses.\n\nI wonder why the container doesn't share the same pts filesystem as the host. at least for toolbox type containers it seems like there's little reason for it be sandboxed \n\n"
+        },
+        {
+            "user": "chergert",
+            "body": "> I wonder why the container doesn't share the same pts filesystem as the host. at least for toolbox type containers it seems like there's little reason for it be sandboxed\n\nThat sounds useful too."
+        },
+        {
+            "user": "halfline",
+            "body": "actually i wonder if things would \"just work\" with this change and if vte set up 0/1/2 for its child to an fd ~~that opened `g_build_filename (\"/run/host/\", ttyname(granted_pty_fd), NULL);` instead using the `fd` from `posix_openpt` (or whatever) directly~~ that prefixed the pty name with `/run/host`\n\nEDIT: Rereading this, this morning I realize my pseudocode was confusing because I got details of the api wrong...updated for clarity."
+        },
+        {
+            "user": "chergert",
+            "body": "In most cases it's just opening the path from `ptsname_r()` right?\n\nhttps://elixir.bootlin.com/glibc/glibc-2.38/source/sysdeps/posix/ttyname.c#L77 Is this really implemented by checking device/inode/etc and looping through the directory? If so, I don't think it would work because they inodes won't match in `/dev/`."
+        },
+        {
+            "user": "halfline",
+            "body": "You're totally right, in most cases the terminal is going to be using `ptsname` already anyway, so it could just prepend `/run/host` to that. The details on how to get the pty device name on the host aren't super important to what i'm saying though...which of `ptsname on the ptm` or `ttyname` / `ptsname` / `minor(stat_buf.st_dev)` on the pty... whatever is used isn't of much consequence. I'm sure e.g. VTE has the ability to get the the pty device name on the host in some way and that way will work. I'm saying on the host the root file system is mounted at `/` AND at `/run/host`.  in the container `/` is different from `/` on the host. but in the container `/run/host` is the same as `/run/host` on the host. If on the host the pty is opened via `/run/host/dev/pts/N` instead of `/dev/pts/N` then it at least seems plausible to me that `tcgetpgrp` will work in the container. but it's just a guess.\n\nI don't think you're looking at the right implementation of `ttyname` since it doesn't even seem to have pty support. maybe that's for glibc on non-linux platforms? \n\nThe inodes will match between e.g. `/dev/pts/0` and `/run/host/dev/pts/0` on the host, and won't match between `/dev/pts/0` and `/run/host/dev/pts/0` in the container. Though I suspect it's more about the associated ptmx device than the inodes of the devices themselves (though same story either way). So, depending on how `ttyname` is implemented I guess it's possible that using `/run/host/dev/pts/0` could leave `ttyname` in the guest dysfunctional.\n\nEDIT: Also updated this comment for clarity"
+        },
+        {
+            "user": "halfline",
+            "body": "ah i think ttyname is implemented here:\n\nhttps://elixir.bootlin.com/glibc/glibc-2.38/source/sysdeps/unix/sysv/linux/ttyname_r.c\n\nIt looks like it just calls readlink(\"/proc/self/fd/%d\", fd) so i think it should work in the guest."
+        },
+        {
+            "user": "halfline",
+            "body": "actually looking at vte right now, it uses `TIOCGPTPEER` not `ptsname` so probably do need use `ttyname` indeed."
+        },
+        {
+            "user": "halfline",
+            "body": "So just to be clear, this is what i'm suggesting along with @giuseppe 's change in podman.\n(note, only compile tested, I didn't see if it works or anything).\n\n```diff\n--- a/src/pty.cc\n+++ b/src/pty.cc\n@@ -40,2 +40,3 @@\n #include <sys/socket.h>\n+#include <sys/stat.h>\n #include <errno.h>\n@@ -96,17 +97,4 @@ Pty::unref() noexcept\n int\n-Pty::get_peer(bool cloexec) const noexcept\n+Pty::get_peer_fd(int fd_flags) const noexcept\n {\n-        if (!m_pty_fd)\n-                return -1;\n-\n-        /* FIXME? else if (m_flags & VTE_PTY_NO_CTTTY)\n-         * No session and no controlling TTY wanted, do we need to lose our controlling TTY,\n-         * perhaps by open(\"/dev/tty\") + ioctl(TIOCNOTTY) ?\n-         */\n-\n-        /* Now open the PTY peer. Note that this also makes the PTY our controlling TTY. */\n-        auto const fd_flags = int{O_RDWR |\n-                                  ((m_flags & VTE_PTY_NO_CTTY) ? O_NOCTTY : 0) |\n-                                  (cloexec ? O_CLOEXEC : 0)};\n-\n         auto peer_fd = vte::libc::FD{};\n@@ -154,4 +142,39 @@ Pty::get_peer(bool cloexec) const noexcept\n \n+        return peer_fd.release();\n+}\n+\n+int\n+Pty::get_peer(bool cloexec) const noexcept\n+{\n+        if (!m_pty_fd)\n+                return -1;\n+\n+        /* FIXME? else if (m_flags & VTE_PTY_NO_CTTTY)\n+         * No session and no controlling TTY wanted, do we need to lose our controlling TTY,\n+         * perhaps by open(\"/dev/tty\") + ioctl(TIOCNOTTY) ?\n+         */\n+\n+        /* Now open the PTY peer. Note that this also makes the PTY our controlling TTY. */\n+        auto const fd_flags = int{O_RDWR |\n+                                  ((m_flags & VTE_PTY_NO_CTTY) ? O_NOCTTY : 0) |\n+                                  (cloexec ? O_CLOEXEC : 0)};\n+\n+        auto peer_fd = vte::libc::FD{};\n+\n+        peer_fd = get_peer_fd(fd_flags);\n+\n         assert(bool(peer_fd));\n \n+        if (is_exportable_to_containers()) {\n+                const char *tty_name = ttyname(peer_fd.get());\n+                std::string global_peer = \"/run/host\" + std::string(tty_name);\n+                auto global_peer_fd = vte::libc::FD{};\n+\n+                global_peer_fd = ::open(global_peer.c_str(), fd_flags);\n+\n+                if (global_peer_fd != -1) {\n+                        peer_fd.swap(global_peer_fd);\n+                }\n+        }\n+\n #if defined(__sun) && defined(HAVE_STROPTS_H)\n@@ -180,2 +203,27 @@ Pty::get_peer(bool cloexec) const noexcept\n \n+bool\n+Pty::is_exportable_to_containers() const noexcept\n+{\n+#ifdef __linux__\n+        struct stat m_pty_stat, global_ptmx_stat;\n+\n+        if (::fstat(m_pty_fd.get(), &m_pty_stat) == -1) {\n+            auto errsv = vte::libc::ErrnoSaver{};\n+                _vte_debug_print(VTE_DEBUG_PTY, \"%s failed: %s\\n\", \"fstat\", g_strerror(errsv));\n+                return false;\n+        }\n+\n+        // Check if /run/host/dev/pts/ptmx is an alias to the current pty master\n+        // If so, we should use it instead so containers (with their own /dev/pts)\n+        // can fully use the pty\n+        if (::stat(\"/run/host/dev/pts/ptmx\", &global_ptmx_stat) != -1 &&\n+            m_pty_stat.st_dev == global_ptmx_stat.st_dev &&\n+            m_pty_stat.st_ino == global_ptmx_stat.st_ino) {\n+                return true;\n+        }\n+#endif\n+\n+        return false;\n+}\n+\n void\ndiff --git a/src/pty.hh b/src/pty.hh\nindex 2dc8ac97..efa31067 100644\n--- a/src/pty.hh\n+++ b/src/pty.hh\n@@ -35,2 +35,4 @@ private:\n \n+        bool is_exportable_to_containers() const noexcept;\n+        int get_peer_fd(int fd_flags) const noexcept;\n public:\n```"
+        },
+        {
+            "user": "chergert",
+            "body": "@halfline I don't use VTE spawn API in any of my projects (it's all done manually so I have more control), so I can't test this patch. But I can make something that does the same thing quick in Prompt/GNOME Builder/etc."
+        },
+        {
+            "user": "halfline",
+            "body": "ah okay i didn't realize that. cool, the main point of the patch was just to clarify what i was trying to say anyway since i felt like i was failing to articulate it well."
+        },
+        {
+            "user": "chergert",
+            "body": "It doesn't look like this will work. I get different `st_dev` and `st_ino` for both. For example I get for the PTY master something like `5` and `26`. And for the `/run/host/dev/pts/ptmx` something like `88` and `2`."
+        },
+        {
+            "user": "chergert",
+            "body": "I don't want to spam this thread any further, so @halfline and I can take our VTE issues to the GNOME tracker somewhere. But one last thing, if you feel like testing, https://gitlab.gnome.org/chergert/prompt/-/commit/a97f790ed13b22eaf8f0f9ecd3aaae45cd86b65d adds a commit to Prompt which you can test this via Flatpak.\n\nOnce we have a podman that is updated on the host, we can tweak our command line arguments to include `passthrough-tty`."
+        },
+        {
+            "user": "halfline",
+            "body": "> It doesn't look like this will work. I get different `st_dev` and `st_ino` for both. For example I get for the PTY master something like `5` and `26`. And for the `/run/host/dev/pts/ptmx` something like `88` and `2`.\n\nahhh, I guess that makes sense though it's inconvenient. Every ptm has a different end point so it's really a different device than the multiplexer.  \n\nWell, we just have to change the the check a little... either `fstat` the `pts` instead of the `ptm` side or compare `/dev/pts/ptmx` to `/run/host/dev/pts/ptmx` directly instead `fstat` on the`ptm` fd."
+        },
+        {
+            "user": "halfline",
+            "body": "okay i created https://gitlab.gnome.org/chergert/prompt/-/merge_requests/4 for us to have a place to move the discussion and experiments"
+        },
+        {
+            "user": "chergert",
+            "body": "Is there anything I can do to help this along?\n\nI have a number of features in Prompt that I'll be able to fix for Podman/Toolbox containers once it's in place."
+        },
+        {
+            "user": "giuseppe",
+            "body": "we are just waiting for a new conmon release to be included in the CI images and then we can merge #20774"
+        },
+        {
+            "user": "chergert",
+            "body": "Thanks so much for taking the time to reply! Sounds great!"
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 20774
+        }
+    ]
+}

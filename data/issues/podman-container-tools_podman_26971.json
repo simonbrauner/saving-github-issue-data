@@ -1,0 +1,56 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 26971,
+    "type": "pull_request",
+    "title": "Fix a locking bug in that could cause a double-unlock",
+    "state": "closed",
+    "labels": [
+        "lgtm",
+        "approved",
+        "release-note",
+        "locked - please file new issue/PR",
+        "No New Tests"
+    ],
+    "user": "mheon",
+    "body": "The `cleanupExecBundle` function was only meant to be called on a locked container, as it does some state mutation operations. It also has a timed wait (if the directory is busy and can't be removed yet, give it a few milliseconds) in which it deliberately yields the lock to not block the container for that time.\n\nThe `healthCheckExec()` function calls `cleanupExecBundle` out of a `defer` block. This is after the `defer c.lock.Unlock()` so it fires afterwards when the function returns, so we're normally fine - the container is still locked when our defer runs. The problem is that `healthCheckExec()` also unlocks the container during the expensive exec operation, and can actually fail and return while not holding the lock - meaning our `defer` can fire on an unlocked container, leading to a potential double unlock in `cleanupExecBundle`.\n\nWe could, potentially, re-lock the container after the exec occurs, but we're actually waiting for a `select` to trigger to end the function, so that's not a good solution. Instead, just re-lock (if necessary) in the defer, before invoking `cleanupExecBundle()`. The `defer c.lock.Unlock()` will fire right after and unlock after us.\n\nFixes #26968\n\n<!--\nThanks for sending a pull request!\n\nPlease make sure you've read our contributing guidelines and how to submit a pull request (https://github.com/containers/podman/blob/main/CONTRIBUTING.md#submitting-pull-requests).\n\nFinally, be sure to sign commits with your real name. Since by opening\na PR you already have commits, you can add signatures if needed with\nsomething like `git commit -s --amend`.\n-->\n\n#### Does this PR introduce a user-facing change?\n\n<!--\nIf no, just write `None` in the release-note block below. If yes, a release note\nis required: Enter your extended release note in the block below. If the PR\nrequires additional action from users switching to the new release, include the\nstring \"action required\".\n\nFor more information on release notes, please follow the Kubernetes model:\nhttps://git.k8s.io/community/contributors/guide/release-notes.md\n-->\n\n```release-note\nFixed a bug where Podman would sometimes panic when executing health checks due to a locking issue\n```\n",
+    "comments": [
+        {
+            "user": "mheon",
+            "body": "Tagging no new tests, we probably can't reproduce the conditions required for double-unlock reliably (busy error when removing exec session directory).\n\nBut don't merge just yet, I think there's some cleanup necessary in `healthCheckExec()` around exec session handling - I'll investigate tomorrow morning."
+        },
+        {
+            "user": "packit-as-a-service[bot]",
+            "body": "[NON-BLOCKING] Packit jobs failed. @containers/packit-build please check. Everyone else, feel free to ignore."
+        },
+        {
+            "user": "packit-as-a-service[bot]",
+            "body": "[NON-BLOCKING] Packit jobs failed. @containers/packit-build please check. Everyone else, feel free to ignore."
+        },
+        {
+            "user": "mheon",
+            "body": "Alright, the exec session patch breaks it, because we can't retrieve the exec session PID to stop it early if there's a timeout. Inconvenient. I'll think about this more in the morning."
+        },
+        {
+            "user": "Luap99",
+            "body": "Why do we need to do this ignore ENOTEMPTY and EBUSY at all? I see this was added in https://github.com/containers/podman/commit/e252b3b4f294745ca8ac6d1c1850de2e7f1365c7 which mentions nfs. Our VMs do not run on nfs yet we still landed in that code path.\n\nDoesn't ENOTEMPTY mean something is writing into the directory while we delete all files from it, how would happen? And EBUSY is for mount points which definitely should not be the case here?\n\nDo we actually gain anything by unlocking instead of busy looping while staying locked? How often would such an ENOTEMPTY/EBUSY error actually happen and how long does it take to get resolved?\nI much rather do the simple safe thing which is not to mess which locking in such deep call stack, it is way to brittle IMO.\n \ncc @giuseppe \n"
+        },
+        {
+            "user": "giuseppe",
+            "body": "that is/was needed because if any program (like conmon) has an open file in that directory, you can't really delete it on NFS.\n\nNFS will rename it to some weird `.nfs$HASH` file so the `Rmdir` will fail.  The unlocking/locking was added to give time to conmon to terminate and since it can trigger the podman cleanup that in turn locks the container, we need to give it the possibility to terminate.  Once conmon is terminated, NFS will take care of really deleting these files and then we can do the `Rmdir`.\n\n\n"
+        },
+        {
+            "user": "Luap99",
+            "body": "> that is/was needed because if any program (like conmon) has an open file in that directory, you can't really delete it on NFS.\n\nSure that was the reason why it was added but that does not explain how the hell we hit that code path in our CI VMs which AFAIK use a normal ext4 fs?"
+        },
+        {
+            "user": "mheon",
+            "body": "Comments addressed, one flake rerun.\n\nI'm going to look at the session bits separately - that is definitely a larger set of changes."
+        },
+        {
+            "user": "openshift-ci[bot]",
+            "body": "[APPROVALNOTIFIER] This PR is **APPROVED**\n\nThis pull-request has been approved by: *<a href=\"https://github.com/containers/podman/pull/26971#pullrequestreview-3183998349\" title=\"Approved\">giuseppe</a>*, *<a href=\"https://github.com/containers/podman/pull/26971#pullrequestreview-3184164233\" title=\"LGTM\">Luap99</a>*, *<a href=\"https://github.com/containers/podman/pull/26971#\" title=\"Author self-approved\">mheon</a>*\n\nThe full list of commands accepted by this bot can be found [here](https://go.k8s.io/bot-commands?repo=containers%2Fpodman).\n\nThe pull request process is described [here](https://git.k8s.io/community/contributors/guide/owners.md#the-code-review-process)\n\n<details >\nNeeds approval from an approver in each of these files:\n\n- ~~[OWNERS](https://github.com/containers/podman/blob/main/OWNERS)~~ [Luap99,giuseppe,mheon]\n\nApprovers can indicate their approval by writing `/approve` in a comment\nApprovers can cancel approval by writing `/approve cancel` in a comment\n</details>\n<!-- META={\"approvers\":[]} -->"
+        }
+    ],
+    "cross_references": []
+}

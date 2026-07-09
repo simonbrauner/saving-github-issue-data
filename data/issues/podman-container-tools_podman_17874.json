@@ -1,0 +1,121 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 17874,
+    "type": "pull_request",
+    "title": "Sqlite fixes",
+    "state": "closed",
+    "labels": [
+        "lgtm",
+        "approved",
+        "release-note-none",
+        "locked - please file new issue/PR"
+    ],
+    "user": "mheon",
+    "body": "Two fixes:\n- Ensure that SQLite schema migration happens before we init any part of the database, so we never access a database with a bad schema.\n- Fix a flake where we were getting database locked errors due to concurrent read/write of the same table.\n\n```release-note\nNONE\n```\n",
+    "comments": [
+        {
+            "user": "openshift-ci[bot]",
+            "body": "[APPROVALNOTIFIER] This PR is **APPROVED**\n\nThis pull-request has been approved by: *<a href=\"https://github.com/containers/podman/pull/17874#\" title=\"Author self-approved\">mheon</a>*\n\nThe full list of commands accepted by this bot can be found [here](https://go.k8s.io/bot-commands?repo=containers%2Fpodman).\n\nThe pull request process is described [here](https://git.k8s.io/community/contributors/guide/owners.md#the-code-review-process)\n\n<details >\nNeeds approval from an approver in each of these files:\n\n- ~~[OWNERS](https://github.com/containers/podman/blob/main/OWNERS)~~ [mheon]\n\nApprovers can indicate their approval by writing `/approve` in a comment\nApprovers can cancel approval by writing `/approve cancel` in a comment\n</details>\n<!-- META={\"approvers\":[]} -->"
+        },
+        {
+            "user": "mheon",
+            "body": "@edsantiago This should get rid of the database locked flake, but I haven't been able to reproduce locally so I can't be 100% on that."
+        },
+        {
+            "user": "vrothberg",
+            "body": "Can we make a mix of https://github.com/containers/podman/pull/17867 and this PR?\n\nI really think that setting the PRAGMAs as done in https://github.com/containers/podman/pull/17867 is 1) faster and 2) easier to read.\n\n"
+        },
+        {
+            "user": "edsantiago",
+            "body": "FWIW, the string \"UNIQUE\" (case-sensitive, caps) does not appear in the CI logs, nor do any of the following case-insensitive strings:\n* \"constraint fail\"\n* \"config row\"\n* \"adding db\"\n* \"dbconfig.id\"\n\nTimings, with a reminder that this is not equivalent to serious performance benchmarks\n\n| type | distro              | user     | DB     |    local |   remote | container |\n| ---- | --------            | ----     | --     |    ----: |   -----: | --------: |\n| int  | fedora-37           | root     |        |    30:45 |    33:11 |     27:59 |\n| int  | fedora-37           | root     | sqlite |    30:59 |    33:33 |\n| int  | fedora-37           | rootless |        |    29:41 |          |\n| int  | fedora-37           | rootless | sqlite |    28:50 |          |\n"
+        },
+        {
+            "user": "edsantiago",
+            "body": "System test runs in #17831 are done. Saw lots of \"database is locked\", but no \"unique etc\" errors."
+        },
+        {
+            "user": "mheon",
+            "body": "I have pulled in #17867 from @vrothberg "
+        },
+        {
+            "user": "mheon",
+            "body": "Marking as WIP: I'm going to perf test max connections vs transaction locking."
+        },
+        {
+            "user": "mheon",
+            "body": "@edsantiago Did you pull in Valentin's earlier PR, and if so did it resolve the database locked issue?"
+        },
+        {
+            "user": "edsantiago",
+            "body": "@mheon yes I made an earlier run of #17831 using @vrothberg's fixes, and saw no instances of the \"is locked\" bug. I'm now rerebasing on this PR, and will resubmit in a few seconds."
+        },
+        {
+            "user": "mheon",
+            "body": "```\nBenchmark 1: /home/mheon/code/podman/bin/podman --db-backend=sqlite ps -a\n  Time (mean ± σ):      21.7 ms ±   1.0 ms    [User: 27.1 ms, System: 11.8 ms]\n  Range (min … max):    19.1 ms …  24.1 ms    100 runs\n \nBenchmark 2: /home/mheon/code/podman/bin/podman_maxcons --db-backend=sqlite ps -a\n  Time (mean ± σ):      22.2 ms ±   1.2 ms    [User: 28.8 ms, System: 11.9 ms]\n  Range (min … max):    19.5 ms …  26.4 ms    100 runs\n \nSummary\n  '/home/mheon/code/podman/bin/podman --db-backend=sqlite ps -a' ran\n    1.03 ± 0.08 times faster than '/home/mheon/code/podman/bin/podman_maxcons --db-backend=sqlite ps -a'\n```"
+        },
+        {
+            "user": "mheon",
+            "body": "Maxcons is definitely slowing us down somewhat, at least at high container counts (that was 500)"
+        },
+        {
+            "user": "mheon",
+            "body": "It goes down to ~1% slower at lower container counts"
+        },
+        {
+            "user": "mheon",
+            "body": "Based on current numbers, the tx lock seems slightly faster. I'm going to remove the connection count limit."
+        },
+        {
+            "user": "mheon",
+            "body": "Re-pushed. Max connections logic is gone. Removing WIP. Going to switch to sqlite vs bolt perf comparisons."
+        },
+        {
+            "user": "edsantiago",
+            "body": "Followup: I did not see `UNIQUE constraint` nor 'database is locked` in system tests, yay, but I do see one new failure I've never seen before, in [f37 rootless sqlite](https://api.cirrus-ci.com/v1/artifact/task/4515110023069696/html/int-podman-fedora-37-rootless-host-sqlite.log.html#t--stop-podman-service--1):\n```\n  stop podman.service\n  ...\n  Execing /var/tmp/go/src/github.com/containers/podman/bin/podman --root /tmp/podman_test2489001336/server_root inspect --format={{.State.Running}} top_ccwvMutB\n  Error: inspecting object: no such object: \"top_ccwvMutB\"\n```\nWhat's really curious is that this is an e2e test that says **Execing**, whereas usually they say \"Running\". And the \"Execing\" line does not include the `--db-backend` or any of the other long list of options usually shown in \"Running\" log lines. Is this some weird different way of running podman? \n\nWorth pointing out that this PR is being run on a system with `/etc/containers/containers.conf` force-modified to use sqlite, so this is different from the current CI situation in which testing is happening via command-line `--db-backend` options."
+        },
+        {
+            "user": "edsantiago",
+            "body": "@mheon @vrothberg I'm sorry to report that [f37 rootless sqlite](https://api.cirrus-ci.com/v1/artifact/task/5568909810597888/html/int-podman-fedora-37-rootless-host-sqlite.log.html#t--Podman-start-after-signal-kill--1) had one failure in my PR:\n```\n$ podman [options] ps -q\nError: adding DB config row: UNIQUE constraint failed: DBConfig.ID\n```\n(where \"my PR\" is #17831 rebased against 0c313b6e5)"
+        },
+        {
+            "user": "mheon",
+            "body": "Damn. Alright, have to add even more validation there, I guess."
+        },
+        {
+            "user": "vrothberg",
+            "body": "> Damn. Alright, have to add even more validation there, I guess.\n\nI think there's a race condition in creating the table.  Checking for the table existence should be part of the transaction:\n\n```diff\ndiff --git a/libpod/sqlite_state.go b/libpod/sqlite_state.go\nindex e1007dbc3709..9df98dc4b465 100644\n--- a/libpod/sqlite_state.go\n+++ b/libpod/sqlite_state.go\n@@ -336,23 +336,21 @@ func (s *SQLiteState) ValidateDBConfig(runtime *Runtime) (defErr error) {\n \t\truntimeGraphDriver = storeOpts.GraphDriverName\n \t}\n \n-\trow := s.conn.QueryRow(\"SELECT Os, StaticDir, TmpDir, GraphRoot, RunRoot, GraphDriver, VolumeDir FROM DBConfig;\")\n-\n+\ttx, err := s.conn.Begin()\n+\tif err != nil {\n+\t\treturn fmt.Errorf(\"beginning DB config transaction: %w\", err)\n+\t}\n+\tdefer func() {\n+\t\tif defErr != nil {\n+\t\t\tif err := tx.Rollback(); err != nil {\n+\t\t\t\tlogrus.Errorf(\"Rolling back transaction to create DB config: %v\", err)\n+\t\t\t}\n+\t\t}\n+\t}()\n+\trow := tx.QueryRow(\"SELECT Os, StaticDir, TmpDir, GraphRoot, RunRoot, GraphDriver, VolumeDir FROM DBConfig;\")\n \tif err := row.Scan(&os, &staticDir, &tmpDir, &graphRoot, &runRoot, &graphDriver, &volumePath); err != nil {\n \t\tif errors.Is(err, sql.ErrNoRows) {\n \t\t\t// Need to create runtime config info in DB\n-\t\t\ttx, err := s.conn.Begin()\n-\t\t\tif err != nil {\n-\t\t\t\treturn fmt.Errorf(\"beginning DB config transaction: %w\", err)\n-\t\t\t}\n-\t\t\tdefer func() {\n-\t\t\t\tif defErr != nil {\n-\t\t\t\t\tif err := tx.Rollback(); err != nil {\n-\t\t\t\t\t\tlogrus.Errorf(\"Rolling back transaction to create DB config: %v\", err)\n-\t\t\t\t\t}\n-\t\t\t\t}\n-\t\t\t}()\n-\n \t\t\tif _, err := tx.Exec(createRow, 1, schemaVersion, runtimeOS,\n \t\t\t\truntimeStaticDir, runtimeTmpDir, runtimeGraphRoot,\n \t\t\t\truntimeRunRoot, runtimeGraphDriver, runtimeVolumePath); err != nil {\n```"
+        },
+        {
+            "user": "vrothberg",
+            "body": "@edsantiago, could you apply the upper diff to your PR and see whether it fixes the flake?"
+        },
+        {
+            "user": "edsantiago",
+            "body": "@vrothberg done, run is in progress. Quick note that this flake is rare: it did not happen at all on my last CI rerun, and it did not happen in this PR's most recent run. (As in: I downloaded all the logs and grep'ed them for even single failures). I will of course continue to download-and-grep all logs for this and my PR and report my findings."
+        },
+        {
+            "user": "edsantiago",
+            "body": "Well, [doesn't look good](https://api.cirrus-ci.com/v1/artifact/task/4539884703055872/html/int-podman-fedora-37-rootless-host-sqlite.log.html). Didn't even make it past the image fetch:\n```\nCaching quay.io/libpod/cirros:latest at /tmp/quay.io-libpod-cirros-latest.tar...\n$ podman [options] pull quay.io/libpod/cirros:latest\nError: beginning refresh transaction: database is locked\n```"
+        },
+        {
+            "user": "vrothberg",
+            "body": "> Well, [doesn't look good](https://api.cirrus-ci.com/v1/artifact/task/4539884703055872/html/int-podman-fedora-37-rootless-host-sqlite.log.html). Didn't even make it past the image fetch:\n> \n> ```\n> Caching quay.io/libpod/cirros:latest at /tmp/quay.io-libpod-cirros-latest.tar...\n> $ podman [options] pull quay.io/libpod/cirros:latest\n> Error: beginning refresh transaction: database is locked\n> ```\n\nThis error is really weird. @mheon, shouldn't Podman just busy-wait until the DB is unlocked by another thread/process?"
+        },
+        {
+            "user": "edsantiago",
+            "body": "Incremental progress is totally fine with me.\n\n/lgtm\n/hold"
+        },
+        {
+            "user": "baude",
+            "body": "/hold cancel"
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 17867
+        }
+    ]
+}

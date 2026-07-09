@@ -1,0 +1,75 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 25862,
+    "type": "issue",
+    "title": "podman pull locks and holds podman run",
+    "state": "closed",
+    "labels": [
+        "kind/feature",
+        "triaged"
+    ],
+    "user": "stepancheg",
+    "body": "### Feature request description\n\nCleanup first:\n\n```\npodman rmi -a -f\n```\n\nIn first terminal, run\n\n```\nwhile :; do podman run alpine date; done\n\nTrying to pull docker.io/library/alpine:latest...\nGetting image source signatures\nCopying blob f18232174bc9 done   |\nCopying config aded1e1a5b done   |\nWriting manifest to image destination\nSat Apr 12 04:26:40 UTC 2025\nSat Apr 12 04:26:41 UTC 2025\nSat Apr 12 04:26:41 UTC 2025\nSat Apr 12 04:26:41 UTC 2025\nSat Apr 12 04:26:42 UTC 2025\nSat Apr 12 04:26:42 UTC 2025\nSat Apr 12 04:26:42 UTC 2025\nSat Apr 12 04:26:43 UTC 2025\nSat Apr 12 04:26:43 UTC 2025\nSat Apr 12 04:26:43 UTC 2025\nSat Apr 12 04:26:44 UTC 2025\n...\n```\n\ntwo/three times per second.\n\nIn a second terminal run\n\n```\npodman pull docker.io/library/centos:6\nTrying to pull docker.io/library/centos:6...\nGetting image source signatures\nCopying blob ff50d722b382 done   |\nCopying config 5bf9684f47 done   |\nWriting manifest to image destination\n5bf9684f472089d6d5cb636041d3d6dc748dbde39f1aefc374bbd367bd2aabbf\n```\n\nSomewhere after copying finished, `podman` invokes untar, and at this moment, `podman run` is paused until `podman pull` completes:\n\n```\nSat Apr 12 04:26:49 UTC 2025\nSat Apr 12 04:26:50 UTC 2025\nSat Apr 12 04:26:50 UTC 2025   # two seconds delay until the following run\nSat Apr 12 04:26:52 UTC 2025\nSat Apr 12 04:26:52 UTC 2025\nSat Apr 12 04:26:53 UTC 2025\n```\n\nThis is critical for larger images which can take minutes to unpack.\n\n### Suggest potential solution\n\n`podman pull` could hold finer grained lock or locks, so it would not prevent running unrelated images.\n\nOr `podman pull` could unpack layers into temp directory without acquiring lock, and then move.\n\n### Have you considered any alternatives?\n\nRun podman images in separate stores, so they won't interfere.\n\n### Additional context\n\nUsing podman version 4.9.3. I have read changelog, does not seem to mention locking-related changes.\n\nUbuntu 24.04.2. Root.",
+    "comments": [
+        {
+            "user": "mheon",
+            "body": "@mtrmac Is this the same as https://github.com/containers/podman/issues/1911 "
+        },
+        {
+            "user": "mtrmac",
+            "body": "No, this is simpler than that. We hold a whole-storage write lock while extracting a layer from tar to individual files. (#1911 is about not pulling the layer _again_ while another process has started a pull, or is extracting a layer.)\n\nWe would need to stage the layer without holding a lock, and then hold the lock only for the time of a quick ~metadata operation. If anything, this could make #1911 worse (but I think it’s a good idea anyway).\n\nThe hard part is reliably deleting the staged data if the pull is aborted. This is strongly related to the current design discussion about deleting layers without holding locks ( https://github.com/containers/storage/pull/2314 )."
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "Luap99",
+            "body": "If I read the code right the expensive part is the ApplyDiff() which extracts the content while holding the storage lock here.\nhttps://github.com/containers/container-libs/blob/f6b3f787048700aaff7000c5053c4a02c80a354b/storage/layers.go#L2489\n\nNow while it is technically possible to unlock and lock again afterwards that cannot work because we marked the layer with the \"incompleteFlag\" (rightfully). That then however means that another process that opens or reloads the store will run the initial incomplete layer cleanup so any other podman process would delete the layer right away which cannot be right.\n\nSo to fix that we need to hold another per layer lock which is hold during ApplyDiff() call and then in the store load which cleans up incomplete layers we need to try to acquire the lock (non blocking) and only if we get it delete the layer there.\nWhile that sounds possible it would cause an obvious issue with forwards compatibility. If we pull with the new storage code and then another process loads the store with the old code it would not know about the per layer lock and delete breaking the current in progress layer creation. Given the the same storage is used by podman/buildah/skopeo/crio I assume that is critical as we cannot assume they are updated in lockstep?\n\n@mtrmac @giuseppe Do you have any pointers on how to go about this?"
+        },
+        {
+            "user": "mtrmac",
+            "body": "@Luap99 I think the crucial low-level primitive is now available: `c/storage/internal/tempdir`. Those are set up in _new_ locations, and a process can obtain an “instance” which is only valid as long as that process is running; as soon as it exits, the next process with RW access to the store will delete the “instance”’s data.\n\nThat _should_ be backward-compatible because it’s an entirely new location (… well… it’s a bit iffy in `drivers/overlay`, where all directories are _assumed_ to be a layer, but AFAICS it should work well enough).\n\nRight now, `internal/tempdir` only allows staging a deletion (by `rename()`ing the data to be deleted into the instance, while holding a lock, and then deleting it after dropping a lock), but I think it should be very easy to extend it to stage an addition (allocate an ~empty instance, move all data into it, then `rename()` the data into the primary location). And after that exists, `ApplyDiff` can be extended / reimplemented, vaguely so that the driver allocates an instance in the right location, generic code extracts the tarball without holding a layers lock, and then, while holding the layers lock, the data is moved from the staging instance into the final location, and metadata is updated."
+        },
+        {
+            "user": "mtrmac",
+            "body": "> So to fix that we need to hold another per layer lock which is hold during ApplyDiff() call and then in the store load which cleans up incomplete layers we need to try to acquire the lock (non blocking) and only if we get it delete the layer there.\n\nThis kind of design, where the in-progress layer is “visible” while not holding any storage locks, would be interesting for https://github.com/containers/podman/issues/1911, but that’s quite a bit more work. Right now, in the public c/storage API, a layer either exists or doesn’t exist; there is no “in-progress” state. And even if we figured out the API part, we would need a _third_ lock, so that, if two processes are trying to pull the layer concurrently, the one that starts later can wait for the first one to finish (it _must_ wait, because 1) it needs the layer data, so it can’t just continue, and 2) layer IDs are deterministic, so it can’t create its own copy).\n\nSo, that would be even more disruptive, and with more backward compatibility concerns. This issue specifically tracks the case of _one_ pull vs. other processes reading c/storage, not the concurrent pull situation. But, longer term, I think `internal/tempdir` is a better infrastructure for the shared pulling as well — with that, we _have_ a “yes, I am still alive, it is worth waiting for me” mechanism, and we probably can add a way for other processes to wait for that situation to resolve. (I’m not sure that’s _sufficient_, IIRC the previous work on concurrent pulls ran into AB-BA locking problems or something like that, but I may very well be misremembering.)"
+        },
+        {
+            "user": "Luap99",
+            "body": "> Right now, internal/tempdir only allows staging a deletion (by rename()ing the data to be deleted into the instance, while holding a lock, and then deleting it after dropping a lock), but I think it should be very easy to extend it to stage an addition (allocate an ~empty instance, move all data into it, then rename() the data into the primary location). And after that exists, ApplyDiff can be extended / reimplemented, vaguely so that the driver allocates an instance in the right location, generic code extracts the tarball without holding a layers lock, and then, while holding the layers lock, the data is moved from the staging instance into the final location, and metadata is updated.\n\nSo should I then in applyDiffWithOptions() allocate such a tmpdir instance, unlock and then pass the tmpdir to the ApplyDiff()?\n\n> That should be backward-compatible because it’s an entirely new location (… well… it’s a bit iffy in drivers/overlay, where all directories are assumed to be a layer, but AFAICS it should work well enough).\n\nI am not sure I see how this would solve the forwards compatible problem. If the layer is created with the incomplete flag set and then the store gets unlocked the old c/storage will see that and remove the layer right away not knowing about whatever staging the other process is doing as it will not take the look of the tmpdir instance. How can the old store know he this layer is still being constructed?\n\nBecause right now in `(r *layerStore) create()` we create the layer with the incomplete flag set and then sync this state to disk before applying the diff to ensure the layer is removed when the process is killed during extraction.\nOr are you saying we should not commit that initial incomplete layer and first apply the layer content into the tmpdir. Since we already have the cleanup part of that working there should be no leaks then?"
+        },
+        {
+            "user": "mtrmac",
+            "body": "> So should I then in applyDiffWithOptions() allocate such a tmpdir instance, unlock and then pass the tmpdir to the ApplyDiff()?\n\n_Very_ vaguely, `Driver.StartStagingDiffToApply(id) -> (dest pathOrSomePrivateObject, tempdir.CleanupTempDirFunc, error)`: only the graph driver knows in which location the layer will be finally stored, and that matters because we want to `rename()` into that location, i.e. it must be on the same filesystem.\n\n`Driver.StartStagingDiffToApply` probably needs to be called under some lock, at the very least to detect pre-existing layers.\nAnd after unlocking (we will need to re-check if the layer hasn’t been created in the meantime, and), the driver will need an `ApplyStagedDiff`. (Or maybe the existing `ApplyDiff` can be entirely replaced, but that would require updating various rarely-if-ever-used code paths.)\n\n[Compare also `DriverWithDiffer`, but that is older, and it is using a different / weaker staging implementation. Long-term, I would very much like the two to be unified, but that might be difficult right now, or at least too much work for a single PR.]\n\n> > That should be backward-compatible because it’s an entirely new location (… well… it’s a bit iffy in drivers/overlay, where all directories are assumed to be a layer, but AFAICS it should work well enough).\n> \n> I am not sure I see how this would solve the forwards compatible problem. If the layer is created with the incomplete flag set \n\nThat wouldn’t happen. At the `StartStagingDiffToApply` phase, and while extracting the tarball, there would be no entry at all in `layers.json`. An incomplete layer entry would only exist for the duration of `ApplyStagedDiff`.\n\n> Or are you saying we should not commit that initial incomplete layer and first apply the layer content into the tmpdir. Since we already have the cleanup part of that working there should be no leaks then?\n\n~Yes: while we are extracting the tarball, cleanup would happen via `internal/tempdir`, not via `layerIncompleteFlag`."
+        },
+        {
+            "user": "Luap99",
+            "body": "@mtrmac So I did some more digging into the different drivers codes for this and I am bit confused about a couple of things about the less used drivers, because zfs and btrfs mount actual volumes so any rename cannot work?!. The target path is only being mounted by the driver.Get() call and I assume any sort of mounting mus also always be locked somehow to avoid races with the ref counting?\n\nSo I guess we need another Driver specific interface for overlay and vfs where we can extract via the tmpdir functionality and keep doing what we do for zfs/btrfs?\n\n"
+        },
+        {
+            "user": "mtrmac",
+            "body": "@Luap99 I didn’t realize that, but that sounds right — currently `driver.Create` and `driver.ApplyDiff` are separate operations, and for the “naive diff” implementations that is a mount + extract.\n\nA nit is that the `ApplyDiff` functionality in overlay can also fall back to the “naive diff” code path, it seems to me one that should never _regularly_ trigger (we always send `layer.Parent` as the `parent` parameter, except for `graphtest` and hypothetical — I hope unsupported — direct calls to the driver interface), but there might be some nuance to the `isParent` check that I am now missing. (Cc: @giuseppe / @nalind ). So the decision _might_ need to be per-operation — hopefully that’s not the case, and, instead, overlay’s `ApplyDiff` can be simplified."
+        },
+        {
+            "user": "Luap99",
+            "body": "> A nit is that the ApplyDiff functionality in overlay can also fall back to the “naive diff” code path, it seems to me one that should never regularly trigger (we always send layer.Parent as the parent parameter,\n\nI was wondering about that too, but then I though it was for the case when the layer has no parent, i.e. the \"root\" layer? I mean at some point there must be a layer without a parent layer unless I am missing something about the design.\n\nBut yeah I am not sure about the different untar implementations there"
+        },
+        {
+            "user": "mtrmac",
+            "body": "I think in (the simple variant of) that case `ApplyDiff(newOnlyLayer, \"\")` and `isParent(newOnlyLayer, \"\"`) _should_ correctly detect a “matching parent” situation — except that `isParent` calls semantically-incorrect `d.dir(\"\")` before it checks for the “no parent” case."
+        },
+        {
+            "user": "Luap99",
+            "body": "looks like I forgot to close this one, this was fixed in https://github.com/podman-container-tools/container-libs/pull/378 which laned in podman 5.8"
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "container-libs",
+            "number": 378
+        }
+    ]
+}

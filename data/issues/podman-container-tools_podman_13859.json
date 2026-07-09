@@ -1,0 +1,161 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 13859,
+    "type": "pull_request",
+    "title": "pod: add exit policies",
+    "state": "closed",
+    "labels": [
+        "lgtm",
+        "approved",
+        "locked - please file new issue/PR"
+    ],
+    "user": "vrothberg",
+    "body": "Add the notion of an \"exit policy\" to a pod.  This policy controls the\nbehaviour when the last container of pod exits.  Initially, there are\ntwo policies:\n\n - \"continue\" : the pod continues running. This is the default policy\n                when creating a pod.\n\n - \"stop\" : stop the pod when the last container exits. This is the\n            default behaviour for `play kube`.\n\nIn order to implement the deferred stop of a pod, add a worker queue to\nthe libpod runtime.  The queue will pick up work items and in this case\nhelps resolve dead locks that would otherwise occur if we attempted to\nstop a pod during container cleanup.\n\nNote that the default restart policy of `play kube` is \"Always\".  Hence,\nin order to really solve #13464, the YAML files must set a custom\nrestart policy; the tests use \"OnFailure\".\n\nFixes: #13464\nSigned-off-by: Valentin Rothberg <vrothberg@redhat.com>",
+    "comments": [
+        {
+            "user": "openshift-ci[bot]",
+            "body": "[APPROVALNOTIFIER] This PR is **APPROVED**\n\nThis pull-request has been approved by: *<a href=\"https://github.com/containers/podman/pull/13859#\" title=\"Author self-approved\">vrothberg</a>*\n\nThe full list of commands accepted by this bot can be found [here](https://go.k8s.io/bot-commands?repo=containers%2Fpodman).\n\nThe pull request process is described [here](https://git.k8s.io/community/contributors/guide/owners.md#the-code-review-process)\n\n<details >\nNeeds approval from an approver in each of these files:\n\n- ~~[OWNERS](https://github.com/containers/podman/blob/main/OWNERS)~~ [vrothberg]\n\nApprovers can indicate their approval by writing `/approve` in a comment\nApprovers can cancel approval by writing `/approve cancel` in a comment\n</details>\n<!-- META={\"approvers\":[]} -->"
+        },
+        {
+            "user": "vrothberg",
+            "body": "@cdoern PTAL"
+        },
+        {
+            "user": "mheon",
+            "body": "I don't think this works with `--rm` containers, which will directly invoke `podman rm` last I checked."
+        },
+        {
+            "user": "mheon",
+            "body": "Actually, I take that back, `RemoveContainer()` should invoke `cleanup()` if the container was running."
+        },
+        {
+            "user": "mheon",
+            "body": "We can potentially avoid the workqueue bits by doing this in a `defer()` in `Cleanup()` and `RemoveContainer()` - as long as it's the first defer in the function, even before the lock/defer unlock() - it will run after all locks are released, but still block the function from returning and Podman from exiting until it finishes."
+        },
+        {
+            "user": "mheon",
+            "body": "Though, that requires that we add it to every function that can stop a single container, which could be complicated"
+        },
+        {
+            "user": "vrothberg",
+            "body": "> We can potentially avoid the workqueue bits by doing this in a `defer()` in `Cleanup()` and `RemoveContainer()` - as long as it's the first defer in the function, even before the lock/defer unlock() - it will run after all locks are released, but still block the function from returning and Podman from exiting until it finishes.\n\nSee https://github.com/containers/podman/pull/13859#discussion_r849639274.  There are deadlock all over the place.  We have the choice to either update all call sites of `cleanup()` and change the locking, or we use a work-queue like approach.  I really prefer the queue as it can't really bite us in the future."
+        },
+        {
+            "user": "mheon",
+            "body": "Note my use of the capitalized `Cleanup` - if we hit the public API entrypoints, we can avoid all locks because no locks have been taken before `Cleanup()` starts"
+        },
+        {
+            "user": "vrothberg",
+            "body": "> Note my use of the capitalized `Cleanup` - if we hit the public API entrypoints, we can avoid all locks because no locks have been taken before `Cleanup()` starts\n\nHow would you call `stopInfraIfNeeded` after the API finished?  I guess with a `defer` and that's where the container is locked."
+        },
+        {
+            "user": "vrothberg",
+            "body": "> We could make the auto-stop behavior opt-in and let play kube default to it.\n\nGiven e2e tests are also barking, I think the behavior should really be opt-in for ordinary pods but be turned on for `play kube` ones."
+        },
+        {
+            "user": "Luap99",
+            "body": "> Given e2e tests are also barking, I think the behavior should really be opt-in for ordinary pods but be turned on for `play kube` ones.\n\nI can only speak for the `podman run check dnsname plugin with CNI` test, in this case it is just a implementation detail and should be fixed. It tries to resolve the pod name because it assumes it stays running, adding another container to keep it running will fix this. I don't see this as a real world use case.\n\n> We could make the auto-stop behavior opt-in and let play kube default to it.\n\nI think making this configurable is a good idea in case users have problems with the new bahavior but IMO the default should be to stop the infra. I see no reasons why they have to keep running since they do nothing."
+        },
+        {
+            "user": "rhatdan",
+            "body": "I thought the use case we added or were adding was pods go away when the last container exits.  They can start without a container, but if a container is added and removed the infra container goes away."
+        },
+        {
+            "user": "vrothberg",
+            "body": "> I thought the use case we added or were adding was pods go away when the last container exits. They can start without a container, but if a container is added and removed the infra container goes away.\n\nThe infra container will now be stopped but the pod will continue to exist.  We can add a `--rm` flag to pod-create similar to the one for containers to remove on exit.\n\nThe question now is whether we want to auto-stop the infra container for ordinary pods.  There are certain tests breaking that created a file in the pod's mount NS:\n* First container does a `touch /foo`\n* Second container does a `ls /foo`\n\nThe second one is now breaking as the mount NS is destroyed when we stop the infra container."
+        },
+        {
+            "user": "rhatdan",
+            "body": "Can we change the test to do:\n\n```\npodman create mypod -v test:/test --name mypod\npodman pod run --name mypod $IMAGE touch /test/foobar\npodman pod run --name mypod $IMAGE ls /test/foobar\n```\nSecond container should restart the pod, correct?\n"
+        },
+        {
+            "user": "vrothberg",
+            "body": "@rhatdan I feel rather strongly to make the behavior configurable.  If the change already breaks the tests there is no get-free-out-of-jail card if it broke users.\n\nI started working on it yesterday."
+        },
+        {
+            "user": "vrothberg",
+            "body": "@rhatdan PTAL"
+        },
+        {
+            "user": "rhatdan",
+            "body": "LGTM"
+        },
+        {
+            "user": "mheon",
+            "body": "I'm still unsure how we guarantee all pending jobs have finished before the runtime shuts down and Podman exits"
+        },
+        {
+            "user": "TomSweeneyRedHat",
+            "body": "All kinds of red unhappy test and you need a rebase @vrothberg "
+        },
+        {
+            "user": "vrothberg",
+            "body": "> I'm still unsure how we guarantee all pending jobs have finished before the runtime shuts down and Podman exits\n\nI'll take another look"
+        },
+        {
+            "user": "vrothberg",
+            "body": "@mheon, can you take a look at the code comments I added? Please let me know if you find them sufficient."
+        },
+        {
+            "user": "vrothberg",
+            "body": "Moving to WIP for now to do the plumbing for containers.conf."
+        },
+        {
+            "user": "vrothberg",
+            "body": "-> https://github.com/containers/common/pull/1017 to move the definitions and parsing directly to c/common."
+        },
+        {
+            "user": "flouthoc",
+            "body": "@vrothberg Just a small doubt why do we need extra `exit_policy` shouldn't pod just follow how `restartPolicy` is configured default is `Always` so it is expected to restart but if its `Never` or `OnFailure` pod should just end with `Succeeded` status.\n\nRef: https://kubernetes.io/docs/concepts/workloads/pods/pod-lifecycle/#pod-phase"
+        },
+        {
+            "user": "rhatdan",
+            "body": "Containers follow restart policy not the Pod.  Theoretically if I add a restart=always container to a Pod, the container should restart even if the Pod is set to `stop`,"
+        },
+        {
+            "user": "flouthoc",
+            "body": "@rhatdan ah i see but shouldn't containers inherit the `restartPolicy` from pod spec as stated here for all the containers in a pod https://kubernetes.io/docs/concepts/workloads/pods/pod-lifecycle/#restart-policy\n\nAfaik In kubernetes construct i don't think its possible to add a restart policy for a specific container , containers always inherit restartPolicy from pod , some reference here https://pkg.go.dev/k8s.io/api/core/v1#Container and https://pkg.go.dev/k8s.io/api/core/v1#PodSpec\n\nJust want to make sure that a standard spec behaves in a similar manner between podman and k8s other than that I think this should be fine. So yeah i guess its fine.\n\nEdit: Nvm not a blocker."
+        },
+        {
+            "user": "vrothberg",
+            "body": "> Containers follow restart policy not the Pod. Theoretically if I add a restart=always container to a Pod, the container should restart even if the Pod is set to `stop`,\n\nYes, that is correct.  That is why the tests set the restart policy to \"onFailure\" to actually trigger the \"stop\" exit policy when being run by `play kube`.\n\nIt is also a topic that I wanted to reflect on next week: should the default restart policy really be \"always\"?  I see why K8s does that but should Podman do that as well?"
+        },
+        {
+            "user": "vrothberg",
+            "body": "> @vrothberg Just a small doubt why do we need extra `exit_policy` shouldn't pod just follow how `restartPolicy` is configured default is `Always` so it is expected to restart but if its `Never` or `OnFailure` pod should just end with `Succeeded` status.\n\nIt won't without this patch as the infra container would continue to run.  Hence, we need to stop the pod once all containers (other than the infra) are done. _However_, we cannot do that unconditionally as it would break backwards compat to how `podman pod create` works.  That's why we needed to make it configurable via an \"exit policy\".\n\n"
+        },
+        {
+            "user": "vrothberg",
+            "body": "> Moving to WIP for now to do the plumbing for containers.conf.\n\nDone."
+        },
+        {
+            "user": "vrothberg",
+            "body": "@mheon PTanotherL"
+        },
+        {
+            "user": "mheon",
+            "body": "LGTM on my end"
+        },
+        {
+            "user": "vrothberg",
+            "body": "Nice, @rhatdan, want to merge?"
+        },
+        {
+            "user": "rhatdan",
+            "body": "/lgtm"
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "containers",
+            "repository": "common",
+            "number": 1017
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 13417
+        }
+    ]
+}

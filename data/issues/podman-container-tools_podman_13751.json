@@ -1,0 +1,65 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 13751,
+    "type": "issue",
+    "title": "error running newuidmap: \"invalid internal status\"",
+    "state": "closed",
+    "labels": [
+        "kind/bug",
+        "stale-issue",
+        "locked - please file new issue/PR"
+    ],
+    "user": "markstos",
+    "body": "**Is this a BUG REPORT or FEATURE REQUEST? (leave only one on its own line)**\n\n/kind bug\n\n**Description**\n\nUnable to run a container with podman 4.0.1 on Arch Linux\n\n**Steps to reproduce the issue:**\n\n1. `podman run -ti --rm --network=host docker.io/mongo:4.4 mongo`\n\n**Describe the results you received:**\n\n```\nERRO[0000] error running `/usr/bin/newuidmap 291662 0 1000 1 1 10000 65536`:  \nERRO[0000] invalid internal status, try resetting the pause process with \"podman system migrate\": cannot setup namespace using \"/usr/bin/newuidmap\": exit status 1 \n```\n\nRunning `podman system migrate` does not fix it. I got a different error before I ran `podman system migrate`, now lost. \n\n\n\n**Describe the results you expected:**\n\nExpected it to work. \n\n**Additional information you deem important (e.g. issue happens only occasionally):**\n\nBoth `/etc/subuid` and `/etc/subgid` contain `mark:10000:65536` and are symlinked to a file in my home directory.\n\nHere's what happens if I try to run the `newuid` command directly:\n\n```\n❯ /usr/bin/newuidmap 291829 0 1000 1 1 10000 65536\nnewuidmap: Could not open proc directory for target 291829\n```\n\n**Output of `podman version`:**\n\n`podman --version` reports 4.0.1, but `podman version` fails with the same \"invalid internal status\" error as above. \n\n```\n(paste your output here)\n```\n\n**Output of `podman info --debug`:**\n\nThe command can't run. It fails the same as above. \n\n**Package info (e.g. output of `rpm -q podman` or `apt list podman`):**\n\n```\n❯ paru -Qi podman\nName            : podman\nVersion         : 4.0.1-2\nDescription     : Tool and library for running OCI-based containers in pods\nArchitecture    : x86_64\nURL             : https://github.com/containers/podman\nLicenses        : Apache\nGroups          : None\nProvides        : None\nDepends On      : conmon  containers-common  crun  iptables  libdevmapper.so=1.02-64  libgpgme.so=11-64\n                  libseccomp.so=2-64  slirp4netns\nOptional Deps   : apparmor: for AppArmor support\n                  btrfs-progs: support btrfs backend devices [installed]\n                  catatonit: --init flag support\n                  netavark: for a new container-network-stack implementation\n                  podman-compose: for docker-compose compatibility\n                  podman-docker: for Docker-compatible CLI\nRequired By     : ansible-bender\nOptional For    : None\nConflicts With  : None\nReplaces        : None\nInstalled Size  : 79.67 MiB\nPackager        : David Runge <dvzrv@archlinux.org>\nBuild Date      : Sun 13 Mar 2022 07:44:23 AM EDT\nInstall Date    : Sun 13 Mar 2022 04:37:18 PM EDT\nInstall Reason  : Explicitly installed\nInstall Script  : No\nValidated By    : Signature\n```\n\n**Have you tested with the latest version of Podman and have you checked the Podman Troubleshooting Guide? (https://github.com/containers/podman/blob/main/troubleshooting.md)**\n\n\nYes\n",
+    "comments": [
+        {
+            "user": "giuseppe",
+            "body": "could you try running manually these commands?\n\n```\n$ unshare -U sleep 100 &\n$ /usr/bin/newuidmap $! 0 1000 1 1 10000 65536\n```\n\nDoes the newuidmap call succeed?"
+        },
+        {
+            "user": "markstos",
+            "body": "It failed. So I'm guessing this is not a podman problem? If not, it would be helpful if podman's diagnostic message could provide a little more direction on how to possibly resolve the issue.\n\nI'd really love to use rootless containers with Podman on Arch Linux.\n\n```\n$ unshare -U sleep 100 &\n[1] 381035\n$ /usr/bin/newuidmap $! 0 1000 1 1 10000 65536 || echo \"failed: $?\"\nfailed: 1\n```\n\nAfter I run `unshare`, I checked the `uid_map` file for the process. The file exists, but it is empty:\n\n```\ncat /proc/381035/uid_map \n```"
+        },
+        {
+            "user": "rhatdan",
+            "body": "I would figure either newuidmap is not setuid or does not have the filecap setuid applied to it.\nAlso is there entries in /etc/subuid for this user."
+        },
+        {
+            "user": "markstos",
+            "body": "@rhatdan You were right that Arch Linux didn't have the setuid bit set on `newuidmap`. It seems it's been that been way for 5+ years so is probably not considered a \"bug\" ( https://github.com/lxc/lxd/issues/3397#issuecomment-307632741 ). \n\nIt would be helpful if Podman could check for the `setuid` bit and warn about that problem if it's not set.\n\nBut setting the setuid bit still didn't didn't fix it.  As seen below, it looks like the `subuid` and `subgid` permissions are set correctly. \n\n```\nmark$ unshare -U sleep 100 &\n[1] 392795\n\nmark$ /usr/bin/newuidmap $! 0 1000 1 1 10000 65536 || echo \"failed: $?\"\nfailed: 1\n\nmark$ ls -l /bin/newuidmap \n-rwsr-sr-x 1 root libvirt 37528 Jan 27 08:47 /bin/newuidmap\n\nmark$ groups\nlibvirt docker video input audio wheel mark\n\nmark$ cat /etc/subuid \nmark:10000:65536\n\nmark$ cat /etc/subgid \nmark:10000:65536\n\nmark$ grep mark /etc/passwd\nmark:x:1000:1000::/home/mark:/bin/fish\n\nmark$ ls -lthd /etc/subuid /etc/subgid\nlrwxrwxrwx 1 root root 28 Apr  1 10:17 /etc/subgid -> /home/mark/.local/etc/subgid\nlrwxrwxrwx 1 root root 28 Apr  1 10:17 /etc/subuid -> /home/mark/.local/etc/subuid\n```\n\n(The \"group\" of `newuid` was originally set to \"root\", but after a test failed using that, I tried setting the group to \"libvirt\" to see if that helped. It didn't). "
+        },
+        {
+            "user": "markstos",
+            "body": "@rhatdan I presume you closed this because the permissions of `newuidmap` are not a Podman bug. I get that. That's fair.\n\nConsider this a \"feature request\" for Podman to detect this case and exit gracefully with an error message that `newuidmap` doesn't have the required permissions. \n\nI've tried unsuccessfully to get going with Podman multiple times due to rough edges that I'm sure are due in part to running it outside of Fedora.  Smoothing out these rough edges with better diagnostics can help grow the user base and in turn the pool of contributors.  "
+        },
+        {
+            "user": "rhatdan",
+            "body": "Opened a PR  containers/storage#1188 to check on failure of newuidmap and newgidmap."
+        },
+        {
+            "user": "markstos",
+            "body": "Thank you  @rhatdan !"
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "rhatdan",
+            "body": "Since this is in podman 4.1, closing."
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "containers",
+            "repository": "storage",
+            "number": 1188
+        },
+        {
+            "organization": "ES-Nix",
+            "repository": "podman-rootless",
+            "number": 9
+        }
+    ]
+}

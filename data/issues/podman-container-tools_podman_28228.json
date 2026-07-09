@@ -1,0 +1,128 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 28228,
+    "type": "pull_request",
+    "title": "fix: compat API image push err meg propagation",
+    "state": "closed",
+    "labels": [
+        "stale-pr",
+        "kind/api-change",
+        "6.0"
+    ],
+    "user": "matejvasek",
+    "body": "When returning error http code (e.g. 4xx, 5xx) the body needs to contain a JSON that has a key `message` in it,\nwe must not use `jsonmessage.JSONMessage`.\n\nThe JSON of shape `jsonmessage.JSONMessage` is used only when client already received 200.\n\n<!--\nThanks for sending a pull request!\n\nFor more detailed information, please review our contributing guidelines:\nhttps://github.com/containers/podman/blob/main/CONTRIBUTING.md#submitting-pull-requests\n-->\n\n#### Checklist\n\nEnsure you have completed the following checklist for your pull request to be reviewed:\n<!-- Use [x] to mark as done, or click the checkbox after opening PR -->\n\n- [ ] Certify you wrote the patch or otherwise have the right to pass it on as an open-source patch by signing all\ncommits. (`git commit -s`). (If needed, use `git commit -s --amend`).  The author email must match\nthe sign-off email address. See [CONTRIBUTING.md](https://github.com/containers/podman/blob/main/CONTRIBUTING.md#sign-your-prs)\nfor more information.\n- [ ] Referenced issues using `Fixes: #00000` in commit message (if applicable)\n- [ ] [Tests](https://github.com/containers/podman/tree/main/test#readme) have been added/updated (or no tests are needed)\n- [ ] [Documentation](https://github.com/containers/podman/blob/main/docs/README.md) has been updated (or no documentation changes are needed)\n- [ ] All commits pass `make validatepr` (format/lint checks)\n- [ ] [Release note](https://github.com/kubernetes/community/blob/master/contributors/guide/release-notes.md) entered in the section below (or `None` if no user-facing changes)\n\n#### Does this PR introduce a user-facing change?\n\n<!--\nWrite `None` if there are no user-facing changes, otherwise enter your release note below.\nInclude \"action required\" if users need to take action when upgrading.\n-->\n\n```release-note\n\n```\n",
+    "comments": [
+        {
+            "user": "matejvasek",
+            "body": "alternative fix:\n```patch\ndiff --git a/pkg/api/handlers/compat/images_push.go b/pkg/api/handlers/compat/images_push.go\nindex a5e63383f7..c2fed1389b 100644\n--- a/pkg/api/handlers/compat/images_push.go\n+++ b/pkg/api/handlers/compat/images_push.go\n@@ -189,21 +189,23 @@ loop: // break out of for/select infinite loop\n \t\t\tflush()\n \t\tcase err := <-pushErrChan:\n \t\t\tif err != nil {\n-\t\t\t\tvar msg string\n+\t\t\t\tvar code = http.StatusInternalServerError\n \t\t\t\tif errors.Is(err, storage.ErrImageUnknown) {\n \t\t\t\t\t// Image may have been removed in the meantime.\n-\t\t\t\t\twriteStatusCode(http.StatusNotFound)\n-\t\t\t\t\tmsg = \"An image does not exist locally with the tag: \" + imageName\n-\t\t\t\t} else {\n-\t\t\t\t\twriteStatusCode(http.StatusInternalServerError)\n-\t\t\t\t\tmsg = err.Error()\n+\t\t\t\t\tcode = http.StatusNotFound\n+\t\t\t\t\terr = errors.New(\"An image does not exist locally with the tag: \" + imageName)\n+\t\t\t\t}\n+\t\t\t\tif !statusWritten {\n+\t\t\t\t\tutils.Error(w, code, err)\n+\t\t\t\t\tflush()\n+\t\t\t\t\tbreak loop\n \t\t\t\t}\n \t\t\t\treport.Error = &jsonstream.Error{\n-\t\t\t\t\tMessage: msg,\n+\t\t\t\t\tMessage: err.Error(),\n \t\t\t\t}\n \t\t\t\t//nolint:staticcheck // Deprecated field, but because consumers might still read it keep it.\n \t\t\t\tif _, err := apiutil.SupportedVersion(r, \"<1.52.0\"); err == nil {\n-\t\t\t\t\treport.ErrorMessage = msg\n+\t\t\t\t\treport.ErrorMessage = err.Error()\n \t\t\t\t}\n \t\t\t\tif err := enc.Encode(report); err != nil {\n \t\t\t\t\tlogrus.Warnf(\"Failed to json encode error %q\", err.Error())\n```"
+        },
+        {
+            "user": "matejvasek",
+            "body": "Well simplest might be basically revert https://github.com/containers/podman/pull/18954 and return `200` immediately *before* the loop. That's what docker actually does. Missing image? => `200`. Registry not reachable? believe it or not `200`. I kid you not.\n\nThen again some people might be used to that we return 4xx 5xx."
+        },
+        {
+            "user": "matejvasek",
+            "body": "/cc @vrothberg "
+        },
+        {
+            "user": "mheon",
+            "body": "...Should we have a separate code path for Compat Pull that does the \"dumb thing\" and make Libpod pull a little more intelligent? Can probably share ~90% of code between the two. Docker always gets a 200 and an error message, Libpod endpoints get more descriptive HTTP status codes and errors?"
+        },
+        {
+            "user": "simonbrauner",
+            "body": "I like the alternative fix, but I would propose saving the error to a different variable instead of keeping it in `err`, because `if _, err := apiutil.SupportedVersion(r, \"<1.52.0\"); err == nil {` overwrites the error with `nil` before `report.ErrorMessage = err.Error()` happens.\n\n```patch\ndiff --git a/pkg/api/handlers/compat/images_push.go b/pkg/api/handlers/compat/images_push.go\nindex a5e63383f7..5e3a4fc1bf 100644\n--- a/pkg/api/handlers/compat/images_push.go\n+++ b/pkg/api/handlers/compat/images_push.go\n@@ -189,21 +189,24 @@ loop: // break out of for/select infinite loop\n                        flush()\n                case err := <-pushErrChan:\n                        if err != nil {\n-                               var msg string\n+                               statusCode := http.StatusInternalServerError\n+                               pushError := err\n                                if errors.Is(err, storage.ErrImageUnknown) {\n                                        // Image may have been removed in the meantime.\n-                                       writeStatusCode(http.StatusNotFound)\n-                                       msg = \"An image does not exist locally with the tag: \" + imageName\n-                               } else {\n-                                       writeStatusCode(http.StatusInternalServerError)\n-                                       msg = err.Error()\n+                                       statusCode = http.StatusNotFound\n+                                       pushError = errors.New(\"An image does not exist locally with the tag: \" + imageName)\n+                               }\n+                               if !statusWritten {\n+                                       utils.Error(w, statusCode, pushError)\n+                                       flush()\n+                                       break loop\n                                }\n                                report.Error = &jsonstream.Error{\n-                                       Message: msg,\n+                                       Message: pushError.Error(),\n                                }\n                                //nolint:staticcheck // Deprecated field, but because consumers might still read it keep it.\n                                if _, err := apiutil.SupportedVersion(r, \"<1.52.0\"); err == nil {\n-                                       report.ErrorMessage = msg\n+                                       report.ErrorMessage = pushError.Error()\n                                }\n                                if err := enc.Encode(report); err != nil {\n                                        logrus.Warnf(\"Failed to json encode error %q\", err.Error())\n\n```"
+        },
+        {
+            "user": "matejvasek",
+            "body": "I don't think we necessary need to return `200` like `docker` does, I think it's pretty neat that `podman` returns `404` for missing image for instance. We just must ensure that the body shape matches status code. If we return non-`200` the body must have `message` field. If we return `200` we must return sequence of `jsonmessage.JSONMessage`."
+        },
+        {
+            "user": "matejvasek",
+            "body": "I think that also docker may return non-`200` on some \"early\" errors (when some very basic preconditions are not met). However whether image does not exist or the registry hostname is not resolvable seems to be \"late\" error that happens after docker sends status code."
+        },
+        {
+            "user": "matejvasek",
+            "body": ">I think that also docker may return non-200 on some \"early\" errors \n\nearly errors are probably only some parameter validation error, when there is something really wrong with input parameters, e.g. invalid image name."
+        },
+        {
+            "user": "packit-as-a-service[bot]",
+            "body": "[NON-BLOCKING] Packit jobs failed. @containers/packit-build please check. Everyone else, feel free to ignore."
+        },
+        {
+            "user": "matejvasek",
+            "body": "What is failing? Why?"
+        },
+        {
+            "user": "Honny1",
+            "body": "Flaky CI. I rerun tests."
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this PR had no activity for 30 days."
+        },
+        {
+            "user": "mheon",
+            "body": "Do we need to get this in before 6.0?"
+        },
+        {
+            "user": "mtrmac",
+            "body": "@mheon It does change the output of the API, although it could be reasonably called a bug fix.\n\nIf we were treating this as an API break that needs to be done now, I’d prefer also fixing `pkg/api/handlers/utils.CompatPull` similarly."
+        },
+        {
+            "user": "matejvasek",
+            "body": "What is status on this?"
+        },
+        {
+            "user": "matejvasek",
+            "body": "IMO this is a bugfix. The endpoint did not behave like moby/docker does. Compat endpoints should be behave like moby/docker.\n\nIt's been a long time but IIRC my investigation:\nInterestingly https://github.com/podman-container-tools/podman/pull/18954 worked just fine, but only by accident because it contained a bug of its own. However when that bug was fixed in https://github.com/podman-container-tools/podman/pull/26898 the incorrect response shape bug popped up.\n\nI had to adjust my software to this see https://github.com/knative/func/pull/3477/files#diff-7b5a4e905dcf16aafdbf43da2d3daa6272346d09ddb05d9ddb39cd4d68c6cbb9R197-R198\n\nBefore I could know whether image push failed because specific error (e.g. hostname resolution) today I can just check that **some** error happened."
+        },
+        {
+            "user": "matejvasek",
+            "body": "I am not making problems up. One day I noticed that podman 5.7 reports errors incorrectly."
+        },
+        {
+            "user": "mheon",
+            "body": "I am still in favor of a merge. Can you rebase to pick up new CI?"
+        },
+        {
+            "user": "mtrmac",
+            "body": "@mheon \n\n> If we were treating this as an API break that needs to be done now, I’d prefer also fixing `pkg/api/handlers/utils.CompatPull` similarly.\n\nyour call on whether this should happen together or whether doing only one of them for 6.0 is fine; I have little preference."
+        },
+        {
+            "user": "inknos",
+            "body": "PR LGTM, but imho whether it's a bugfix or not, I think it's better to treat it as a user-facing change, so probably release notes are good here. I am in favor of before 6.0 too"
+        },
+        {
+            "user": "mheon",
+            "body": "@mtrmac I am on board with doing pull as well"
+        },
+        {
+            "user": "inknos",
+            "body": "> I am still in favor of a merge. Can you rebase to pick up new CI?\n\nFor clarity, I'd like to see the PR rebased on new CI as well :)"
+        },
+        {
+            "user": "mheon",
+            "body": "We can do pull in a separate PR, or open an issue to do it in 7"
+        },
+        {
+            "user": "packit-as-a-service[bot]",
+            "body": "tmt tests failed for commit 7607c3ec8200a4064c9ecb5d84c662816bc9f9c2. @lsm5, @psss, @thrix please check."
+        },
+        {
+            "user": "matejvasek",
+            "body": "No idea why tests are failing."
+        },
+        {
+            "user": "Honny1",
+            "body": "Classical packit issues. Since the whole our CI is green. We can continue with reviews. PTAL @podman-container-tools/podman-maintainers "
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 28901
+        }
+    ]
+}

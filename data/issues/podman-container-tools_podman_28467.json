@@ -1,0 +1,84 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 28467,
+    "type": "issue",
+    "title": "Value of $XDG_RUNTIME_DIR persists across reboots",
+    "state": "open",
+    "labels": [
+        "kind/bug"
+    ],
+    "user": "WhyNotHugo",
+    "body": "### Issue Description\n\nPreviously, `XDG_RUNTIME_DIR=/run/user-1000`.\n\nMy system setup has changed, and after a reboot, `XDG_RUNTIME_DIR` points to a different location.\n\n`podman` seems to have persisted the value of `XDG_RUNTIME_DIR` somewhere, and now fails, because it's trying to access a path which no longer exists:\n\n```\n> podman ps\nWARN[0000] RunRoot is pointing to a path (/run/user-1000/containers) which is not writable. Most likely podman will fail. \nError: creating events dirs: mkdir /run/user-1000: permission denied\n```\n\nNote that the value of `XDG_RUNTIME_DIR` has been stable since the system rebooted: the value that podman is using was only ever exposed _before_ the system went offline.\n\n### Steps to reproduce the issue\n\nSteps to reproduce the issue\n1. Set `XDG_RUNTIME_DIR` to some value.\n2. `podman run …` (any container)\n3. Reconfigure the system so that the next boot uses a different `XDG_RUNTIME_DIR` (e.g.: by changing the system component that initialises it).\n4. Reboot\n5. `podman ps`\n\n\n### Describe the results you received\n\nPodman tries to access a path based on an environment variable's value from a previous boot.\n\n### Describe the results you expected\n\nPodman should not cache environment variables or values derived from them; it should read the current XDG_RUNTIME_DIR.\n\n### podman info output\n\nPodman 5.8.1-r1, on Alpine Linux.\n\n```console\n> podman info\nWARN[0000] RunRoot is pointing to a path (/run/user-1000/containers) which is not writable. Most likely podman will fail. \nError: creating events dirs: mkdir /run/user-1000: permission denied\n```\n\n### Podman in a container\n\nNo\n\n### Privileged Or Rootless\n\nRootless\n\n### Upstream Latest Release\n\nYes",
+    "comments": [
+        {
+            "user": "WhyNotHugo",
+            "body": "In `libpod/runtime.go`, `mergeDBConfig` explicitly overwrite the value of `r.storageConfig.RunRoot` with the value persisted in the database.\n\nIn all cases, podman would use a stale value of `XDG_RUNTIME_DIR`. \nThis only works if the database value is equal to the current value (in which case the assignment is a no-op). "
+        },
+        {
+            "user": "Luap99",
+            "body": "That is expected, you cannot safely change paths later because full paths may be stored in the container db as json values, so if we would use the new path we might end up in a very bad state.\n\nYou would have to `podman system reset` to start fresh."
+        },
+        {
+            "user": "WhyNotHugo",
+            "body": "> That is expected\n\nAs an end-user, this is most definitely not expected.\n\nThe xdg basedir spec is quite clear about this:\n\n> The lifetime of the directory MUST be bound to the user being logged in\n\npodman assumes the contrary: it assumes that the directory persists across reboots, and fails if its path changes.\n\n---\n\n> you cannot safely change paths later because full paths may be stored in the container db as json values, so if we would use the new path we might end up in a very bad state.\n\nThe XDG_RUNTIME_DIR is, by definition, ephemeral. All of its contents are flushed when the system goes offline. Any path that points to directories inside of it become invalid at that point.\n\nThe current implementation only works because most implementations use a stable path across reboots.\n\n> You would have to podman system reset to start fresh.\n\nDestroying all my data every reboot is absolutely unacceptable."
+        },
+        {
+            "user": "Luap99",
+            "body": "\n> > That is expected\n> \n> As an end-user, this is most definitely not expected.\n\nI am not claiming otherwise, I am saying this is expected behavior of podman as of today adn as such not something I consider a bug. That does not rule out changes in the future.\n\n\n> The XDG_RUNTIME_DIR is, by definition, ephemeral. All of its contents are flushed when the system goes offline. Any path that points to directories inside of it become invalid at that point.\n\nWell the files are gone sure, we handle that fine and recreate paths. The problem is we have many db options who may commit such tmp paths into the db and all these paths would somehow be updated each boot which is not exactly trival to maintain or alternative figure out how to not store them or store relative paths.\n\nThese are technical problems to solve before we could remove such restrictions\ncc @mheon \n\nAlso the other reason why we have such paths checks is that many user run with inconsistent envs, i.e. no one session with no XDG_RUNTIME_DIR while another with. IF we do not catch this we end up with inconsistent states which is just really bad.\n\n> Destroying all my data every reboot is absolutely unacceptable.\n\nWhy would you change that value on every reboot?\n\n\n\n\n"
+        },
+        {
+            "user": "WhyNotHugo",
+            "body": "> Well the files are gone sure, we handle that fine and recreate paths. The problem is we have many db options who may commit such tmp paths into the db and all these paths would somehow be updated each boot which is not exactly trival to maintain or alternative figure out how to not store them or store relative paths.\n\nCan we store the paths relative to `$XDG_RUNTIME_DIR`?\n\nThe paths can be made absolute when reading them and be made relative when saving them, providing a clear barrios where this happens.\n\n> Also the other reason why we have such paths checks is that many user run with inconsistent envs, i.e. no one session with no XDG_RUNTIME_DIR while another with.\n\nI think it's safe to exit-error if `$XDG_RUNTIME_DIR`; the user can deal with fixing their environment in such a case. I think pretty much anything else would fail in such a scenario anyway.\n\n> Why would you change that value on every reboot?\n\nThat a bit tangential, but instead of using a suid helper to create the directory in a location only writable by root, it's created _without_ suid in a location where all users can write. The location is not stable across reboots in order to prevent races. I wrote [an article with the rationale behind this](https://whynothugo.nl/journal/2026/04/02/creating-an-xdg_runtime_dir/) if you're really interested.\n\nA longer-term goal is to mount `/` with `nosuid`."
+        },
+        {
+            "user": "mheon",
+            "body": "I was planning to include auto-rewrite for paths in the database (if and only if no containers, pods, and volumes are present) in my 6.0 SQLite removal, but I ended up deferring it for reasons I've honestly forgotten.\n\nChanging storage for paths in containers to be relative - to allow moves without removing all your containers - is also possible, but adds complications, the potential for bugs, and introduces a lot of migration problems (what about containers created prior to the patch?). Further, it doesn't really solve the problem that our cached paths in the database seek to prevent. If `XDG_RUNTIME_DIR` changes but Podman container storage is not moved at the same time, you now have containers that exist in the database but whose backing storage no longer exists. Fixed paths guarantees that we're insulated from environment variable changes, which can and do occur on a regular basis (e.g. `/tmp` vs `/var/run` for temporary files based on how a user logged in is a fairly common one we see)."
+        },
+        {
+            "user": "Luap99",
+            "body": "> Fixed paths guarantees that we're insulated from environment variable changes, which can and do occur on a regular basis (e.g. /tmp vs /var/run for temporary files based on how a user logged in is a fairly common one we see).\n\nI think that is fair for as long as the user is logged in, as pointed out here though the spec says XDG_RUNTIME_DIR can change afterwards so we should be able to deal with it somehow.\n\nWe already have special state reset logic to detect reboots, and of course to recreate the tmpdirs we use there. So we could freeze the XDG_RUNTIME_DIR on each boot but allow changes between reboots.\n\nBut I do agree implementation wise making the code ready for such things is non trival considering we need to keep old containers working.\nI do not see this as a high priority thing for us to fix but I would certainly welcome contributions."
+        },
+        {
+            "user": "WhyNotHugo",
+            "body": "> Changing storage for paths in containers to be relative - to allow moves without removing all your containers - is also possible, but adds complications, the potential for bugs\n\nNote that nothing is moved. The path to which `$XDG_RUNTIME_DIR` points (both in my setup and yours) ceases to exist upon reboot. It gets re-created and re-populated.\n\n> Further, it doesn't really solve the problem that our cached paths in the database seek to prevent. If XDG_RUNTIME_DIR changes but Podman container storage is not moved at the same time, you now have containers that exist in the database but whose backing storage no longer exists.\n\n`$XDG_RUNTIME_DIR` must not change while the user has running processes; this is expressly prohibited by the basedir spec. Such a scenario would be the result of a wildly broken setup, and all sorts of other things would break (or note: wayland, pipewire, dbus).\n\nI'm not sure that this realistically needs to be supported. \n\n> Fixed paths guarantees that we're insulated from environment variable changes, which can and do occur on a regular basis (e.g. /tmp vs /var/run for temporary files based on how a user logged in is a fairly common one we see).\n\nI guess this refers to `$TMPDIR`, and this protection can remain, since it's orthogonal to caching the value of `XDG_RUNTIME_DIR`.\n\n---\n\nTLDR: I think the main value of storing paths is protecting against `$TMPDIR` and others changing, but realistically, protecting against change in `XDG_RUNTIME_DIR` is unnecessary."
+        },
+        {
+            "user": "mheon",
+            "body": "> > Changing storage for paths in containers to be relative - to allow moves without removing all your containers - is also possible, but adds complications, the potential for bugs\n> \n> Note that nothing is moved. The path to which `$XDG_RUNTIME_DIR` points (both in my setup and yours) ceases to exist upon reboot. It gets re-created and re-populated.\n> \n> > Further, it doesn't really solve the problem that our cached paths in the database seek to prevent. If XDG_RUNTIME_DIR changes but Podman container storage is not moved at the same time, you now have containers that exist in the database but whose backing storage no longer exists.\n> \n> `$XDG_RUNTIME_DIR` must not change while the user has running processes; this is expressly prohibited by the basedir spec. Such a scenario would be the result of a wildly broken setup, and all sorts of other things would break (or note: wayland, pipewire, dbus).\n\nAnd yet, it happens. Particularly when dealing with headless systems where you have a user starting sessions directly via SSH, while also having cronjobs or similar starting containers. One of these creates a proper login session and gets a `/var/run/$UID` created; one does not. If the containers created by these jobs overlap, things can start to break quickly. Caching paths ensures we're at least all using the same source of truth. If we cache `/var/run/$UID` and it doesn't exist for the timer-initiated containers, things still break, but it's at least immediately obvious to folks what went wrong.\n\n"
+        },
+        {
+            "user": "WhyNotHugo",
+            "body": "podman is trying to accomodate broken environments where XDG_RUNTIME_DIR _is not_ consistent for concurrent sessions. This behaviour violates the specification, and software that sets up environments in this way needs to be fixed.\n\nObviously I'm biased because this affects me, but scenarios which *don't* violate the spec take precedence over scenarios which violate the spec.\n\nThe big issue now is that folks have come to rely on this band-aid, and removing it is a breaking change."
+        },
+        {
+            "user": "WhyNotHugo",
+            "body": "Okay, new pitch:\n\nWhen reading values from the database, check if they exist and area readable/writeable. If they are override with these values, otherwise ignore them."
+        },
+        {
+            "user": "WhyNotHugo",
+            "body": "> When reading values from the database, check if they exist and area readable/writeable. If they are override with these values, otherwise ignore them.\n\nAny thoughts on this approach? I can't think of it breaking any scenario."
+        },
+        {
+            "user": "Luap99",
+            "body": "> Okay, new pitch:\n> \n> When reading values from the database, check if they exist and area readable/writeable. If they are override with these values, otherwise ignore them.\n\nIgnoring the values when it is not writeable/exists does not solve the problem of the db having full paths stored and hence will just defer the problem to a later point and lead to even more unexpected results.\n\nI think we need some higher level discussion on how to solve the we store full paths in the db problem, but that is not a problem I will have time to look at any time soon."
+        },
+        {
+            "user": "mheon",
+            "body": "I think it might be time to put together a design on what this could look like. At that point, maybe tag it for community contributors?"
+        },
+        {
+            "user": "WhyNotHugo",
+            "body": "> Ignoring the values when it is not writeable/exists does not solve the problem of the db having full paths stored and hence will just defer the problem to a later point and lead to even more unexpected results.\n\n@mheon indicated above that this \"problem\" (saving runtime paths into the db) exist as a workaround for users with broken setups which change XDG_RUNTIME_DIR at runtime.\n\nWhat kind of unexpected results do you envision happening with my proposal?"
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "WhyNotHugo",
+            "body": "This is still an issue every time the system reboots. I've been using hacky workarounds with symlinks, but it's a very annoying bug."
+        }
+    ],
+    "cross_references": []
+}

@@ -1,0 +1,176 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 16107,
+    "type": "issue",
+    "title": "f37 rootless: pod create: creating cgroup, already exists",
+    "state": "closed",
+    "labels": [
+        "locked - please file new issue/PR"
+    ],
+    "user": "edsantiago",
+    "body": "on f37:\n```console\n$ podman pod create\nError: unable to create pod cgroup for pod SHA:\n    creating cgroup user.slice/user-libpod_pod_SHA.slice: \n   Unit user-libpod_pod_SHA.slice already exists.\n```\nInfinitely repeatable, each time with a different SHA.\n\npodman-4.3.0~rc1-3.fc37.x86_64 on 5.19.12-300.fc37.x86_64\n\nalso built from sources, main @ bb0b1849d7102c2f9212ebaaeb332519a92c5d3c",
+    "comments": [
+        {
+            "user": "rhatdan",
+            "body": "This is a blocker and should not be released until this is fixed.\n\n@mheon FYI"
+        },
+        {
+            "user": "giuseppe",
+            "body": "this looks like a systemd issue:\n\nI've tried the following program on F36, F37 and Rawhide and the issue happens only with F37:\n\n```go\npackage main\n\nimport (\n\t\"context\"\n\t\"fmt\"\n\t\"os\"\n\t\"strconv\"\n\n\tsystemdDbus \"github.com/coreos/go-systemd/v22/dbus\"\n\t\"github.com/godbus/dbus/v5\"\n)\n\n// GetUserConnection returns an user connection to D-BUS\nfunc GetUserConnection(uid int) (*systemdDbus.Conn, error) {\n\treturn systemdDbus.NewConnection(func() (*dbus.Conn, error) {\n\t\treturn dbusAuthConnection(uid, dbus.SessionBusPrivate)\n\t})\n}\n\nfunc dbusAuthConnection(uid int, createBus func(opts ...dbus.ConnOption) (*dbus.Conn, error)) (*dbus.Conn, error) {\n\tconn, err := createBus()\n\tif err != nil {\n\t\treturn nil, err\n\t}\n\n\tmethods := []dbus.Auth{dbus.AuthExternal(strconv.Itoa(uid))}\n\n\terr = conn.Auth(methods)\n\tif err != nil {\n\t\tconn.Close()\n\t\treturn nil, err\n\t}\n\tif err := conn.Hello(); err != nil {\n\t\treturn nil, err\n\t}\n\n\treturn conn, nil\n}\n\nfunc main() {\n\tconn, err := GetUserConnection(os.Geteuid())\n\tif err != nil {\n\t\tpanic(err)\n\t}\n\tname := \"user-libpod_pod_642a6b41ae846eedd6587e86d653e43fae07431e9c8ee235dfff9652274aca2f.slice\"\n\tproperties := []systemdDbus.Property{\n\t\tsystemdDbus.PropDescription(fmt.Sprintf(\"cgroup %s\", name)),\n\t\tsystemdDbus.PropWants(\"user.slice\"),\n\t}\n\tpMap := map[string]bool{\n\t\t\"DefaultDependencies\": false,\n\t\t\"MemoryAccounting\":    true,\n\t\t\"CPUAccounting\":       true,\n\t\t\"BlockIOAccounting\":   true,\n\t}\n\n\tfor k, v := range pMap {\n\t\tp := systemdDbus.Property{\n\t\t\tName:  k,\n\t\t\tValue: dbus.MakeVariant(v),\n\t\t}\n\t\tproperties = append(properties, p)\n\t}\n\n\tch := make(chan string)\n\t_, err = conn.StartTransientUnitContext(context.TODO(), \"user-libpod_pod_047d1efebfc678193ffe5a251334be92e62a1aee7ecab2c8c6fc80973e9e51d5.slice\", \"replace\", properties, ch)\n\tfmt.Println(err)\n}\n```\n\nOn F37 it fails with:\n\n```\nUnit user-libpod_pod_047d1efebfc678193ffe5a251334be92e62a1aee7ecab2c8c6fc80973e9e51d5.slice already exists.\n```"
+        },
+        {
+            "user": "giuseppe",
+            "body": "filed a bugzilla: https://bugzilla.redhat.com/show_bug.cgi?id=2133792"
+        },
+        {
+            "user": "cdoern",
+            "body": "I am going to take a look at this, I was the last one to mess around with this code. It is possible we create the directory in two places incorrectly. "
+        },
+        {
+            "user": "cdoern",
+            "body": "I would bet that this has to do with the recent split up of the runtime files for freebsd support.... "
+        },
+        {
+            "user": "edsantiago",
+            "body": "Update: this is new in podman-4.3. `podman-4:4.2.1-2.fc37.x86_64` works fine. I am sorry for the misinformation during scrum."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@giuseppe WDYT?"
+        },
+        {
+            "user": "rhatdan",
+            "body": "If this new then it is a blocker for release."
+        },
+        {
+            "user": "giuseppe",
+            "body": "@cdoern can you reproduce the issue with the code example I've posted above?\n\nI'd expect that to work anyway (as it does on F36 and Rawhide), no matter what we do in Podman"
+        },
+        {
+            "user": "cdoern",
+            "body": "@giuseppe I am running F36 but it does work for me on there. is the problem reproducible with podman 4.2 on F37? The major changes that have been done due to the freebsd support and from me adding extended systemd support for pods makes me worried that it might actually be our issue."
+        },
+        {
+            "user": "giuseppe",
+            "body": "I can reproduce the issue on F37 both with podman and the test snippet"
+        },
+        {
+            "user": "edsantiago",
+            "body": "The issue is new in podman 4.3. podman 4.2 works fine on f37. This is a regression. No matter whose fault it is, podman 4.3 cannot ship on f37 right now."
+        },
+        {
+            "user": "cdoern",
+            "body": "> The issue is new in podman 4.3. podman 4.2 works fine on f37. This is a regression. No matter whose fault it is, podman 4.3 cannot ship on f37 right now.\n\nOk, this makes me think it is a podman 4.3 inclusion. Unless a major change in systemd also shipped in that timeframe? I am going to investigate the cgroup creation path this afternoon to see if I can pinpoint it"
+        },
+        {
+            "user": "giuseppe",
+            "body": "it seems to work fine on F37 if I downgrade to [systemd-251.4-53.fc37](https://bodhi.fedoraproject.org/updates/FEDORA-2022-37c5a02924), looking at the changelog the patch \"[PATCH] manager: optionally, do a full preset on first boot\" was removed from the last systemd version, so I've tried running `systemctl preset-all` and the command seems to fix the system:\n\n```\n$ bin/podman pod create\n67bb0802368eee78e79ade156756026c3ece2c811ed6144fc3c6f64ae274600d\n```"
+        },
+        {
+            "user": "cevich",
+            "body": "@giuseppe so if I read that right, I could stick that command into our CI as a temporary workaround.  To get F37 tests passing for now, until the package is fixed (and new images built)?"
+        },
+        {
+            "user": "yuwata",
+            "body": "Hi! I am a maintainer of systemd.\nCould you open an issue on systemd upstream https://github.com/systemd/systemd with\n1. minimal reproducer _without_ the go module,\n2. debugging log of systemd,\n3. if possible, result of bisect between v251.4..v251.5,\n\nNote, the patch about the preset-all should not be relevant. The patch was merged to v251.5, hence dropped from the spec file. The functionality about that feature should not be changed."
+        },
+        {
+            "user": "giuseppe",
+            "body": "@yuwata there is already a reproducer that doesn't require Podman attached to the bugzilla."
+        },
+        {
+            "user": "yuwata",
+            "body": "Is it possible to reproduce the issue with `busctl` or `gdbus`, without using the go module??\nAlso, please provide the debugging log with the reproducer. Otherwise, there is almost nothing we can do."
+        },
+        {
+            "user": "giuseppe",
+            "body": " It works on Rawhide so from what I can see it is related to the specific version on F37.\n\nI will try to get a simpler reproducer, but I don't see how there is nothing you can do since there is already one with minimal dependencies.  Have you tried running it on a freshly installed F37 machine?"
+        },
+        {
+            "user": "giuseppe",
+            "body": "I've reinstalled Fedora 37 trying to find a better reproducer but I don't see the issue anymore, I'll update here as soon as I've more details"
+        },
+        {
+            "user": "giuseppe",
+            "body": "after updating the packages and rebooting I see again the error on the freshly installed F37 VM.\n\nThis is what I captured from busctl:\n\n```\nmethod call time=1665745962.106018 sender=:1.18 -> destination=org.freedesktop.systemd1 serial=2 path=/org/freedesktop/systemd1; interface=org.freedesktop.systemd1.Manager; member=StartTransientUnit\n   string \"test-25478.slice\"\n   string \"replace\"\n   array [\n      struct {\n         string \"Description\"\n         variant             string \"cgroup test-25478.slice\"\n      }\n      struct {\n         string \"Wants\"\n         variant             array [\n               string \"user.slice\"\n            ]\n      }\n      struct {\n         string \"MemoryAccounting\"\n         variant             boolean true\n      }\n      struct {\n         string \"CPUAccounting\"\n         variant             boolean true\n      }\n      struct {\n         string \"BlockIOAccounting\"\n         variant             boolean true\n      }\n      struct {\n         string \"DefaultDependencies\"\n         variant             boolean false\n      }\n   ]\n   array [\n   ]\nmethod call time=1665745962.106175 sender=:1.0 -> destination=org.freedesktop.DBus serial=64 path=/org/freedesktop/DBus; interface=org.freedesktop.DBus; member=GetConnectionCredentials\n   string \":1.18\"\nmethod return time=1665745962.106180 sender=org.freedesktop.DBus -> destination=:1.0 serial=4294967295 reply_serial=64\n   array [\n      dict entry(\n         string \"UnixUserID\"\n         variant             uint32 1000\n      )\n      dict entry(\n         string \"ProcessID\"\n         variant             uint32 1959\n      )\n      dict entry(\n         string \"UnixGroupIDs\"\n         variant             array [\n               uint32 10\n               uint32 1000\n               uint32 1000\n            ]\n      )\n      dict entry(\n         string \"LinuxSecurityLabel\"\n         variant             array of bytes \"unconfined_u:unconfined_r:unconfined_t:s0-s0:c0.c1023\" + \\0\n      )\n   ]\nmethod call time=1665745962.106508 sender=:1.0 -> destination=org.freedesktop.DBus serial=65 path=/org/freedesktop/DBus; interface=org.freedesktop.DBus; member=GetConnectionUnixUser\n   string \":1.18\"\nmethod return time=1665745962.106524 sender=org.freedesktop.DBus -> destination=:1.0 serial=4294967295 reply_serial=65\n   uint32 1000\nerror time=1665745962.107075 sender=:1.0 -> destination=:1.18 error_name=org.freedesktop.systemd1.UnitExists reply_serial=2\n   string \"Unit test-25478.slice already exists.\"\nsignal time=1665745962.107083 sender=:1.0 -> destination=(null destination) serial=67 path=/org/freedesktop/systemd1; interface=org.freedesktop.systemd1.Manager; member=UnitNew\n   string \"test.slice\"\n   object path \"/org/freedesktop/systemd1/unit/test_2eslice\"\nsignal time=1665745962.107086 sender=:1.0 -> destination=(null destination) serial=68 path=/org/freedesktop/systemd1; interface=org.freedesktop.systemd1.Manager; member=UnitRemoved\n   string \"test.slice\"\n   object path \"/org/freedesktop/systemd1/unit/test_2eslice\"\nsignal time=1665745962.107097 sender=:1.0 -> destination=(null destination) serial=69 path=/org/freedesktop/systemd1; interface=org.freedesktop.systemd1.Manager; member=UnitNew\n   string \"test-25478.slice\"\n   object path \"/org/freedesktop/systemd1/unit/test_2d25478_2eslice\"\nsignal time=1665745962.107100 sender=:1.0 -> destination=(null destination) serial=70 path=/org/freedesktop/systemd1; interface=org.freedesktop.systemd1.Manager; member=UnitRemoved\n   string \"test-25478.slice\"\n   object path \"/org/freedesktop/systemd1/unit/test_2d25478_2eslice\"\nsignal time=1665745962.107523 sender=org.freedesktop.DBus -> destination=:1.19 serial=4294967295 path=/org/freedesktop/DBus; interface=org.freedesktop.DBus; member=NameLost\n   string \":1.19\"\nsignal time=1665745962.107529 sender=org.freedesktop.DBus -> destination=(null destination) serial=4294967295 path=/org/freedesktop/DBus; interface=org.freedesktop.DBus; member=NameOwnerChanged\n   string \":1.19\"\n   string \":1.19\"\n   string \"\"\nsignal time=1665745962.107576 sender=org.freedesktop.DBus -> destination=:1.18 serial=4294967295 path=/org/freedesktop/DBus; interface=org.freedesktop.DBus; member=NameLost\n   string \":1.18\"\nsignal time=1665745962.107580 sender=org.freedesktop.DBus -> destination=(null destination) serial=4294967295 path=/org/freedesktop/DBus; interface=org.freedesktop.DBus; member=NameOwnerChanged\n   string \":1.18\"\n   string \":1.18\"\n   string \"\"\n```\n\n"
+        },
+        {
+            "user": "giuseppe",
+            "body": "and the same reproducer with busctl:\n\n```\nNAME=test-$RANDOM.slice\necho Running $NAME\nbusctl --user call org.freedesktop.systemd1 /org/freedesktop/systemd1 org.freedesktop.systemd1.Manager StartTransientUnit 'ssa(sv)a(sa(sv))' \"$NAME\" \"replace\" 6 \"Description\" \"s\" \"slice\" \"Wants\" as 1 \"user.slice\" \"DefaultDependencies\" b false MemoryAccounting b true CPUAccounting b true BlockIOAccounting b true 0\n```\n\nOn F36 I get:\n\n```\nRunning test-20500.slice\no \"/org/freedesktop/systemd1/job/44528\"\n```\n\nOn F37:\n\n```\nRunning test-31900.slice\nCall failed: Unit test-31900.slice already exists.\n```\n"
+        },
+        {
+            "user": "keszybz",
+            "body": "https://github.com/systemd/systemd/pull/25004"
+        },
+        {
+            "user": "akdev1l",
+            "body": "This is fixed in F37\n\n```\n$ uname -r\n5.19.15-301.fc37.x86_64\n[akdev@halifax ~]$ podman pod create test\nf656fddd7f4dda70e06bc3e1c65defcafddee4b324b252b8cb6316d0d2dbe001\n``` "
+        },
+        {
+            "user": "vkSegfault",
+            "body": "Fresh Fedora 37, fully updated:\n`podman pod create test\nError: unable to create pod cgroup for pod eedfbde3da99856b9f4e363b986ab7b33d0432e8b83ea20ccfe6d7d68f086487: error creating cgroup user.slice/user-libpod_pod_eedfbde3da99856b9f4e363b986ab7b33d0432e8b83ea20ccfe6d7d68f086487.slice: Unit user-libpod_pod_eedfbde3da99856b9f4e363b986ab7b33d0432e8b83ea20ccfe6d7d68f086487.slice already exists.`"
+        },
+        {
+            "user": "akdev1l",
+            "body": "@vkSegfault what is your kernel version? \n\nI was able to validate above by applying: https://bodhi.fedoraproject.org/updates/FEDORA-2022-1a5b125ac6 \n\nperhaps the package isn't yet in the stable repos?  (it looks like it should be though)"
+        },
+        {
+            "user": "vkSegfault",
+            "body": "@akdev1l :\n`\nuname -r\n5.19.16-301.fc37.x86_64\n`\n\nbut with previous one: 5.19.1**5**-301 was all the same.\n\n\n`sudo dnf upgrade --refresh --advisory=FEDORA-2022-1a5b125ac6 \nDependencies resolved.\nNothing to do.\nComplete!\n`\nSo seems it's either not fixed or not in stable.\n\nThere are plenty of updates in Fedora 37 - Test Updates repo, but I had it turned off and actually a bit scary to install them cause F37 is pretty much great given it's not officialy released yet as stable release.\n\nEdit 1:\nAbove someone stated that bug affects only Podman 4.3 but in my case it's `podman --version\npodman version 4.2.1`"
+        },
+        {
+            "user": "akdev1l",
+            "body": "@vkSegfault mm it looks like I was using podman from rawhide repos:\n\n```\nakdev@halifax ~]$ rpm -q podman\npodman-4.3.0~rc1-5.fc38.x86_64\n[akdev@halifax ~]$ podman --version\npodman version 4.3.0-rc1\n[akdev@halifax ~]$ uname -r \n5.19.15-301.fc37.x86_64\n[akdev@halifax ~]$ podman pod create testpod\n2f442310b82f6f05d2649076dfedb378d34f1b029ed3c67d2a23bac711d2dbad\n```\n\nbut I downgraded to 4.2.1 and it also worked - I fully upgraded my system to be latest F37 with no rawhide packages:\n\n```\n$ uname -r\n5.19.16-301.fc37.x86_64\n$ rpm -q podman\npodman-4.2.1-2.fc37.x86_64\n$ podman --version\npodman version 4.2.1\n$ podman pod create test3\n5f23957501f00c5fe38f1be62b4e64526ca6c0b125ef4f6c0376085c94064321\n$ podman pod ps\nPOD ID        NAME        STATUS      CREATED         INFRA ID      # OF CONTAINERS\n5f23957501f0  test3       Created     43 seconds ago  686e7ebb80b6  1\n```\n\nworks ok for me not sure - we need a tie breaker"
+        },
+        {
+            "user": "jonnyso",
+            "body": "Well, don't know if this helps but, same problem for me on F37 Silverblue:\n\n```\n[jonny@fedora Podman]$ rpm -q podman\npodman-4.2.1-2.fc37.x86_64\n[jonny@fedora Podman]$ podman --version\npodman version 4.2.1\n[jonny@fedora Podman]$ uname -r\n5.19.16-301.fc37.x86_64\n[jonny@fedora Podman]$ systemctl --version\nsystemd 251 (251.6-609.fc37)\n```\n\n"
+        },
+        {
+            "user": "edsantiago",
+            "body": ">systemd 251 (251.6-609.fc37)\n\nI believe the fix is in systemd [251.**7**](https://bodhi.fedoraproject.org/updates/FEDORA-2022-c72fd8b071), you have .6.  "
+        },
+        {
+            "user": "giuseppe",
+            "body": "I think this issue can be closed since it has been fixed in systemd and there is no action to take in Podman, but please feel free to comment further"
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 15760
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 16162
+        },
+        {
+            "organization": "cockpit-project",
+            "repository": "bots",
+            "number": 3983
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 16231
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 16264
+        },
+        {
+            "organization": "containers",
+            "repository": "toolbox",
+            "number": 1085
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 16936
+        }
+    ]
+}

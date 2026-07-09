@@ -1,0 +1,99 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 2334,
+    "type": "issue",
+    "title": "SELinux denial when checkpointing a container",
+    "state": "closed",
+    "labels": [
+        "kind/bug",
+        "locked - please file new issue/PR"
+    ],
+    "user": "adrianreber",
+    "body": "When I try to checkpoint a container on Fedora 29 or RHEL8 with the latest available podman package I get the following SELinux denial:\n\n```\n# podman run -d docker.io/library/alpine:latest top\n# podman --log-level debug container checkpoint -l\ncriu failed: type NOTIFY errno 0\nlog file: /var/lib/containers/storage/overlay-containers/c84bb3f5307c63f2df5a441fa599b9517cde456bd5b0c9820e0e69c45da1c005/userdata/dump.log\nfailed to checkpoint container c84bb3f5307c63f2df5a441fa599b9517cde456bd5b0c9820e0e69c45da1c005: `/usr/bin/runc checkpoint --image-path /var/lib/containers/storage/overlay-containers/c84bb3f5307c63f2df5a441fa599b9517cde456bd5b0c9820e0e69c45da1c005/userdata/checkpoint --work-path /var/lib/containers/storage/overlay-containers/c84bb3f5307c63f2df5a441fa599b9517cde456bd5b0c9820e0e69c45da1c005/userdata c84bb3f5307c63f2df5a441fa599b9517cde456bd5b0c9820e0e69c45da1c005` failed: exit status 1\n# ausearch -m AVC -m USER_AVC -ts recent | grep top\ntype=AVC msg=audit(1550142323.799:1167): avc:  denied  { connectto } for  pid=23569 comm=\"top\" path=002F6372746F6F6C732D70722D3233363139 scontext=system_u:system_r:container_t:s0:c245,c463 tcontext=unconfined_u:system_r:container_runtime_t:s0-s0:c0.c1023 tclass=unix_stream_socket permissive=0\n```\n\nThe same steps are running in CI every time successfully, so something is different during CI and when actually using it. The `connectto` is coming from CRIU's parasite code which is injected in the destination process trying to talk to the main CRIU binary.\nTo be able to checkpoint a container I need following two SELinux rules:\n\n```\nallow container_t container_runtime_t:unix_stream_socket connectto;\nallow container_t container_var_lib_t:file append;\n```\nWhat is the right place or package to add these two rules.",
+    "comments": [
+        {
+            "user": "mheon",
+            "body": "@rhatdan PTAL"
+        },
+        {
+            "user": "rhatdan",
+            "body": "We removed this service, because it is a huge security hole.  Allowing this access would allow a container process to gain access to the docker.sock and create a --privileged root running container.\n\nThe way to fix this is for the tool creating the socket to label it with the containers label or at least \ncontainer_t:s0\n\nlabel.SetSockLabel($CONTAINERPROCESLABEL)\nCreateSocket()\n\nThis would then require \n\nallow container_t container_t:unix_stream_socket connectto;\n\nWhich is allowed in the current policy.\n\nIs this socket being created in runc?\n\nNow container_t appending to a file labeled container_var_lib_t, is another matter?  Is this debugging code or something else?"
+        },
+        {
+            "user": "adrianreber",
+            "body": "> We removed this service, because it is a huge security hole. Allowing this access would allow a container process to gain access to the docker.sock and create a --privileged root running container.\n> \n> The way to fix this is for the tool creating the socket to label it with the containers label or at least\n> container_t:s0\n> \n> label.SetSockLabel($CONTAINERPROCESLABEL)\n> CreateSocket()\n> \n> This would then require\n> \n> allow container_t container_t:unix_stream_socket connectto;\n> \n> Which is allowed in the current policy.\n> \n> Is this socket being created in runc?\n\nIt is created directly from CRIU. I started a discussion upstream CRIU to be able to use an existing socket or to tell CRIU which label the socket should have. Then we could tell runc which label it should have and runc can pass it to CRIU.\n\n> Now container_t appending to a file labeled container_var_lib_t, is another matter? Is this debugging code or something else?\n\nThis is for debug output which is currently always written. It is hard-coded in runc. If we could add a policy to allow this, this would be great."
+        },
+        {
+            "user": "rhatdan",
+            "body": "What is the path to the file. I would rather we label it something like container_log_t so that we would not be able to append to any file in /var/lib/containers.\n\nDoes CRIU create the socket or runc?  Could you explain the process for the socket to be created?"
+        },
+        {
+            "user": "adrianreber",
+            "body": "> What is the path to the file. I would rather we label it something like container_log_t so that we would not be able to append to any file in /var/lib/containers.\n\nThe path to the file is: `filepath.Join(c.bundlePath(), \"dump.log\")`\n\nSo something like this could be used:\n\n```\ndiff --git a/libpod/container_internal_linux.go b/libpod/container_internal_linux.go\nindex 65cb47c8..b98392fc 100644\n--- a/libpod/container_internal_linux.go\n+++ b/libpod/container_internal_linux.go\n@@ -476,6 +476,18 @@ func (c *Container) checkpoint(ctx context.Context, options ContainerCheckpointO\n        if c.state.State != ContainerStateRunning {\n                return errors.Wrapf(ErrCtrStateInvalid, \"%q is not running, cannot checkpoint\", c.state.State)\n        }\n+\n+       // Create the CRIU log file and label it\n+       logFile, err := os.Create(filepath.Join(c.bundlePath(), \"dump.log\"))\n+       if err != nil {\n+               return errors.Wrapf(err, \"failed to create CRIU log file %q\", filepath.Join(c.bundlePath(), \"dump.log\"))\n+       }\n+       logFile.Close()\n+       err = label.SetFileLabel(filepath.Join(c.bundlePath(), \"dump.log\"), the_correct_container_log_t_label)\n+       if err != nil {\n+               return errors.Wrapf(err, \"failed to label CRIU log file %q\", filepath.Join(c.bundlePath(), \"dump.log\"))\n+       }\n+\n        if err := c.runtime.ociRuntime.checkpointContainer(c, options); err != nil {\n                return err\n        }\n```\n\nNot sure if that is the correct way to do it. But creating an empty log file with the right label should fix this. Then the processes in the container would need to be able to write that log file.\n\n> \n> Does CRIU create the socket or runc? Could you explain the process for the socket to be created?\n\nCRIU creates the socket in the destination network namespace https://github.com/checkpoint-restore/criu/blob/master/compel/src/lib/infect.c#L1030 , once CRIU infects the destination process with the parasite code, the parasite code tries to connect to that socket and that fails (`avc:  denied  { connectto } for  pid=23569 comm=\"top\"`). CCing @avagin in case this is not correct."
+        },
+        {
+            "user": "rhatdan",
+            "body": "The code for libpod/container_internal/linux.go looks pretty good.\n\nIs this code \"infect.c\" called by runc or podman?\nIf runc then we need to call setsockcreate(processlabel) before calling it"
+        },
+        {
+            "user": "adrianreber",
+            "body": "If I do `err = label.SetFileLabel(filepath.Join(c.bundlePath(), \"dump.log\"), c.MountLabel())` writing to the log file works. So this seems solved.\n\nFor the socket I have to use setsockcreate(processlabel) in CRIU. If I do it in runc it seems to fail creating runc sockets. For the socket my plan is to add a CRIU feature to specify the SELinux label of the socket. So Podman calls `runc checkpoint --criu-socket-selinux-label \"processlabel\"` and runc then tells CRIU which SELinux label to use. This will require changes in Podman, runc and CRIU.\n\nIs the `c.ProcessLabel()` the right label for the socket, or should I use something else. With that label it already just works."
+        },
+        {
+            "user": "rhatdan",
+            "body": "Does runc fail in permissive mode?"
+        },
+        {
+            "user": "adrianreber",
+            "body": "If I add `label.SetSocketLabel(processlabel)` to runc just before calling CRIU and if I do `setenforce 0` I get the following denials, but runc does not fail:\n```\ntype=AVC msg=audit(1550644128.094:4176): avc:  denied  { create } for  pid=28779 comm=\"runc\" scontext=unconfined_u:system_r:container_runtime_t:s0-s0:c0.c1023 tcontext=system_u:object_r:container_file_t:s0:c289,c751 tclass=unix_stream_socket permissive=1\ntype=AVC msg=audit(1550644128.094:4177): avc:  denied  { getopt } for  pid=28779 comm=\"runc\" scontext=unconfined_u:system_r:container_runtime_t:s0-s0:c0.c1023 tcontext=system_u:object_r:container_file_t:s0:c289,c751 tclass=unix_stream_socket permissive=1\ntype=AVC msg=audit(1550644128.094:4178): avc:  denied  { getattr } for  pid=28779 comm=\"runc\" scontext=unconfined_u:system_r:container_runtime_t:s0-s0:c0.c1023 tcontext=system_u:object_r:container_file_t:s0:c289,c751 tclass=unix_stream_socket permissive=1\ntype=AVC msg=audit(1550644128.095:4179): avc:  denied  { write } for  pid=28779 comm=\"runc\" path=\"socket:[1909154]\" dev=\"sockfs\" ino=1909154 scontext=unconfined_u:system_r:container_runtime_t:s0-s0:c0.c1023 tcontext=system_u:object_r:container_file_t:s0:c289,c751 tclass=unix_stream_socket permissive=1\ntype=AVC msg=audit(1550644128.095:4180): avc:  denied  { read } for  pid=28779 comm=\"runc\" scontext=unconfined_u:system_r:container_runtime_t:s0-s0:c0.c1023 tcontext=system_u:object_r:container_file_t:s0:c289,c751 tclass=unix_stream_socket permissive=1\ntype=AVC msg=audit(1550644128.322:4186): avc:  denied  { shutdown } for  pid=28779 comm=\"runc\" scontext=unconfined_u:system_r:container_runtime_t:s0-s0:c0.c1023 tcontext=system_u:object_r:container_file_t:s0:c289,c751 tclass=unix_stream_socket permissive=1\n```\n\nBut if I reset the socket label to default in runc with `err = label.SetSocketLabel(\"\")` just after calling CRIU it works. So I actually can solve this with a simple runc patch.\n\nI will prepare a Podman pull request for the CRIU log file labelling and a runc pull request for the CRIU socket labelling and CC you. Thanks for your help.\n"
+        },
+        {
+            "user": "rhatdan",
+            "body": "Excellent."
+        },
+        {
+            "user": "adrianreber",
+            "body": "runc changes for CRIU socket labelling available at: https://github.com/opencontainers/runc/pull/1992\n\nPodman changes to fix CRIU log file labelling and to use new runc features available at: https://github.com/containers/libpod/pull/2382"
+        },
+        {
+            "user": "adrianreber",
+            "body": "The log file denial is solved with #2382. For the `connectto` denial I need to work on a solution in CRIU."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@adrianreber Is this complete, can we close this issue now?"
+        },
+        {
+            "user": "adrianreber",
+            "body": "@rhatdan with your changes to container-selinux and once my CRIU PR (https://github.com/checkpoint-restore/criu/pull/648) gets merged, all should be resolved."
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "opencontainers",
+            "repository": "runc",
+            "number": 1992
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 2382
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 2435
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 2461
+        },
+        {
+            "organization": "checkpoint-restore",
+            "repository": "criu",
+            "number": 648
+        }
+    ]
+}

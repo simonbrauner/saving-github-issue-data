@@ -1,0 +1,112 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 18083,
+    "type": "pull_request",
+    "title": "rootless: make sure we only use a single pause process",
+    "state": "closed",
+    "labels": [
+        "lgtm",
+        "approved",
+        "release-note-none",
+        "locked - please file new issue/PR"
+    ],
+    "user": "Luap99",
+    "body": "Currently --tmpdir changes the location of the pause.pid file. this causes issues because the c code in pkg/rootless does not know about that. I tried to fix this[1] by fixing the c code to not use the shortcut. While this fix worked it will result in many pause processes leaking in the integrration tests.\n\nCommit ab88632 added this behavior but following the disccusion it was never the intention that we end up having more than one pause process. The issues that was trying to fix was caused by somthing else AFAICT, the main problem seems to be that the pause.pid file parent directory may not be created when we try to create the pid file so it failed with ENOENT. This patch fixes it by creating this directory always and revert the change to no longer depend on the tmpdir value.\n\nWith this commit we now always use XDG_RUNTIME_DIR/libpod/tmp/pause.pid for all podman processes. This allows the c shortcut to work reliably and should therefore improve perfomance over my other approach.\n\nA system test is added to ensure we see the right behavior and that podman system migrate actually stops the pause process. I do not see a better way.\n\nThis should fix the issues with namespace missmatches that we can see in CI as flakes.\n\n[1] https://github.com/containers/podman/pull/18057\n\nFixes #17903\n\n<!--\nThanks for sending a pull request!\n\nPlease make sure you've read our contributing guidelines and how to submit a pull request (https://github.com/containers/podman/blob/main/CONTRIBUTING.md#submitting-pull-requests).\n\nIn case you're only changing docs, make sure to prefix the pull-request title with \"[CI:DOCS]\". That will prevent functional tests from running and save time and energy.\n\nFinally, be sure to sign commits with your real name. Since by opening\na PR you already have commits, you can add signatures if needed with\nsomething like `git commit -s --amend`.\n-->\n\n#### Does this PR introduce a user-facing change?\n\n<!--\nIf no, just write `None` in the release-note block below. If yes, a release note\nis required: Enter your extended release note in the block below. If the PR\nrequires additional action from users switching to the new release, include the\nstring \"action required\".\n\nFor more information on release notes, please follow the Kubernetes model:\nhttps://git.k8s.io/community/contributors/guide/release-notes.md\n-->\n\n```release-note\nNone\n```\n",
+    "comments": [
+        {
+            "user": "edsantiago",
+            "body": "...but don't push yet. Tests are more than halfway complete, I think we should see how they do."
+        },
+        {
+            "user": "edsantiago",
+            "body": "...such as, [Debian](https://api.cirrus-ci.com/v1/artifact/task/4813164345294848/html/sys-podman-debian-12-rootless-host-boltdb.log.html#t--00526). Maybe Debian doesn't set XDG? I think your fix would address that."
+        },
+        {
+            "user": "edsantiago",
+            "body": "ok, tests complete. Timing results below, because I have a vague memory that you thought something-something might affect CI times but now I can't find that comment.\n\n| type | distro              | user     | DB     |    local |   remote | container |\n| ---- | --------            | ----     | --     |    ----: |   -----: | --------: |\n| int  | debian-12           | root     |        |    26:34 |    36:55 |\n| int  | fedora-36           | root     |        |    31:52 |    36:34 |     30:19 |\n| int  | fedora-37           | root     |        |    30:04 |    35:04 |     28:25 |\n| int  | fedora-37           | root     | sqlite |    30:50 |    34:01 |\n| int  | debian-12           | rootless |        |    25:00 |          |\n| int  | fedora-36           | rootless |        |    30:59 |          |\n| int  | fedora-37           | rootless |        |    28:09 |          |\n| int  | fedora-37           | rootless | sqlite |    28:22 |          |\n| sys  | debian-12           | root     |        |    26:28 |    18:13 |\n| sys  | fedora-36           | root     |        |    31:14 |    20:37 |\n| sys  | fedora-37           | root     |        |    29:47 |    20:58 |\n| sys  | fedora-37-aarch64   | root     |        |    32:35 |    22:03 |\n| sys  | debian-12           | rootless |        |   !27:21 |          |\n| sys  | fedora-36           | rootless |        |    29:23 |          |\n| sys  | fedora-37           | rootless |        |    29:34 |    19:27 |\n\n[EDIT: Debian was the only failure]"
+        },
+        {
+            "user": "Luap99",
+            "body": "I asked for https://github.com/containers/podman/pull/18057, this PR should not be any slower than before"
+        },
+        {
+            "user": "edsantiago",
+            "body": "Weird: [Debian is still failing](https://api.cirrus-ci.com/v1/artifact/task/5494861554515968/html/sys-podman-debian-12-rootless-host-boltdb.log.html).\n\nAlso, this is weird too: in my hammer-at-sqlite PR, I see [**four** \"no logs from conmon\" failures](https://api.cirrus-ci.com/v1/artifact/task/5511492271865856/html/int-podman-fedora-37-rootless-host-boltdb.log.html) (#10927). That's very unusual; the most I've ever seen before is two in one run. I'm commenting on this PR, but it could just as easily be #18085."
+        },
+        {
+            "user": "edsantiago",
+            "body": "Logs downloaded and checked. Lots of flakes, but none of them especially worrisome. (Mostly \"no logs from conmon\", and one \"failed to unmount NS\" (presumably handled in #18085))."
+        },
+        {
+            "user": "Luap99",
+            "body": "Ok I guess I need to hack/get_ci_vm to see what the debian env looks like. "
+        },
+        {
+            "user": "Luap99",
+            "body": "/hold\nThe test is not working correctly because the `podman pause` process can also be `catatonit -P` so pgrep obviously didn't found it.\n\nThe question is also why is fedora using `podman pause` but debian `catatonit -P`?\nhttps://github.com/containers/podman/blob/fb41410dfce41f8c12409e7d12c6ab89337fe941/pkg/rootless/rootless_linux.c#L280-L285\nOn debian we have `/usr/bin/catatonit` while on fedora it is `/usr/libexec/podman/catatonit`.\nThe `LIBEXECPODMAN \"catatonit\"` is suspicious, I do not see an extra `/` added between the dir and catatonit. \n\nWhile this is a bug and can be fixed easily I am not so sure if my test would make much sense given that I would need to grep for `catatonit -P` and well this could also be run for whatever reasons by other commands, at least we have no direct way of controlling it.\n\nAnyway it is end of the day here so I will continue next week."
+        },
+        {
+            "user": "edsantiago",
+            "body": "Friendly suggestion for an alternative [550-pause-process.bats](https://github.com/containers/podman/files/11173933/550-pause-process.bats.txt)\n\nA little safer in some ways. Tested with `podman pause` and with `catatonit`. Tested with `podman@main` (required disabling the pidfile check), and the using-same-namespace test failed as expected."
+        },
+        {
+            "user": "TomSweeneyRedHat",
+            "body": "LGTM\nonce the tests get happier"
+        },
+        {
+            "user": "openshift-ci[bot]",
+            "body": "[APPROVALNOTIFIER] This PR is **APPROVED**\n\nThis pull-request has been approved by: *<a href=\"https://github.com/containers/podman/pull/18083#pullrequestreview-1374834236\" title=\"Approved\">giuseppe</a>*, *<a href=\"https://github.com/containers/podman/pull/18083#\" title=\"Author self-approved\">Luap99</a>*, *<a href=\"https://github.com/containers/podman/pull/18083#pullrequestreview-1378793527\" title=\"Approved\">vrothberg</a>*\n\nThe full list of commands accepted by this bot can be found [here](https://go.k8s.io/bot-commands?repo=containers%2Fpodman).\n\nThe pull request process is described [here](https://git.k8s.io/community/contributors/guide/owners.md#the-code-review-process)\n\n<details >\nNeeds approval from an approver in each of these files:\n\n- ~~[OWNERS](https://github.com/containers/podman/blob/main/OWNERS)~~ [Luap99,giuseppe,vrothberg]\n\nApprovers can indicate their approval by writing `/approve` in a comment\nApprovers can cancel approval by writing `/approve cancel` in a comment\n</details>\n<!-- META={\"approvers\":[]} -->"
+        },
+        {
+            "user": "vrothberg",
+            "body": "@giuseppe @edsantiago PTanotherL"
+        },
+        {
+            "user": "edsantiago",
+            "body": "LGTM"
+        },
+        {
+            "user": "edsantiago",
+            "body": "Also meant to say, I've had this running (cherry-picked) in #17831 and it doesn't cure the \"stop\" issue but I have seen a reduction in other flakes."
+        },
+        {
+            "user": "Luap99",
+            "body": "Yeah for now all I think #17903 should be fixed with it, if other flakes are fixed by this that is welcome too."
+        },
+        {
+            "user": "edsantiago",
+            "body": "/hold cancel"
+        },
+        {
+            "user": "edsantiago",
+            "body": "Belated followup: I downloaded all CI logs, manually viewed all the `int` flakes, and saw no \"FS magic\" flakes. \n\nIn my no-retries PR, though, fully rebased against this, I hit this in [f37 rootless](https://api.cirrus-ci.com/v1/artifact/task/4964221834756096/html/int-podman-fedora-37-rootless-host-sqlite.log.html#t--podman-network-disconnect--1):\n```\n$ podman [options] network disconnect aliasTest0d525e717e5b8341b3ec5d17a1ffd9884906485f7350245538d5e15c3aa161ab test\nError: getting rootless network namespace: unknown FS magic on \"/run/user/1599/netns/rootless-netns-642818b009b6b2c8e81e\": 1021994\n```\nAny suggestions on how to diagnose that?"
+        },
+        {
+            "user": "Luap99",
+            "body": "OMG, sometimes I do not see the forest for the trees. While this fix is still correct the major problem is that we are killing the pause process in `podman system reset`. https://github.com/containers/podman/blob/8c4838f6b44e55c7d6bfc72e7763a59cf01f1a62/libpod/reset.go#L124\n\nWe cannot do this when we run parallel testing. https://github.com/containers/podman/pull/18057 may have fixed this as well but there the problem would be that we leak 100/1000s of pause processes which I rather avoid.\nI really see no sane way here, we can either\na) skip all reset tests for rootless or\nb) make reset not kill the pause process\n\nRegardless I will reopen the issue then, this is clearly not fixed."
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 18057
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 18056
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 17904
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 17903
+        }
+    ]
+}

@@ -1,0 +1,302 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 6693,
+    "type": "pull_request",
+    "title": "Implement --sdnotify cmdline option to control sd-notify behavior",
+    "state": "closed",
+    "labels": [
+        "lgtm",
+        "approved",
+        "ok-to-test",
+        "locked - please file new issue/PR"
+    ],
+    "user": "goochjj",
+    "body": "--sdnotify conmon-only|container|none\n\nWith \"conmon-only\", we send the MAINPID, and clear the NOTIFY_SOCKET so the OCI\nruntime doesn't pass it into the container. We also advertise \"ready\" when the\nOCI runtime finishes to advertise the service as ready.\n\nWith \"container\", we send the MAINPID, and leave the NOTIFY_SOCKET so the OCI\nruntime passes it into the container for initialization, and let the container advertise further metadata.\n\nThe \"none\" option does what it's always done in the past - passes NOTIFY_SOCKET\nto conmon's process and the OCI runtime processes, and does no manipulation or \"help\".\n\nThis removes the need for hardcoded CID and PID files in the command line, and\nthe PIDFile directive, as the pid is advertised directly through sd-notify.\n\nSigned-off-by: Joseph Gooch <mrwizard@dok.org>\n\nIncludes #6689 \nReferences #6688 ",
+    "comments": [
+        {
+            "user": "openshift-ci-robot",
+            "body": "Hi @goochjj. Thanks for your PR.\n\nI'm waiting for a [containers](https://github.com/orgs/containers/people) member to verify that this patch is reasonable to test. If it is, they should reply with `/ok-to-test` on its own line. Until that is done, I will not automatically test new commits in this PR, but the usual testing commands by org members will still work. Regular contributors should [join the org](https://github.com/orgs/containers/people) to skip this step.\n\nOnce the patch is verified, the new status will be reflected by the `ok-to-test` label.\n\nI understand the commands that are listed [here](https://go.k8s.io/bot-commands?repo=containers%2Flibpod).\n\n<details>\n\nInstructions for interacting with me using PR comments are available [here](https://git.k8s.io/community/contributors/guide/pull-requests.md).  If you have questions or suggestions related to my behavior, please file an issue against the [kubernetes/test-infra](https://github.com/kubernetes/test-infra/issues/new?title=Prow%20issue:) repository.\n</details>\n"
+        },
+        {
+            "user": "goochjj",
+            "body": "The more I think about this I'm not sure \"none\" is a valid option, though it was essentially requested...  Since \"none\" returns a broken situation. (MAINPID never advertised properly)... Unless there's a case when runc or crun advertises the correct MAINPID.\n\n"
+        },
+        {
+            "user": "mheon",
+            "body": "I think `none` is \"I am not being managed by systemd, please ignore\" - we've seen cases where Podman is run as a child of something actually managed by systemd, inherits NOTIFY_SOCKET from the parent (arguably a bug in the parent, but still), and then blocks forever as it tries to notify on an already-used socket."
+        },
+        {
+            "user": "goochjj",
+            "body": "> I think `none` is \"I am not being managed by systemd, please ignore\" - we've seen cases where Podman is run as a child of something actually managed by systemd, inherits NOTIFY_SOCKET from the parent (arguably a bug in the parent, but still), and then blocks forever as it tries to notify on an already-used socket.\n\nThat's a reasonable interpretation.  In that case I should probably block NOTIFY_SOCKET from being passed down to the OCI runtime and conmon... correct?  That way everything will proceed as if the NOTIFY_SOCKET isn't there.\n\nvs. what it does now, which means \"libpod does nothing with NOTIFY_SOCKET other than pass it on\", which is pretty similar to \"container\".\n\n"
+        },
+        {
+            "user": "goochjj",
+            "body": "> > I think `none` is \"I am not being managed by systemd, please ignore\" - we've seen cases where Podman is run as a child of something actually managed by systemd, inherits NOTIFY_SOCKET from the parent (arguably a bug in the parent, but still), and then blocks forever as it tries to notify on an already-used socket.\n> \n> That's a reasonable interpretation. In that case I should probably block NOTIFY_SOCKET from being passed down to the OCI runtime and conmon... correct? That way everything will proceed as if the NOTIFY_SOCKET isn't there.\n> \n> vs. what it does now, which means \"libpod does nothing with NOTIFY_SOCKET other than pass it on\", which is pretty similar to \"container\".\n\nIn which case I think \"ignore\" is a better description.\n\n"
+        },
+        {
+            "user": "mheon",
+            "body": "Ignore works for me - and yes, we should not forward the socket in that case"
+        },
+        {
+            "user": "rhatdan",
+            "body": "Doesn't Podman have to respond to the ignore and set the ready state for systemd if it sees the flag and is set to ignore?  IE Systemd will never mark the unit file as ready unless someone says it is ready."
+        },
+        {
+            "user": "goochjj",
+            "body": "> Doesn't Podman have to respond to the ignore and set the ready state for systemd if it sees the flag and is set to ignore? IE Systemd will never mark the unit file as ready unless someone says it is ready.\n\nThat's true - however, currently Podman doesn't respond at all.  Runc/crun do.  Ignore is only relevant when some other service is the responsible party.\n\n\nThe default is \"container\", which is the current behavior, which would mean Runc/Crun need to respond.  This PR just makes sure the correct MAINPID is set during the conversation.\n\nconmon-only means Podman is the responsible party - the one responsible for sending READY=1, and keeps runc/crun out of the loop.\n\nignore would only be used if some other service is calling podman. I.e. some service that is sd-notify enabled, and therefore they are the responsible party.  Contrived example:\n```\n#!/bin/bash\n\n#I'm a service\nsystemd-notify --status=\"Starting up\"\n\n#Spawn some containers\npodman run --sdnotify ignore --rm -d alpine sleep infinity\npodman run --sdnotify ignore --rm -d alpine sleep infinity\npodman run --sdnotify ignore --rm -d alpine sleep infinity\n\n#Do other stuff\nsleep 1\n\n#And we're good\nsystemd-notify --ready\n```\n\nRight now, each podman would see the NOTIFY_SOCKET set and assume that it's responsible for telling systemd when it's ready... Which is incorrect, the overall service is the shell script. \n\nThe other alternative is people explicitly changing the podman lines to do:\n```\nenv -u NOTIFY_SOCKET podman run --rm -d alpine sleep infinity\n```\n\nAs that's really what ignore is doing.\n"
+        },
+        {
+            "user": "vrothberg",
+            "body": "> This removes the need for hardcoded CID and PID files in the command line, and\nthe PIDFile directive, as the pid is advertised directly through sd-notify.\n\nCan you elaborate why this would remove the CID file? I think that's still needed to cleanly stop/remove a container in a unit."
+        },
+        {
+            "user": "vrothberg",
+            "body": "Reviewing now. @giuseppe PTAL as well "
+        },
+        {
+            "user": "mheon",
+            "body": "Once comments are addressed, this LGTM"
+        },
+        {
+            "user": "goochjj",
+            "body": "> > This removes the need for hardcoded CID and PID files in the command line, and\n> > the PIDFile directive, as the pid is advertised directly through sd-notify.\n> \n> Can you elaborate why this would remove the CID file? I think that's still needed to cleanly stop/remove a container in a unit.\n\nCID file can still be used, it's just SystemD doesn't need it so it doesn't need to be hanging out in /run/%n-cid, it'll revert to being in userdata/\n\nPID file can still be used, it's just SystemD doesn't need it so it doesn't need to be hanging out in /run/%n.pid, it'll revert to being in userdata/.... And we don't need to specify it in PIDFile because systemd will receive the appropriate PID via MAINPID= w/ Type=notify.\n\nIf for whatever reason people still want to use Type=forking, they can, they'll need to keep the PIDFile directive and put it somewhere it can be found... Otherwise Type=notify just makes things more clean and less hardcoded.\n\n"
+        },
+        {
+            "user": "goochjj",
+            "body": "> Oh man, I really like this PR. Thanks a ton!\n> \n> Just a minor comment regarding input validation. @edsantiago , could you have a look as well? I wonder if you have a suggestion how we could test this in CI.\n\nI too was struggling with this.  I can envision the tests - as I did the testing manually, but it's going to require forking which is currently beyond my ability to do in golang. \n\nWe'd need a thread that opens a UNIX dgram socket and captures input.  Perhaps (tmpdir)/notify.\n\n1) Ensure podman ignores the socket\n  Create notify socket\n  Monitor notify socket\n  set env NOTIFY_SOCKET\n  Spawn podman run --rm --sd-notify=ignore alpine ls\n  Verify podman returns exit 0\n  Verify notify socket received absolutely no data.\n\n2) Verify sd-notify=conmon (heres where it starts to get tricky)\n  Create notify socket\n  set env NOTIFY_SOCKET\n  Proc1) Monitor notify socket\n  Proc2) Spawn podman run --rm --sd-notify=conmon alpine ls\n  Proc1) wait for receipt of MAINPID=(pid) and verify it points to conmon, descendent of Proc2\n  Proc1) Wait for receipt of second MAINPID= and READY=1\n  Proc2) verify exit 0\n\n3) Verify sd-notify=container\n  Create notify socket\n  set env NOTIFY_SOCKET\n  Proc1) Monitor notify socket\n  Proc2) Spawn podman run --rm --sd-notify=container alpine ls\n  Proc1) wait for receipt of MAINPID=(pid) and verify it points to conmon, descendent of Proc2\n  Proc1) sleep 3 seconds\n  Proc1) Find the socket - /run/runc/(CID)/notify/notify.sock or /run/crun/(CID)/notify/notify - and send READY=1 to it\n  Proc1) Verify you get back MAINPID= and READY=1\n  Proc2) verify exit 0\n\n  If podman exits in Proc2 before we send the READY in Proc1, then runc/crun didn't wait for a notification.\n\n4) Test that not specifying sd-notify does the same thing as 3\n5) Test that not setting NOTIFY_SOCKET does the same thing as 1\n\nI'm not sure how to coordinate the test between two threads like that in Go.\n"
+        },
+        {
+            "user": "goochjj",
+            "body": "All comments should be resolved at this point. PTAL!\n"
+        },
+        {
+            "user": "edsantiago",
+            "body": "I'm having a lot of trouble with `sdnotify=container`. It is very possible that the fault is mine, because it's been many months since I last fiddled with sdnotify.\n\nI think someone/something (crun?) is intercepting `NOTIFY_SOCKET`. Note these two commands, differing only in the setting of that envariable:\n```console\n$ env -u NOTIFY_SOCKET ./bin/podman run --privileged --rm -v /tmp/podman-sdnotify:/tmp/podman-sdnotify:Z alpine ls -l /tmp\ntotal 0\nsrwxrwxr-x    1 root     root             0 Jun 22 17:24 podman-sdnotify\n$ NOTIFY_SOCKET=/tmp/podman-sdnotify ./bin/podman run --privileged --rm -v /tmp/podman-sdnotify:/tmp/podman-sdnotify:Z alpine ls -l /tmp\ntotal 0\nsrwxrwxrwx    1 root     root             0 Jun 22 17:36 notify\n```\nThat is: when `NOTIFY_SOCKET` is unset, the (existing) socket is bind-mounted just fine in the container. When it is **set**, the bind mount doesn't work, and there's a socket called `notify`.\n\nThe context for this is that I was trying:\n```console\n$ socat unix-recv:/tmp/podman-sdnotify -\n\n[in another terminal]\n$ ./bin/podman run --privileged --rm --sdnotify=container -v /tmp/podman-sdnotify:/tmp/podman-sdnotify:Z fedora systemd-notify --ready\nFailed to notify init system: No such file or directory\n```\nI have a vague memory that this was intentional, but don't remember the details. @giuseppe perhaps you remember?"
+        },
+        {
+            "user": "goochjj",
+            "body": "> I'm having a lot of trouble with `sdnotify=container`. It is very possible that the fault is mine, because it's been many months since I last fiddled with sdnotify.\n> \n> I think someone/something (crun?) is intercepting `NOTIFY_SOCKET`. Note these two commands, differing only in the setting of that envariable:\n> \n> ```\n> $ env -u NOTIFY_SOCKET ./bin/podman run --privileged --rm -v /tmp/podman-sdnotify:/tmp/podman-sdnotify:Z alpine ls -l /tmp\n> total 0\n> srwxrwxr-x    1 root     root             0 Jun 22 17:24 podman-sdnotify\n> $ NOTIFY_SOCKET=/tmp/podman-sdnotify ./bin/podman run --privileged --rm -v /tmp/podman-sdnotify:/tmp/podman-sdnotify:Z alpine ls -l /tmp\n> total 0\n> srwxrwxrwx    1 root     root             0 Jun 22 17:36 notify\n> ```\n> \n> That is: when `NOTIFY_SOCKET` is unset, the (existing) socket is bind-mounted just fine in the container. When it is **set**, the bind mount doesn't work, and there's a socket called `notify`.\n> \n> The context for this is that I was trying:\n> \n> ```\n> $ socat unix-recv:/tmp/podman-sdnotify -\n> \n> [in another terminal]\n> $ ./bin/podman run --privileged --rm --sdnotify=container -v /tmp/podman-sdnotify:/tmp/podman-sdnotify:Z fedora systemd-notify --ready\n> Failed to notify init system: No such file or directory\n> ```\n> \n> I have a vague memory that this was intentional, but don't remember the details. @giuseppe perhaps you remember?\n\nrunc/crun take care of proxying the socket. In fact they don't bind mount it, they create a unix-datagram inside the container, and write to the one outside.\n\nI am attempting to decipher goroutines so I can write a proper test in e2e...\n\nBasically though:\nT1: `socat unix-recvfrom:/tmp/podman-sdnotify,fork -`\nT2: `env NOTIFY_SOCKET=/tmp/podman-sdnotify ./bin/podman run --rm --sdnotify=container fedora systemd-notify --ready`\n\nT1 shows\nMAINPID=22842READY=1\nMAINPID=22854\nMAINPID=22842\n\nThis illustrates the sequence:\n  podman now sends 22842 (conmon) PID during oci_conmon_linux\n  runc/crun passes READY=1 back from systemd-notify\n  runc/crun passes MAINPID=22854 back from systemd-notify (which we can't monitor)\n  podman sends 22842 from container start - to overwrite the wrong PID\n\n\n\n\n"
+        },
+        {
+            "user": "edsantiago",
+            "body": "```\n MAINPID=22842READY=1\n```\nHow are you getting this?! My entire rathole stemmed from my trying to do exactly that. I cannot get it to work, either root or rootless: `systemd-notify` in the container fails as I described above. I get `MAINPID=xxx` in the `socat` window, but never `READY=1`"
+        },
+        {
+            "user": "edsantiago",
+            "body": "I'm on Fedora 32 with crun"
+        },
+        {
+            "user": "goochjj",
+            "body": "correction - \n\nWhen NOTIFY_SOCKET is passed,\n1) runc will create a socket in /run/runc/CID/notify/notify.sock, and then add a bind mount to /run/systemd/notify.sock (or similar).  This works as I illustrated\n2) crun is creating a socket in /run/crun/CID/notify/notify.sock, but never adds the bind mount, so it crashes spectacularly.\n\nNote that's not a problem with this PR, it's crun missing a bind mount - try on podman pre-this-PR without a sdnotify command line option - that fails too.\n\nJust using your technique of adding the bind mount won't work - because runc and crun are explicitly blocking until THEIR socket receives a READY=1.\n\n\n\n"
+        },
+        {
+            "user": "goochjj",
+            "body": "> ```\n>  MAINPID=22842READY=1\n> ```\n> \n> How are you getting this?! My entire rathole stemmed from my trying to do exactly that. I cannot get it to work, either root or rootless: `systemd-notify` in the container fails as I described above. I get `MAINPID=xxx` in the `socat` window, but never `READY=1`\n\nMagic!\n\n(Or, photon, cgroups 1 + runc)  :-D\n"
+        },
+        {
+            "user": "goochjj",
+            "body": "> correction -\n> \n> When NOTIFY_SOCKET is passed,\n> \n> 1. runc will create a socket in /run/runc/CID/notify/notify.sock, and then add a bind mount to /run/systemd/notify.sock (or similar).  This works as I illustrated\n> 2. crun is creating a socket in /run/crun/CID/notify/notify.sock, but never adds the bind mount, so it crashes spectacularly.\n> \n> Note that's not a problem with this PR, it's crun missing a bind mount - try on podman pre-this-PR without a sdnotify command line option - that fails too.\n> \n> Just using your technique of adding the bind mount won't work - because runc and crun are explicitly blocking until THEIR socket receives a READY=1.\n\nI am looking in config.json for the bind mount - which probably isn't a good test if crun is doing it after the spec is loaded. I suppose I need to inspect the mount namespace\n\n"
+        },
+        {
+            "user": "edsantiago",
+            "body": "Phew - thank you. Ok, so it's `crun` then. That sure was a lot of time wasted this morning, but I'm glad the issue is identified. Please ignore my bind-mount comment, that was just a red herring, me trying to track down the root cause.\n\nIf `crun` is renaming the socket, shouldn't it reset `NOTIFY_SOCKET` in the container? I ran `printenv` and still see `NOTIFY_SOCKET=/tmp/podman-sdnotify` in the container"
+        },
+        {
+            "user": "goochjj",
+            "body": "> Phew - thank you. Ok, so it's `crun` then. That sure was a lot of time wasted this morning, but I'm glad the issue is identified. Please ignore my bind-mount comment, that was just a red herring, me trying to track down the root cause.\n> \n> If `crun` is renaming the socket, shouldn't it reset `NOTIFY_SOCKET` in the container? I ran `printenv` and still see `NOTIFY_SOCKET=/tmp/podman-sdnotify` in the container\n\nYep I agree - I'm tracking it down\n"
+        },
+        {
+            "user": "goochjj",
+            "body": "> > Phew - thank you. Ok, so it's `crun` then. That sure was a lot of time wasted this morning, but I'm glad the issue is identified. Please ignore my bind-mount comment, that was just a red herring, me trying to track down the root cause.\n> > If `crun` is renaming the socket, shouldn't it reset `NOTIFY_SOCKET` in the container? I ran `printenv` and still see `NOTIFY_SOCKET=/tmp/podman-sdnotify` in the container\n> \n> Yep I agree - I'm tracking it down\n\nyeah it's the env variable that isn't being set right.\n\ncrun is mounting the socket at /run/notify.\n\n`env NOTIFY_SOCKET=/run/podman-sdnotify /usr/bin/podman --runtime /opt/podman/bin/crun run --rm  -it fedora sh -c 'printenv NOTIFY_SOCKET;ls -ld /run/notify; env NOTIFY_SOCKET=/run/notify systemd-notify --ready'`\n\nI'll see if I can find that in crun\n"
+        },
+        {
+            "user": "goochjj",
+            "body": "> > > Phew - thank you. Ok, so it's `crun` then. That sure was a lot of time wasted this morning, but I'm glad the issue is identified. Please ignore my bind-mount comment, that was just a red herring, me trying to track down the root cause.\n> > > If `crun` is renaming the socket, shouldn't it reset `NOTIFY_SOCKET` in the container? I ran `printenv` and still see `NOTIFY_SOCKET=/tmp/podman-sdnotify` in the container\n> > \n> > \n> > Yep I agree - I'm tracking it down\n> \n> yeah it's the env variable that isn't being set right.\n> \n> crun is mounting the socket at /run/notify.\n> \n> `env NOTIFY_SOCKET=/run/podman-sdnotify /usr/bin/podman --runtime /opt/podman/bin/crun run --rm -it fedora sh -c 'printenv NOTIFY_SOCKET;ls -ld /run/notify; env NOTIFY_SOCKET=/run/notify systemd-notify --ready'`\n> \n> I'll see if I can find that in crun\n\nHeh, this is weird.  It's apparently assuming the socket name is \"notify\".\n\nWhen I pass /run/podman-sdnotify, it's mounted as /run/notify\nWhen I pass /tmp/podman-sdnotify, it's mounted as /tmp/notify\n\nI'm assuming this has just been working, because systemd's socket filename is notify. sooooo\n"
+        },
+        {
+            "user": "giuseppe",
+            "body": "> > \n> \n> Heh, this is weird. It's apparently assuming the socket name is \"notify\".\n> \n> When I pass /run/podman-sdnotify, it's mounted as /run/notify\n> When I pass /tmp/podman-sdnotify, it's mounted as /tmp/notify\n> \n> I'm assuming this has just been working, because systemd's socket filename is notify. sooooo\n\nboth crun and runc wrap the NOTIFY_SOCKET logic and expose a different socket to the container.\n\nWhen the container notifies it is ready, crun/runc reads the notification on the socket they've created and propagate it back to systemd on the correct socket.\n\nThis is to address two issues:\n\n- workaround a systemd notify socket race where the sender of the notification cannot be correctly found with short lived processes if it is not directly monitored by systemd or in a different cgroup.\n\n- avoid that the container communicates directly with systemd and could send some weird MAINPID= value.  So both crun/runc filter anything received from the container except `READY=1`.  I think systemd-nspawn does the same thing."
+        },
+        {
+            "user": "goochjj",
+            "body": "> > > \n> > \n> > \n> > Heh, this is weird. It's apparently assuming the socket name is \"notify\".\n> > When I pass /run/podman-sdnotify, it's mounted as /run/notify\n> > When I pass /tmp/podman-sdnotify, it's mounted as /tmp/notify\n> > I'm assuming this has just been working, because systemd's socket filename is notify. sooooo\n> \n> both crun and runc wrap the NOTIFY_SOCKET logic and expose a different socket to the container.\n> \n> When the container notifies it is ready, crun/runc reads the notification on the socket they've created and propagate it back to systemd on the correct socket.\n> \n> This is to address two issues:\n> \n> * workaround a systemd notify socket race where the sender of the notification cannot be correctly found with short lived processes if it is not directly monitored by systemd or in a different cgroup.\n> * avoid that the container communicates directly with systemd and could send some weird MAINPID= value.  So both crun/runc filter anything received from the container except `READY=1`.  I think systemd-nspawn does the same thing.\n\nI have no problem with any of that, except crun is doing it wrong.\n\nWhen NOTIFY_SOCKET=/run/podman-sdnotify is passed,\nCRUN creates /run/crun/CID/notify/notify.sock\nCRUN bind mounts /run/crun/CID/notify/notify.sock to /run/notify\nCRUN starts the container with NOTIFY_SOCKET=/run/podman-sdnotify\n\nAnd it doesn't work.\n\nBind mount appears to be mounting to $(dirname $NOTIFY_SOCKET)/notify but passes the NOTIFY_SOCKET as is.\n\nSo, runc works regardless of what NOTIFY_SOCKET is\ncrun only works if the socket name is notify.  i.e. /run/systemd/notify, /run/notify, /tmp/notify, /tmp/some/path/here/notify, what have you.\n\nSince this isn't related to my PR, I don't think it should be a blocker on this issue - if it needs to be corrected there'd need to be an issue in the crun repo.\n"
+        },
+        {
+            "user": "goochjj",
+            "body": "Could use some feedback on the e2e test. It works. It's not entirely... understandable.\n\nI could attempt to refactor the unix dgram stuff into a helper function\n\nAlso, obviously it wouldn't be merged focused.\n\nI'd squash these 3 commits together."
+        },
+        {
+            "user": "goochjj",
+            "body": "https://github.com/containers/crun/issues/414\n"
+        },
+        {
+            "user": "mheon",
+            "body": "Changes LGTM, but I'd like someone else with more experience with notify to review the tests for accuracy"
+        },
+        {
+            "user": "mheon",
+            "body": "@giuseppe @edsantiago PTAL"
+        },
+        {
+            "user": "openshift-ci-robot",
+            "body": "[APPROVALNOTIFIER] This PR is **APPROVED**\n\nThis pull-request has been approved by: *<a href=\"https://github.com/containers/libpod/pull/6693#pullrequestreview-436249879\" title=\"Approved\">edsantiago</a>*, *<a href=\"https://github.com/containers/libpod/pull/6693#\" title=\"Author self-approved\">goochjj</a>*, *<a href=\"https://github.com/containers/libpod/pull/6693#pullrequestreview-434485434\" title=\"Approved\">rhatdan</a>*\n\nThe full list of commands accepted by this bot can be found [here](?repo=containers%2Flibpod).\n\nThe pull request process is described [here](https://git.k8s.io/community/contributors/guide/owners.md#the-code-review-process)\n\n<details >\nNeeds approval from an approver in each of these files:\n\n- ~~[OWNERS](https://github.com/containers/libpod/blob/master/OWNERS)~~ [rhatdan]\n\nApprovers can indicate their approval by writing `/approve` in a comment\nApprovers can cancel approval by writing `/approve cancel` in a comment\n</details>\n<!-- META={\"approvers\":[]} -->"
+        },
+        {
+            "user": "goochjj",
+            "body": "Squashing commits and removing FIt\n"
+        },
+        {
+            "user": "goochjj",
+            "body": "Yeah I'm not sure about the test failures.  From what I can tell rootless should work just fine.\n\nI don't know how to solve this \n```\n\"unlinkat /tmp/podman/imagecachedir/vfs/dir/083c11ecaa71f30cd96462da54e18aa870d7cddfa199f9ff31ed8d9913d56b40/run: permission denied\"\n```\nOr this on fedora 32\n```\nRunning: podman [options] run fedora sh -c ls -ld $NOTIFY_SOCKET; systemd-notify --ready; printenv NOTIFY_SOCKET\n         MAINPID=241378\n         MAINPID=241378\n         \u001b[0;1;31mFailed to notify init system: Permission denied\u001b[0m\n         srwxrwxrwx. 1 root root 0 Jun 24 14:20 /tmp/podman_test883637516/notify\n         /tmp/podman_test883637516/notify\n         output: srwxrwxrwx. 1 root root 0 Jun 24 14:20 /tmp/podman_test883637516/notify /tmp/podman_test883637516/notify\n         [AfterEach] Podman systemd-notify\n```\n\nOr the networking test that's failing on Fedora32 - which I don't think I caused.\n\nUbuntu tests seem to be apparmor related.\n\nIf anyone has any ideas, let me know.  Otherwise, let me know how you'd like me to proceed - if we should merge as is or if you want me to do something else.\n"
+        },
+        {
+            "user": "edsantiago",
+            "body": "AppArmor - known problem, rebase to fix. But I don't think there's any point right now, because I don't think these tests are going to pass any time soon without @giuseppe's help.\n\n@giuseppe, could you take a look at what crun is doing here, and how it's mounting the socket? In particular:\n```console\n$ NOTIFY_SOCKET=/tmp/podman-sdnotify/notify ./bin/podman run --rm --sdnotify=container fedora sh -c 'ls -lZ /tmp'\ntotal 4\n-rwx------. 1 root root system_u:object_r:fusefs_t:s0       1379 May 15 06:48 ks-script-xz5dtd94\ndrwx------. 2 root root unconfined_u:object_r:user_tmp_t:s0   60 Jun 25 12:17 podman-sdnotify\n\n$ NOTIFY_SOCKET=/tmp/podman-sdnotify/notify ./bin/podman run --rm --sdnotify=container fedora sh -c 'ls -lZ /tmp/podman-sdnotify'\nls: cannot open directory '/tmp/podman-sdnotify': Permission denied\n\n$ sudo setenforce 0\n$ NOTIFY_SOCKET=/tmp/podman-sdnotify/notify ./bin/podman run --rm --sdnotify=container fedora sh -c 'ls -lZ /tmp/podman-sdnotify'\ntotal 0\nsrwxrwxrwx. 1 root root unconfined_u:object_r:user_tmp_t:s0 0 Jun 25 12:17 notify\n```\nThis happens if I try `/run/user/MYID/systemd/notify` also: the parent directory and socket are created with `user_tmp_t`, and I get an AVC when the container tries to access the socket."
+        },
+        {
+            "user": "giuseppe",
+            "body": "> @giuseppe, could you take a look at what crun is doing here, and how it's mounting the socket? In particular:\n\ncrun is mounting the socket from the `/run/user/$UID` directory.  That is a socket created by crun itself.  crun will read from this socket and propagate the notification to systemd.\n\nThat is why we see the `unconfined_u:object_r:container_var_run_t:s0` label.  Should we relax the selinux policy?  I'll try to change the label from crun, I'll let you know in a bit"
+        },
+        {
+            "user": "giuseppe",
+            "body": "I've opened a PR here: https://github.com/containers/crun/pull/419\n\nWhat I see now:\n\n```\n$ NOTIFY_SOCKET=/run/user/1000/notify/notify  ./bin/podman run --rm --sdnotify=container fedora ls -lZ /run/user/1000/notify\nERRO[0000] Error notifying systemd of Conmon PID: dial unixgram /run/user/1000/notify/notify: connect: no such file or directory \nERRO[0000] Error notifying systemd of Conmon PID: dial unixgram /run/user/1000/notify/notify: connect: no such file or directory \ntotal 0\nsrwxrwxrwx. 1 root root unconfined_u:object_r:container_file_t:s0:c421,c594 0 Jun 25 13:27 notify\n```\n\nlet's disable selinux for now, I am already working on a new release for crun\n"
+        },
+        {
+            "user": "goochjj",
+            "body": "> AppArmor - known problem, rebase to fix. But I don't think there's any point right now, because I don't think these tests are going to pass any time soon without @giuseppe's help.\n\nI'm rebased on origin/master... so...\n"
+        },
+        {
+            "user": "goochjj",
+            "body": "> This happens if I try `/run/user/MYID/systemd/notify` also: the parent directory and socket are created with `user_tmp_t`, and I get an AVC when the container tries to access the socket.\n\nIt's my intention to review the mount labels in the \"Make libpod/conmon handle the notify socket\" branch...\n"
+        },
+        {
+            "user": "rhatdan",
+            "body": "/ok-to-test"
+        },
+        {
+            "user": "goochjj",
+            "body": "Can someone please advise me on how I can run the integration tests locally? I can't get them to work on F32 or Ubuntu 20.04, for different reasons.\n\nI want to fix the checks locally as pushing and having Cirrus tell me they're wrong is going to make this a lot longer to resolve. (And ginkgo focusing local works, but that's using my VM's state, not whatever state Cirrus uses)\n\nAt this point my assumptions are that container-selinux 2.137 is included because the libpodimage appears to include updates-testing, but maybe it's failing because crun 0.14 isn't packaged yet.  I want to confirm my assumptions but I can't even get that far locally.\n\nI'm trying `make integration`, but the \"ADD / $GOSRC\" looks questionable to me, so I changed it to \"ADD . $GOSRC\" as it looks like it should add the libpod source directory into the container.\n\nF32 dies with:\n```\n[2020-07-01T13:36:10+00:00] Removing:\n[2020-07-01T13:36:10+00:00]  runc      x86_64      2:1.0.0-144.dev.gite6555cc.fc32      @@System      9.0 M\n[2020-07-01T13:36:10+00:00]\n[2020-07-01T13:36:10+00:00] Transaction Summary\n[2020-07-01T13:36:10+00:00] ================================================================================\n[2020-07-01T13:36:10+00:00] Remove  1 Package\n[2020-07-01T13:36:10+00:00]\n[2020-07-01T13:36:10+00:00] Freed space: 9.0 M\n[2020-07-01T13:36:10+00:00] Running transaction check\n[2020-07-01T13:36:10+00:00] Transaction check succeeded.\n[2020-07-01T13:36:10+00:00] Running transaction test\n[2020-07-01T13:36:10+00:00] Transaction test succeeded.\n[2020-07-01T13:36:10+00:00] Running transaction\n[2020-07-01T13:36:11+00:00] RPM: error: Plugin selinux: hook tsm_pre failed\n[2020-07-01T13:36:11+00:00] Error: Could not run transaction.\n[2020-07-01T13:36:11+00:00] <exit 1> dnf erase -y runc\n##### (failed with exit: 1)\n##### (exceeded 5 attempts)\nError: error building at STEP \"RUN bash $PACKER_BASE/fedora_packaging.sh &&     dnf clean all &&     rm -rf /var/cache/dnf\": error while running runtime: exit status 125\nmake: *** [Makefile:280: libpodimage] Error 125\n```\n\nFocal dies with:\n```\nSTEP 8: RUN bash $PACKER_BASE/fedora_packaging.sh &&     dnf clean all &&     rm -rf /var/cache/dnf\nERRO[0000] systemd cgroup flag passed, but systemd support for managing cgroups is not available\nsystemd cgroup flag passed, but systemd support for managing cgroups is not available\nerror running container: error creating container for [/bin/sh -c bash $PACKER_BASE/fedora_packaging.sh &&     dnf clean all &&     rm -rf /var/cache/dnf]: : exit status 1\nError: error building at STEP \"RUN bash $PACKER_BASE/fedora_packaging.sh &&     dnf clean all &&     rm -rf /var/cache/dnf\": error while running runtime: exit status 1\nmake: *** [Makefile:280: libpodimage] Error 125\n```\n\nFor that matter it seems podman doesn't detect/use systemd cgroup manager on my Focal testbed... Should these tests be run as root?\n"
+        },
+        {
+            "user": "rhatdan",
+            "body": "@edsantiago PTAL"
+        },
+        {
+            "user": "edsantiago",
+            "body": "```\nsystemd support for managing cgroups is not available\n```\nCan you try:  `setsebool -P container_manage_cgroup=1`\n\nAs for running ginkgo tests locally, sorry. I've spent a ridiculous amount of time over the last few years trying to do that and never even gotten close. It must be possible, I suppose, but for me it's actually just faster and less frustrating to let CI do it."
+        },
+        {
+            "user": "edsantiago",
+            "body": "One suggestion: since this is something I'm going to put in system tests anyway, why not just skip ginkgo and go directly to bats? I can help you write a `test/system/xxx-sdnotify.bats` test if you'd like. *THOSE* are completely trivial to run on a development system."
+        },
+        {
+            "user": "goochjj",
+            "body": "Already on container_manage_cgroup --> on\n\nWhen I do sudo make integration I get\n```\n./hack/install_catatonit.sh\nskipping ... catatonit is already installed\nfatal: not a git repository (or any of the parent directories): .git\ngo build -ldflags '-X github.com/containers/libpod/libpod/define.gitCommit= -X github.com/containers/libpod/libpod/define.buildInfo=1593612156 -X github.com/containers/libpod/libpod/config._installPrefix=/usr/local -X github.com/containers/libpod/libpod/config._etcDir=/etc ' -tags \"   selinux systemd exclude_graphdriver_devicemapper seccomp\" -o test/checkseccomp/checkseccomp github.com/containers/libpod/test/checkseccomp\nfatal: not a git repository (or any of the parent directories): .git\ngo build -ldflags '-X github.com/containers/libpod/libpod/define.gitCommit= -X github.com/containers/libpod/libpod/define.buildInfo=1593612157 -X github.com/containers/libpod/libpod/config._installPrefix=/usr/local -X github.com/containers/libpod/libpod/config._etcDir=/etc ' -o test/goecho/goecho github.com/containers/libpod/test/goecho\nginkgo -v  -tags \"   selinux systemd exclude_graphdriver_devicemapper seccomp\" -timeout=90m -cover -flakeAttempts 3 -progress -trace -noColor -nodes 3 -debug test/e2e/. hack/.\n/bin/sh: ginkgo: command not found\nmake: *** [Makefile:331: ginkgo] Error 127\nmake: *** [Makefile:300: integration] Error 2\n```\n\n\nI'm game to test however.  I don't have experience with any of these tools, so I'm just guessing here. :-D\n\nI'm on Kubernetes slack if that's easier.\n\n"
+        },
+        {
+            "user": "goochjj",
+            "body": "@edsantiago This is how I'm currently testing\n\n[notifytesting.zip](https://github.com/containers/libpod/files/4858525/notifytesting.zip)\n\nFor container, I'll test rootless with\nbash notifytest-container.sh $HOME/tmp/notify.sock\nbash notifytest-container.sh $HOME/tmp/a/long/path/notify.sock\n\nRoot\nbash notifytest-container.sh /run/notify.sock\nbash notifytest-container.sh /run/notify/notify.sock\nbash notifytest-container.sh /tmp/no/particular/path/and/name\n\nThe others can run root or rootless since no bind mount takes place.\n\nThe --pids-limit 0 is an artifact of #6834 \n\nAny help you can provide is appreciated!\n\n\n"
+        },
+        {
+            "user": "edsantiago",
+            "body": "@goochjj what is your test environment where you can get this working? I'm just trying to get a manual confirmation that it works, and continue to get AVCs. I am using `crun` with the latest pr 419 (c04fd1508ab51d8e62bb29d40cddaf23a87e6a44) and the d46fd8ef266e84c70968a199991561c514618d6a commit of your PR. I have container-selinux-2.137.0-3.fc32. I still can't access the socket in the container:\n```\n$ NOTIFY_SOCKET=/tmp/podman-sdnotify/notify ./bin/podman run --rm --sdnotify=container fedora sh -c 'systemd-notify --ready'\nFailed to notify init system: Permission denied\n\ntype=AVC msg=audit(1593618438.828:158200): avc:  denied  { sendto } for  pid=935032 comm=\"systemd-notify\" path=\"/run/user/14904/crun/665079e2855b0ad745bec386e90b95825fbba4792ecdc710ac9a124f7ba7e38b/notify/notify\" scontext=system_u:system_r:container_t:s0:c105,c402 tcontext=unconfined_u:unconfined_r:unconfined_t:s0-s0:c0.c1023 tclass=unix_dgram_socket permissive=0\n```"
+        },
+        {
+            "user": "goochjj",
+            "body": "@edsantiago place your podman in /usr/local/bin, chcon it to match /usr/bin/\nActually, `sudo make install.bin-nobuild`\nAnd then use /usr/local/bin.\n\nThe SELinux policy tags the podman process based on its source location\n"
+        },
+        {
+            "user": "edsantiago",
+            "body": "Argh - missing `chcon`, that was it. Thank you!\n\nPS location doesn't matter, all you need to do is `chcon -t container_runtime_exec_t bin/podman`"
+        },
+        {
+            "user": "goochjj",
+            "body": "Interesting, when I didn't run it from /usr/local I don't think I got the process context, just the file context.  <shrug> I'm only pretending to know what I'm doing.\n"
+        },
+        {
+            "user": "edsantiago",
+            "body": "@goochjj I submitted https://github.com/goochjj/libpod/pull/2 against your PR, it's a simple .bats file containing tests for each of your additions. Feel free to include it as part of your PR if you like.\n\nNote that the tests are actually disabled, because they require a new conmon and container-selinux that is not available on the CI machines and probably won't be for a while. Since my tests pass, I'm pretty happy to just approve this without tests in CI. It will take time to get the CI systems updated."
+        },
+        {
+            "user": "goochjj",
+            "body": "@edsantiago  THANK YOU\nSo I should remove the test/e2e/ file then, ginkgo doesn't have to ALSO test it.\n\nShould we maybe check crun and container-selinux directly? i.e\n```\n. /etc/os-release\nif [ \"$NAME\" = \"Fedora\" -a \"$VERSION_ID\" = \"32\" ]; then\n  VER=$(rpm -q container-selinux --queryformat \"%{VERSION}\")\n  if [ -z \"$VER\" ]; then echo \"Cannot find container-selinux\"; exit 1; fi\n  rpmdev-vercmp 2.137 \"$VER\"\n  RET=$?\n  if [ \"$RET\" = \"12\" ]; then\n    #Package is 2.137.0 or newer\n    true\n  else\n    echo \"Container-selinux is older than 2.137, skipping test\"\n  fi\nfi\n```\nSimilarly look at crun --version....\n"
+        },
+        {
+            "user": "edsantiago",
+            "body": "> So I should remove the test/e2e/ file then, ginkgo doesn't have to ALSO test it.\n\nI'd be happy with that.\n\n>Should we maybe check crun and container-selinux directly? \n\n...and add an equivalent check for Ubuntu? That's a scary amount of temporary code. Probably the cleanest option is to file an issue or maybe two: one to upgrade all CI machines, one to update the Fedora specfile to add a `Requires:` on the specific crun and container-selinux. "
+        },
+        {
+            "user": "goochjj",
+            "body": "> > So I should remove the test/e2e/ file then, ginkgo doesn't have to ALSO test it.\n> \n> I'd be happy with that.\n\nDone\n\n> > Should we maybe check crun and container-selinux directly?\n> \n> ...and add an equivalent check for Ubuntu? That's a scary amount of temporary code. Probably the cleanest option is to file an issue or maybe two: one to upgrade all CI machines, one to update the Fedora specfile to add a `Requires:` on the specific crun and container-selinux.\n\nYeah ok you're right.\n\nIt looks like you're already conspiring for a crun build, and I know rhatdan is working through the updates-testing branch.  Is there something I need to do? What would those issues look like?\n\n\n"
+        },
+        {
+            "user": "edsantiago",
+            "body": "I can file those once `crun` is packaged. One is an issue here, the other in the fedpkg repo for podman. I'm OOTO the rest of the week but have filed a reminder note for myself. Thanks for all your work on this!"
+        },
+        {
+            "user": "goochjj",
+            "body": "Thank you!\n"
+        },
+        {
+            "user": "goochjj",
+            "body": "Do I need to do anything else for this to be merged?"
+        },
+        {
+            "user": "mheon",
+            "body": "Let me re-kick the tests, I think they just flaked.\n\n@rhatdan @vrothberg @giuseppe @baude PTAL"
+        },
+        {
+            "user": "vrothberg",
+            "body": "Restarted the last flake"
+        },
+        {
+            "user": "rhatdan",
+            "body": "@giuseppe PTAL"
+        },
+        {
+            "user": "mheon",
+            "body": "Two flakes, both on the Fedora repos. I'm just going to merge once this goes green.\n\n/lgtm\n/hold"
+        },
+        {
+            "user": "rhatdan",
+            "body": "/hold cancel"
+        },
+        {
+            "user": "rhatdan",
+            "body": "Thanks @goochjj Nice contribution."
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 6689
+        },
+        {
+            "organization": "containers",
+            "repository": "conmon",
+            "number": 182
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 5572
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 6869
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 6160
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 7317
+        }
+    ]
+}

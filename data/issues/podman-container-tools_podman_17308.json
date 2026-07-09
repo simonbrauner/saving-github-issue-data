@@ -1,0 +1,58 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 17308,
+    "type": "issue",
+    "title": "[Feature]: digest support for OCI transport",
+    "state": "open",
+    "labels": [
+        "kind/feature"
+    ],
+    "user": "mwopfner",
+    "body": "### Feature request description\n\nUsing `digest` in the oci transport currently does not work (`podman pull oci:/tmp/local/alpine@sha256:3d426b0bfc361d6e8303f51459f17782b219dece42a1c7fe463b6014b189c86d`) because the parsing only handles the `:tag` notation.\nFrom the documentation (https://github.com/containers/image/blob/main/docs/containers-transports.5.md#ocipathreference) I'm not sure if this is desired behavior or a bug.\nI looked into the problem and found that it is not much needed to support it (see patch below). I'm not sure if this is the right place to request the feature, because all changes have to be made in vendor libs.\n\n### Suggest potential solution\n\nI created a path [oci_digest_support.txt](https://github.com/containers/podman/files/10555476/oci_digest_support.txt) and tested it on my system:\n```\ndiff --git i/vendor/github.com/containers/common/libimage/pull.go w/vendor/github.com/containers/common/libimage/pull.go\nindex 51712bb3b..70703e1d4 100644\n--- i/vendor/github.com/containers/common/libimage/pull.go\n+++ w/vendor/github.com/containers/common/libimage/pull.go\n@@ -227,7 +227,11 @@ func (r *Runtime) copyFromDefault(ctx context.Context, ref types.ImageReference,\n \t\tstorageName = imageName\n \n \tcase ociTransport.Transport.Name():\n-\t\tsplit := strings.SplitN(ref.StringWithinTransport(), \":\", 2)\n+\t\tsplit := strings.SplitN(ref.StringWithinTransport(), \"@\", 2)\n+\n+\t\tif len(split) == 1 {\n+\t\t\tsplit = strings.SplitN(ref.StringWithinTransport(), \":\", 2)\n+\t\t}\n \t\tstorageName = toLocalImageName(split[0])\n \t\timageName = storageName\n \ndiff --git i/vendor/github.com/containers/image/v5/oci/internal/oci_util.go w/vendor/github.com/containers/image/v5/oci/internal/oci_util.go\nindex 148bc12fa..6849459f5 100644\n--- i/vendor/github.com/containers/image/v5/oci/internal/oci_util.go\n+++ w/vendor/github.com/containers/image/v5/oci/internal/oci_util.go\n@@ -58,7 +58,14 @@ func splitPathAndImageWindows(reference string) (string, string) {\n }\n \n func splitPathAndImageNonWindows(reference string) (string, string) {\n-\tsep := strings.SplitN(reference, \":\", 2)\n+\n+\tsep := strings.SplitN(reference, \"@\", 2)\n+\n+\tif len(sep) == 1 {\n+\t\tsep = strings.SplitN(reference, \":\", 2)\n+\t}\n+\n+\t// sep := strings.SplitN(reference, \":\", 2)\n \tpath := sep[0]\n \n \tvar image string\ndiff --git i/vendor/github.com/containers/image/v5/oci/layout/oci_transport.go w/vendor/github.com/containers/image/v5/oci/layout/oci_transport.go\nindex be22bed6d..527cadbb8 100644\n--- i/vendor/github.com/containers/image/v5/oci/layout/oci_transport.go\n+++ w/vendor/github.com/containers/image/v5/oci/layout/oci_transport.go\n@@ -103,7 +103,15 @@ func (ref ociReference) Transport() types.ImageTransport {\n // e.g. default attribute values omitted by the user may be filled in in the return value, or vice versa.\n // WARNING: Do not use the return value\n[oci_digest_support.txt](https://github.com/containers/podman/files/10555452/oci_digest_support.txt)\n in the UI to describe an image, it does not contain the Transport().Name() prefix.\n func (ref ociReference) StringWithinTransport() string {\n-\treturn fmt.Sprintf(\"%s:%s\", ref.dir, ref.image)\n+\n+\t// if we use a digest for the image\n+\t_, err := digest.Parse(ref.image)\n+\tif err == nil {\n+\t\treturn fmt.Sprintf(\"%s@%s\", ref.dir, ref.image)\n+\t} else {\n+\t\t// if we use a normal tag for the image\n+\t\treturn fmt.Sprintf(\"%s:%s\", ref.dir, ref.image)\n+\t}\n }\n \n // DockerReference returns a Docker reference associated with this reference\n@@ -194,13 +202,26 @@ func (ref ociReference) getManifestDescriptor() (imgspecv1.Descriptor, error) {\n \t\t\tif md.MediaType != imgspecv1.MediaTypeImageManifest && md.MediaType != imgspecv1.MediaTypeImageIndex {\n \t\t\t\tcontinue\n \t\t\t}\n-\t\t\trefName, ok := md.Annotations[imgspecv1.AnnotationRefName]\n-\t\t\tif !ok {\n-\t\t\t\tcontinue\n-\t\t\t}\n-\t\t\tif refName == ref.image {\n-\t\t\t\td = &md\n-\t\t\t\tbreak\n+\n+\t\t\t// if we use a digest for the image\n+\t\t\tdigest, err := digest.Parse(ref.image)\n+\t\t\tif err == nil {\n+\t\t\t\tif md.Digest == digest {\n+\t\t\t\t\td = &md\n+\t\t\t\t\tbreak\n+\t\t\t\t} else {\n+\t\t\t\t\tcontinue\n+\t\t\t\t}\n+\t\t\t} else {\n+\t\t\t\t// if we use a tag\n+\t\t\t\trefName, ok := md.Annotations[imgspecv1.AnnotationRefName]\n+\t\t\t\tif !ok {\n+\t\t\t\t\tcontinue\n+\t\t\t\t}\n+\t\t\t\tif refName == ref.image {\n+\t\t\t\t\td = &md\n+\t\t\t\t\tbreak\n+\t\t\t\t}\n \t\t\t}\n \t\t}\n \t}\n```\n\n\n### Have you considered any alternatives?\n\nI considered using `:tag` but i don't have any tags. I only have digests.\n\n### Additional context\n\nThe version section of `podman info`\n```\nversion:\n  APIVersion: 4.3.1\n  Built: 1668026638\n  BuiltTime: Wed Nov  9 20:43:58 2022\n  GitCommit: 814b7b003cc630bf6ab188274706c383f9fb9915-dirty\n  GoVersion: go1.17.13\n  Os: linux\n  OsArch: linux/amd64\n  Version: 4.3.1\n```\n",
+    "comments": [
+        {
+            "user": "vrothberg",
+            "body": "Thanks for reaching out!\n\n@mtrmac WDYT?"
+        },
+        {
+            "user": "mtrmac",
+            "body": "(FWIW, there is the https://github.com/containers/image/pull/1381 / https://github.com/containers/image/pull/1677 which adds _path_`:@`_index_. That might be an alternative to a digest reference in some situations, but certainly not a 100% replacement. We should get that finished eventually…)\n\nSure, that feature seems desirable to provide.\n\nSome specific concerns to deal with:\n- I’m not sure we can just introduce a `@` metacharacter; that could break existing users. We probably need to design some syntax that continues to terminate the path with `:`. The ~obvious choice of `:@sha256:…` is somewhat **EDIT in conflict** with the `:@`_index_ work; we might be able to clearly disambiguate, or we need to change one or the other to use a different syntax. It’s certainly possible to solve, but it will require a bit more precision.\n- Implementation-wise, I do think we need to have specific and exact semantics for data; not “if it parses as a digest, it is a digest” (note that https://github.com/opencontainers/image-spec/blob/main/annotations.md clearly allows a digest-lookalike as the reference annotation) — separate fields in the “reference” object, with unambiguous semantics.\n- (Due to relevance to image signing, we require the reference code to have very good unit test coverage)\n\nSo fully implementing this would be a somewhat larger effort than the diff above, but it’s a good idea and something that should happen.\n"
+        },
+        {
+            "user": "mwopfner",
+            "body": "@mtrmac: Thanks for your feedback. I was pretty sure the patch is not a proper solution :wink: (especially the splitting of the reference into its parts). Here I also got a bit lost with the naming.\n\n- In the source code the variable named `reference` actually contains `path:reference` as described in https://github.com/containers/image/blob/main/docs/containers-transports.5.md#ocipathreference. So the `reference` variable is not just the reference but the `path` plus the `reference` separated by `:`\n- Is it also correct that `reference` in `oic:path:reference` must have the format of `org.opencontainers.image.ref.name` or is it `path:reference` which must have the format? (https://github.com/opencontainers/image-spec/blob/main/annotations.md)\n- I think adding a `@digest` notation in generally would work `oci:path[:{reference|@source-index}|@digest]` when we split only on the first `@` or `:`. I think if a proper regex is used this should be possible (something like https://regex101.com/r/oDjEDX/4 for the last path element). This of course would prevent the use of `@` in the last path element. But I don't think that is a large problem because registries like `quay.io` also do not allow it.\n\nIf I can help implementing this feature in any way please let me know."
+        },
+        {
+            "user": "mtrmac",
+            "body": "The “reference” naming is an unfortunate consequence of several layers of indirection/abstraction. `ociReference` is an instance of a “c/image image reference”, and it refers to any single image (text form `oci:…`). That has up to three parts:\n- `oci:`\n- a path\n- the `org.opencontainers.image.ref.name` annotation.\n\n… and the last part is, by the OCI spec, described as “name of the reference”, let’s call that “OCI reference”. Hence the man page names that part `reference`, meaning OCI reference; OTOH the man page does not use the “reference” word to refer to ”c/image image reference”; it usually says “image name”.\n\nSo, the  `org.opencontainers.image.ref.name` syntax applies to the third part of the image reference (the field `ociReference.image`)\n\n---\n\nWe can’t use `oci:`_path_`@`_digest_  because right now the `@`_digest_ part (or at least the prefix up to the `:` in `@sha256:`) is interpreted as `_path`. E.g. `oci:/foo@sha256:abc…` currently refers to file `/foo@sha256`, with the `…ref.name` annotation value `abc…`.\n\nThe _path_ refers to a local filesystem, so `quay.io` restrictions on repository names are not relevant. \n\nSure, `@` in path names is somewhat unusual, but we are already in enough trouble :) for making it impossible to use `:` in the _path_ part.\n\n---\n\nWRT the way to implement this, most of the work will need to happen in the https://github.com/containers/image repository ; we can discuss both the detailed syntax and implementation there.\n\nSimilarly, the containers/common part would be a PR in that repository; and both will flow into Podman.\n\nI have, at least, filed https://github.com/containers/container-libs/issues/222 , so that this is tracked in the relevant repo."
+        },
+        {
+            "user": "mwopfner",
+            "body": "@mtrmac Thanks for openning https://github.com/containers/container-libs/issues/222. I will add the proposal details there.\n\nRegarding the use of `oci:`_path_`@`_digest_ \n- Yes, it is exactly as you described it and it is correct, that oci is on the filesystem so registry restrictions do not apply. \n- It is more like: should we keep the syntax between registries and oci the same or have different ones and does anyone currently use `@`. (`man podman-pull` tells us `podman pull [options] [transport]name[:tag|@digest]` which suggests, on a very high level, that i can use `@digest` with oci). \n- I'm also fine with another syntax like `:@`.\n"
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@mtrmac I think this is waiting for a response from you?"
+        },
+        {
+            "user": "mtrmac",
+            "body": "@rhatdan This will happen in c/image, via the tracked RFE, when/if it is implemented there."
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "container-libs",
+            "number": 222
+        }
+    ]
+}

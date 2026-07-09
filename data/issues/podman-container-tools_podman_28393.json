@@ -1,0 +1,76 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 28393,
+    "type": "pull_request",
+    "title": "[WIP] podman: propagate user namespace mappings to image pull",
+    "state": "open",
+    "labels": [
+        "stale-pr"
+    ],
+    "user": "giuseppe",
+    "body": "Needs: https://github.com/containers/container-libs/pull/717\n\nWhen running `podman run --userns=keep-id` (or other userns modes) and the image is not yet present, podman pulls the image without any UID/GID mapping information.\n\nThis applies to all userns modes: keep-id, nomap, and explicit --uidmap/--gidmap mappings.  The auto mode (--userns=auto) is not supported because its mappings depend on the image size and are computed at container creation time, after the image has already been pulled.\n\n<!--\nThanks for sending a pull request!\n\nFor more detailed information, please review our contributing guidelines:\nhttps://github.com/containers/podman/blob/main/CONTRIBUTING.md#submitting-pull-requests\n-->\n\n#### Checklist\n\nEnsure you have completed the following checklist for your pull request to be reviewed:\n<!-- Use [x] to mark as done, or click the checkbox after opening PR -->\n\n- [ ] Certify you wrote the patch or otherwise have the right to pass it on as an open-source patch by signing all\ncommits. (`git commit -s`). (If needed, use `git commit -s --amend`).  The author email must match\nthe sign-off email address. See [CONTRIBUTING.md](https://github.com/containers/podman/blob/main/CONTRIBUTING.md#sign-your-prs)\nfor more information.\n- [ ] Referenced issues using `Fixes: #00000` in commit message (if applicable)\n- [ ] [Tests](https://github.com/containers/podman/tree/main/test#readme) have been added/updated (or no tests are needed)\n- [ ] [Documentation](https://github.com/containers/podman/blob/main/docs/README.md) has been updated (or no documentation changes are needed)\n- [ ] All commits pass `make validatepr` (format/lint checks)\n- [ ] [Release note](https://github.com/kubernetes/community/blob/master/contributors/guide/release-notes.md) entered in the section below (or `None` if no user-facing changes)\n\n#### Does this PR introduce a user-facing change?\n\n<!--\nWrite `None` if there are no user-facing changes, otherwise enter your release note below.\nInclude \"action required\" if users need to take action when upgrading.\n-->\n\n```release-note\nNone\n```\n",
+    "comments": [
+        {
+            "user": "packit-as-a-service[bot]",
+            "body": "[NON-BLOCKING] Packit jobs failed. @containers/packit-build please check. Everyone else, feel free to ignore."
+        },
+        {
+            "user": "packit-as-a-service[bot]",
+            "body": "[NON-BLOCKING] Packit jobs failed. @containers/packit-build please check. Everyone else, feel free to ignore."
+        },
+        {
+            "user": "giuseppe",
+            "body": "> What does this implementation do? I think an error during pull is rather bad. In many cases we can run just fine and do not have to care that some uid/gids end up unmapped.\n> \n> I guess we can make your implementation work via remote once you fix the design to move mapping parsing server side. But then we likely should drop all of the current code for that I guess?\n\nisn't that the desirable outcome though?  You can't store the image with the provided mappings, and we would lose information if we tried to store it with unmapped IDs.  In theory this could break the container payload as it might try to use IDs that are not usable.\n\nThat is the same error you get if you try to pull an image with an ID that is not mapped in the user namespace:\n\n```\n$ podman pull quay.io/giuseppe/test:big-id\nTrying to pull quay.io/giuseppe/test:big-id...\nGetting image source signatures\nCopying blob 1c3aa36eaa23 done   |\nError: unable to copy from source docker://quay.io/giuseppe/test:big-id: writing blob: adding layer with blob \"sha256:1c3aa36eaa23535ecc9a8c92bacc280651e052ef8b2b1c926fbe145ee3a6a96e\"/\"\"/\"sha256:eabfe1b6ecee4c14ac500024500d020b3b3f3ec36a5311262f66118848831021\": unpacking failed (error: exit status 1; output: potentially insufficient UIDs or GIDs available in user namespace (requested 1000000:1000000 for /big-id): Check /etc/subuid and /etc/subgid if configured locally and run \"podman system migrate\": lchown /big-id: invalid argument)\n```\n\nWhat we are really missing is a check when running with a local image; currently, we don't validate which IDs are needed, unlike the pull code and the warnings are only related to the additional groups.\n\nI've no strong feelings about this feature, but this was already present (and that is why UIDMappings and GIDMappings are exposed in the pull code), we lost it when we moved to libimage.  The difference is that now it affects rootless when using native overlay instead of fuse-overlayfs, instead of rootful containers as it was when idmapped mounts were not a thing.\n"
+        },
+        {
+            "user": "Luap99",
+            "body": "> I've no strong feelings about this feature, but this was already present (and that is why UIDMappings and GIDMappings are exposed in the pull code), we lost it when we moved to libimage. The difference is that now it affects rootless when using native overlay instead of fuse-overlayfs, instead of rootful containers as it was when idmapped mounts were not a thing.\n\nYeah to be clear I have nothing against doing this, just noting the problem of the current design with client side resolving and that there is some cleanup work with the old code which handled the mappings as well so we should do this only once.\n\nLogic wise I think this approach here seem a lot better and enables the possibility for remote support. I have not deeply looked into all the required code but not having to pull just to copy/chown a second time seems very useful.\n\n\n> isn't that the desirable outcome though? You can't store the image with the provided mappings, and we would lose information if we tried to store it with unmapped IDs. In theory this could break the container payload as it might try to use IDs that are not usable.\n> That is the same error you get if you try to pull an image with an ID that is not mapped in the user namespace:\n\nI know, but personally I (ab)use this feature for security. As you see all these common base images come with all this gids defined that I do not need or use. Many images run fine with with one uid so I map one uid/gid, or maybe two-three but only the ones that are really needed. Yes I could map the first X gids but I liked knowing that I could only expose what I need. And well of course the fact if instead of a warning I get hard errors it breaks my current  server deployment and I need to assign new ranges.\n\nI guess you are right if we pull with a specific mapping we cannot write something outside that mapping all of the sudden to disk. So I guess that is why we have the current difference between ignoring on chown and error on pull. So if we keep that status quo nothing changes and I am fine with that even though it is a bit odd.\n"
+        },
+        {
+            "user": "giuseppe",
+            "body": "this will be beneficial for use cases like Toolbx because the image pulled there is always running inside the same user namespace (never with vanilla mappings), so it will avoid the expensive re-chown on the quite big image.\n\n@debarshiray please correct me if I am wrong."
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this PR had no activity for 30 days."
+        },
+        {
+            "user": "debarshiray",
+            "body": "> this will be beneficial for use cases like Toolbx because the image pulled there is always running inside the same user namespace (never with vanilla mappings), so it will avoid the expensive re-chown on the quite big image.\n\nYes, when `toolbox(1)` is used without `sudo(8)`, it always uses:\n```ShellSession\n$ podman pull ...\n$ podman create --userns keep-id ...\n```\n\nWhen run as `sudo toolbox ...`, it uses `--userns host`.\n\n> @debarshiray please correct me if I am wrong.\n\nThanks for the ping.  I needed some time to dig up my old notes (hidden within several dozen Firefox tabs) about ID mapped mounts, `storage-chown-by-maps` slowness and extra storage, and fuse-overlayfs versus the Linux kernel's overlayfs; and refresh my memory.  :)\n\nI suppose you are trying to solve the issue discussed here:\nhttps://github.com/coreos/fedora-coreos-tracker/issues/1749\nhttps://github.com/podman-container-tools/podman/issues/16541\n\nIf so, I am a bit confused.\n\nFirst, the commit message says:\n```\nWhen running `podman run --userns=keep-id` (or other userns modes) and\nthe image is not yet present, podman pulls the image without any UID/GID\nmapping information.\n```\n\nIt seems to contradict [these](https://github.com/podman-container-tools/podman/issues/16541#issuecomment-3228321309) comments from August last year.  I thought that `podman run --userns keep-id ...` always pulled an image missing from the local storage with the final ID mappings.\n\nDid I misunderstand something?  Did something change in the last several months?\n\nSecond, Toolbx always uses `podman pull`, `create`, `start`, `exec` separately, and never uses `podman run` directly.  So, an optimization that only works with `podman run` won't benefit it.\n\nI am wondering, if we can tell the `podman pull` command about the user namespace ID mappings.  Most Toolbx users use the ready-made Toolbx images, and those are not idiomatic OCI images for deploying services.  Hence, we can always pull them with the `--userns keep-id` mappings and improve the user experience for a significant majority of users."
+        },
+        {
+            "user": "giuseppe",
+            "body": "The optimization was in place before then there was a regression when we moved to libimage, so we lost it. \n\nThis PR reintroduces it. It also work for podman create. \n\nI don't think we should make it explicit for pull, this is an internal optimization and should not be exposed. \n\nCould you use create/pull directly? "
+        },
+        {
+            "user": "debarshiray",
+            "body": "> The optimization was in place before then there was a regression when we moved to libimage, so we lost it.\n> \n> This PR reintroduces it. It also work for podman create.\n\nI see.\n \n> I don't think we should make it explicit for pull, this is an internal optimization and should not be exposed.\n> \n> Could you use create/pull directly?\n\nYou mean, instead of using `podman pull` separately, letting `podman create` do it?  Off the top of my head, doing so can complicate error handling, which is entirely based on exit codes.  eg., it will be good if some Podman commands had a dedicated exit code to denote `ENOSPC`.\n\nThere's another more flexible and gullible use case that can benefit enormously from any optimization like this - the Toolbx test suite.  :)\n\nUnlike normal Toolbx use, where the performance issues only impact the first use of an image, the test suite deletes containers and images several times, and is particularly slow.  Speeding it up will greatly improve the developer experience.\n\nThe test suite has its own local containers/storage store separate from the user's usual store, and does some weird tricks to reduce network I/O.\n\nWhen setting up the test suite, it downloads all the images to a local directory:\n```ShellSession\n$ skopeo copy \\\n    docker://registry.fedoraproject.org/fedora-toolbox:44 \\\n    dir:/test/suite/image/cache/fedora-toolbox-44\n```\n\nWhenever a test wants to use an image, it copies the cached image to the containers/storage:\n```ShellSession\n$ skopeo copy \\\n    dir:/test/suite/image/cache/fedora-toolbox-44 \\\n    containers-storage:[overlay@/test/suite/containers/storage+/test/suite/containers/storage]registry.fedoraproject.org/fedora-toolbox:44\n```\n\nSometimes the image in the containers/storage is used by multiple tests, and then `podman rm` and `rmi` are used to wipe the slate clean, and the steps repeat.  We do try to reduce the number of times we wipe things, and it still happens several times.\n\n_This means that the test suite doesn't cover any `toolbox(1)` code paths for downloading images over the network.  We accepted it as a necessary evil.  Otherwise, repeatedly downloading the images over the network made the tests unreliable due to network problems and exceeding registry quotas, and slow._\n\nI am guessing that this triggers the disk I/O performance issues.  So, I am wondering if we can somehow hack things up to optimize the disk I/O.\n\nMaybe we can create a dummy container with `podman create` just to download the image with the user namespace ID mappings?  Will it retain the ID mappings if we copy it from the containers/storage to the cache directory, and then copy it back when needed?"
+        },
+        {
+            "user": "debarshiray",
+            "body": "> There's another more flexible and gullible use case\n> that can benefit enormously from any optimization like this - the Toolbx test suite. :)\n>\n> [...]\n>\n> The test suite has its own local containers/storage\n> store separate from the user's usual store\n\nWe can force the test suite to use fuse-overlayfs.   However, some distributions (eg., some Fedora derivatives) don't have it, and it will create problems when running the tests there.  So, we will have to somehow parametrise it, and then it will hit the same disk I/O performance issues."
+        },
+        {
+            "user": "giuseppe",
+            "body": "Yes, a dummy container will force the image to be pulled with that mappings and it will be retained in the storage. "
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "container-libs",
+            "number": 717
+        },
+        {
+            "organization": "coreos",
+            "repository": "fedora-coreos-tracker",
+            "number": 1749
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 16541
+        }
+    ]
+}

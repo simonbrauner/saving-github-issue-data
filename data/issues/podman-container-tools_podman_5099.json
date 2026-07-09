@@ -1,0 +1,86 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 5099,
+    "type": "pull_request",
+    "title": "Only modify conmon cgroup if we have running containers",
+    "state": "closed",
+    "labels": [
+        "lgtm",
+        "approved",
+        "locked - please file new issue/PR"
+    ],
+    "user": "mheon",
+    "body": "If there are no running containers - for example, if the pod was just created - the cgroup in question may not exist (under certain circumstances that we're not 100% sure about). However, regardless, we don't need to set a PID limit, as nothing will be making cleanup processes (no running conmon processes), so not changing the cgroup is safe regardless.\n\nFixes #5072\n",
+    "comments": [
+        {
+            "user": "openshift-ci-robot",
+            "body": "[APPROVALNOTIFIER] This PR is **APPROVED**\n\nThis pull-request has been approved by: *<a href=\"https://github.com/containers/libpod/pull/5099#\" title=\"Author self-approved\">mheon</a>*\n\nThe full list of commands accepted by this bot can be found [here](https://go.k8s.io/bot-commands?repo=containers%2Flibpod).\n\nThe pull request process is described [here](https://git.k8s.io/community/contributors/guide/owners.md#the-code-review-process)\n\n<details >\nNeeds approval from an approver in each of these files:\n\n- ~~[OWNERS](https://github.com/containers/libpod/blob/master/OWNERS)~~ [mheon]\n\nApprovers can indicate their approval by writing `/approve` in a comment\nApprovers can cancel approval by writing `/approve cancel` in a comment\n</details>\n<!-- META={\"approvers\":[]} -->"
+        },
+        {
+            "user": "mheon",
+            "body": "@edsantiago Poke - can I bother you to test this? I think this fixes it, but I'm not certain."
+        },
+        {
+            "user": "TomSweeneyRedHat",
+            "body": "LGTM assuming happy tests"
+        },
+        {
+            "user": "edsantiago",
+            "body": "LGTM. In log below, `podman` is rpm-installed, `podman.X` is built from sources with your patch:\n```console\n$ podman pod create --name=foo\na28021a6497946873bbe6355e10761db5803d4cc5826bea685ab76da248768ec\n$ podman pod rm foo\nError: error updating pod a28021a6497946873bbe6355e10761db5803d4cc5826bea685ab76da248768ec conmon group: open /sys/fs/cgroup/libpod_parent/a28021a6497946873bbe6355e10761db5803d4cc5826bea685ab76da248768ec/conmon/pids.max: no such file or directory\n\n\n$ podman.X pod create --name=foo\n5df02bf436d37769d9948d2b24bde24b7f77ba619dfac21af90c5063c0bf1a26\n$ podman.X pod rm foo\n5df02bf436d37769d9948d2b24bde24b7f77ba619dfac21af90c5063c0bf1a26\n```"
+        },
+        {
+            "user": "rhatdan",
+            "body": "/lgtm"
+        },
+        {
+            "user": "edsantiago",
+            "body": "tests are flaking\n/hold"
+        },
+        {
+            "user": "mheon",
+            "body": "I've seen the in-podman flake a few times this morning - I think we might be having registry issues"
+        },
+        {
+            "user": "edsantiago",
+            "body": "Yeah, fedora registry is definitely hosed"
+        },
+        {
+            "user": "edsantiago",
+            "body": "Now I'm seeing what look like real failures tho:\n```\nError: error configuring network namespace for container c91448b0b75d0130791956204d7c170711d99c76fa3c185f999daa43e9dbbeb2: running [/usr/sbin/iptables -t filter -N CNI-ADMIN --wait]: exit status 1: iptables v1.8.2 (nf_tables): Chain already exists\n....\nRunning: podman [options] --events-backend file --storage-driver=vfs pod rm -f test1\n[+0559s] time=\"2020-02-05T20:09:59Z\" level=error msg=\"Error deleting pod eb696dc6a5291d20a8a7bcbe82cf64ebf02a6c4c656ff7b704ea76760ee261a0 cgroup /libpod_parent/eb696dc6a5291d20a8a7bcbe82cf64ebf02a6c4c656ff7b704ea76760ee261a0: remove /sys/fs/cgroup/systemd/libpod_parent/eb696dc6a5291d20a8a7bcbe82cf64ebf02a6c4c656ff7b704ea76760ee261a0: remove /sys/fs/cgroup/systemd/libpod_parent/eb696dc6a5291d20a8a7bcbe82cf64ebf02a6c4c656ff7b704ea76760ee261a0/conmon: remove /sys/fs/cgroup/systemd/libpod_parent/eb696dc6a5291d20a8a7bcbe82cf64ebf02a6c4c656ff7b704ea76760ee261a0/conmon: device or resource busy\"\n...\nhttps://api.cirrus-ci.com/v1/task/5519400170160128/logs/integration_test.log#t--podman-pod-rm--fa-removes-everything"
+        },
+        {
+            "user": "mheon",
+            "body": "Oh no. That's the case that we were trying to fix with this code in the first place - ensuring that cleanup processes never spawned."
+        },
+        {
+            "user": "edsantiago",
+            "body": "Good news, bad news. Good news first: I can reproduce [the failure](https://api.cirrus-ci.com/v1/task/6243504007413760/logs/integration_test.log#t--podman-pod-rm-removes-a-pod-with-a-container) on f30:\n```\n# podid=$(podman --cgroup-manager=cgroupfs pod create --infra=false --share='');podman --cgroup-manager=cgroupfs run --pod $podid -d alpine ls;podman --cgroup-manager=cgroupfs pod rm $podid\n44e9dc690aee39b33059cc12a58663b23c77a1219f4b08707f923a0fb6d3e98b\nERRO[0000] Error deleting pod 3f90166a3d10ef8627caca66045560db5c238ff5c488f77563ebe3d5bb2f0771 cgroup /libpod_parent/3f90166a3d10ef8627caca66045560db5c238ff5c488f77563ebe3d5bb2f0771: remove /sys/fs/cgroup/systemd/libpod_parent/3f90166a3d10ef8627caca66045560db5c238ff5c488f77563ebe3d5bb2f0771: remove /sys/fs/cgroup/systemd/libpod_parent/3f90166a3d10ef8627caca66045560db5c238ff5c488f77563ebe3d5bb2f0771/conmon: remove /sys/fs/cgroup/systemd/libpod_parent/3f90166a3d10ef8627caca66045560db5c238ff5c488f77563ebe3d5bb2f0771/conmon: device or resource busy\nError: error removing pod 3f90166a3d10ef8627caca66045560db5c238ff5c488f77563ebe3d5bb2f0771 conmon cgroup: remove /sys/fs/cgroup/systemd/libpod_parent/3f90166a3d10ef8627caca66045560db5c238ff5c488f77563ebe3d5bb2f0771/conmon: remove /sys/fs/cgroup/systemd/libpod_parent/3f90166a3d10ef8627caca66045560db5c238ff5c488f77563ebe3d5bb2f0771/conmon: remove /sys/fs/cgroup/systemd/libpod_parent/3f90166a3d10ef8627caca66045560db5c238ff5c488f77563ebe3d5bb2f0771/conmon: device or resource busy\n```\nBad news: I can also reproduce on master, without your patch. I think this is a broken test: I think there's a race condition, because adding `sleep 5` between the `podman run` and `podman pod rm` makes the problem go away. If I had to guess, I'd say `podmanTest.RunLsContainerInPod()` should not be running with `-d` or at least the test should wait for the container to finish, but ginkgo makes my head hurt so I'm not going to guess.\n\nI don't know if we're seeing real failures or not, and am giving up for the day."
+        },
+        {
+            "user": "mheon",
+            "body": "That is plan B if I can't get this approach to work"
+        },
+        {
+            "user": "mheon",
+            "body": "Fedora registries being problematic again"
+        },
+        {
+            "user": "mheon",
+            "body": "@rhatdan @vrothberg @baude Anyone want to hit this one with a held LGTM? Last flake should be going green soon"
+        },
+        {
+            "user": "rhatdan",
+            "body": "/lgtm"
+        },
+        {
+            "user": "rhatdan",
+            "body": "@mheon wishful thinking on the flake."
+        },
+        {
+            "user": "mheon",
+            "body": "/hold cancel"
+        }
+    ],
+    "cross_references": []
+}

@@ -1,0 +1,273 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 16315,
+    "type": "pull_request",
+    "title": "remote,build: ignore if `.containerignore` or `.dockerignore` is a symlink outside of buildContext",
+    "state": "closed",
+    "labels": [
+        "lgtm",
+        "approved",
+        "release-note",
+        "kind/api-change",
+        "locked - please file new issue/PR"
+    ],
+    "user": "flouthoc",
+    "body": "Drop support for remote use-cases when `.containerignore` or `.dockerignore` is a symlink pointing to arbitrary location on host.\n\n```release-note\nremote,build: do not allow to process arbitrary symlinks on host for remote builds.\n```\n",
+    "comments": [
+        {
+            "user": "openshift-ci[bot]",
+            "body": "[APPROVALNOTIFIER] This PR is **APPROVED**\n\nThis pull-request has been approved by: *<a href=\"https://github.com/containers/podman/pull/16315#\" title=\"Author self-approved\">flouthoc</a>*\n\nThe full list of commands accepted by this bot can be found [here](https://go.k8s.io/bot-commands?repo=containers%2Fpodman).\n\nThe pull request process is described [here](https://git.k8s.io/community/contributors/guide/owners.md#the-code-review-process)\n\n<details >\nNeeds approval from an approver in each of these files:\n\n- ~~[OWNERS](https://github.com/containers/podman/blob/main/OWNERS)~~ [flouthoc]\n\nApprovers can indicate their approval by writing `/approve` in a comment\nApprovers can cancel approval by writing `/approve cancel` in a comment\n</details>\n<!-- META={\"approvers\":[]} -->"
+        },
+        {
+            "user": "rhatdan",
+            "body": "Can you just use \tsecurejoin \"github.com/cyphar/filepath-securejoin\"?\n\nI think this will throw an error if .dockerignore or .containerignore point at a link outside of the root path. That way I could have a link within the context dir."
+        },
+        {
+            "user": "flouthoc",
+            "body": "> I think this will throw an error if .dockerignore or .containerignore point at a link outside of the root path\n\n@rhatdan I think SecureJoin does not throws error if link is outside the root path, it just resolves the symlink and concats with the `root`. So final path is created something as `/root/some/abs/resolved/symlink`. In such cases since path does not exists so no error is relyed to user it just silently ignores the `.containerignore` or `.dockerignore` file without notifying the user.\n\nHowever it works correctly if symlink is inside the `root` or relative to `root`.\n\nFollowing is the diff which i tried\n```diff\ndiff --git a/pkg/bindings/images/build.go b/pkg/bindings/images/build.go\nindex aabc7290d..63d354ad1 100644\n--- a/pkg/bindings/images/build.go\n+++ b/pkg/bindings/images/build.go\n@@ -27,6 +27,7 @@ import (\n        \"github.com/containers/storage/pkg/ioutils\"\n        \"github.com/docker/go-units\"\n        \"github.com/hashicorp/go-multierror\"\n+       securejoin \"github.com/cyphar/filepath-securejoin\"\n        jsoniter \"github.com/json-iterator/go\"\n        \"github.com/sirupsen/logrus\"\n )\n@@ -754,16 +755,16 @@ func errIfSymlink(path string) error {\n }\n \n func parseDockerignore(root string) ([]string, error) {\n-       path := filepath.Join(root, \".containerignore\")\n-       err := errIfSymlink(path)\n+       path, err := securejoin.SecureJoin(root, \".containerignore\")\n+       //err := errIfSymlink(path)\n        if err != nil {\n                return nil, err\n        }\n        ignore, err := os.ReadFile(path)\n        if err != nil {\n                var dockerIgnoreErr error\n-               path = filepath.Join(root, \".dockerignore\")\n-               symlinkErr := errIfSymlink(path)\n+               path, symlinkErr := securejoin.SecureJoin(root, \".dockerignore\")\n+               //symlinkErr := errIfSymlink(path)\n                if symlinkErr != nil {\n                        return nil, symlinkErr\n                }\n```"
+        },
+        {
+            "user": "flouthoc",
+            "body": "> That way I could have a link within the context dir.\n\n@rhatdan even though secure-join is not working as expected but I have modified function to `errIfSymlinkOutsideRoot` which should handle this use-case.\n\n"
+        },
+        {
+            "user": "rhatdan",
+            "body": "But wouldn't securejoin work ok since when you attempt to open the path, it would fail with file does not exist?\n\nIf I set .containerignore->/etc/shadow; don't you get an  error like\n/ROOTDIR/etc/shadow does not exist"
+        },
+        {
+            "user": "flouthoc",
+            "body": "> But wouldn't securejoin work ok since when you attempt to open the path, it would fail with file does not exist?\n> \n> If I set .containerignore->/etc/shadow; don't you get an error like /ROOTDIR/etc/shadow does not exist\n\n@rhatdan I think It does not fails cause `parseDockerIgnore` ignores `IsNotExists` https://github.com/containers/podman/blob/main/pkg/bindings/images/build.go#L751, I think its because the ignore files are not direct input by users but detected by podman internally."
+        },
+        {
+            "user": "rhatdan",
+            "body": "OK\nLGTM\nBut tests are failing."
+        },
+        {
+            "user": "flouthoc",
+            "body": "@rhatdan They were flakes CI is green now."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@containers/podman-maintainers PTAL"
+        },
+        {
+            "user": "eriksjolund",
+            "body": "I tried out  f9ae0309e4213bc9094054bde0249c17bd681736\nIt's possible to detect that the directory _/etc/testdir_ exists on the host (that is outside of the context directory). \nThe build fails when the directory does not exist. I don't know if this matters or not.\n\n```\n$ pwd\n/home/test/srcdir\n$ ls -la\ntotal 8\ndrwxr-xr-x. 2 test test   62 Oct 28 07:31 .\ndrwx------. 8 test test 4096 Oct 28 07:24 ..\n-rw-r--r--. 1 test test   13 Oct 28 07:30 Dockerfile\nlrwxrwxrwx. 1 test test   42 Oct 28 07:22 .dockerignore -> /etc/testdir/../../proc/self/cwd/emptyfile\n-rw-r--r--. 1 test test    0 Oct 28 07:21 emptyfile\n$ cat Dockerfile\nFROM scratch\n$\n```\n#### case 1: The directory /etc/testdir exists\n\n```\n$ ls -ld /etc/testdir\ndrwxr-xr-x. 2 root root 6 Oct 28 07:32 /etc/testdir\n$ pwd\n/home/test/srcdir\n$ podman --remote build --no-cache .\nSTEP 1/1: FROM scratch\nCOMMIT\n--> 1ef5892c2c0\n1ef5892c2c024279067db4deba42eb22e528d4876ddc9bc084294b2363aff67d\n$\n```\n\n#### case 2: The directory /etc/testdir does not exist\n\n```\n$ ls -ld /etc/testdir\nls: cannot access '/etc/testdir': No such file or directory\n$ pwd\n/home/test/srcdir\n$ podman --remote build --no-cache .\nError: unable to resolve symlink /home/test/srcdir/.dockerignore: lstat /etc/testdir: no such file or directory\n$\n```\n\n#### about the Podman version\n```\n$ podman version\nClient:       Podman Engine\nVersion:      4.3.0-dev\nAPI Version:  4.3.0-dev\nGo Version:   go1.18.6\nGit Commit:   f9ae0309e4213bc9094054bde0249c17bd681736\nBuilt:        Fri Oct 28 07:52:08 2022\nOS/Arch:      linux/amd64\n```\n"
+        },
+        {
+            "user": "flouthoc",
+            "body": "@eriksjolund That was one of the reason to mask this error https://github.com/containers/podman/pull/16315#discussion_r1007240297 , I think we should mask this error."
+        },
+        {
+            "user": "flouthoc",
+            "body": "@eriksjolund Try again plz."
+        },
+        {
+            "user": "eriksjolund",
+            "body": "> @eriksjolund Try again plz. \n\n@flouthoc I'm not able to do that right now but I could check during the weekend.  I'm also a bit curious to investigate if there is any way to combine github.com/cyphar/filepath-securejoin with some additional checks in parseDockerIgnore(). \n\nAnother thing: I think it would be more secure to use the resolved path _resolvedPath_\n```\nresolvedPath, _ := filepath.EvalSymlinks(path)\n```\nwhen reading the file. The symlinks might have changed after the check (TOCTOU).\n\n\n\n\n\n\n\n\n\n"
+        },
+        {
+            "user": "eriksjolund",
+            "body": "I think it would be good to aim for docker buildkit compatibility  (i.e. running `DOCKER_BUILDKIT=1 docker build ...`)\n\nIt looks like docker resolves a _.dockerignore_ symlink as if the build context directory is the root of the file system.\n\n```\n$ docker --version\nDocker version 20.10.17, build 100c701\n$ pwd\n/Users/test/dir\n$ ls -la\ntotal 16\ndrwxr-xr-x  7 test  test  224 Oct 28 20:04 .\ndrwxr-xr-x  3 test  test   96 Oct 28 19:42 ..\nlrwxr-xr-x  1 test  test    7 Oct 28 20:04 .dockerignore -> /ignore\n-rw-r--r--  1 test  test   41 Oct 28 19:42 Dockerfile\n-rw-r--r--  1 test  test    0 Oct 28 19:42 a1\n-rw-r--r--  1 test  test    0 Oct 28 19:42 a2\n-rw-r--r--  1 test  test    3 Oct 28 20:03 ignore\n$ cat Dockerfile\nFROM docker.io/library/alpine\nCOPY / /dir\n$ cat ignore\na1\n$ DOCKER_BUILDKIT=1 docker build -q --no-cache -t test .\nsha256:4eda78871f8fe0e92e4190fdbe27477b5e7e7cb74d860e8e3e721e38a24523eb\n$ docker run --rm test ls /dir\nDockerfile\na2\nignore\n$ ln -sf ../ignore .dockerignore\n$ ls -la\ntotal 16\ndrwxr-xr-x  7 test  test  224 Oct 28 20:04 .\ndrwxr-xr-x  3 test  test   96 Oct 28 19:42 ..\nlrwxr-xr-x  1 test  test    7 Oct 28 20:14 .dockerignore -> ../ignore\n-rw-r--r--  1 test  test   41 Oct 28 19:42 Dockerfile\n-rw-r--r--  1 test  test    0 Oct 28 19:42 a1\n-rw-r--r--  1 test  test    0 Oct 28 19:42 a2\n-rw-r--r--  1 test  test    3 Oct 28 20:03 ignore\n$ DOCKER_BUILDKIT=1 docker build -q --no-cache -t test .\nsha256:9f77e227de43139bba6edcca4543909d39efca7bd410f641b2facc0655bf5a01\n$ docker run --rm test ls /dir\nDockerfile\na2\nignore\n$\n```\n\n\n"
+        },
+        {
+            "user": "eriksjolund",
+            "body": "@flouthoc with your new commit 4b242b2 the error message became\n\n```\nError: /home/test/srcdir/.dockerignore cannot be a symlink outside of build context\n```\n\ninstead of the previous result from https://github.com/containers/podman/pull/16315#issuecomment-1294506978\n\n```\nError: unable to resolve symlink /home/test/srcdir/.dockerignore: lstat /etc/testdir: no such file or directory\n```\n\n#### About using github.com/cyphar/filepath-securejoin   \nfrom https://github.com/containers/podman/pull/16315#issuecomment-1293301950\n> In such cases since path does not exists so no error is relyed to user it just silently ignores the .containerignore or .dockerignore file without notifying the user. \n\nOne alternative could be to use filepath-securejoin  and at the same time introduce new  a command-line option for allowing _.dockerignore_ to be a symlink. \nUsers using a symlink _.dockerignore_ would then be surprised by a failing build instead of a non-working _.dockerignore_  when they upgrade the Podman version.\nAfter a few Podman releases, allowing symlink _.dockerignore_  could be made the default setting.\n\nA side-note regarding Buildkit: At first sight it seems that filepath-securejoin behaves in the same way as Buildkit regarding following symlinks. That conclusion is just drawn from the two  Buildkit tests in\nhttps://github.com/containers/podman/pull/16315#issuecomment-1295322849 \n(In other words, the behaviour might differ when looking more closely)\n\n#### About using  filepath.EvalSymlinks(path)\n\n@flouthoc  4b242b2 (that is using `filepath.EvalSymlinks(path)`)  is fine by me. Paths outside of the build context directory may be traversed but I think that commit changes the current Podman functionality the least.\n\n\n\n\n\n\n\n"
+        },
+        {
+            "user": "flouthoc",
+            "body": "@eriksjolund I think securejoin approach is better if `buildkit` is just ignoring invalid symlinks instead of error, I'll amend this."
+        },
+        {
+            "user": "eriksjolund",
+            "body": "@flouthoc When I tested it out,  Builldkit ignored the invalid symlink\n```\n$ ls -la                                                        \ntotal 8\ndrwxr-xr-x  4 test  test  128 Oct 29 10:21 .\ndrwxr-xr-x  3 test  test   96 Oct 28 19:42 ..\nlrwxr-xr-x  1 test  test   11 Oct 29 10:21 .dockerignore -> nonexistent\n-rw-r--r--  1 test  test   42 Oct 28 20:12 Dockerfile\n$ DOCKER_BUILDKIT=1 docker build --no-cache -q .                \nsha256:9a56b68578083e54c7883e0d8cf6b0eea2f1f7d724e17181fd07fc53ba845eb0\n$ echo $?\n0\n$\n```\n"
+        },
+        {
+            "user": "flouthoc",
+            "body": "@eriksjolund Following patch maintains parity with docker and buildkit, I have added a test to verify this."
+        },
+        {
+            "user": "eriksjolund",
+            "body": "@flouthoc I tried out ec21a3a and noticed that the server may receive a symlink .dockerignore. When symlinks are evaluated on the server side the resulting path is a file outside of the context directory. To achieve this I used an extra symlink \n```\n$ ls -l d/d/d/d/d/d/\ntotal 0\nlrwxrwxrwx. 1 test test 17 Nov  2 19:17 d -> ../../../../../..\n```\n\n\n"
+        },
+        {
+            "user": "flouthoc",
+            "body": "> @flouthoc I tried out [ec21a3a](https://github.com/containers/podman/commit/ec21a3a62874016e1b4cfcfac0ff7cf60eb8a566) and noticed that the server may receive a symlink .dockerignore. When symlinks are evaluated on the server side the resulting path is a file outside of the context directory. To achieve this I used an extra symlink\n> \n> ```\n> $ ls -l d/d/d/d/d/d/\n> total 0\n> lrwxrwxrwx. 1 test test 17 Nov  2 19:17 d -> ../../../../../..\n> ```\n\n@eriksjolund Should be handled now. Could you PTAL again."
+        },
+        {
+            "user": "eriksjolund",
+            "body": "I think a 54de6e7 client will not read outside of the context directory. \nA `podman system service` of 54de6e7 may read outside of the context directory if some other client (for example Podman 4.3.1) performs a remote build. (Just mentioning it as a side-note as this PR touches the client-side code)"
+        },
+        {
+            "user": "flouthoc",
+            "body": "> I think a [54de6e7](https://github.com/containers/podman/commit/54de6e7a96fd727cb5141ced4621d6220d65ec3c) client will not read outside of the context directory. A `podman system service` of [54de6e7](https://github.com/containers/podman/commit/54de6e7a96fd727cb5141ced4621d6220d65ec3c) may read outside of the context directory if some other client (for example Podman 4.3.1) performs a remote build. (Just mentioning it as a side-note as this PR touches the client-side code)\n\n@eriksjolund Yes that is correct and expected that the older client version does not have this patch we will have to backport it on necessary versions and we already have ticket for those.\n\n@containers/podman-maintainers PTAL"
+        },
+        {
+            "user": "eriksjolund",
+            "body": "@flouthoc There are other clients than Podman. (I haven't tested any other clients though)."
+        },
+        {
+            "user": "flouthoc",
+            "body": "@eriksjolund  Overall I'm not sure about about supporting every third party client, I think podman can only guarantee about `podman-remote`, `docker`, `API` and `compat API`.  Do you think i missed any other client ?\n\nAlso if any third party client wants to process `symlink` and post it to podman via API it should still be allowed, cause they are using API directly, I don't think its a problem with `podman` but how a third party client has implemented it. But we can discuss on this.\n\nWe can actually make it work for API as well if we move parts of symlink validation from `func parseDockerignore` to server end but not sure if that is expected thing to do ? ( It prohibits use-case where someone actually wants to send symlink in build context for API use-case but it is still support by regular podman and buildah )"
+        },
+        {
+            "user": "eriksjolund",
+            "body": "> @eriksjolund Overall I'm not sure about about supporting every third party client, I think podman can only guarantee about `podman-remote`, `docker`, `API` and `compat API`. Do you think i missed any other client ?\n\nI don't know so much about the different uses of `podman system service`.\n\n> \n> Also if any third party client wants to process `symlink` and post it to podman via API it should still be allowed, cause they are using API directly, I don't think its a problem with `podman` but how a third party client has implemented it. But we can discuss on this.\n\nThat the server allows symlinks is fine but I think the server should not follow symlinks to the outside of the build context directory. I don't see how any client could depend on such functionality. (The result of the container build then starts to be dependent of the files and directories outside of the build context)\n\n> \n> We can actually make it work for API as well if we move parts of symlink validation from `func parseDockerignore` to server end but not sure if that is expected thing to do ? ( It prohibits use-case where someone actually wants to send symlink in build context for API use-case but it is still support by regular podman and buildah )\n\nSharing code between client and server sounds like a good idea.\n\n\n"
+        },
+        {
+            "user": "rhatdan",
+            "body": "I agree we should be only resolving symlinks within the build context directory on the server."
+        },
+        {
+            "user": "flouthoc",
+            "body": "> I agree we should be only resolving symlinks within the build context directory on the server.\n\n@rhatdan @eriksjolund Done `.containerignore` validation happens at server end."
+        },
+        {
+            "user": "eriksjolund",
+            "body": "What is the expected behaviour when a `.dockerignore` is a symlink pointing to `../.dockerignore`? Should the symlink be followed? In the following test podman (fe14a5ee7e4c622ebad0acb17e8845427046a9a7) followed the symlink but not docker.\n\nI could take another look over the weekend.\n\nTest of fe14a5ee7e4c622ebad0acb17e8845427046a9a7\n```\n$ podman version\nClient:       Podman Engine\nVersion:      4.4.0-dev\nAPI Version:  4.4.0-dev\nGo Version:   go1.19.3\nGit Commit:   fe14a5ee7e4c622ebad0acb17e8845427046a9a7\nBuilt:        Wed Nov 30 18:58:15 2022\nOS/Arch:      linux/amd64\n$ ls -la\ntotal 8\ndrwxr-xr-x.  2 test535 test535   71 Dec  1 08:20 .\ndrwx------. 11 test535 test535 4096 Dec  1 08:15 ..\n-rw-r--r--.  1 test535 test535   42 Dec  1 08:14 Dockerfile\nlrwxrwxrwx.  1 test535 test535   16 Dec  1 08:15 .dockerignore -> ../.dockerignore\n-rw-r--r--.  1 test535 test535    0 Dec  1 08:11 hello\n-rw-r--r--.  1 test535 test535    0 Dec  1 08:11 world\n$ cat Dockerfile \nFROM docker.io/library/alpine\nCOPY / /dir\n$ cat .dockerignore \nhello\n$ podman build . -t test1 --no-cache\nSTEP 1/2: FROM docker.io/library/alpine\nSTEP 2/2: COPY / /dir\nCOMMIT test1\n--> 5c14e06b6fb\nSuccessfully tagged localhost/test1:latest\n5c14e06b6fb26a9850533583f38bab83ecf1cd7a6a427e8dd2406857b6aad8e8\n$ podman run --rm localhost/test1 ls /dir\nDockerfile\nworld\n$ \n```\n\n\nTest of docker on a macOS Ventura 13.0.1\n```\n$ docker --version\nDocker version 20.10.20, build 9fdeb9c\n$ docker build -t test -q --no-cache .\nsha256:192f2b81e192675ddb3599426b598f8d6677520a6f9d2ccae7a0b4751e089982\n$ DOCKER_BUILDKIT=1 docker build -t test -q --no-cache .\nsha256:ad0018ab8842d21073f211901347512ed538e2d605b25cedd2c35d3cb160a346\n$ docker run --rm test ls /dir                          \nDockerfile\nhello\nworld\n$ DOCKER_BUILDKIT=0 docker build -t test -q --no-cache .\nSending build context to Docker daemon  3.072kB\nError response from daemon: forbidden path outside the build context: .dockerignore ()\n$\n```\n\n\n\n\n"
+        },
+        {
+            "user": "flouthoc",
+            "body": "@eriksjolund Did you update the remote-binary as well ? For me `SecureJoin fails` with following error\n\n```console\ntotal 16\ndrwxr-xr-x. 1 fl fl 110 Dec  1 14:50 .\ndrwxrwxr-x. 1 fl fl 128 Dec  1 14:44 ..\ndrwxr-xr-x. 1 fl fl   2 Nov  2 23:46 d\n-rw-r--r--. 1 fl fl  42 Nov  3 00:45 Dockerfile\nlrwxrwxrwx. 1 fl fl  16 Dec  1 14:45 .dockerignore -> ../.dockerignore\ndrwxr-xr-x. 1 fl fl  24 Nov  2 23:36 etc\n-rw-r--r--. 1 fl fl   0 Nov  2 23:35 hello\n-rw-rw-r--. 1 fl fl   0 Dec  1 14:50 out\n-rw-r--r--. 1 fl fl 426 Nov 28 19:33 src.tar.gz\nlrwxrwxrwx. 1 fl fl  47 Nov  2 23:50 .test -> d/d/d/d/d/d/d/d/../../../../../etc/private_file\n-rw-r--r--. 1 fl fl   0 Nov  2 23:35 world\n```\n\nOutput\n```sh\npodman-remote build --no-cache -t test .\nError: SecureJoin /home/fl/work/podman/bin/src/../.dockerignore/: too many levels of symbolic links\n```"
+        },
+        {
+            "user": "eriksjolund",
+            "body": "@flouthoc Probably I made a mistake while building. (It's just a standard Fedora 37 computer)\nI could check it over the weekend."
+        },
+        {
+            "user": "eriksjolund",
+            "body": "@flouthoc Now I made sure to update the podman-remote binary as well.\n\n\npodman-remote works fine. (See __test 1__ and __test 2__)\n\nI wonder if podman (without --remote) needs to be adjusted as well? (See __test 3__) \n\n\n\n###  Test 1  \n__server__: fe14a5e (podman system service)  \n__client__: 4.3.1\n```\n$ podman --version\npodman version 4.3.1\n$ cat Dockerfile \nFROM docker.io/library/alpine\nCOPY / /dir\n$ ls -la\ntotal 8\ndrwxr-xr-x. 2 test537 test537   71 Dec  3 15:57 .\ndrwx------. 9 test537 test537 4096 Dec  3 15:57 ..\n-rw-r--r--. 1 test537 test537   42 Dec  3 15:57 Dockerfile\nlrwxrwxrwx. 1 test537 test537   16 Dec  3 15:57 .dockerignore -> ../.dockerignore\n-rw-r--r--. 1 test537 test537    0 Dec  3 15:57 hello\n-rw-r--r--. 1 test537 test537    0 Dec  3 15:57 world\n$ cat .dockerignore \nhello\n$ CONTAINER_HOST=tcp://127.0.0.1:1460 podman --remote build . -t test1 --no-cache\nError: invalid symlink \"/var/tmp/libpod_builder4036717781/build/.dockerignore\" -> \"../.dockerignore\"\n```\n### Test 2\n\n__server__: fe14a5e (podman system service)  \n__client__: fe14a5e \n\n```\n$ podman version\nClient:       Podman Engine\nVersion:      4.4.0-dev\nAPI Version:  4.4.0-dev\nGo Version:   go1.19.3\nGit Commit:   fe14a5ee7e4c622ebad0acb17e8845427046a9a7\nBuilt:        Sat Dec  3 13:53:45 2022\nOS/Arch:      linux/amd64\n$ ls -la\ntotal 8\ndrwxr-xr-x. 2 test536 test536   71 Dec  3 15:18 .\ndrwx------. 8 test536 test536 4096 Dec  3 16:22 ..\n-rw-r--r--. 1 test536 test536   42 Dec  3 15:15 Dockerfile\nlrwxrwxrwx. 1 test536 test536   16 Dec  3 15:14 .dockerignore -> ../.dockerignore\n-rw-r--r--. 1 test536 test536    0 Dec  3 15:14 hello\n-rw-r--r--. 1 test536 test536    0 Dec  3 15:14 world\n$ cat Dockerfile \nFROM docker.io/library/alpine\nCOPY / /dir\n$ cat .dockerignore \nhello\n$ CONTAINER_HOST=unix://$XDG_RUNTIME_DIR/podman/podman.sock podman --remote build . -t test2 --no-cache\nError: SecureJoin /home/test536/src2/../.dockerignore/: too many levels of symbolic links\n$ \n```\n\n### Test 3 (without --remote)\n\n```\n$ podman version\nClient:       Podman Engine\nVersion:      4.4.0-dev\nAPI Version:  4.4.0-dev\nGo Version:   go1.19.3\nGit Commit:   fe14a5ee7e4c622ebad0acb17e8845427046a9a7\nBuilt:        Sat Dec  3 13:53:45 2022\nOS/Arch:      linux/amd64\n$ ls -la\ntotal 8\ndrwxr-xr-x. 2 test536 test536   71 Dec  3 15:18 .\ndrwx------. 8 test536 test536 4096 Dec  3 16:22 ..\n-rw-r--r--. 1 test536 test536   42 Dec  3 15:15 Dockerfile\nlrwxrwxrwx. 1 test536 test536   16 Dec  3 15:14 .dockerignore -> ../.dockerignore\n-rw-r--r--. 1 test536 test536    0 Dec  3 15:14 hello\n-rw-r--r--. 1 test536 test536    0 Dec  3 15:14 world\n$ cat Dockerfile \nFROM docker.io/library/alpine\nCOPY / /dir\n$ cat .dockerignore \nhello\n$ podman build . -t test3 --no-cache\nSTEP 1/2: FROM docker.io/library/alpine\nTrying to pull docker.io/library/alpine:latest...\nGetting image source signatures\nCopying blob c158987b0551 done  \nCopying config 49176f190c done  \nWriting manifest to image destination\nStoring signatures\nSTEP 2/2: COPY / /dir\nCOMMIT test3\n--> ca7bb5b8e6e\nSuccessfully tagged localhost/test3:latest\nca7bb5b8e6ef2720574a8b988ec140d99b5579bf84c7184a193e58146dc7481f\n$ podman run --rm test3 ls -la /dir\ntotal 4\ndrwxr-xr-x    2 root     root            58 Dec  3 15:55 .\ndr-xr-xr-x    1 root     root            28 Dec  3 15:55 ..\nlrwxrwxrwx    1 root     root            16 Dec  3 14:14 .dockerignore -> ../.dockerignore\n-rw-r--r--    1 root     root            42 Dec  3 14:15 Dockerfile\n-rw-r--r--    1 root     root             0 Dec  3 14:14 world\n$ \n$ mv Dockerfile ..\n$ ln -s ../Dockerfile .\n$ ls -la\ntotal 4\ndrwxr-xr-x. 2 test536 test536   71 Dec  3 16:32 .\ndrwx------. 9 test536 test536 4096 Dec  3 16:32 ..\nlrwxrwxrwx. 1 test536 test536   13 Dec  3 16:32 Dockerfile -> ../Dockerfile\nlrwxrwxrwx. 1 test536 test536   16 Dec  3 15:14 .dockerignore -> ../.dockerignore\n-rw-r--r--. 1 test536 test536    0 Dec  3 15:14 hello\n-rw-r--r--. 1 test536 test536    0 Dec  3 15:14 world\n$ podman build . -t test3 --no-cache\nSTEP 1/2: FROM docker.io/library/alpine\nSTEP 2/2: COPY / /dir\nCOMMIT test3\n--> f0d340fdfd2\nSuccessfully tagged localhost/test3:latest\nf0d340fdfd253b252ab34960d6b0f77b70f0dadf9ba0552e9b79c3aac22ea072\n$ podman run --rm test3 ls -la /dir\ntotal 0\ndrwxr-xr-x    2 root     root            58 Dec  3 15:33 .\ndr-xr-xr-x    1 root     root            28 Dec  3 15:53 ..\nlrwxrwxrwx    1 root     root            16 Dec  3 14:14 .dockerignore -> ../.dockerignore\nlrwxrwxrwx    1 root     root            13 Dec  3 15:32 Dockerfile -> ../Dockerfile\n-rw-r--r--    1 root     root             0 Dec  3 14:14 world\n$\n```\n\n\n\n"
+        },
+        {
+            "user": "flouthoc",
+            "body": "@eriksjolund podman without remote is on the same host, user already has access to this file so I think users should be allowed use symlink when on the same host and this restriction should be only on `remote` use-cases. WDYT ?\n\n@rhatdan WDYT ?"
+        },
+        {
+            "user": "eriksjolund",
+            "body": "@flouthoc That's a fair point, that users already have access to the file, but I don't think users need the feature. It would be better if podman remote and non-remote behaviour would match. Another argument for not having the feature is that the docker behaviour (see  https://github.com/containers/podman/pull/16315#issuecomment-1333338785)  does not match the podman behaviour. \n\nThe feature is actually available in docker if `DOCKER_BUILDKIT=0` and  the file outside of the source directory is not named _.dockerignore_ .\n\n<details>\n  <summary>Click me for a DOCKER_BUILDKIT=0 example</summary>\n\n```\n$ docker --version\nDocker version 20.10.21, build baeda1f\n$ ls -la                          \ntotal 8\ndrwxr-xr-x  6 erik  wheel  192 Dec  4 09:25 .\ndrwxr-xr-x  4 erik  wheel  128 Dec  4 09:23 ..\nlrwxr-xr-x  1 erik  wheel    7 Dec  4 09:25 .dockerignore -> ../file\n-rw-r--r--  1 erik  wheel   42 Oct 23 13:46 Dockerfile\n-rw-r--r--  1 erik  wheel    0 Dec  4 09:22 hello\n-rw-r--r--  1 erik  wheel    0 Dec  4 09:22 world\n$ cat Dockerfile \nFROM docker.io/library/alpine\nCOPY / /dir\n$ cat .dockerignore \nhello\n$ DOCKER_BUILDKIT=0 docker build --no-cache -q -t test .   \nsha256:eebb326bb23e9f48e5530031208072f605eb9d2fb3466e9710c3b66ca107ba70\n$ docker run --rm test ls -la /dir                      \ntotal 12\ndrwxr-xr-x    2 root     root          4096 Dec  4 08:29 .\ndrwxr-xr-x    1 root     root          4096 Dec  4 08:29 ..\nlrwxrwxrwx    1 root     root             7 Dec  4 08:25 .dockerignore -> ../file\n-rw-r--r--    1 root     root            42 Oct 23 11:46 Dockerfile\n-rw-r--r--    1 root     root             0 Dec  4 08:22 world\n$\n```\n</details>\n\n\n The docker project sees this feature as a bug, though. The feature is not available when using BuildKit (i.e., using `DOCKER_BUILDKIT=1`). \n\n\nI think the best would be not to use a followed _.dockerignore_ symlink that ends up being outside the source directory even for non-remote. The same goes for _Dockerfile_ (both non-remote and remote).\n\n\n\n\n\n"
+        },
+        {
+            "user": "flouthoc",
+            "body": "@eriksjolund That's a fair point if everybody agrees I think we can implement it on the buildah side in a different PR. This PR was majorly concern with the security issue of resolving symlink on host side only for `podman-remote` and `podman server`.\n\nOverall I still think`buildah` running on host should resolv symlink but I have no strong opinion and okay to implement it on buildah side as a feature instead of security patch.\n\n@eriksjolund other than that is there anything else blocking this PR ?"
+        },
+        {
+            "user": "eriksjolund",
+            "body": "@flouthoc No, I don't see any blocker."
+        },
+        {
+            "user": "rhatdan",
+            "body": "I agree local and remote should both only allow links within the context directory."
+        },
+        {
+            "user": "flouthoc",
+            "body": "@rhatdan Yes gonna do it at buildah side as well as a feature, should we merge this as well so its easier to backport to older versions of podman since this closes the remote security issue."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@flouthoc needs a rebase."
+        },
+        {
+            "user": "flouthoc",
+            "body": "Buildah end of this feature is already merged: https://github.com/containers/buildah/pull/4468"
+        },
+        {
+            "user": "rhatdan",
+            "body": "Should you include the vendor of the latest buildah into this PR?"
+        },
+        {
+            "user": "vrothberg",
+            "body": "Needs a rebase.  Let's get this in soon for 4.4."
+        },
+        {
+            "user": "flouthoc",
+            "body": "I think this should become green now."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@flouthoc are bud tests failing or are they flakes?"
+        },
+        {
+            "user": "flouthoc",
+            "body": "I think last test is a flake."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@containers/podman-maintainers PTAL"
+        },
+        {
+            "user": "rhatdan",
+            "body": "@eriksjolund PTAL"
+        },
+        {
+            "user": "rhatdan",
+            "body": "@vrothberg @mheon PTAL"
+        },
+        {
+            "user": "rhatdan",
+            "body": "@giuseppe @flouthoc @vrothberg PTAL"
+        },
+        {
+            "user": "eriksjolund",
+            "body": "(feedback from reading the code)\n\nIt looks like  the resulting `excludes` from ParseDockerignore may be dependent on the order of the items in the array `containerfiles`. I'm thinking of the situation when `podman build --file containerfile1 --file containerfile2 .` is used and at the same time the files _containerfile1.containerignore_ and   _containerfile2.containerignore_  exist. Maybe this is expected  behavoiur.\n\n\n\n\n"
+        },
+        {
+            "user": "flouthoc",
+            "body": "@eriksjolund Yes this is expected and keeping the original behavior but if it needs to be changed I think it should be part of a new issue. \n\nThe original issue is also fixed at buildah end here so this PR only makes sure that we dont tar up symlink from `podman-remote` : https://github.com/containers/buildah/pull/4468"
+        },
+        {
+            "user": "eriksjolund",
+            "body": "> @eriksjolund Yes this is expected and keeping the original behavior but if it needs to be changed I think it should be part of a new issue.\n\nSGTM\n\nYesterday I tried out local (i.e. non-remote) Podman and got different results when using either\nthe filename\n\n_.dockerignore_\n\nor the filename\n\n_Dockerfile.dockerignore_\n\nIf the file `Dockerfile.dockerignore` is a symlink pointing to for instance `../testfile`,\nlocal podman will use `../testfile` \n\n\nIf I repeat the experiment but use the filename _.dockerignore_ instead of the filename _Dockerfile.dockerignore_, in other words\n\n```\n$ rm Dockerfile.dockerignore\n$ ln -s ../testfile .dockerignore\n```\nlocal podman will not use `../testfile`  \n\nI think restricting local podman would be good but the scope for this PR is the remote case. \n\n\n\n"
+        },
+        {
+            "user": "sanmai-NL",
+            "body": "How is 'an arbitrary location outside the build context' defined? A symlink that resolves to a path outside the build context?"
+        },
+        {
+            "user": "Mingli-Yu",
+            "body": "Does the issue resolved in podman 4.4.2?  Thanks!"
+        },
+        {
+            "user": "rhatdan",
+            "body": "@flouthoc @eriksjolund is this ready to merge?"
+        },
+        {
+            "user": "eriksjolund",
+            "body": "> @flouthoc @eriksjolund is this ready to merge?\n\nLGTM"
+        },
+        {
+            "user": "rhatdan",
+            "body": "/lgtm"
+        },
+        {
+            "user": "lsm5",
+            "body": "/cherrypick v4.4.1-rhel"
+        },
+        {
+            "user": "openshift-cherrypick-robot",
+            "body": "@lsm5: new pull request created: #20901\n\n<details>\n\nIn response to [this](https://github.com/containers/podman/pull/16315#issuecomment-1839272855):\n\n>/cherrypick v4.4.1-rhel\n\n\nInstructions for interacting with me using PR comments are available [here](https://git.k8s.io/community/contributors/guide/pull-requests.md).  If you have questions or suggestions related to my behavior, please file an issue against the [kubernetes/test-infra](https://github.com/kubernetes/test-infra/issues/new?title=Prow%20issue:) repository.\n</details>"
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "golang",
+            "repository": "vulndb",
+            "number": 1151
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "buildah",
+            "number": 4468
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 17369
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 17476
+        }
+    ]
+}

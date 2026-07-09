@@ -1,0 +1,97 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 23447,
+    "type": "pull_request",
+    "title": "libpod: Drop checks for paths in sqlite+boltdb",
+    "state": "open",
+    "labels": [
+        "do-not-merge/work-in-progress",
+        "release-note",
+        "No New Tests"
+    ],
+    "user": "cgwalters",
+    "body": "The original logic here is old, dating to\nhttps://github.com/containers/podman/commit/7eb5ce940c8145ef57920ef90b52857e9716ffc9 and got inherited when the sqlite database was added.\n\nSince then, various changes have landed here especially around canonicalizing symbolic links.\n\nHowever, this code *still* often causes problems; most recently in https://gitlab.com/fedora/bootc/base-images/-/issues/20 where it seems like the way Anaconda has the system set up trips this up again.\n\nI can certainly believe that things can go wrong if one overrides/reconfigures e.g. the runtime state dir to be different. But there's also a lot of other ways to break podman...and it's trivial to subvert this check with a bind mount over the absolute path, pointing to some arbitrary different place.\n\nIn general, encoding file names into files that are potentially owned by the user is ugly...it can trip up basic things like migrating a home directory, etc.\n\nSince I am not aware of a common misconfiguration that these checks block, and I am *very* aware of a lot of times they have incorrectly blocked correct situations...just drop the checks.\n\nIf we *do* need to do some more validation later, I think we could say encode the directory inodes for at least the volume dir. And the runtime dir could have the inode for the root, but not the other way around.\n\n<!--\nIf no, just write `None` in the release-note block below. If yes, a release note\nis required: Enter your extended release note in the block below. If the PR\nrequires additional action from users switching to the new release, include the\nstring \"action required\".\n\nFor more information on release notes, please follow the Kubernetes model:\nhttps://git.k8s.io/community/contributors/guide/release-notes.md\n-->\n\n```release-note\nThis version of podman no longer performs checks for directory paths stored in the database. A future version will likely drop them entirely.\n```\n",
+    "comments": [
+        {
+            "user": "openshift-ci[bot]",
+            "body": "[APPROVALNOTIFIER] This PR is **NOT APPROVED**\n\nThis pull-request has been approved by: *<a href=\"https://github.com/containers/podman/pull/23447#\" title=\"Author self-approved\">cgwalters</a>*\n**Once this PR has been reviewed and has the lgtm label**, please assign [jnovy](https://github.com/jnovy) for approval. For more information see [the Kubernetes Code Review Process](https://git.k8s.io/community/contributors/guide/owners.md#the-code-review-process).\n\nThe full list of commands accepted by this bot can be found [here](https://go.k8s.io/bot-commands?repo=containers%2Fpodman).\n\n<details open>\nNeeds approval from an approver in each of these files:\n\n- **[OWNERS](https://github.com/containers/podman/blob/main/OWNERS)**\n\nApprovers can indicate their approval by writing `/approve` in a comment\nApprovers can cancel approval by writing `/approve cancel` in a comment\n</details>\n<!-- META={\"approvers\":[\"jnovy\"]} -->"
+        },
+        {
+            "user": "packit-as-a-service[bot]",
+            "body": "Cockpit tests failed for commit 389e7b7b79b00bec3787ded6af7bdc6cf91404b7. @martinpitt, @jelly, @mvollmer please check."
+        },
+        {
+            "user": "rhatdan",
+            "body": "LGTM\n@mheon @Luap99 PTAL"
+        },
+        {
+            "user": "cgwalters",
+            "body": "For compatibility we need to keep writing the values of course...but hopefully at some point we can just insert dummy values there instead for a further minor cleanup."
+        },
+        {
+            "user": "mheon",
+            "body": "These do still fulfill a purpose in my mind - preventing users from causing a nonfunctional, difficult to recover from configuration by swapping paths in the config file while containers are active. They may be doing that intentionally - your home directory migration is an example - but our database has a lot of paths stored in it, so if you remove the check code and do the migration, things will still be very broken (containers unable to fully remove because we don't know where all their files live, for example). This forces folks to use `system reset`, a command which is wired to work around these issues by just removing the entire directory in question, no worries about incorrect cached paths in the database.\n\nI have been considering adding a \"trust me, I know what I'm doing\" flag to `podman system migrate` that will overwrite the DB's stored config values with the current set, with the intention it only be used in cases where there are no containers present. Would that be acceptable?"
+        },
+        {
+            "user": "cgwalters",
+            "body": "> These do still fulfill a purpose in my mind - preventing users from causing a nonfunctional, difficult to recover from configuration by swapping paths in the config file while containers are active. \n\nAnd in practice, you have seen people do this? How often? More often than the false positives?\n\n> swapping paths\n\nAnd *which specific paths* have you seen swapped? I'm guessing it's mostly the root (and not the runroot or volumes)?\n\n> while containers are active.\n\nI think this is an interesting part - we hence don't need to check if there aren't any containers, which would let us move a lot of checking to a later dynamic point. If we just did that, it would help a lot I think.\n\nCombining these...I am pretty sure we can add highly reliable sanity checking that the runtime dir is paired with its correct static root, e.g. again via inode comparison or so."
+        },
+        {
+            "user": "cgwalters",
+            "body": "sketching out runroot+root binding:\n\n- runroot contains an xattr/stamp file/json/whatever that has the device/inode of the static root (or even a serialized encoded [file handle](https://man7.org/linux/man-pages/man2/open_by_handle_at.2.html))\n- (static) root contains an xattr/stamp file/json/whatever that has the pair of (linux kernel boot uuid, encoded handle for runtime dir)\n\nWith something like that we could do verification both ways *and* it would detect things like bind mounts pointing to a new place unexpectedly, which file path comparison wouldn't."
+        },
+        {
+            "user": "mheon",
+            "body": "I know support does see this a fair bit. Is it catching issues there, or being a hindrance? I think 50/50, but I'll ask to be sure.\n\nPath moves usually seem to be tmpdir related - a result of systemd misconfiguration (no enable-linger, Podman starts to use /tmp, someone notices, lingering is enabled, now we need to swap back to `/run/user/$UID` or similar). Systemd misconfigurations like this are extremely common in the field from what I see."
+        },
+        {
+            "user": "cgwalters",
+            "body": "What about moving the tmpdir actually *under* the storage root, as its own tmpfs?"
+        },
+        {
+            "user": "mheon",
+            "body": "I would have concerns about rootless - I imagine we'd need a mount namespace attached to our userns/pause process, and killing the userns pause process would now kill that mountns and get rid of the tmpfs. I think that would cause problems, but I'm not sure?\n\n@giuseppe @Luap99 Thoughts?"
+        },
+        {
+            "user": "Luap99",
+            "body": "> What about moving the tmpdir actually under the storage root, as its own tmpfs?\n\nHow would we create the tmpfs mount? AS rootless we first would need to join the userns but in order to so we must read the pidfile from the tmpdir so catch 22. And creating the initial mount would be racy without locks so this complicates things more I think. And for rootless it will make the file inaccessible outside the user+mountns which makes it harder to look at them (not that there would be reason to so for a normal user but I think tests depend on it)\n\n\n\n"
+        },
+        {
+            "user": "Luap99",
+            "body": "> sketching out runroot+root binding:\n> \n>     * runroot contains an xattr/stamp file/json/whatever that has the device/inode of the static root (or even a serialized encoded [file handle](https://man7.org/linux/man-pages/man2/open_by_handle_at.2.html))\n> \n>     * (static) root contains an xattr/stamp file/json/whatever that has the pair of (linux kernel boot uuid, encoded handle for runtime dir)\n\nThat sounds better, but keep in mind file handles must be supported by the fs and are privileged AFAIK thus will nor work rootless. But yes some device+inode mapping seems better if paths change, however as @mheon mentioned the actual db will store full paths in container configs and so on so if a path actually moved with the same inode it might still break much later. Although I know this is not a problem for you build use cases where this will work better so maybe it would be good enough?"
+        },
+        {
+            "user": "cgwalters",
+            "body": "Can we just detect the situation when we have containers in the root, but the tmpdir is uninitialized(empty)/nonexistent, and make that the error case?"
+        },
+        {
+            "user": "cgwalters",
+            "body": "> db will store full paths in container configs\n\nEww?"
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this PR had no activity for 30 days."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@mheon @Luap99 @cgwalters what should we do with this one?"
+        },
+        {
+            "user": "cgwalters",
+            "body": "We were working on https://github.com/bootc-dev/bootc/issues/923 and got bit by this, trying to use `podman --root=/sysroot/var/lib/containers/storage` fails because it doesn't understand that here `/sysroot` is a bind mount to the original physical root.\n\nIn a different instance of this I eventually ended up with an elaborate workaround for this in https://github.com/bootc-dev/bootc/blob/df879ed613509885d761d272b63f5712b12012bb/lib/src/imgstorage.rs#L73\n"
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "openshift",
+            "repository": "enhancements",
+            "number": 1600
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 26345
+        }
+    ]
+}

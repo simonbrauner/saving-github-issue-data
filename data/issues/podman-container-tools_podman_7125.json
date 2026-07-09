@@ -1,0 +1,121 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 7125,
+    "type": "pull_request",
+    "title": "validate fds --preserve-fds",
+    "state": "closed",
+    "labels": [
+        "lgtm",
+        "approved",
+        "locked - please file new issue/PR"
+    ],
+    "user": "QiWang19",
+    "body": "validate file descriptors passed from `podman run` and `podman exec` --preserve-fds.\n\nSigned-off-by: Qi Wang <qiwan@redhat.com>",
+    "comments": [
+        {
+            "user": "QiWang19",
+            "body": "Add validation code. But this does not fix panic #6653\nand system tests still fail.\n```\n[+0116s] # #|     FAIL: container read input from fd 4\n[+0116s] # #| expected: 'MSdO93BIGQj5i44nOS4D'\n[+0116s] # #|   actual: 'time=\"2020-07-29T15:16:22-04:00\" level=error msg=\"unable to close file fd-4: \\\"close fd-4: bad file descriptor\\\"\"'\n[+0116s] # #|         > 'time=\"2020-07-29T15:16:22-04:00\" level=error msg=\"unable to cleanup network for container a22fc3e3b4aed17632f3861dfa409fadce23f10b40395526679b67f2a2d1c952: \\\"error closing network namespace for container a22fc3e3b4aed17632f3861dfa409fadce23f10b40395526679b67f2a2d1c952: Failed to close \\\\\\\"/run/user/30150/netns/cni-b4c7ec7e-c192-bc0a-c8e5-992b3c85d99f\\\\\\\": close /run/user/30150/netns/cni-b4c7ec7e-c192-bc0a-c8e5-992b3c85d99f: bad file descriptor\\\"\"'\n```"
+        },
+        {
+            "user": "mheon",
+            "body": "Go may well be happy to create a new file from an invalid FD - we probably need a test that the FD is actually valid."
+        },
+        {
+            "user": "rhatdan",
+            "body": "Yes look like it succeeds.\n\n```\npackage main\n\nimport (\n\t\"fmt\"\n\t\"os\"\n)\n\nfunc main() {\n\tfd1 := os.NewFile(1, \"stdout\")\n\tif fd1 == nil {\n\t\tfmt.Println(\"stdout Failed\")\n\t}\n\tfd5 := os.NewFile(500, \"failure\")\n\tif fd5 == nil {\n\t\tfmt.Println(\"failure succeeded\")\n\t} else {\n\t\tfmt.Println(\"failure failed\", fd5)\n\t}\n\n}\ngo run t.go\nfailure failed &{0xc0000661e0}\n\n```"
+        },
+        {
+            "user": "edsantiago",
+            "body": "Just a heads-up: please see #7144, it looks germane."
+        },
+        {
+            "user": "rhatdan",
+            "body": "This works.\n```\npackage main\n\nimport (\n\t\"fmt\"\n\t\"golang.org/x/sys/unix\"\n)\n\nfunc main() {\n\n\tif _, err := unix.FcntlInt(1, unix.F_GETFL, 0); err != nil {\n\t\tfmt.Println(1, err)\n\t}\n\tif _, err := unix.FcntlInt(400, unix.F_GETFL, 0); err != nil {\n\t\tfmt.Println(400, err)\n\t\tif err == unix.EBADF {\n\t\t\tfmt.Println(\"BINGO\")\n\t\t} else {\n\t\t\tfmt.Println(\"BoNGO\")\n\t\t}\n\n\t}\n\n```"
+        },
+        {
+            "user": "rhatdan",
+            "body": "The call seems to return err = 0 on success.  Not nil, but I think as long as we check for EBADF, then we should be safe.\n"
+        },
+        {
+            "user": "QiWang19",
+            "body": " I didn't see the output from this success case, I guess the err is nil, can't we just return err as long as the err != nil, without checking EBADF?\n```\nif _, err := unix.FcntlInt(1, unix.F_GETFL, 0); err != nil {\n\t\tfmt.Println(1, err)\n\t}\n```"
+        },
+        {
+            "user": "rhatdan",
+            "body": "The preserve-fds should fail on remote client and should also not be executed on Windows.\nWhen I was testing my test program, I was constantly seeing err != nil, Not sure why.  But I added the check for EBADF to make sure the error we were looking for was correct."
+        },
+        {
+            "user": "rhatdan",
+            "body": "How about?\n```\nimport (\n\t\"fmt\"\n\t\"syscall\"\n\n\t\"github.com/pkg/errors\"\n\t\"golang.org/x/sys/unix\"\n)\n\nfunc verifyFD(fd int) error {\n\tif _, err := unix.FcntlInt(uintptr(fd), unix.F_GETFL, 0); err != nil && err != syscall.Errno(0) {\n\t\treturn errors.Wrapf(err, \"failed to verify %d file descriptor\", fd)\n\t}\n\treturn nil\n}"
+        },
+        {
+            "user": "rhatdan",
+            "body": "Your going to need verifyfd in the utils_unsupported.go as well."
+        },
+        {
+            "user": "rhatdan",
+            "body": "Almost there, now I need a test to make sure it errors out with the correct error\n\npodman run --preserve-fd 2 alpine true\n\nShould return an error containing bad fd."
+        },
+        {
+            "user": "giuseppe",
+            "body": "I don't think it can be solved at this level.\n\nFiles can be opened by the Go runtime so we don't know what FDs are valid and what are not.\n\nrootless already stores at startup what ds were open before the Go runtime kicks in.  I think we could take advantage of that and be sure that these fds were already opened when the program started (`open_files_set` in rootless_linux.c). "
+        },
+        {
+            "user": "rhatdan",
+            "body": "Do we have access to these within golang?"
+        },
+        {
+            "user": "giuseppe",
+            "body": "> Do we have access to these within golang?\n\nwe will need to provide a wrapper, something like:\n\n```diff\ndiff --git a/pkg/rootless/rootless_linux.c b/pkg/rootless/rootless_linux.c\nindex d3e43e44d..6d353d2e2 100644\n--- a/pkg/rootless/rootless_linux.c\n+++ b/pkg/rootless/rootless_linux.c\n@@ -225,6 +225,14 @@ can_use_shortcut ()\n   return ret;\n }\n \n+int\n+is_fd_inherited(int fd)\n+{\n+  if (open_files_set == NULL || fd >= open_files_max_fd || fd < 0)\n+    return false;\n+  return FD_ISSET (fd % FD_SETSIZE, &(open_files_set[fd / FD_SETSIZE])) ? 1 : 0;\n+}\n+\n static void __attribute__((constructor)) init()\n {\n   const char *xdg_runtime_dir;\ndiff --git a/pkg/rootless/rootless_linux.go b/pkg/rootless/rootless_linux.go\nindex b1f200cc2..2fe915cab 100644\n--- a/pkg/rootless/rootless_linux.go\n+++ b/pkg/rootless/rootless_linux.go\n@@ -32,6 +32,7 @@ extern uid_t rootless_gid();\n extern int reexec_in_user_namespace(int ready, char *pause_pid_file_path, char *file_to_read, int fd);\n extern int reexec_in_user_namespace_wait(int pid, int options);\n extern int reexec_userns_join(int pid, char *pause_pid_file_path);\n+extern int is_fd_inherited(int fd);\n */\n import \"C\"\n \n@@ -495,3 +496,10 @@ func ConfigurationMatches() (bool, error) {\n \n        return matches(GetRootlessGID(), gids, currentGIDs), nil\n }\n+\n+func IsFdInherited(fd int) bool {\n+       if int(C.is_fd_inherited(C.int(fd))) > 0 {\n+               return true\n+       }\n+       return false\n+}\ndiff --git a/pkg/rootless/rootless_unsupported.go b/pkg/rootless/rootless_unsupported.go\nindex 1499b737f..203d56acb 100644\n--- a/pkg/rootless/rootless_unsupported.go\n+++ b/pkg/rootless/rootless_unsupported.go\n@@ -64,3 +64,7 @@ func GetConfiguredMappings() ([]idtools.IDMap, []idtools.IDMap, error) {\n func ReadMappingsProc(path string) ([]idtools.IDMap, error) {\n        return nil, nil\n }\n+\n+func IsFdInherited(fd int) bool {\n+       return false\n+}\n\n```\n\n"
+        },
+        {
+            "user": "QiWang19",
+            "body": "@giuseppe Are you going to open PR to fix this? Do you mind I grab the code above PR?"
+        },
+        {
+            "user": "giuseppe",
+            "body": "> @giuseppe Are you going to open PR to fix this? Do you mind I grab the code above PR?\n\nplease go forward and use it in this PR"
+        },
+        {
+            "user": "QiWang19",
+            "body": "@giuseppe Any ideas why the test fail? `podman run --preserve-fds` & `podman exec preserve fds sanity check` https://api.cirrus-ci.com/v1/task/5511032351227904/logs/integration_test.log"
+        },
+        {
+            "user": "giuseppe",
+            "body": "> @giuseppe Any ideas why the test fail? `podman run --preserve-fds` & `podman exec preserve fds sanity check` https://api.cirrus-ci.com/v1/task/5511032351227904/logs/integration_test.log\n\nlooks like there is an issue in the code I've provided you, can you try with this version for `is_fd_inherited`?\n\n```\n\nint\nis_fd_inherited(int fd)\n{\n  if (open_files_set == NULL || fd > open_files_max_fd || fd < 0)\n    return 0;\n\n  return FD_ISSET(fd % FD_SETSIZE, &(open_files_set[fd / FD_SETSIZE])) ? 1 : 0;\n}\n```"
+        },
+        {
+            "user": "QiWang19",
+            "body": "@edsantiago @rhatdan @giuseppe PTAL"
+        },
+        {
+            "user": "rhatdan",
+            "body": "/approve\nLGTM\nIf you need to do another PR, you should check the error message in your test to make sure it says something like\n`failed to verify %d file descriptor`"
+        },
+        {
+            "user": "QiWang19",
+            "body": "@edsantiago @rhatdan @mheon PTAL"
+        },
+        {
+            "user": "rhatdan",
+            "body": "LGTM"
+        },
+        {
+            "user": "openshift-ci-robot",
+            "body": "[APPROVALNOTIFIER] This PR is **APPROVED**\n\nThis pull-request has been approved by: *<a href=\"https://github.com/containers/podman/pull/7125#pullrequestreview-461411266\" title=\"LGTM\">giuseppe</a>*, *<a href=\"https://github.com/containers/podman/pull/7125#\" title=\"Author self-approved\">QiWang19</a>*, *<a href=\"https://github.com/containers/podman/pull/7125#issuecomment-668172059\" title=\"Approved\">rhatdan</a>*\n\nThe full list of commands accepted by this bot can be found [here](?repo=containers%2Fpodman).\n\nThe pull request process is described [here]()\n\n<details >\nNeeds approval from an approver in each of these files:\n\n- ~~[OWNERS](https://github.com/containers/podman/blob/master/OWNERS)~~ [giuseppe,rhatdan]\n\nApprovers can indicate their approval by writing `/approve` in a comment\nApprovers can cancel approval by writing `/approve cancel` in a comment\n</details>\n<!-- META={\"approvers\":[]} -->"
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "containers",
+            "repository": "toolbox",
+            "number": 832
+        },
+        {
+            "organization": "containers",
+            "repository": "toolbox",
+            "number": 1180
+        }
+    ]
+}

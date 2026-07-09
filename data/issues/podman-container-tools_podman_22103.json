@@ -1,0 +1,54 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 22103,
+    "type": "issue",
+    "title": "podman stop: Unable to clean up network: netavark: remove aardvark entries: check aardvark-dns netns: IO error: Permission denied",
+    "state": "closed",
+    "labels": [
+        "flakes",
+        "In Progress",
+        "network",
+        "locked - please file new issue/PR"
+    ],
+    "user": "edsantiago",
+    "body": "This is one of those nasty ones that hides in logs, making it impossible for me to get full data.\n\nBest I can tell, the first instance was Feb 9, in [rawhide rootless](https://api.cirrus-ci.com/v1/artifact/task/4892042858332160/html/int-podman-rawhide-rootless-host-sqlite.log.html#t--Podman-run-networking-Aardvark-Test-3--Two-containers--same-subnet-w-aliases--1). Seen also in [f39 root](https://api.cirrus-ci.com/v1/artifact/task/5667051402952704/html/int-podman-fedora-39-root-host-sqlite.log.html#t--Podman-kube-play-with-auto-update-annotations-for-first-container-only--1).\n```\n$ podman [options] stop --all -t 0\ntime=\"2024-03-20T12:25:48-05:00\" level=error msg=\"Unable to clean up network for container SHA: \\\"1 error occurred:\\\\n\\\\t* netavark: remove aardvark entries: check aardvark-dns netns: IO error: Permission denied (os error 13)\\\\n\\\\n\\\"\"\n```\n\nIncomplete list below. There are maybe 3-4 others, it is way too hard to get a complete list.\n\n* fedora-39 : int podman fedora-39 root host sqlite\n    * [03-04 07:36](https://api.cirrus-ci.com/v1/artifact/task/5667051402952704/html/int-podman-fedora-39-root-host-sqlite.log.html#t--Podman-kube-play-with-auto-update-annotations-for-first-container-only--1) in TOP-LEVEL [AfterEach] Podman kube play with auto update annotations for first container only\n* fedora-39 : int podman fedora-39 rootless host sqlite\n    * [03-20 13:38](https://api.cirrus-ci.com/v1/artifact/task/4841071981625344/html/int-podman-fedora-39-rootless-host-sqlite.log.html#t--Podman-kube-play-with-image-data--1) in TOP-LEVEL [AfterEach] Podman kube play with image data\n* rawhide : int podman rawhide root host sqlite\n    * [03-05 13:32](https://api.cirrus-ci.com/v1/artifact/task/6194094691581952/html/int-podman-rawhide-root-host-sqlite.log.html#t--Podman-kube-play-no-security-context--1) in TOP-LEVEL [AfterEach] Podman kube play no security context\n\n| x | x | x | x | x | x |\n| ---: | ---: | ---: | ---: | ---: | ---: |\n| int(3) | podman(3) | fedora-39(2) | root(2) | host(3) | sqlite(3) |\n|  |  | rawhide(1) | rootless(1) |  |  |\n",
+    "comments": [
+        {
+            "user": "Luap99",
+            "body": "I don't get why it would fail with EACCES even as root.\nThese are the only two lines that could fail https://github.com/containers/netavark/blob/cc3f35d2e87defa2e12d0ffeb59a57035e8a5902/src/dns/aardvark.rs#L131-L132\n\nAnd I really do not see why this would fail with anything other the ENOENT which is already ignored by the code. I can see the EACCES might happen as rootless in case where the aardvark pid was already reused by another process where we do not have privs on, but as root that can never be the case.\n"
+        },
+        {
+            "user": "Luap99",
+            "body": "ok I guess we need to ignore more errors, I am using something this to reproduce the logic easily:\n`while :; do sleep 10 & kill -HUP $! && ls -l /proc/$!/ns/net 2>&1 | tee /dev/stderr | grep -E \"No such file or directory|net:\" || break ; done`\nI wrongly assumed the only error can be ENOENT, however during testing this several times I also saw ESRCH and importantly the here reported EACCES.\n\nSo at this point I wonder if it makes sense to not simply ignore all errors. This check is only a nice to have to make us aware of a inconsistent aardvark-dns vs rootless-netns state: https://github.com/containers/podman/issues/20396.\n"
+        },
+        {
+            "user": "edsantiago",
+            "body": "ping\n\n* fedora-39 : int podman fedora-39 rootless host sqlite\n    * [03-26 14:31](https://api.cirrus-ci.com/v1/artifact/task/5936686664777728/html/int-podman-fedora-39-rootless-host-sqlite.log.html#t--Podman-kube-play-test-with-reserved-Label-annotation-in-yaml--1) in TOP-LEVEL [AfterEach] Podman kube play test with reserved Label annotation in yaml\n* rawhide : int podman rawhide root host sqlite\n    * [03-26 07:50](https://api.cirrus-ci.com/v1/artifact/task/5026455655022592/html/int-podman-rawhide-root-host-sqlite.log.html#t--Podman-checkpoint-podman-checkpoint-container-with-established-tcp-connections--1) in Podman checkpoint podman checkpoint container with established tcp connections\n* rawhide : int podman rawhide rootless host sqlite\n    * [03-26 10:03](https://api.cirrus-ci.com/v1/artifact/task/5052586376560640/html/int-podman-rawhide-rootless-host-sqlite.log.html#t--Podman-kube-play-use-network-mode-from-config--1) in TOP-LEVEL [AfterEach] Podman kube play use network mode from config\n\n| x | x | x | x | x | x |\n| ---: | ---: | ---: | ---: | ---: | ---: |\n| int(3) | podman(3) | rawhide(2) | rootless(2) | host(3) | sqlite(3) |\n|  |  | fedora-39(1) | root(1) |  |  |\n"
+        },
+        {
+            "user": "Luap99",
+            "body": "https://github.com/containers/netavark/pull/956"
+        },
+        {
+            "user": "edsantiago",
+            "body": "Looks like the same bug, except ENOENT instead of EACCESS:\n```\n# podman [options] stop --all -t 0\n[cid1]\nError: removing container [cid2] network: netavark: remove aardvark entries: failed to get aardvark pid: IO error: No such file or directory (os error 2)\n```\nIn [f40 root](https://api.cirrus-ci.com/v1/artifact/task/6192587621531648/html/int-podman-fedora-40-root-container-sqlite.log.html#t--Podman-kube-play-with-latest-image-should-always-pull--1). File a new bug, or reopen this one?"
+        },
+        {
+            "user": "Luap99",
+            "body": "I saw that earlier, we can reopen this but on stop it is working differently and I very much fear that there is no way around these races until https://github.com/containers/aardvark-dns/issues/338 is addressed"
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "containers",
+            "repository": "netavark",
+            "number": 956
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 22619
+        }
+    ]
+}

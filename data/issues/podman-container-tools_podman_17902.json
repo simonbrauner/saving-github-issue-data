@@ -1,0 +1,113 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 17902,
+    "type": "pull_request",
+    "title": "Fix a race around SQLite DB config validation",
+    "state": "closed",
+    "labels": [
+        "lgtm",
+        "approved",
+        "release-note-none",
+        "locked - please file new issue/PR"
+    ],
+    "user": "mheon",
+    "body": "The DB config is a single-row table, and the first Podman process to run against the database creates it. However, there was a race where multiple Podman processes, started simultaneously, could try and write it. Only the first would succeed, with subsequent processes failing once (and then running correctly once re-ran), but it was happening often in CI and deserves fixing.\n\n[NO NEW TESTS NEEDED] It's a CI flake fix.\n\n```release-note\nNONE\n```\n",
+    "comments": [
+        {
+            "user": "mheon",
+            "body": "@edsantiago @vrothberg PTAL. Haven't done much testing on my system but I suspect this ought to fix it."
+        },
+        {
+            "user": "vrothberg",
+            "body": "> [+0150s] Error: beginning refresh transaction: database is locked\n\nAh no, same fart as I saw yesterday when trying to fix this race."
+        },
+        {
+            "user": "edsantiago",
+            "body": "Yep, seeing the same thing in my #17831."
+        },
+        {
+            "user": "vrothberg",
+            "body": "But now it seems to fail consistently, not only in rootless."
+        },
+        {
+            "user": "edsantiago",
+            "body": "It's an init problem. Super trivial reproducer:\n```console\n$ bin/podman system reset\n...\n$ bin/podman --db-backend sqlite info\n[5-second hang]\nError: creating tables: beginning transaction: database is locked\n```"
+        },
+        {
+            "user": "mheon",
+            "body": "I was validating without adding `--db-backend=sqlite`\n\nThis explains many, many things"
+        },
+        {
+            "user": "mheon",
+            "body": "I'm not really clear on how this is happening, though. The transaction lock should be preventing anyone from getting in the DB at the same time."
+        },
+        {
+            "user": "mheon",
+            "body": "@vrothberg I can fix the error here by avoiding the transaction, but we need to get to the bottom of why these are happening. The transaction lock is not sufficient to avoid database locks, evidently."
+        },
+        {
+            "user": "edsantiago",
+            "body": "I'm only half paying attention here, but I wonder if I did a poor job of explaining? This is a problem **ONLY AT INIT TIME**. It works perfectly fine after sqlite has been used once.\n```console\n$ git checkout main\n$ make\n...\n$ bin/podman system reset\n...\n$ bin/podman --db-backend sqlite info\n...\n```\nThat works. Now that we have sqlite used once, your PR works perfectly fine:\n```console\n$ git checkout pr/17902\n$ make\n...\n$ bin/podman --db-backend sqlite whatever..... it all works now, because the \"main\" init worked\n```\nBut if we use your PR immediately after `podman system reset`, when there is no sqlite DB, then it dies.\n\nIs that a better way to explain things? Or have I missed something?\n"
+        },
+        {
+            "user": "mheon",
+            "body": "@edsantiago That is fully expected. What I'm saying is that the transaction lock was supposed to prevent this entirely. If we are in a position where, if we code things in a way sqlite does not like, we can get random CI flakes because of concurrent DB access, that is not a good position. We need to understand why these are happening."
+        },
+        {
+            "user": "edsantiago",
+            "body": "It's `ValidateDBConfig()`. Is it possible for it to get invoked while the transaction is open?"
+        },
+        {
+            "user": "mheon",
+            "body": "Shouldn't be. The error we're seeing is actually coming out of DB init, which should be running before validation happens. They're in the same thread (the same function, even) so it should be strictly serial."
+        },
+        {
+            "user": "edsantiago",
+            "body": "This seems to fix it\n```diff\ndiff --git a/libpod/sqlite_state.go b/libpod/sqlite_state.go\nindex 45d2db588..71066b78b 100644\n--- a/libpod/sqlite_state.go\n+++ b/libpod/sqlite_state.go\n@@ -363,6 +363,7 @@ func (s *SQLiteState) ValidateDBConfig(runtime *Runtime) (defErr error) {\n \t\t\t\treturn fmt.Errorf(\"adding DB config row: %w\", err)\n \t\t\t}\n \n+\t\t\ttx.Commit()\n \t\t\treturn nil\n \t\t}\n \n```\n[EDIT: with `err` checking, yada yada]"
+        },
+        {
+            "user": "edsantiago",
+            "body": "With `tx.Commit()`, my PR ran CI... and, yay, no `UNIQUE constraint` failures, but, sigh, one \"database is locked\" in [f36 rootless](https://api.cirrus-ci.com/v1/artifact/task/4912278064070656/html/int-podman-fedora-36-rootless-host-sqlite.log.html#t--Podman-start-after-signal-kill--1). Sorry.\n\nTwo new flakes, too: #17904 and #17905. And, it seems like the debian auto-update flake (#17607) happens a lot more with sqlite, does that make any sense?\n\nI'll keep forcing CI runs to see what else we find."
+        },
+        {
+            "user": "mheon",
+            "body": "Damn it, that makes perfect sense. Good catch."
+        },
+        {
+            "user": "edsantiago",
+            "body": "One run with no lock/unique flakes. The next one failed in [f37 root container](https://api.cirrus-ci.com/v1/artifact/task/5118456224284672/html/int-podman-fedora-37-root-container-sqlite.log.html#t--podman-container-restart-running-container--1), yes, **container**. I don't remember how things work in containerized testing, but this caught me by surprise. Almost bedtime. I'll start one more job but won't look at results until the morrow."
+        },
+        {
+            "user": "edsantiago",
+            "body": "None of these strings appear in the downloaded logs:\n> is locked|unique constraint|constraint fail|config row|adding db|dbconfig.id\n\n...but please do not ignore the \"database is locked\" errors I'm reporting."
+        },
+        {
+            "user": "vrothberg",
+            "body": "> ...but please do not ignore the \"database is locked\" errors I'm reporting.\n\nWe're on it :+1: "
+        },
+        {
+            "user": "edsantiago",
+            "body": "No critical flakes in the run I started this morning (just the \"c1 c2\" flake, which is being addressed).  I've started a new test run, will check in on it later this afternoon."
+        },
+        {
+            "user": "edsantiago",
+            "body": "Another successful run. LGTM. Thanks everyone."
+        },
+        {
+            "user": "vrothberg",
+            "body": "Thanks a ton for checking, @edsantiago !\n\n@flouthoc @giuseppe ready to merge"
+        },
+        {
+            "user": "openshift-ci[bot]",
+            "body": "[APPROVALNOTIFIER] This PR is **APPROVED**\n\nThis pull-request has been approved by: *<a href=\"https://github.com/containers/podman/pull/17902#pullrequestreview-1358670247\" title=\"Approved\">flouthoc</a>*, *<a href=\"https://github.com/containers/podman/pull/17902#\" title=\"Author self-approved\">mheon</a>*\n\nThe full list of commands accepted by this bot can be found [here](https://go.k8s.io/bot-commands?repo=containers%2Fpodman).\n\nThe pull request process is described [here](https://git.k8s.io/community/contributors/guide/owners.md#the-code-review-process)\n\n<details >\nNeeds approval from an approver in each of these files:\n\n- ~~[OWNERS](https://github.com/containers/podman/blob/main/OWNERS)~~ [flouthoc,mheon]\n\nApprovers can indicate their approval by writing `/approve` in a comment\nApprovers can cancel approval by writing `/approve cancel` in a comment\n</details>\n<!-- META={\"approvers\":[]} -->"
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 17858
+        }
+    ]
+}

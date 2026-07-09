@@ -1,0 +1,141 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 7195,
+    "type": "issue",
+    "title": "CI flake: podman-remote: no output from container (and \"does not exist in database\"?)",
+    "state": "closed",
+    "labels": [
+        "flakes",
+        "kind/bug",
+        "remote",
+        "locked - please file new issue/PR"
+    ],
+    "user": "edsantiago",
+    "body": "This is a bad report. I have no reproducer nor any real sense for what's going on.\n\nI'm seeing consistent flakes in #7111 . The failing test is always \"podman run : user namespace preserved root ownership\" which is simply a quick loop of `podman run` commands. The last set of failures all looked like:\n```\n[+0136s] # # podman-remote --url ... run --rm --user=100 --userns=keep-id quay.io/libpod/alpine_labels:latest stat -c %u:%g:%n /etc\n[+0136s] # #/vvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv\n[+0136s] # #|     FAIL: run  --user=100 --userns=keep-id (/etc)   <<<--- these flags are not always the same\n[+0136s] # #| expected: '0:0:/etc'\n[+0136s] # #|   actual: ''\n[+0136s] # #\\^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n```\nIn two of the three most recent failures, in teardown, there's a `podman rm -a -f` that barfs with:\n```\n[+0136s] # Error: container d0ea34aaeffe07cc3e3f7f79933372a2bab825ef97e17c580eb1e1e94b2ac7e7 does not exist in database: no such container\n```\nLogs: [fedora 32](https://cirrus-ci.com/task/5457991551942656?command=system_test#L202), [fedora 31](https://cirrus-ci.com/task/4754304110166016?command=system_test#L202), [special testing rootless](https://cirrus-ci.com/task/5598729040297984?command=system_test#L173).\n\nIn an even earlier run, in [special_testing_rootless](https://cirrus-ci.com/task/6706268498821120?command=system_test#L224), there was a different error in a different test:\n```\n[+0257s] not ok 74 podman volume with --userns=keep-id\n[+0257s] # $ /var/tmp/go/src/github.com/containers/podman/bin/podman-remote --url unix:/tmp/podman.fpYZ0P run --rm -v /tmp/podman_bats.LsZK3v/volume_O8zRoMsGmt:/vol:z quay.io/libpod/alpine_labels:latest stat -c %u:%s /vol/myfile\n[+0257s] # read unixpacket @->/run/user/23298/libpod/tmp/socket/1bee53f8e19e2b03ff773e504fead7f5994b8be5545b315a73a3d2cef290f567/attach: read: connection reset by peer\n[+0257s] # #/vvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv\n[+0257s] # #|     FAIL: w/o keep-id: stat(file in container) == root\n[+0257s] # #| expected: '0:0'\n[+0257s] # #|   actual: 'read unixpacket @->/run/user/23298/libpod/tmp/socket/1bee53f8e19e2b03ff773e504fead7f5994b8be5545b315a73a3d2cef290f567/attach: read: connection reset by peer'\n[+0257s] # #\\^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n```\nThe socket above is a conmon one. I don't know if this is a conmon problem.\n\nThe common factor seems to be `--userns=keep-id`. ",
+    "comments": [
+        {
+            "user": "edsantiago",
+            "body": "Here's [another one](https://storage.googleapis.com/cirrus-ci-6707778565701632-fcae48/artifacts/containers/podman/6119814135545856/html/system_test.log.html), completely different test, but I have a feeling it's related:\n```\n# $ podman-remote --url unix:/tmp/podman.n9RjqF start --attach --interactive c5cb2c8d5b2f3e9e04e3bbdab278bd2826fb60e9906d86c18b9e2ef829c7c848\n# #/vvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv\n# #|     FAIL: output from podman-start on created ctr\n# #| expected: '0OeSILw3HySH9MVHmIn5N0aeZpDkC6w1lF5LvQqC'\n# #|   actual: ''\n# #\\^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n```\nThis time there's no `--userns=keep-id` but the symptom is the same: test expected output, no output was received."
+        },
+        {
+            "user": "edsantiago",
+            "body": "I have a hunch, with zero supporting evidence, that [this is another instance](https://api.cirrus-ci.com/v1/task/5132158488543232/logs/system_test.log):\n```\n# #|     FAIL: SELinux role should always be system_r\n# #| expected: '.*_u:system_r:.*'\n# #|   actual: ''\n```\nIf my hunch is correct, the common factor might be multiple `podman run` commands in quick succession. After a while the server gets tired and cranky, refusing to return any more stdout until it gets a nap."
+        },
+        {
+            "user": "edsantiago",
+            "body": "Here's a sort of reproducer:\n```console\n# while :;do echo -n .;x=$(podman-remote run alpine echo hi);if [ \"$x\" != \"hi\" ]; then echo FAILED: \"'$x'\";fi;done\n...can only attach to created or running containers: container state improper\nFAILED: ''\n...............can only attach to created or running containers: container state improper\nFAILED: ''\n.can only attach to created or running containers: container state improper\nFAILED: ''\n......................................can only attach to created or running containers: container state improper\nFAILED: ''\n............................can only attach to created or running containers: container state improper\nFAILED: ''\n....can only attach to created or running containers: container state improper\nFAILED: ''\n.can only attach to created or running containers: container state improper\nFAILED: ''\n.can only attach to created or running containers: container state improper\nFAILED: ''\n.can only attach to created or running containers: container state improper\nFAILED: ''\n.^C\n```\nI say \"sort of\" because I haven't before seen the \"container state improper\" error message. But the symptom sure is the same: I expected output, got empty string.\n\nThis is podman @ master with #7312 applied, running server on the systemd socket. I can test on master itself if necessary."
+        },
+        {
+            "user": "edsantiago",
+            "body": "Wow! I was going to add a `sleep 1` to the BATS tests, in hopes of minimizing the flake, because it's hitting almost every CI run... but that made it *worse*, and gave me an even better reproducer:\n```console\n# while :;do x=$(podman-remote run alpine echo hi);if [ \"$x\" = \"hi\" ]; then echo -n .;else echo FAILED: \"'$x'\";fi;sleep 1;done\ncan only attach to created or running containers: container state improper\nFAILED: ''\nread unixpacket @->/var/run/libpod/socket/c5f9b16912deabef1bd471289a4afadeb4b0afe839b8c2670f3103cedc1f6419/attach: read: connection reset by peer\nFAILED: ''\n..can only attach to created or running containers: container state improper\nFAILED: ''\ncan only attach to created or running containers: container state improper\nFAILED: ''\n.......can only attach to created or running containers: container state improper\nFAILED: ''\n.read unixpacket @->/var/run/libpod/socket/564f09a28aa8fe025e162c96d9f53b04fbb155c5133b163eb610a3f0390f7d23/attach: read: connection reset by peer\nFAILED: ''\n.can only attach to created or running containers: container state improper\nFAILED: ''\n.can only attach to created or running containers: container state improper\nFAILED: ''\nread unixpacket @->/var/run/libpod/socket/cbc2d70b3e45cf221f5707ccc38e788c617cbcdf07e71fe6e8341bd5a9745a9d/attach: read: connection reset by peer\nFAILED: ''\n..can only attach to created or running containers: container state improper\nFAILED: ''\n......can only attach to created or running containers: container state improper\nFAILED: ''\n```\nNote that this one easily reproduces the `read unixpacket` error. HTH."
+        },
+        {
+            "user": "edsantiago",
+            "body": "I think [this](https://storage.googleapis.com/cirrus-ci-6707778565701632-fcae48/artifacts/containers/podman/4822681868566528/html/integration_test.log.html#t--podman-run-with-user-group--integer-groupname---1) (from #7314) might be another instance of the bug: basically the common factor is \"podman-remote, was expecting output, got nothing\"."
+        },
+        {
+            "user": "edsantiago",
+            "body": "cirrus-flake-summarize just reported [this](https://storage.googleapis.com/cirrus-ci-6707778565701632-fcae48/artifacts/containers/podman/5618975797149696/html/system_test.log.html):\n```\n# # podman-remote --url unix:/tmp/podman.k2CiCr run --rm --pod mypod quay.io/libpod/alpine_labels:latest hostname\n# can only attach to created or running containers: container state improper\n# #/vvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv\n# #|     FAIL: --hostname set the hostname\n# #| expected: '6sjaufqrbk.sxjb7jypwe.net'\n# #|   actual: 'can only attach to created or running containers: container state improper'\n# #\\^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n```\nI can't reproduce on my laptop. I have a hunch that this is the same problem. What I find most interesting is that _the podman command did not fail_. `run_podman` would've barfed before the string check. So we're seeing \"container state improper\" output (no way to know if it's stdout or stderr), none of the expected output, and exit status zero."
+        },
+        {
+            "user": "edsantiago",
+            "body": "Here's a [ginkgo flake](https://storage.googleapis.com/cirrus-ci-6707778565701632-fcae48/artifacts/containers/podman/4822681868566528/html/integration_test.log.html#t--podman-run-user-capabilities-test--1) that appears to be the same underlying problem: all three failures are in the same test (run user capabilities), but each one fails in a different `grep`:\n\n1) third \"podman run\" is empty\n2) first ...\n3) fourth ...\n\nI'm posting this because I've been feeling a little sensitive about it being only the system tests flaking. I think the e2e tests are also seeing this, but their one-two-three-retry thing maybe masks it."
+        },
+        {
+            "user": "edsantiago",
+            "body": "There are now three instances of `podman run --pod mypod ...` flaking with \"container state improper\", as reported above. The instances are:\n\n80 podman pod create - hashtag AllTheOptions\n* fedora-31 : test fedora-31\n  * PR #7292\n    * [08-15 12:51](https://storage.googleapis.com/cirrus-ci-6707778565701632-fcae48/artifacts/containers/podman/5618975797149696/html/system_test.log.html)\n* fedora-31 : test fedora-31 [remote]\n  * PR #7408\n    * [08-22 07:15](https://storage.googleapis.com/cirrus-ci-6707778565701632-fcae48/artifacts/containers/podman/5346497099202560/html/system_test.log.html)\n* ubuntu-19 : test ubuntu-19 [remote]\n  * PR #7388\n    * [08-20 11:47](https://storage.googleapis.com/cirrus-ci-6707778565701632-fcae48/artifacts/containers/podman/6103076459249664/html/system_test.log.html)\n\nIn all cases, exit status is zero. "
+        },
+        {
+            "user": "edsantiago",
+            "body": "There's something bothering me about this. In reviewing my flake logs I see various instances of flakes in the ginkgo tests that could be this problem -- but I'm not seeing any evidence of the scope we've seen the last two weeks. It has gotten so it's impossible to pass CI, even with me spending my day pressing the Re-run button. What has changed?"
+        },
+        {
+            "user": "rhatdan",
+            "body": "I am thinking if @mheon does not fix this soon, we need to disable this remote tests, in order to get the back log of PRs merged."
+        },
+        {
+            "user": "edsantiago",
+            "body": "Agreed. I nearly suggested that in Planning yesterday; the commitment to fixing flakes dissuaded me."
+        },
+        {
+            "user": "mheon",
+            "body": "I think I am close, but it keeps developing new and exciting failure modes\nto convince me otherwise.\n\nOn Thu, Aug 27, 2020, 07:32 Ed Santiago <notifications@github.com> wrote:\n\n> Agreed. I nearly suggested that in Planning yesterday; the commitment to\n> fixing flakes dissuaded me.\n>\n> —\n> You are receiving this because you were mentioned.\n> Reply to this email directly, view it on GitHub\n> <https://github.com/containers/podman/issues/7195#issuecomment-681891924>,\n> or unsubscribe\n> <https://github.com/notifications/unsubscribe-auth/AB3AOCFNWVFUEXCJWXL634LSCY755ANCNFSM4PTNKANA>\n> .\n>\n"
+        },
+        {
+            "user": "mheon",
+            "body": "Re-pushed. The exec exit codes issue should theoretically be fixed."
+        },
+        {
+            "user": "mheon",
+            "body": "If it is, this can finally be closed..."
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 7111
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 7228
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 7296
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 7312
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 7340
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 7338
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 7350
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 6811
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 7428
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 7437
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 7451
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 7580
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 7803
+        }
+    ]
+}

@@ -1,0 +1,112 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 12918,
+    "type": "pull_request",
+    "title": "Propagate CONTAINERS_CONF to conmon",
+    "state": "closed",
+    "labels": [
+        "lgtm",
+        "approved",
+        "locked - please file new issue/PR"
+    ],
+    "user": "dgibson",
+    "body": "The `CONTAINERS_CONF` environment variable can be used to override the configuration file, which is useful for testing.  However, at the moment this variable is not propagated to conmon.  That means in particular, that conmon can't propagate it back to podman when invoking `--exit-command`.  The mismatch in configuration between the starting and cleaning up podman instances can cause a variety of errors.\n\nThis patch also adds two related test cases.  One checks explicitly that the correct `$CONTAINERS_CONF` value appears in conmon's environment.  The other checks for a possible specific impact of this bug: if we use a nonstandard name for the runtime (even if its path is just a regular crun), then the podman container cleanup invoked at container exit will fail. That has the effect of meaning that a container started with `-d --rm` won't be correctly removed once complete.\n",
+    "comments": [
+        {
+            "user": "rhatdan",
+            "body": "Great catch @dgibson \nLGTM\n/approve\n@containers/podman-maintainers PTAL"
+        },
+        {
+            "user": "Luap99",
+            "body": "@edsantiago PTAL at tests"
+        },
+        {
+            "user": "TomSweeneyRedHat",
+            "body": "LGTM\nonce @edsantiago 's concerns are addressed."
+        },
+        {
+            "user": "edsantiago",
+            "body": "Failure looks real:\n```\n         # # podman-remote [...] rm SHA\n         # bbb7cc96e3077f7e7508649e6355dd838fd9bff4e787921d6bd7c78e1292994b\n         # #/vvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv\n         # #| FAIL: exit code is 0; expected 1\n         # #\\^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n```\nShould this test be `skip_if_remote`-ed?"
+        },
+        {
+            "user": "dgibson",
+            "body": "> Failure looks real:\n> \n> ```\n>          # # podman-remote [...] rm SHA\n>          # bbb7cc96e3077f7e7508649e6355dd838fd9bff4e787921d6bd7c78e1292994b\n>          # #/vvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv\n>          # #| FAIL: exit code is 0; expected 1\n>          # #\\^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n> ```\n> \n> Should this test be `skip_if_remote`-ed?\n\nI don't think so, although I'm not sure, since I know almost nothing about how podman remote works.\n\nAFAICT failing in the way it appears to means that the `--rm` option really is failing to work, which seems like a real bug, and I doubt it's caused by my code change, merely exposed by the new test.  I don't really know why my change which fixes the local case would not fix the remote case - but, again, I really don't know how remote works.  I don't think I'll be able to debug this on my own."
+        },
+        {
+            "user": "edsantiago",
+            "body": "It's a race condition:\n```console\n$ while :;do cid=$(bin/podman-remote run -d --rm quay.io/libpod/testimage:20210610 true);bin/podman-remote rm $cid;done\nf67da6c90c667f7f53a4f35c88b501661424646b47e3c21ee9f9d876d9854750\n8ddffb3e971f6986fef5fd21a57c98fe28bdaa70eb66371cbcf6b69395cc1993\nError: no container with name or ID \"ee8a170a78727763a88ccb08319f04899ffe94b7de1a76bea2a33d7d6c47a439\" found: no such container\nError: no container with name or ID \"021aa341a56f9dfab681307eefc1a832226190277897b1e3b4b40319f76e0531\" found: no such container\n1efc9f1d56946353c51fc7b420f5de274fca7af5af2cfec495edc33300aba629\n82f3cf3d2310b85cb2424701a98bcf956981957d93d76dae23a06556259eedda\n825797a3f88cdeabcc55be736aecba25c0cab743044e36260705136cbfca9d01\nError: no container with name or ID \"d8cdcc884b0013a1fa87d68fac7de274d16f4bc66c8b8ad14bfc3ae975c538f6\" found: no such container\n30ca114f4ffab6ac87e3741c37251524bdc207fc1a7a9e13e31cbf56a88a9108\na9e78031c688df5868b0197f01ef3c94f6372b00f786bfeb1236ad32acf792e1\nd3709db21ac0e1044dc9748f83b1e03ebc8a60b367024a0746e387d4ea102077\n```\n...and it's an understandable one, in your test, because there really can't be any timing guarantees here. This race affects both local and remote, it just seems probable that remote is slightly slower.\n\nProposed solution: I don't know. Maybe `run_podman wait $cid`? I would recommend checking out a broken version of podman (one that demonstrates the bug you're trying to test), then figuring out how to reliably give the `run -d --rm` process time to complete and clean up (or not, in the case of the bug). Then write your test to conform to that.\n\nBTW please also remove the `export` from the second test."
+        },
+        {
+            "user": "edsantiago",
+            "body": "Oh - and `CONTAINERS_CONF` doesn't work over remote anyway (I think), so you probably do want to `skip_if_remote` just like in your first test.\n\nThis does not relieve you from fixing the race condition, though: it's a real one, and could conceivably trigger on a real run. It's convenient that podman-remote reproduces it so easily, because that can help you write a robust  wait test."
+        },
+        {
+            "user": "dgibson",
+            "body": "> Oh - and `CONTAINERS_CONF` doesn't work over remote anyway (I think), so you probably do want to `skip_if_remote` just like in your first test.\n\nOk, I've done that for now.  Do you know how we could find out definitively if `$CONTAINERS_CONF` is supposed to work over remote?\n\n> This does not relieve you from fixing the race condition, though: it's a real one, and could conceivably trigger on a real run. It's convenient that podman-remote reproduces it so easily, because that can help you write a robust wait test.\n\nGiven I have no idea how to configure or invoke remote podman, that doesn't actually help that much.  But, I can force that race to happen easily enough using a `sleep 3` instead of a `true`.  I think I have something solid now, lets see what the CI thinks.\n"
+        },
+        {
+            "user": "dgibson",
+            "body": "Alas, the CI is now failing on the e2e ginkgo testsuite, for reasons I can't discern :("
+        },
+        {
+            "user": "edsantiago",
+            "body": "The [plugin in containers failure](https://storage.googleapis.com/cirrus-ci-6707778565701632-fcae48/artifacts/containers/podman/5933325356367872/html/int-podman-fedora-35-root-container.log.html#t--use-plugin-in-containers--1) looks very real to me: either an unintended consequence of your changes, or a bug in the test. Basically, that test code sets CONTAINERS_CONF, and is now failing. I don't work Fridays so I can't look into it further today; but I thought you needed to know.\n\nThe sys remote failure looks like a flake, but it's not one that looks familiar to me, and has already been restarted once, and there's no point in restarting it since there's a genuine failure anyway."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@dgibson  Is this something we need to get into podman 4.0, or can it wait for podman 4.1?"
+        },
+        {
+            "user": "dgibson",
+            "body": "> @dgibson Is this something we need to get into podman 4.0, or can it wait for podman 4.1?\n\nI have no strong opinion.  This is definitely a bug, but it tends only to bite in some unusual edge cases."
+        },
+        {
+            "user": "dgibson",
+            "body": "At least some of the CI failures I'm getting are consistent, however, I'm finding myself in deeply unfamiliar weeds amongst volume plugins trying to debug them.  I *think* the bug I'm addressing here was just masking a pre-existing bug (in the code or the tests, I'm not sure).\n\nThere are several failures, but focussing on one to start with.  It occurs in this section of test code from `tests/e2e/volume_plugin_test.go`:\n\n```\n// HACK: `volume rm -f` is timing out trying to remove containers using the volume.\n// Solution: remove them manually...\n// TODO: fix this when I get back\nrmAll := podmanTest.Podman([]string{\"rm\", \"-af\"})\nrmAll.WaitWithDefaultTimeout()\nExpect(rmAll).Should(Exit(0))\n```\n\nSpecifically, the `podman rm -af` is failing with exit code 125 and the message `Error: cannot remove volume testVolume1 from plugin testvol4, but it has been removed from Podman: required plugin missing` (this does seem to be exposed anywhere obvious - I deduced this with a lot of stracing).  I have no idea why propoagating `CONTAINERS_CONF` further would cause this error.  I thought it might be that the bug I'm addressing caused the need for the HACK in the first place, but that doesn't seem to be the case - if I remove this stanza it fails during cleanup as described by the comment.\n\n/cc @mheon since he added this test."
+        },
+        {
+            "user": "mheon",
+            "body": "I think I know what's going on; the container holding the volume plugin is being `rm -f`'d before one of the containers using the plugin. Not sure how this hasn't been flaking before..."
+        },
+        {
+            "user": "mheon",
+            "body": "I think https://github.com/containers/podman/pull/13264 should resolve this once it merges"
+        },
+        {
+            "user": "mheon",
+            "body": "My PR is merged, rebasing on latest main should (hopefully!) fix tests"
+        },
+        {
+            "user": "dgibson",
+            "body": "> I think I know what's going on; the container holding the volume plugin is being `rm -f`'d before one of the containers using the plugin. Not sure how this hasn't been flaking before...\n\nAha!  One of the possible consequences of this bug is that automatic container cleanup can fail (because the cleanup process doesn't get the right configuration.  I wonder if that could be what was happening - the cleanup of the plugin container failed, meaning the later removal didn't fail."
+        },
+        {
+            "user": "dgibson",
+            "body": "Thanks @mheon, local tests are looking good with your fix, next we'll see how the CI takes it."
+        },
+        {
+            "user": "dgibson",
+            "body": "@edsantiago, @mheon has fixed the CI failures, and I believe I've addressed all the changes you requested.  Can you re-review, so we can merge this?"
+        },
+        {
+            "user": "mheon",
+            "body": "LGTM"
+        },
+        {
+            "user": "openshift-ci[bot]",
+            "body": "[APPROVALNOTIFIER] This PR is **APPROVED**\n\nThis pull-request has been approved by: *<a href=\"https://github.com/containers/podman/pull/12918#\" title=\"Author self-approved\">dgibson</a>*, *<a href=\"https://github.com/containers/podman/pull/12918#pullrequestreview-888651799\" title=\"Approved\">edsantiago</a>*, *<a href=\"https://github.com/containers/podman/pull/12918#issuecomment-1016488407\" title=\"Approved\">rhatdan</a>*\n\nThe full list of commands accepted by this bot can be found [here](https://go.k8s.io/bot-commands?repo=containers%2Fpodman).\n\nThe pull request process is described [here](https://git.k8s.io/community/contributors/guide/owners.md#the-code-review-process)\n\n<details >\nNeeds approval from an approver in each of these files:\n\n- ~~[OWNERS](https://github.com/containers/podman/blob/main/OWNERS)~~ [edsantiago,rhatdan]\n\nApprovers can indicate their approval by writing `/approve` in a comment\nApprovers can cancel approval by writing `/approve cancel` in a comment\n</details>\n<!-- META={\"approvers\":[]} -->"
+        },
+        {
+            "user": "edsantiago",
+            "body": "/lgtm\n\nThanks for following up."
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 12917
+        }
+    ]
+}

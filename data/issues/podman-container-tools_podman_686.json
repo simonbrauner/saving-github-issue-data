@@ -1,0 +1,216 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 686,
+    "type": "pull_request",
+    "title": "pkg/hooks: Version the hook structure and add 1.0.0 hooks",
+    "state": "closed",
+    "labels": [
+        "locked - please file new issue/PR"
+    ],
+    "user": "wking",
+    "body": "This shifts the matching logic out of `libpod/container_internal` and into the `hook` package, where we can reuse it after vendoring into CRI-O (as @rhatdan suggested [here][a]).  It also adds unit tests with almost-complete coverage.  Now `libpod` is even more isolated from the `hook` internals, which makes it fairly straightforward to bump the hook config file to 1.0.0.  I've dubbed the old format 0.1.0, although it doesn't specify an explicit version.  Motivation for some of my changes with 1.0.0:\n\n* Add an explicit `version` field.  This will make any future JSON structure migrations more straightforward by avoiding the need for version-guessing heuristics.\n\n* Collect the matching properties in a new `When` sub-structure.  This makes the root `Hook` structure easier to understand, because you don't have to read over all the matching properties when wrapping your head around `Hook`.\n\n* Replace the old `hook` and `arguments` with a direct embedding of the runtime-spec's hook structure.  This provides access to additional upstream properties (`args[0]`, `env`, and `timeout`) and avoids the complication of a libpod-specific analog structure.\n\n* Add a `when.always` property.  You can usually accomplish this effect in another way (e.g. `when.commands = [\".*\"]`), but having a boolean explicitly for this use-case makes for easier reading and writing.\n\n* Replace the previous `annotations` array with an `annotations` map.  The 0.1.0 approach matched only the values regardless of key, and that seems unreliable.\n\n* Replace `cmds` with `when.commands`, because while there are a few ways to abbreviate “commands”, there's only one way to write it out in full ;).  This gives folks one less thing to remember when writing hook JSON.\n\nI've also added doc-compat support for the various pluralizations of the 0.1.0 properties.  Previously, the docs and code were not in agreement (e.g. [doc `stages`][b] vs. [code `stage`][c]).  More on this particular facet in kubernetes-incubator/cri-o#1235.\n\nAnd I've updated the docs to point out that the annotations being matched are the OCI config annotations.  This differs from CRI-O, where the annotations used are the [Kubernetes-supplied][2] [annotations][3].  For example, [`io.kubernetes.cri-o.Volumes`][4] is [part of CRI-O's runtime config annotations][5], but not part of the Kubernetes-supplied annotations CRI-O uses for matching hooks.\n\nThe `Monitor` method supports [the CRI-O use-case][6].  podman doesn't need it directly, but CRI-O will need it when we vendor this package there.\n\nThe WIP in the subject is because [I'm not sure what the has-bind-mounts logic should look like][d], although I think [the current `len(c.config.Spec.Mounts) > 0`][e] is not quite what we want.\n\n[a]: https://github.com/kubernetes-incubator/cri-o/pull/1517#issuecomment-379963488\n[b]: https://github.com/projectatomic/libpod/blame/v0.4.3/hooks.md#L52\n[c]: https://github.com/projectatomic/libpod/blob/v0.4.3/pkg/hooks/hooks.go#L29\n[d]: https://github.com/projectatomic/libpod/pull/155#pullrequestreview-116002429\n[e]: https://github.com/projectatomic/libpod/blob/v0.4.3/libpod/container_internal.go#L1155\n[1]: https://github.com/kubernetes-incubator/cri-o/pull/1235\n[2]: https://github.com/kubernetes-incubator/cri-o/blob/v1.10.0/server/container_create.go#L760\n[3]: https://github.com/kubernetes-incubator/cri-o/blob/v1.10.0/server/container_create.go#L772\n[4]: https://github.com/kubernetes-incubator/cri-o/blob/v1.10.0/pkg/annotations/annotations.go#L97-L98\n[5]: https://github.com/kubernetes-incubator/cri-o/blob/v1.10.0/server/container_create.go#L830-L834\n[6]: https://github.com/kubernetes-incubator/cri-o/pull/1345/",
+    "comments": [
+        {
+            "user": "rh-atomic-bot",
+            "body": "Can one of the admins verify this patch?\nI understand the following commands:\n- `bot, add author to whitelist`\n- `bot, test pull request`\n- `bot, test pull request once`"
+        },
+        {
+            "user": "mheon",
+            "body": "bot, add author to whitelist"
+        },
+        {
+            "user": "rhatdan",
+            "body": "@baude @mheon PTAL"
+        },
+        {
+            "user": "baude",
+            "body": "LGTM, needs gofmt ... remember to sign all the commits ..."
+        },
+        {
+            "user": "baude",
+            "body": "also  agree on the error handling"
+        },
+        {
+            "user": "wking",
+            "body": "Should it be an error to call `podman` without the configured hook directory?  Currently [the tests fail with][1]:\n\n```\nRunning: /usr/bin/podman --root /tmp/podman_test502773819/crio --runroot /tmp/podman_test502773819/crio-run --runtime /usr/bin/runc --conmon /usr/libexec/crio/conmon --cni-config-dir /etc/cni/net.d --storage-driver=vfs run -it -v /tmp/podman_test502773819/socket:/h registry.fedoraproject.org/fedora-minimal:latest bash -c trap \"echo FOO >> /h/fifo \" 8; echo READY >> /h/fifo; while :; do sleep 0.25; done\nerror setting up OCI Hooks: open /usr/share/containers/oci/hooks.d: no such file or directory\n```\n\nI can use [`IsNotExist`][2] to make that particular error (vs., for example, an `EPERM`) non-fatal.  But is that the expected interface?  If called `podman` with an explicit `--hooks-dir-path=/some/typoed/directory`, I'd expect an error.\n\nShould we keep the error fatal in `libpod`, remove [`podman`'s default][3], and just skip hooks entirely unless `--hooks-dir-path` is explicitly set?  I think that would be the cleanest long-term approach, although we'd need a migration period to shift existing implicit-hooks users over to the new approach.  We could handle that in `podman` though, and immediately transition `libpod` over to requiring the hook directory passed in via [`WithHooksDir`][4] be readable by [the time we need the hooks][5].\n\n[1]: https://s3.amazonaws.com/aos-ci/ghprb/projectatomic/libpod/25a1627b9e4b5a0018fef1cd98f6bd001f514150.2.1524859642219292420/output.log\n[2]: https://golang.org/pkg/os/#IsNotExist\n[3]: https://github.com/projectatomic/libpod/blob/v0.4.3/cmd/podman/main.go#L129\n[4]: https://github.com/projectatomic/libpod/blob/v0.4.3/libpod/options.go#L175-L187\n[5]: https://github.com/projectatomic/libpod/blob/v0.4.3/libpod/container_internal.go#L938-L940"
+        },
+        {
+            "user": "mheon",
+            "body": "@wking I think that if the default hooks directory does not exist, it should not be fatal. But if a directory was explicitly set and does not exist, that should be an error. I'd add a check to make sure the path we give to `WithHooksDir()` in `options.go` exists, and make a nonexistant directory within the actual hooks package nonfatal."
+        },
+        {
+            "user": "wking",
+            "body": "> I think that if the default hooks directory does not exist, it should not be fatal. But if a directory was explicitly set and does not exist, that should be an error.\n\nOk, so:\n\n* “error if the caller explicitly provided an invalid directory”.  I'm on board with that.\n* “do not error if someone calls `podman` without specifying a directory but no hook directory exists”.  I'm on board with that.\n\nDo you have a position on “migrate away from the current default hook directory and require callers who need hooks to set the default directory explicitly”?  I'm in weakly favor of that, but for now I'll assume you want to keep the existing default.\n\n> I'd add a check to make sure the path we give to `WithHooksDir()` in `options.go` exists…\n\nDo we need to bother there?  A check at that point would be racy vs. checking at invocation time.  If we want “directory was explicitly set and does not exist” to be fatal (and we seem to agree that we do), then I'd rather enforce that check in the `hooks` package (as I do in this PR), and make the failed-race behavior too strict instead of making it too permissive.\n\n> … and make a nonexistant directory within the actual hooks package nonfatal.\n\nI think we want to keep this fatal because of the above race.  I've pushed acc35edc0 with one potential implementation for the above criteria that makes the failed-race behavior too strict."
+        },
+        {
+            "user": "mheon",
+            "body": "@wking I like enforcing restrictions in `WithHooksDir()` (and the other `With...()` functions) because they're the logical border of `libpod` and Podman, and act as part of `libpod`'s public API. As such, when we move over to CRI-O (hopefully beginning soon, I'm finishing some of the last work on that front), we'll retain the benefits of the validation there.\n\nI think the checks you added seem reasonable, though they should probably be moved into `WithHooksDir()`. This way, we validate the hooks directory once as it is passed into `libpod` and again when we actually use it, avoiding races (and incurring overhead, but I'm OK with an extra `stat` call as we start up). I would like to see a check in the hooks themselves to make the directory not existing not fatal only if the directory is the default contained in the hooks package (so we can guarantee that, on an unconfigured system with no default directory, we can still run Podman without errors)."
+        },
+        {
+            "user": "wking",
+            "body": "> I think the checks you added seem reasonable, though they should probably be moved into `WithHooksDir()`.\n\nI've kicked this around a bit, but can't get an API I'm comfortable with.  We can't just have `WithHooksDir` return a `RuntimeOption` that returns an error when the directory is missing (like I'm doing [here][1]), because `NewRuntime` doesn't provide a way to continue subsequent processing after a `RuntimeOption` returns an error.  So any error returned from `WithHooksDir`'s `RuntimeOption` has to be fatal.\n\nYou could do something like:\n\n```go\nfunc WithHooksDir(hooksDir string, dirNotExistFatal bool) RuntimeOption\n```\n\nto make the returned error conditional, but then there's no way for the caller to know if the directory was successfully added or not (e.g. if it wanted to pass a warning up the call chain).\n\nAre we really settled on the `NewRuntime(options)` approach?  If we shifted the `With…` setters into runtime methods:\n\n```go\nruntime, err := libpod.NewRuntime()\n…\n\nerr = runtime.SetHooksDir(c.GlobalString(\"hooks-dir-path\"))\nif err != nil && (c.GlobalIsSet(\"hooks-dir-path\") || !os.IsNotExist(err)) {\n  return nil, err\n}\n\nerr = runtime.Finalize()\nreturn runtime, err\n```\n\ncallers would have much more flexibility about handling setter errors.\n\n> This way, we validate the hooks directory once as it is passed into libpod and again when we actually use it, avoiding races…\n\nYou'd still have the race I have in acc35edc0f, where the directory is `stat`-able at runtime-creation-time but no longer in existence by the time we actually try and load the hooks, with callers who did not set `--hooks-dir-path` getting the does-not-exist there when they shouldn't.  That's the “too strict” behavior, and I'm ok with it.  If you wanted to avoid the race, you'd have to pass down a “considers non-existant-hook-dir fatal” boolean or similar into libpod, while we're currently just passing in a hook-dir path.\n\nOn the other hand, the `WithHooksDir(hooksDir string, dirNotExistFatal bool)` signature I mention above would be one way to get the information you'd need to pass down, and it could set both `rt.config.HooksDir` (like it [already does][2]) and a new `rt.config.DirNotExistFatal`.  Then we could text in `WithHooksDir` or not, as you like, and then test *again* with the appropriate fatal-ness at [hook-load time][3].\n\n> I would like to see a check in the hooks themselves to make the directory not existing not fatal only if the directory is the default contained in the hooks package (so we can guarantee that, on an unconfigured system with no default directory, we can still run Podman without errors).\n\nI'm currently very happy with `pkg/hooks` not consuming [its directory constants][4] at all.  Things like CRI-O's “[if the user set a non-default hook dir, drop the usual override directory][5]” seem needlessly brittle to bake into the `hooks` library itself.  By not baking in a `DefaultDir` condition, we avoid issues for folks who want to support, say, unprivileged users who read hooks from a per-user directory.  Or for callers who have different opinions about where hooks should go by default.  If you really need to avoid the race, then I'd much prefer passing a `HooksNewErrorFatal` or similar config down through libpod, which you could consume like:\n\n```go\nmanager, err := hooks.New(ctx, []string{c.runtime.config.HooksDir})\nif err != nil {\n  if c.runtime.config.HooksNewErrorFatal {  // or something that only softens the directory-does-not-exist case\n    return err\n  }\n  logrus.Warn(err)\n}\n```\n\n[1]: https://github.com/projectatomic/libpod/commit/acc35edc0fae5ae6bd208192152936312c79a969#diff-abbffb2987be29a6ad27e98cd6c3be0eR62\n[2]: https://github.com/projectatomic/libpod/blob/v0.4.4/libpod/options.go#L184\n[3]: https://github.com/projectatomic/libpod/blob/v0.4.4/libpod/container_internal.go#L929-L931\n[4]: https://github.com/projectatomic/libpod/blob/dc0bd4b8e0803e5f11433a5cad265a16d15a41dd/pkg/hooks/hooks.go#L19-L23\n[5]: https://github.com/kubernetes-incubator/cri-o/blob/v1.10.0/lib/container_server.go#L181-L183"
+        },
+        {
+            "user": "mheon",
+            "body": "I'm fine with the error from `WithHooksDir` being fatal - explicitly setting hooks to a directory that doesn't exist sounds like an error. If we actually want to clear them, a separate function (`WithNoHooks()` or similar) sounds more reasonable to me than accepting \"\" as a way to clear the hooks.\n\nYour second suggestion, passing down an error, sounds fine, though I think we'd be better off just passing through an error from `os.Stat()` so we can use the built-in `os.IsNotExist()` function to check if we actually had a fatal init error, or the directory we're using as hooks doesn't exist (probably just a logged warning)"
+        },
+        {
+            "user": "wking",
+            "body": "> If we actually want to clear them, a separate function (`WithNoHooks()` or similar) sounds more reasonable to me than accepting \"\" as a way to clear the hooks.\n\n`WithHooks(hooksDir *string, …)` with `nil` to clear would be explicit enough for me if we wanted to have empty-string values mean the current directory.  I'm also fine documenting empty-string values as clearing if we want.  A `WithNoHooks()` is nice and explicit, but then callers have to switch between the two functions and switch based on their own `*string` or `bool`/`string` pair.  Anyhow, for now I've pushed 9394b2f1 to have `WithHooks` error on empty strings, and we can sort out the clearing API later.\n\n> Your second suggestion, passing down an error, sounds fine, though I think we'd be better off just passing through an error from `os.Stat()` so we can use the built-in `os.IsNotExist()` function to check if we actually had a fatal init error, or the directory we're using as hooks doesn't exist (probably just a logged warning)\n\nA `Stat` call would be racy.  When `hooks.New` is called with a non-existent directory, it's [the `ioutil.ReadDir`][1] that would return the not-exist error, since that's the only operation we need to perform on the directory.  9394b2f1 adds a new `HooksDirNotExistFatal` `libpod` config setting and sets it via:\n\n```go\nfunc WithHooksDir(hooksDir string, dirNotExistFatal bool) RuntimeOption\n```\n\nThat allows us to avoid the `os.Stat`/`ioutil.ReadDir` race by pushing the warn/error switch [down into libpod][2].  Does that look good to you?\n\n[1]: https://github.com/projectatomic/libpod/blob/9394b2f1bcc646d157b9e7fff108abd21b817514/pkg/hooks/read.go#L64-L66\n[2]: https://github.com/projectatomic/libpod/blob/9394b2f1bcc646d157b9e7fff108abd21b817514/libpod/container_internal.go#L1133-L1139\n"
+        },
+        {
+            "user": "mheon",
+            "body": "@wking That implementation looks like a good compromise. We preserve checking at the public bounds of Libpod, and we have a way of ensuring that a non-existant hooks dir is nonfatal.\n\nI'll do one more look over on monday, but I think my concerns are addressed now. Thanks @wking "
+        },
+        {
+            "user": "rhatdan",
+            "body": "@wking  I think I just fixed the travis issues, but I think you need to rebase your PR to fix it."
+        },
+        {
+            "user": "rh-atomic-bot",
+            "body": ":umbrella: The latest upstream changes (presumably e6ec1aa) made this pull request unmergeable. Please resolve the merge conflicts."
+        },
+        {
+            "user": "wking",
+            "body": "I'll rebase this and polish it up now that #700 has landed."
+        },
+        {
+            "user": "wking",
+            "body": "I've rebased this around #700 (and around some trivial context conflicts from #690) with 9394b2f -> feac0f6.  That also makes the change [from \"any\" to \"all\" condition matching for 1.0.0 hooks][1] and [drops the `--hooks-dir-path` FIXME][2].\n\nI've added [a new FIXME][3] about defining the injection order.  For folks with multiple hook JSON files, do we want injected hooks ordered by by the JSON filenames as sorted alphabetically in the current locale?  Some other order?  Leave the order undefined for now?\n\n[1]: https://github.com/projectatomic/libpod/pull/686#discussion_r185240481\n[2]: https://github.com/projectatomic/libpod/pull/686#discussion_r185914844\n[3]: https://github.com/projectatomic/libpod/pull/686/files#diff-6ff75d2b4fc02ea5ead9bd97530d6f2aR26"
+        },
+        {
+            "user": "mheon",
+            "body": "@wking Alphabetic sorting sounds simple to implement and easy to work with (drop a numeric prefix on things if you want to easily enforce load order, simple enough)."
+        },
+        {
+            "user": "wking",
+            "body": "On Wed, May 09, 2018 at 04:52:47PM -0700, Matthew Heon wrote:\n> @wking Alphabetic sorting sounds simple to implement and easy to\n> work with (drop a numeric prefix on things if you want to easily\n> enforce load order, simple enough).\n\nAs far as I can tell, sort.Strings [1] is locale-agnostic.  Should I\nbe using Collator.SortStrings?  Should I use sort.Strings and dig\ndeeply enough to explain its ordering?\n\n[1]: https://golang.org/pkg/sort/#Strings\n[2]: https://godoc.org/golang.org/x/text/collate#Collator.SortStrings\n"
+        },
+        {
+            "user": "mheon",
+            "body": "`sort.Strings` sorts based on Unicode codepoint value. This should be consistent for most alphabets, though I'm not certain how well it would handle CJK languages."
+        },
+        {
+            "user": "mheon",
+            "body": "Correction - I was originally under the impression Go used the full codepoint for sorting, but it apparently uses a byte-by-byte compare of UTF-8 strings, so multibyte characters are compared separately. Ew."
+        },
+        {
+            "user": "wking",
+            "body": "Even legitimate code-point ordering would miss most of [these][1].  So `Collator.SortStrings`?\n\n[1]: https://en.wikipedia.org/wiki/Alphabetical_order#Language-specific_conventions"
+        },
+        {
+            "user": "mheon",
+            "body": "@wking Yeah, seems like the best way forward."
+        },
+        {
+            "user": "wking",
+            "body": "> Yeah, seems like the best way forward.\n\nI dug into the `Collator.SortStrings` approach today and ran into some trouble with POSIX support there too: golang/go#25340.  Should I move ahead with special casing to translate `C` and `POSIX` to `und-u-va-posix`?  Or should we give up on locales, go with `sort.Strings`, and document [its UTF-8 byte-comparison approach][1]?\n\n[1]: https://github.com/projectatomic/libpod/pull/686#issuecomment-387914358"
+        },
+        {
+            "user": "mheon",
+            "body": "@wking I think handling `POSIX` and `C` as `und-u-va-posix` is probably preferable to straight byte-comparison. We'll still have to document exceptions to expected sorting, but there will be a lot fewer exceptions than byte comparison."
+        },
+        {
+            "user": "wking",
+            "body": "I've pushed 3887fca -> ec446c3, adding [locale-specific ordering][1] with [custom handling for `C` and `POSIX`][2] to work around golang/go#25340.\n\nThere are no more FIXMEs in the change-set now, so I've also removed the \"WIP\" prefix from the PR subject.\n\n[1]: https://github.com/projectatomic/libpod/pull/686#issuecomment-387915911\n[2]: https://github.com/projectatomic/libpod/pull/686#issuecomment-388159076"
+        },
+        {
+            "user": "wking",
+            "body": "I've pushed ec446c3 -> db4b2ec, with some typo fixes and a commit vendoring x/text/collate.  Now all the CI tests are green here."
+        },
+        {
+            "user": "mheon",
+            "body": "LGTM"
+        },
+        {
+            "user": "rh-atomic-bot",
+            "body": ":umbrella: The latest upstream changes (presumably 177c27e) made this pull request unmergeable. Please resolve the merge conflicts."
+        },
+        {
+            "user": "wking",
+            "body": "Rebased around 853c5c41f1a0f65815674cce0777a20de24c8309 (which went straight to master without a PR?)."
+        },
+        {
+            "user": "mheon",
+            "body": "@wking That was part of #507 - our mergebot doesn't actually merge, and instead closes PRs and pushes to master."
+        },
+        {
+            "user": "mheon",
+            "body": "@rh-atomic-bot r+"
+        },
+        {
+            "user": "rh-atomic-bot",
+            "body": ":pushpin: Commit 19bf480 has been approved by `mheon`\n\n<!-- @rh-atomic-bot r=mheon 19bf4803617a44d0f3c3a4528805383688d2e26a -->"
+        },
+        {
+            "user": "rh-atomic-bot",
+            "body": ":lock: Merge conflict"
+        },
+        {
+            "user": "rh-atomic-bot",
+            "body": ":umbrella: The latest upstream changes (presumably c339c5b) made this pull request unmergeable. Please resolve the merge conflicts."
+        },
+        {
+            "user": "mheon",
+            "body": "Alright, now we've developed a conflict in the README... Sorry about this @wking - we're having a busy day in terms of PRs merged"
+        },
+        {
+            "user": "wking",
+            "body": "> Sorry about this @wking - we're having a busy day in terms of PRs merged\n\nIt's a good problem to have ;).  Rebased around #754 with 19bf480 -> 85f463c.\n"
+        },
+        {
+            "user": "mheon",
+            "body": "@rh-atomic-bot r+"
+        },
+        {
+            "user": "rh-atomic-bot",
+            "body": ":pushpin: Commit 85f463c has been approved by `mheon`\n\n<!-- @rh-atomic-bot r=mheon 85f463c217c2f140a72e5671e55d4060923ed212 -->"
+        },
+        {
+            "user": "rh-atomic-bot",
+            "body": ":hourglass: Testing commit 85f463c with merge c8208a8..."
+        },
+        {
+            "user": "rh-atomic-bot",
+            "body": ":sunny: Test successful - [status-papr](https://s3.amazonaws.com/aos-ci/ghprb/projectatomic/libpod/c8208a845e734a3527f5f589d7d318087ca92b07.1526057487965944576/index.html)\nApproved by: mheon\nPushing c8208a845e734a3527f5f589d7d318087ca92b07 to master..."
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 758
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 811
+        },
+        {
+            "organization": "cri-o",
+            "repository": "cri-o",
+            "number": 1517
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 887
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 1487
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 2494
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 2501
+        }
+    ]
+}

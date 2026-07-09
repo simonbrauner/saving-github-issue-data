@@ -1,0 +1,31 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 9983,
+    "type": "issue",
+    "title": "poststop hook executed twice",
+    "state": "closed",
+    "labels": [
+        "kind/bug",
+        "locked - please file new issue/PR"
+    ],
+    "user": "chethanah",
+    "body": "/kind bug\n\n**Description**\n- poststop hook executes twice \n\n**Consider the following hooks example for podman**\n- Hooks config `prestart-hook.json` and `poststop-hook.json`\n```bash\n# ls /etc/containers/oci/hooks.d/\npoststop-hook.json  prestart-hook.json\n\n# jq .  /etc/containers/oci/hooks.d/prestart-hook.json\n{\n  \"version\": \"1.0.0\",\n  \"hook\": {\n    \"path\": \"/root/podman-hook/prestart-hook.sh\"\n  },\n  \"when\": {\n    \"annotations\": {\n      \"testhook\": \"true\"\n    }\n  },\n  \"stages\": [\n    \"prestart\"\n  ]\n}\n\n# jq .  /etc/containers/oci/hooks.d/poststop-hook.json\n{\n  \"version\": \"1.0.0\",\n  \"hook\": {\n    \"path\": \"/root/podman-hook/poststop-hook.sh\"\n  },\n  \"when\": {\n    \"annotations\": {\n      \"testhook\": \"true\"\n    }\n  },\n  \"stages\": [\n    \"poststop\"\n  ]\n}\n```\n- `prestart-hook.sh` and `poststop-hook.sh` are executed in prestart and poststop stages respectively. Writes logs to `prestart-hook.log` and `poststop-hook.log`\n```sh\nroot@home:~/podman-hook# cat prestart-hook.sh \n#!/bin/bash \necho \"----Prestart\" >> /root/podman-hook/prestart-hook.log\ndate +%s >> /root/podman-hook/prestart-hook.log\n#cat - | jq . >> /root/podman-hook/prestart-hook.log\n\nroot@home:~/podman-hook# cat poststop-hook.sh \n#!/bin/bash \necho \"----Poststop\" >> /root/podman-hook/poststop-hook.log\ndate +%s >> /root/podman-hook/poststop-hook.log\n#cat - | jq . >> /root/podman-hook/poststop-hook.log\n\n# chmod 755 prestart-hook.sh poststop-hook.sh\n```\n- Launch container, with `--rm` option\n```bash\n# podman --hooks-dir=\"/etc/containers/oci/hooks.d/\" run --annotation=testhook=true -it --rm  docker.io/library/bash\nbash-5.1# ls\nbin    dev    etc    home   lib    media  mnt    opt    proc   root   run    sbin   srv    sys    tmp    usr    var\nbash-5.1#\nexit\n```\n- Upon inspecting the `prestart-hook.log` and `poststop-hook.log`, we can notice that the poststop hook has been executed twice.\n```bash\n# cat prestart-hook.log\n----Prestart\n1617936054\n\n# cat poststop-hook.log\n----Poststop\n1617936057\n----Poststop\n1617936059\n\n```\n- The same can be verified by launching container with `--log-level=debug`. We can see debug logs where poststop hook is executed twice for a single container launch and exit.\n\n**Issue**\n- The stages were `prestart` and `poststop` only. But poststop executed twice.\n- poststop hook is not added to OCI spec (config.json) of container. Since it's handled locally by podman as extension stage hook, it's executed twice. Once, during cleanupRuntime and again during removeContainer.\n- Without the `--rm` option the poststop hook executes only once, but when `podman rm <ID>` is run the poststop hook executes again.\n\n**How to?**\n- How to execute poststop hook only once? In an use case where poststop hooks operates on file, executing twice leads to unitended results. \n- Is there a way to remove poststop from extension stage hooks from hooks config?\n- Since, poststop hook is handled localy by podman and not by runtime, how to pass poststop hook with OCI spec?\n\n**Understood from the source the following**\n- \"postDeleteHooks runs the poststop hooks (if any) as specified by the OCI Runtime Specification (which requires them to run post-delete, despite the stage name)\"\n- Also, [delete(ctx)](https://github.com/containers/podman/blob/6d0c554cbb36bbfda786fb2e4b12239af91781cb/libpod/container_internal.go#L1863) is called twice. Once, during cleanupRuntime and again during removeContainer. This is where extension stage hook is handled lcoally.\n\n\n**Output of `podman version`:**\n\n```\n$ podman version\nVersion:      3.0.1\nAPI Version:  3.0.0\nGo Version:   go1.15.2\nBuilt:        Thu Jan  1 05:30:00 1970\nOS/Arch:      linux/amd64\n```\n",
+    "comments": [
+        {
+            "user": "rhatdan",
+            "body": "If you run this command without the --rm flag, does the same issue happen?"
+        },
+        {
+            "user": "chethanah",
+            "body": "- Without the `--rm` flag the poststop hook is executed only once. But `podman rm` executes the poststop hook again.\n- Considering the same example as above, here is a sample console output\n- Launch container without --rm option\n```bash\n# podman --log-level=debug --hooks-dir=\"/etc/containers/oci/hooks.d/\" run --annotation=testhook=true -it  docker.io/library/bash\nbash-5.1# ls\nbin    dev    etc    home   lib    media  mnt    opt    proc   root   run    sbin   srv    sys    tmp    usr    var\nbash-5.1#\nexit\n```\n- poststop hook executed only once\n```bash\n# cat prestart-hook.log\n----Prestart\n1618285896\n\n# cat poststop-hook.log\n----Poststop\n1618285903\n```\n- Remove container using `rm` subcommand, notice poststop hook executed again.\n```bash\n# podman ps -a\nCONTAINER ID  IMAGE                   COMMAND  CREATED         STATUS                     PORTS   NAMES\n6b57d57fb225  docker.io/library/bash  bash     27 seconds ago  Exited (0) 19 seconds ago          elegant_goldwasser\n\n# podman rm 6b57d57fb225\n6b57d57fb2258df8cff56b1213d85c79eff8a4b8a9b04d17df213e9f588dcf49\n\n# cat poststop-hook.log\n----Poststop\n1618285903\n----Poststop\n1618285931\n```\n\n- Also considering OCI: poststop hook is only executed after the container delete operation\n  - https://github.com/opencontainers/runtime-spec/blob/master/config.md#poststop \n  - The same hook operation can be verified with `runc` \n    - create -> start -> run prestart hook -> stopped state -> delete -> run poststop hook \n  - The poststop executes only once after container delete.\n\n "
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 10000
+        }
+    ]
+}

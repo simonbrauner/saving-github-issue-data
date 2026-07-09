@@ -1,0 +1,60 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 692,
+    "type": "issue",
+    "title": "Commit failure in baseline tests",
+    "state": "closed",
+    "labels": [
+        "locked - please file new issue/PR"
+    ],
+    "user": "TomSweeneyRedHat",
+    "body": "**Description**\nWhen I ran the ./test/test_podman_baseline.sh on a new Fedora 27 vm with the latest podman, I ran into errors when running containers that had been committed to.\n\n**Steps to reproduce the issue:**\n\n1.  Run '/bin/bash -v ./test/test_podman_baseline.sh' or the following portion of the script:\n\n```\n########\n# Create Fedora based container\n########\nimage=$(podman pull fedora)\necho $image\npodman run $image ls /\n\n########\n# Create shell script to test on\n########\nFILE=./runecho.sh\n/bin/cat <<EOM >$FILE\n#!/bin/bash\nfor i in {1..9};\ndo\n    echo \"This is a new container pull ipbabble [\" \\$i \"]\"\ndone\nEOM\nchmod +x $FILE\n\n########\n# Copy and run file on container\n########\nctrid=$(podman ps --all -q)\nmnt=$(podman mount $ctrid)\ncp ./runecho.sh ${mnt}/tmp/runecho.sh\npodman umount $ctrid\npodman commit $ctrid runecho\npodman run runecho ./tmp/runecho.sh\n```\n\n\n**Describe the results you received:**\n\nNo errors noted prior to the run command.\n```\n# podman run runecho ./tmp/runecho.sh\ncontainer create failed: container_linux.go:348: starting container process caused \"process_linux.go:402: container init caused \\\"rootfs_linux.go:58: mounting \\\\\\\"/var/lib/containers/storage/overlay-containers/f69978b5052805d458956faff88103dadacdf4f31faff5a49977ea9579b132c8/userdata/volumes/proc\\\\\\\" to rootfs \\\\\\\"/var/lib/containers/storage/overlay/2985c424e19dbfd588ce1513ff6244074958de2a45cc4f04626e51ad1451bfa7/merged\\\\\\\" at \\\\\\\"proc\\\\\\\" caused \\\\\\\"\\\\\\\\\\\\\\\"/var/lib/containers/storage/overlay/2985c424e19dbfd588ce1513ff6244074958de2a45cc4f04626e51ad1451bfa7/merged/proc\\\\\\\\\\\\\\\" cannot be mounted because it is located inside \\\\\\\\\\\\\\\"/proc\\\\\\\\\\\\\\\"\\\\\\\"\\\"\"\n: internal libpod error\n\n```\n\n**Describe the results you expected:**\n\nThe container should run showing with no errors and a number of lines of output from a counter.\n\n**Additional information you deem important (e.g. issue happens only occasionally):**\n\n**Output of `podman version`:**\n\n```\n# podman version\nVersion:       0.4.4\nGo Version:    go1.9.5\nOS/Arch:       linux/amd64\n\n# ls  /tmp/p*.rpm\npodman-0.4.4-1.git888927a.fc27.x86_64.rpm\n```\n\n**Output of `podman info`:**\n\n```\n# podman info\nhost:\n  MemFree: 909926400\n  MemTotal: 2089639936\n  SwapFree: 2141188096\n  SwapTotal: 2147479552\n  arch: amd64\n  cpus: 1\n  hostname: localhost.localdomain\n  kernel: 4.15.10-300.fc27.x86_64\n  os: linux\n  uptime: 1h 40m 45.68s (Approximately 0.04 days)\ninsecure registries:\n  registries: []\nregistries:\n  registries:\n  - docker.io\n  - registry.fedoraproject.org\n  - registry.access.redhat.com\nstore:\n  ContainerStore:\n    number: 2\n  GraphDriverName: overlay\n  GraphOptions:\n  - overlay.override_kernel_check=true\n  GraphRoot: /var/lib/containers/storage\n  GraphStatus:\n    Backing Filesystem: xfs\n    Native Overlay Diff: \"true\"\n    Supports d_type: \"true\"\n  ImageStore:\n    number: 3\n  RunRoot: /var/run/containers/storage\n\n```\n\n**Additional environment details (AWS, VirtualBox, physical, etc.):**\n\nVirtual Machine on my PC.  Fedora 27 freshly installed.  I did `dnf -y update` to get it up to date and then also `dnf -y docker` and also installed the podman kit that I'd pulled from the Fedora site..\n\n\n",
+    "comments": [
+        {
+            "user": "mheon",
+            "body": "This has to be default mounts in the spec.\n\nhttps://github.com/projectatomic/libpod/blob/master/libpod/container_commit.go#L99-L101\n\nWe can't do this in libpod because libpod has no concept of a volume mount vs a default mount - it only knows about mounts in the spec.\n\nWe need to move this part into cmd/podman/ and base it off the CreateConfig artifact. If we can't find the artifact, we just commit without volumes."
+        },
+        {
+            "user": "mheon",
+            "body": "For the libpod side of things, we're probably better off just basing the volumes off what's in the image we're building from. Same for CMD and ENTRYPOINT, probably - set the real ones based on CreateConfig in cmd/podman and use the image ones in libpod if not overridden."
+        },
+        {
+            "user": "mheon",
+            "body": "To clarify my thinking here... in `commit.go` we add all the mounts in the spec we are given to the image we create. This doesn't work because the spec contains many default mounts as well - `/proc` for example - that should never make it into an image. We can't really determine what these are on the `libpod` side, so we can't use the spec mounts in Libpod to commit.\n\nI'd really prefer to avoid adding large portions of the unparsed CLI into libpod - CRI-O is never going to use them. Therefore, I think we should move the volume mount additions into `cmd/podman /commit.go` where we can get at the original parsed command line (and its volume mounts) via the create config artifact we use for `ps` and `inspect`. If the user provides volumes for the new image at the command line, we pass those into libpod; otherwise, we pass in the volumes from the create config. On the libpod side, if not overridden, it's probably safest to just use the volumes from the image the container is based on."
+        },
+        {
+            "user": "mheon",
+            "body": "We might want to cut a `v0.4.4.1` tag or similar once a fix is in, because I think every image we commit right now is going to be broken because of this. We should also add an integration test to run a committed image to verify that works."
+        },
+        {
+            "user": "TomSweeneyRedHat",
+            "body": "Just realized I'd left off the required pull/run commands in the reproducer.  I've just updated my original comment with them added in."
+        },
+        {
+            "user": "baude",
+            "body": "@TomSweeneyRedHat @mheon lets discuss monday. im not sure about where this really is ... would prefer to team up on it."
+        },
+        {
+            "user": "baude",
+            "body": "We cannot be looking at the image a container is based on for mounts.  We need to only look at the container being committed.  I believe the correct fix here is set a const of default mounts in libpod and in commit.go where are adding the volumes to the new image, we only add those NOT which are not defaults."
+        },
+        {
+            "user": "baude",
+            "body": "ill propose a PR"
+        },
+        {
+            "user": "mheon",
+            "body": "@baude Won't work. We can't assume how the config is generated, so we don't know what the default mounts are. We cannot distinguish between user mounts and default mounts in libpod.\n\nAddition of user mounts need to move out into `cmd/podman`. Within libpod, we either have to set them based on the image, or not at all."
+        },
+        {
+            "user": "edsantiago",
+            "body": "Seeing same thing w/ podman-0.5.1-1524903167.giteda0fd7.fc27"
+        },
+        {
+            "user": "mheon",
+            "body": "Should be fixed now by #699 "
+        }
+    ],
+    "cross_references": []
+}

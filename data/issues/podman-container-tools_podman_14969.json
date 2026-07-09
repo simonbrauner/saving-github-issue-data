@@ -1,0 +1,77 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 14969,
+    "type": "pull_request",
+    "title": "WIP: fix deadlock between play kube and cleanup",
+    "state": "closed",
+    "labels": [
+        "do-not-merge/work-in-progress",
+        "release-note-none",
+        "locked - please file new issue/PR"
+    ],
+    "user": "tyler92",
+    "body": "There was a deadlock between two concurrent processes: play kube and cleanup,\nthat is called after container exit when RestartPolicy is used. Before the fix,\nthe cleanup command didn't lock Pod's lock, so there was a possibility of\nobtaining two locks in different order in two processes.\n\n[NO NEW TESTS NEEDED]\n\nCloses #14921\n\nSigned-off-by: Mikhail Khachayants <tyler92@inbox.ru>\n\n<!--\nThanks for sending a pull request!\n\nPlease make sure you've read our contributing guidelines and how to submit a pull request (https://github.com/containers/podman/blob/main/CONTRIBUTING.md#submitting-pull-requests).\n\nIn case you're only changing docs, make sure to prefix the pull-request title with \"[CI:DOCS]\". That will prevent functional tests from running and save time and energy.\n\nFinally, be sure to sign commits with your real name. Since by opening\na PR you already have commits, you can add signatures if needed with\nsomething like `git commit -s --amend`.\n-->\n\n#### Does this PR introduce a user-facing change?\n\n<!--\nIf no, just write `None` in the release-note block below. If yes, a release note\nis required: Enter your extended release note in the block below. If the PR\nrequires additional action from users switching to the new release, include the\nstring \"action required\".\n\nFor more information on release notes, please follow the Kubernetes model:\nhttps://git.k8s.io/community/contributors/guide/release-notes.md\n-->\n\n```\nNone\n```\n",
+    "comments": [
+        {
+            "user": "openshift-ci[bot]",
+            "body": "[APPROVALNOTIFIER] This PR is **NOT APPROVED**\n\nThis pull-request has been approved by: *<a href=\"https://github.com/containers/podman/pull/14969#\" title=\"Author self-approved\">tyler92</a>*\nTo complete the [pull request process](https://git.k8s.io/community/contributors/guide/owners.md#the-code-review-process), please assign **vrothberg** after the PR has been reviewed.\nYou can assign the PR to them by writing `/assign @vrothberg` in a comment when ready.\n\nThe full list of commands accepted by this bot can be found [here](https://go.k8s.io/bot-commands?repo=containers%2Fpodman).\n\n<details open>\nNeeds approval from an approver in each of these files:\n\n- **[OWNERS](https://github.com/containers/podman/blob/main/OWNERS)**\n\nApprovers can indicate their approval by writing `/approve` in a comment\nApprovers can cancel approval by writing `/approve cancel` in a comment\n</details>\n<!-- META={\"approvers\":[\"vrothberg\"]} -->"
+        },
+        {
+            "user": "tyler92",
+            "body": "This is my idea how to fix https://github.com/containers/podman/issues/14921. Actually in my tests this change works properly. But I'm no very familiar with Podman's code and maybe this is incorrect approach from architecture point of view.\n\nPlease let me known if this PR make sense or we should reject it."
+        },
+        {
+            "user": "tyler92",
+            "body": "/release-note-none"
+        },
+        {
+            "user": "vrothberg",
+            "body": "What is the reproducer for the issue?  I tried with the reproducer for https://github.com/containers/podman/issues/14929 but I still see deadlock."
+        },
+        {
+            "user": "tyler92",
+            "body": "https://github.com/containers/podman/issues/14929 and https://github.com/containers/podman/issues/14921 look like different issues. Steps to reproduce this PR:\n\n1. Create the following kube yaml:\n\n```\napiVersion: v1\nkind: Pod\nmetadata:\n  labels:\n    app: my-pod\n  name: my-pod\nspec:\n  containers:\n  - name: app\n    image: debian\n    imagePullPolicy: Never\n    command:\n    - /bin/sleep\n    args:\n    - 0.001\n  hostNetwork: true\n  restartPolicy: Always\n```\n\n2. Run the following script:\n\n```\n#!/bin/bash\n\nset -o errexit\n\nfor x in {1..10000};\n    do echo \"* $x *\"\n    podman play kube ./my-pod.yaml\n    podman pod rm -f -a\n    podman rm -a\ndone\n```\n\n3. Observe script output until deadlock."
+        },
+        {
+            "user": "mheon",
+            "body": "I don't like this because it serializes cleanups across the pod, which could have perf implications. I'm trying to track down exactly where Cleanup locks the pod, thus far without success, to make a more precise fix."
+        },
+        {
+            "user": "vrothberg",
+            "body": "Look at @giuseppe's analysis in https://github.com/containers/podman/issues/14929#issuecomment-1189088354.  It is the very same problem. \n\n`podman pod rm` keeps all containers locked simultaneously.  During cleanup, a container _may_ take the lock of its dependency container and \"boom\".  So `podman pod rm` takes lock A, `container cleanup` takes lock B and then they try to take the other one."
+        },
+        {
+            "user": "tyler92",
+            "body": "> I'm trying to track down exactly where Cleanup locks the pod, thus far without success, to make a more precise fix.\n\nA little bit tungled way:\n\nContainer.Cleanup locks container ->\nPod.stopIfOnlyInfraRemains locks Pod ->\nPod.stopWithTimeout locks containers ->\nContainer.Cleanup locks container\n\n> I don't like this because it serializes cleanups across the pod, which could have perf implications\n\nI agree with you, so please consider my PR as just an idea of potential fix.\n"
+        },
+        {
+            "user": "vrothberg",
+            "body": "I think we need to solve the problem in `podman pod rm` https://github.com/containers/podman/issues/14929#issuecomment-1189106564.  IMHO this is the source of the problem: unless the order of locking there gets fixed, any code path of a container getting the lock of its dependency has the potential to dead lock.  AFAICS, there are more such code paths than (*Container).Cleanup()."
+        },
+        {
+            "user": "vrothberg",
+            "body": "@tyler92 `stopIfOnlyInfraRemains` is not taking the pod lock while the container is locked. Have a look at the comment here https://github.com/containers/podman/blob/main/libpod/container_internal.go#L1955.  If that would be the case, the issue would not be racy but 100 percent reproducible."
+        },
+        {
+            "user": "tyler92",
+            "body": "I've launched long stress test with https://github.com/containers/podman/pull/14976 and scripts from https://github.com/containers/podman/issues/14921, currently the problem is not reproduced, but I want to execute test in loop for several hours.\n\nOk, https://github.com/containers/podman/pull/14976 looks good for maitaners, so should I close this PR?"
+        },
+        {
+            "user": "rhatdan",
+            "body": "I think I will close this, as it is fixed."
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 14929
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 14976
+        }
+    ]
+}

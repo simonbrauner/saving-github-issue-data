@@ -1,0 +1,224 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 1136,
+    "type": "issue",
+    "title": "`podman create --mac-address` doesn't work",
+    "state": "closed",
+    "labels": [
+        "stale-issue",
+        "locked - please file new issue/PR"
+    ],
+    "user": "runiq",
+    "body": "/kind bug\n\n**Description**\n\nThe `--mac-address` switch to `podman create`/`podman run` doesn't work.\n\n**Steps to reproduce the issue:**\n\n```\n# podman run --rm -it --mac-address=02:23:45:67:89:ab registry.fedoraproject.org/fedora-minimal:28 cat /sys/class/net/eth0/address\n0a:58:0a:58:01:5a\n```\n\n**Describe the results you received:**\n\nAn automatically-assigned MAC address.\n\n**Describe the results you expected:**\n\nThe MAC address I specifiied in the argument.\n\n**Output of `podman version`:**\n\n```\nVersion:       0.7.2\nGo Version:    go1.10.3\nOS/Arch:       linux/amd64\n```\n\n**Output of `podman info`:**\n\n<details>\n<summary>Output of `podman info`</summary>\n\n```\nhost:\n  MemFree: 8406614016\n  MemTotal: 16652193792\n  SwapFree: 8398041088\n  SwapTotal: 8398041088\n  arch: amd64\n  cpus: 4\n  hostname: trabajo.itz.uni-halle.de\n  kernel: 4.17.6-200.fc28.x86_64\n  os: linux\n  uptime: 20m 9.95s\ninsecure registries:\n  registries:\n  - trabajo.itz.uni-halle.de:5000\nregistries:\n  registries:\n  - trabajo.itz.uni-halle.de:5000\n  - registry.fedoraproject.org\n  - docker.io\nstore:\n  ContainerStore:\n    number: 0\n  GraphDriverName: vfs\n  GraphOptions: []\n  GraphRoot: /home/ajaam/.local/share/containers/storage\n  GraphStatus: {}\n  ImageStore:\n    number: 1\n  RunRoot: /run/user/29574/run\n```\n\n</details>\n\n**Additional environment details (AWS, VirtualBox, physical, etc.):**\n\n<details>\n<summary>Contents of /etc/cni/net.d/87-podman-bridge.conflist</summary>\n\n```\n{\n    \"cniVersion\": \"0.3.0\",\n    \"name\": \"podman\",\n    \"plugins\": [\n      {\n        \"type\": \"bridge\",\n        \"bridge\": \"cni0\",\n        \"isGateway\": true,\n        \"ipMasq\": true,\n        \"ipam\": {\n            \"type\": \"host-local\",\n            \"subnet\": \"10.88.0.0/16\",\n            \"routes\": [\n                { \"dst\": \"0.0.0.0/0\" }\n            ]\n        }\n      },\n      {\n        \"type\": \"portmap\",\n        \"capabilities\": {\n          \"portMappings\": true\n        }\n      }\n    ]\n}\n```\n\n</details>",
+    "comments": [
+        {
+            "user": "mheon",
+            "body": "@rhatdan Looks like we missed a flag when we were removing options CNI doesn't support...\n\n@runiq Thanks. Don't know when we'll be able to implement this, given that our network backend (CNI plugins) doesn't really offer support for this. We may end up disabling the flag until this happens."
+        },
+        {
+            "user": "runiq",
+            "body": "No worries, for the use-case I'm eyeing (node-locked license server in container) I can use docker in the meantime."
+        },
+        {
+            "user": "mbaudier",
+            "body": "Is it planned to support setting mac addresses at some point? I have the same issue as @runiq, but since this is a new deployment I would have liked to avoid docker and use podman from the start.\n\nI have also tried setting the mac adress via `ip link set dev eth0 address` in the container, but it doesn't work (`RTNETLINK answers: Operation not permitted`) which is probably not surprising. "
+        },
+        {
+            "user": "mheon",
+            "body": "@mccv1r0 Is there any ability for us to set the MAC address for bridge networks in CNI?"
+        },
+        {
+            "user": "mccv1r0",
+            "body": "> Is there any ability for us to set the MAC address for bridge networks in CNI?\n\nSee [tuning](https://github.com/containernetworking/plugins/tree/master/plugins/meta/tuning#interface-attribute-operation) plugin.   The ```mac``` well known capabilities is probably what you want vs setting mac in a .conflist file.  This page also reads like CNI_ARGS works too, but check if CNI_ARGS is being deprecated.\n\n\n"
+        },
+        {
+            "user": "mbaudier",
+            "body": "Thanks for your quick answers. I am testing on CentOS 7 (podman v1.3.2, containernetworking-plugins v0.7.5, from the 'extras' repository):\n\n- CNI_ARGS doesn't recognize the MAC argument:\n```\nCNI_ARGS=\"MAC=c2:11:22:33:44:55\" podman run -it centos\nERRO[0000] Error adding network: ARGS: unknown args [\"MAC=c2:11:22:33:44:55\"]\n```\n(I tested the 'IP' argument to see whether CNI_ARGS works and the IP address was properly set)\n\n- I added a 'tuning' plugin section in the provided `/etc/cni/net.d/87-podman-bridge.conflist`\n```\n...\n      {\n        \"type\": \"tuning\",\n        \"capabilities\": {\n          \"mac\": true\n        }\n      }\n\n```\nand also tried to explicitly set the MAC address at various locations in this file (in the plugin definition, as args, etc.) but to no avail.\n\nI think that I am missing something with how the chaining of plugins is working. (I mostly tried to understand [network-configuration-lists](https://github.com/containernetworking/cni/blob/master/SPEC.md#network-configuration-lists))\n\nShould I define additional files?\nHow can I somehow map a given container/image/ip address/some criterion to a MAC address in the conflist file?"
+        },
+        {
+            "user": "mheon",
+            "body": "Reopening this given that it does seem possible on the CNI side."
+        },
+        {
+            "user": "mccv1r0",
+            "body": "Been on PTO until today.  I used this just now to test that the containers MAC address can be set using up to date CNI and plugins.  \n\ncnitool simulates a runtime such as podman.  First set CAP_ARGS to tell cnitool what it should feed CNI as the runtime supplied capabilities:\n\n```\n$ export CAP_ARGS='{\n    \"portMappings\": [\n        { \"hostPort\": 9092, \"containerPort\": 92, \"protocol\": \"sctp\" },\n        { \"hostPort\": 9092, \"containerPort\": 92, \"protocol\": \"tcp\" }\n    ],\n    \"mac\": \"02:22:33:44:55:66\" \n}'\n```\n\nNow run cnitool:\n\n```\n$ cnitool add portmap-mac-mcc2-range-chain /var/run/netns/mcc-cni-test0\n{\n    \"cniVersion\": \"0.4.0\",\n    \"interfaces\": [\n        {\n            \"name\": \"mcc2\",\n            \"mac\": \"96:cf:3a:cf:31:62\"\n        },\n        {\n            \"name\": \"vetha0536c8a\",\n            \"mac\": \"96:cf:3a:cf:31:62\"\n        },\n        {\n            \"name\": \"ens2\",\n            \"mac\": \"02:22:33:44:55:66\",\n            \"sandbox\": \"/var/run/netns/mcc-cni-test0\"\n        }\n    ],\n    \"ips\": [\n        {\n            \"version\": \"4\",\n            \"interface\": 2,\n            \"address\": \"10.2.0.4/24\",\n            \"gateway\": \"10.2.0.1\"\n        }\n    ],\n    \"dns\": {\n        \"nameservers\": [\n            \"8.8.8.4\"\n        ]\n    }\n}\n```\n\nThe corresponding conflist is: \n\n```\n{\n        \"name\": \"portmap-mac-mcc2-range-chain\",\n        \"cniVersion\": \"0.4.0\",\n        \"plugins\": [{\n                        \"type\": \"bridge\",\n                        \"bridge\": \"mcc2\",\n                        \"ipMasq\": true,\n                        \"isGateway\": false,\n                        \"ipam\": {\n                                \"type\": \"host-local\",\n                                \"ranges\": [\n                                        [{\n                                                \"subnet\": \"10.2.0.0/24\",\n                                                \"rangeStart\": \"10.2.0.2\",\n                                                \"rangeEnd\": \"10.2.0.220\",\n                                                \"gateway\": \"10.2.0.1\"\n                                        }]\n                                ],\n\n                        },\n                        \"dns\": {\n                                \"nameservers\": [\"8.8.8.4\"]\n                        }\n                },\n                {\n                        \"type\": \"portmap\",\n                        \"capabilities\": {\n                                \"portMappings\": true\n                        }\n                },\n                {\n                        \"name\": \"mytuning\",\n                        \"type\": \"tuning\",\n                        \"capabilities\": {\n                                \"mac\": true\n                        },\n                        \"sysctl\": {\n                                \"net.core.somaxconn\": \"500\"\n                        }\n                }\n        ]\n}\n\n```"
+        },
+        {
+            "user": "mheon",
+            "body": "Alright. Based on this, we need small changes to the ocicni wrapper to allow setting `\"mac\"` in CNI args, plus a small change to the plugins section of our default CNI config."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@mheon Is this something we can get in for podman 1.5 along with IPV6 support?  Seems like a nice feature to add."
+        },
+        {
+            "user": "mheon",
+            "body": "Sure, I think this is a good candidate for 1.5.\n\nOn Thu, Aug 1, 2019, 05:30 Daniel J Walsh <notifications@github.com> wrote:\n\n> @mheon <https://github.com/mheon> Is this something we can get in for\n> podman 1.5 along with IPV6 support? Seems like a nice feature to add.\n>\n> —\n> You are receiving this because you were mentioned.\n> Reply to this email directly, view it on GitHub\n> <https://github.com/containers/libpod/issues/1136?email_source=notifications&email_token=AB3AOCHAICGFQDT2UYMAGCLQCKUJ5A5CNFSM4FLMURAKYY3PNVWWK3TUL52HS4DFVREXG43VMVBW63LNMVXHJKTDN5WW2ZLOORPWSZGOD3J7BTQ#issuecomment-517206222>,\n> or mute the thread\n> <https://github.com/notifications/unsubscribe-auth/AB3AOCG3SIPOJQJJOLCXVQLQCKUJ5ANCNFSM4FLMURAA>\n> .\n>\n"
+        },
+        {
+            "user": "rhatdan",
+            "body": "@mheon Since this did not make the 1.5 release.  Could you make this feature work in the next week or so, or should we assign it to someone else?"
+        },
+        {
+            "user": "mheon",
+            "body": "My target here is 1.5.1 or .2.\n\nOn Sat, Aug 10, 2019, 06:01 Daniel J Walsh <notifications@github.com> wrote:\n\n> @mheon <https://github.com/mheon> Since this did not make the 1.5\n> release. Could you make this feature work in the next week or so, or should\n> we assign it to someone else?\n>\n> —\n> You are receiving this because you were mentioned.\n> Reply to this email directly, view it on GitHub\n> <https://github.com/containers/libpod/issues/1136?email_source=notifications&email_token=AB3AOCFA3EY6UXZSAPRUB43QD2GZLA5CNFSM4FLMURAKYY3PNVWWK3TUL52HS4DFVREXG43VMVBW63LNMVXHJKTDN5WW2ZLOORPWSZGOD4AKMLY#issuecomment-520136239>,\n> or mute the thread\n> <https://github.com/notifications/unsubscribe-auth/AB3AOCEILOKTU3HW6AWUT63QD2GZLANCNFSM4FLMURAA>\n> .\n>\n"
+        },
+        {
+            "user": "baude",
+            "body": "make a card!"
+        },
+        {
+            "user": "filak-sap",
+            "body": "Any progress? I need `run --mac-address` too."
+        },
+        {
+            "user": "mheon",
+            "body": "On my list of priorities, it's around position 3 - after volume plugin support (working on this now) and IPv6 support."
+        },
+        {
+            "user": "filak-sap",
+            "body": "@mheon Any hints on how to implement this feature?"
+        },
+        {
+            "user": "mheon",
+            "body": "First step is to modify OCICNI to allow the MAC address to be passed in as part of CNI args - `https://github.com/cri-o/ocicni/`\n\nThen we vendor the new OCICNI library, and add handling for `--mac-address` in Podman itself "
+        },
+        {
+            "user": "filak-sap",
+            "body": "Shall we use the tunning plugin as proposed at: https://github.com/intel/multus-cni/issues/266#issuecomment-465837978 ?"
+        },
+        {
+            "user": "filak-sap",
+            "body": "This seems to be naive:\n\n```diff\ndiff --git a/pkg/ocicni/ocicni.go b/pkg/ocicni/ocicni.go\nindex 88d1806..adbd0a0 100644\n--- a/pkg/ocicni/ocicni.go\n+++ b/pkg/ocicni/ocicni.go\n@@ -819,6 +819,15 @@ func buildCNIRuntimeConf(cacheDir string, podNetwork *PodNetwork, ifName string,\n                rt.Args = append(rt.Args, [2]string{\"IP\", ip})\n        }\n \n+       // Add the requested static MAC to CNI_ARGS\n+       mac := runtimeConfig.MAC\n+       if mac != \"\" {\n+               if tstMAC := net.ParseMAC(mac); tstMAC == nil {\n+                       return nil, fmt.Errorf(\"unable to parse MAC address %q\", mac)\n+               }\n+               rt.Args = append(rt.Args, [2]string{\"MAC\", mac})\n+       }\n+\n        // Set PortMappings in Capabilities\n        if len(runtimeConfig.PortMappings) != 0 {\n                rt.CapabilityArgs[\"portMappings\"] = runtimeConfig.PortMappings\ndiff --git a/pkg/ocicni/types.go b/pkg/ocicni/types.go\nindex af013ae..717ecda 100644\n--- a/pkg/ocicni/types.go\n+++ b/pkg/ocicni/types.go\n@@ -44,6 +44,9 @@ type RuntimeConfig struct {\n        // with the hostlocal IP allocator. If left unset, an IP will be\n        // dynamically allocated.\n        IP string\n+       // MAC is a static MAC address to be assigned to the network interface.\n+       // If left unset, a MAC will be dynamically allocated.\n+       MAC string\n        // PortMappings is the port mapping of the sandbox.\n        PortMappings []PortMapping\n        // Bandwidth is the bandwidth limiting of the pod\n```"
+        },
+        {
+            "user": "mheon",
+            "body": "That looks like it could well be enough - if you're able to PR this against OCICNI, I think there's a good chance they'll accept it."
+        },
+        {
+            "user": "filak-sap",
+            "body": "I could not resist to play with a little bit (not compiled nor tested):\nhttps://github.com/filak-sap/libpod/commit/9abe0ad1228140e0690595a5f762f00ed49b2bb9"
+        },
+        {
+            "user": "rhatdan",
+            "body": "@filak-sap That looks pretty good, open a WIP PR and we can look at fixing ocicni."
+        },
+        {
+            "user": "mheon",
+            "body": "I got a few knits, but overall those changes LGTM"
+        },
+        {
+            "user": "filak-sap",
+            "body": "I managed to build it - #4058"
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "This issue had no activity for 30 days. In the absence of activity or the \"do-not-close\" label, the issue will be automatically closed within 7 days."
+        },
+        {
+            "user": "rhatdan",
+            "body": "Since we have a PR for this, we are not that far away from gaining support.  We need someone to take over for @filak-sap to push it over the finish line."
+        },
+        {
+            "user": "runiq",
+            "body": "Awesome, thanks everyone, much appreciated!"
+        },
+        {
+            "user": "rhatdan",
+            "body": "No problem, keep the issues coming.   They help make Podman into a better project."
+        },
+        {
+            "user": "ghost",
+            "body": "I can still not assign static IP to container using following command:\npodman create --net podnet -v /etc/nginx:/etc/nginx:ro --mac-address=3e:84:ea:ab:7d:51 -p 80:80 -p 443:443 --restart=on-failure:3 docker.io/library/nginx\n\nfedora 30\npodman 1.7\n\nplease assist me, I need this to work"
+        },
+        {
+            "user": "mheon",
+            "body": "Providing an error message might be helpful - hard to tell what's going wrong from just the command?"
+        },
+        {
+            "user": "ghost",
+            "body": "There is no error, I just does not get the mac address im assigning an mac\n\nfrom inspect:\n```\"CreateCommand\": [\n                \"podman\",\n                \"create\",\n                \"--net\",\n                \"podnet\",\n                \"-v\",\n                \"/etc/nginx:/etc/nginx:ro\",\n                \"--mac-address=3e:84:ea:ab:7d:51\",\n...\n\"MacAddress\": \"3e:84:ea:ab:7d:51\"\n```\n\n\nCNI conf:\n```{\n   \"cniVersion\": \"0.4.0\",\n   \"name\": \"podnet\",\n   \"plugins\": [\n      {\n         \"type\": \"bridge\",\n         \"bridge\": \"br0\",\n         \"ipam\": {\n            \"type\": \"dhcp\"\n         }\n      },\n      {\n        \"type\": \"tuning\",\n        \"capabilities\": {\n          \"mac\": true\n      }\n      }\n   ]\n}\n```"
+        },
+        {
+            "user": "ghost",
+            "body": "Fuck. They match up..."
+        },
+        {
+            "user": "mheon",
+            "body": "I did a quick check and verified with ifconfig inside a container - looks like the flag is working as expected"
+        },
+        {
+            "user": "ghost",
+            "body": "But its acually still a issue for me, because I didnt acually fuck up. It was this mac that sendt a request to my dhcp server: 0a:dd:5b:ce:23:d1\n\nWhy? how am I suppose to set static IPs in pfsense then? whats happening?"
+        },
+        {
+            "user": "baude",
+            "body": "do you actually want to be doing a macvlan connection?"
+        },
+        {
+            "user": "ghost",
+            "body": "No I need the containers to connect to my bridge, which is the lan adapter in pf sense. Therefore i would like them to make dhcp requests with the same mac everytime. Please help"
+        },
+        {
+            "user": "mheon",
+            "body": "Hm. So you're using a pre-established bridge, configured elsewhere? And CNI is making DHCP requests using a different MAC?"
+        },
+        {
+            "user": "ghost",
+            "body": "Yup, I would like my containers to jump on that bridge, since I have VMs and other things there, is this a problem with cni plugins? Or is it misconfiguration on my part?"
+        },
+        {
+            "user": "rhatdan",
+            "body": "@mccv1r0 Thoughts?"
+        },
+        {
+            "user": "mccv1r0",
+            "body": "When I try to reproduce, I get an error ```Error: cannot parse 3e:84:eaab7d:51 as MAC address: address 3e:84:eaab7d:51: invalid MAC address: invalid argument```\n\nIs ```--mac-address=3e:84:eaab7d:51```  the actual syntax?\n\nI am using: \n\npodman version 1.7.0 on Fedora 30  \n\n"
+        },
+        {
+            "user": "mheon",
+            "body": "Is there a missing `:`? `--mac-address=3e:84:ea:ab:7d:51`"
+        },
+        {
+            "user": "mccv1r0",
+            "body": "```\n$ sudo podman create --net podman  --mac-address=\"3e:84:eaab7d:51\" -p 80:80 -p 443:443 --restart=on-failure:3 docker.io/library/nginx \nError: cannot parse 3e:84:eaab7d:51 as MAC address: address 3e:84:eaab7d:51: invalid MAC address: invalid argument\n```\nI tried with and without double quotes \n"
+        },
+        {
+            "user": "mccv1r0",
+            "body": "*&%# never mind...  cut/paste error \n"
+        },
+        {
+            "user": "ghost",
+            "body": "Okai so my issue is the following. Im using this network-conf:\n\n```\n{\n   \"cniVersion\": \"0.4.0\",\n   \"name\": \"podnet\",\n   \"plugins\": [\n      {\n         \"type\": \"bridge\",\n         \"bridge\": \"br0\",\n         \"ipam\": {\n            \"type\": \"dhcp\"\n         }\n      },\n      {\n        \"type\": \"tuning\",\n        \"capabilities\": {\n          \"mac\": true\n      }\n      }\n   ]\n}\n```\nI want my containers to jump on the bridge and to get a ip from the dhcp, this combined with the `--mac-address` would make it super easy to assign static IP adresses in pfsense which is running a dchp server. My problem is that the dhcp cli plugin \n`/usr/libexec/cni/dhcp daemon &` is not presenting the dhcp server with the macaddress specified, but rather with one randomly generated.\n\nAll help is very appriciated\n"
+        },
+        {
+            "user": "ghost",
+            "body": "@mccv1r0 @mheon @rhatdan\nThoughts?"
+        },
+        {
+            "user": "mccv1r0",
+            "body": "Things seem to work when using host-local (for a quick test):\n\n```\n$ sudo podman run -d --net podman --name=\"testMac\"  --mac-address=3e:84:ea:ab:7d:52 socksink-sudo  \n115c0a0831d5cb0a5b4d547ef29c7577e19c8a0f7b7b23c28730bacca5a1e337\n$ sudo podman exec testMac ip link show \n1: lo: <LOOPBACK,UP,LOWER_UP> mtu 65536 qdisc noqueue state UNKNOWN mode DEFAULT group default qlen 1000\n    link/loopback 00:00:00:00:00:00 brd 00:00:00:00:00:00\n3: eth0@if47: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc noqueue state UP mode DEFAULT group default \n    link/ether 3e:84:ea:ab:7d:52 brd ff:ff:ff:ff:ff:ff\n$ \n$ sudo podman run -d --net podman --name=\"testMac-aa\"  --mac-address=3e:84:ea:ab:7d:aa socksink-sudo  \n7f34432208191f2c4984af5ca9306d492200c0fc8c4da3d562861bf75c32c8ae\n$ sudo podman exec testMac-aa ip link show \n1: lo: <LOOPBACK,UP,LOWER_UP> mtu 65536 qdisc noqueue state UNKNOWN mode DEFAULT group default qlen 1000\n    link/loopback 00:00:00:00:00:00 brd 00:00:00:00:00:00\n3: eth0@if48: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc noqueue state UP mode DEFAULT group default \n    link/ether 3e:84:ea:ab:7d:aa brd ff:ff:ff:ff:ff:ff\n$ \n```\nI don't have dhcp plugin setup yet.  While I do that, @leier69, in your failing case, can you run ```ip link show``` (vs inspect) to see what iproute2 thinks the mac address is?\n\n"
+        },
+        {
+            "user": "mccv1r0",
+            "body": "I still don't have dhcp setup fully, but I might not need to.   Using tcpdump on the bridge, I don't see the right mac address in the dhcp request.  In one window:\n\n```\n$ sudo podman run -d --net podnet --name=\"testMac-aa\"  --mac-address=3e:84:ea:ab:7d:aa socksink-sudo\n```\nIn the tcpdump window, I'd expect to see ```3e:84:ea:ab:7d:aa``` but don't.\n\n```\n[mcambria@mcambria dwhelper]$ sudo tcpdump -n -i podnet0 ip and udp \ndropped privs to tcpdump\ntcpdump: verbose output suppressed, use -v or -vv for full protocol decode\nlistening on podnet0, link-type EN10MB (Ethernet), capture size 262144 bytes\n13:34:09.570215 IP 0.0.0.0.bootpc > 255.255.255.255.bootps: BOOTP/DHCP, Request from 16:ea:58:20:a6:1a, length 326\n13:34:18.203928 IP 0.0.0.0.bootpc > 255.255.255.255.bootps: BOOTP/DHCP, Request from 16:ea:58:20:a6:1a, length 326\n13:34:31.196745 IP 0.0.0.0.bootpc > 255.255.255.255.bootps: BOOTP/DHCP, Request from 16:ea:58:20:a6:1a, length 326\n\n```\n\n@leier69  Can you verify this on your setup?  That is, run tcpdump on your bridge etc. confirm the mac seen by dhcp server matches tcpdump/container etc?\n\nIf you do, open an issue in [CNI Plugins](https://github.com/containernetworking/plugins).  It looks like the issue is specific to the CNI dhcp client plugin.\n\n"
+        },
+        {
+            "user": "ghost",
+            "body": "created issue https://github.com/containernetworking/plugins/issues/450.\n\nPlease comment on it to further its progress @mccv1r0 \n\nand 1000 times thanks @mccv1r0 ! <3 this gives me hope to have this setup work smoothly"
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 1138
+        },
+        {
+            "organization": "unifi-utilities",
+            "repository": "unifi-common",
+            "number": 46
+        }
+    ]
+}

@@ -1,0 +1,26 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 28919,
+    "type": "pull_request",
+    "title": "Add resource limit support to podman exec ",
+    "state": "closed",
+    "labels": [],
+    "user": "ranjithrajaram",
+    "body": "This commit adds support for constraining resource usage (CPU, memory, cpuset) of processes started via 'podman exec' by placing them in dedicated cgroups with specified limits.\n\nKey changes:\n- Added --cpu-quota, --cpu-period, --cpuset-cpus, and --memory flags to podman exec command\n- Implemented cgroup setup with proper controller delegation handling\n- Added ExecResourceLimits entity and CgroupPath field to ExecConfig\n- Runtime passes --cgroup flag to OCI runtime (crun/runc)\n- Added comprehensive tests for ExecConfig serialization\n\nTechnical implementation:\n- Creates child cgroup under container's scope (e.g., scope/exec-<timestamp>)\n- Enables required controllers in scope's cgroup.subtree_control\n- Applies resource limits to cgroup interface files\n- Passes relative cgroup path (../exec-<timestamp>) to runtime\n- Automatic cleanup when exec session ends\n- Uses nanosecond precision for exec IDs to prevent collisions\n- Validates cgroups v2 availability upfront with clear error messages\n- Proper error handling for controller delegation failures\n\nCgroup structure:\n- Container scope: machine.slice/libpod-<id>.scope\n- Container cgroup: machine.slice/libpod-<id>.scope/container\n- Exec cgroup: machine.slice/libpod-<id>.scope/exec-<nano-timestamp>\n- Relative path to runtime: ../exec-<timestamp> (from container cgroup)\n\nTested with crun 1.27.1 on cgroups v2 systems.\n\n\n#### Does this PR introduce a user-facing change?\n\nYes. The PR adds four new flags to podman exec:\n\n--cpu-quota — limit CPU CFS quota (microseconds)\n--cpu-period — set CPU CFS period (microseconds)\n--memory — limit memory (e.g., 512m, 2g)\n--cpuset-cpus — restrict to specific CPUs (e.g., 0-3, 0,2,4)\nThese allow users to constrain resource usage of exec'd processes via cgroups v2. The flags are local-mode only (hidden in remote mode). Documentation is added in podman-exec.1.md.in\n\n\n#### release-note\n\nPodman exec now supports resource limits via `--cpu-quota`, `--cpu-period`, `--memory`, and `--cpuset-cpus` flags, allowing users to constrain CPU and memory usage of exec'd processes using cgroups v2 (local mode only).",
+    "comments": [
+        {
+            "user": "mheon",
+            "body": "Does this actually work? I don't see us actually placing the PID of the exec session in the cgroup anywhere.\n\nI also have some reservations about doing this outside of the OCI runtime. Are we moving the process into a new cgroup after the runtime has already created it? That could be an issue.\n\nFinally, now that I'm thinking about it: since this is a sub-cgroup of the container cgroup, won't the container be able to edit the resource limits in it (under at least some circumstances... thinking about systemd in a container here)\n\n@giuseppe PTAL"
+        },
+        {
+            "user": "giuseppe",
+            "body": "I haven't looked in details but we got something similar few months ago.\n\nNo, this won't work because it must be done in the OCI runtime and it must handle/create sub-cgroups.\n\nHave you even tried running it?\n"
+        },
+        {
+            "user": "ranjithrajaram",
+            "body": "OCI runtime spec currently has no mechanism to pass cgroup resource limits for exec. This path will require RFC I suppose\n\nWe can close this PR. Thanks for reviewing it\n\nTo answer the questions around **\"does this actually work\"** and **\"have you ever tried running it\"**:\n\nYes, I have tested this implementation in a rootless environment on a cgroups v2 system using `crun` and also for `rootful`.  The limits are indeed correctly imposed. Here is a quick demonstration of the run and verification:\n\n1. **Start the exec command with limits in the background:**\n   ```bash\n   podman exec --cpuset-cpus \"2,3\" --memory 100m --cpu-quota 50000 redhat2 sleep 360 &\n\n2. Verify the generated exec sub-cgroup and applied limits on the host:\n\nEXEC_CGROUP=$(find /sys/fs/cgroup/user.slice/user-10352.slice/user@10352.service/user.slice/libpod-*/exec-* -type d 2>/dev/null | head -1)\n\necho \"Exec cgroup: $EXEC_CGROUP\"\necho -n \"CPUs: \"; cat $EXEC_CGROUP/cpuset.cpus\necho -n \"Memory: \"; cat $EXEC_CGROUP/memory.max\necho -n \"CPU quota: \"; cat $EXEC_CGROUP/cpu.max\necho -n \"Process in cgroup: \"; cat $EXEC_CGROUP/cgroup.procs\n\n3. Outpuut\n\nExec cgroup: /sys/fs/cgroup/user.slice/user-10352.slice/user@10352.service/user.slice/libpod-cdd770f86806ed1f3bc620bc8e70cbdfb72b36a1cc44fa5a54627b3f95791613.scope/exec-6b6b72b9a7069d4e\nCPUs: 2-3\nMemory: 104857600\nCPU quota: 50000 100000\nProcess in cgroup: 66836\n\n---\n"
+        }
+    ],
+    "cross_references": []
+}

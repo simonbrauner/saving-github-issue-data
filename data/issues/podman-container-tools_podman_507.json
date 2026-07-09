@@ -1,0 +1,210 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 507,
+    "type": "pull_request",
+    "title": "CGroup Handling Enhancements",
+    "state": "closed",
+    "labels": [
+        "locked - please file new issue/PR"
+    ],
+    "user": "mheon",
+    "body": "Add validation to CGroup parents passed into libpod. If we are using the systemd CGroup manager, the basename must end in `.slice`; if we are using cgroupfs, the path cannot contain `cgroup.slice`. This is based on the CRI-O validation code located at https://github.com/kubernetes-incubator/cri-o/blob/master/server/sandbox_run.go#L379-L400\n\nAlso, add our CGroup path to the OCI spec, passing it into `runc`. When the container is deleted in `runc`, it will clean up configured CGroups, solving our problem of leaving CGroup scopes around after containers exit.\n\nCloses: #497 \nCloses: #496 \n",
+    "comments": [
+        {
+            "user": "mheon",
+            "body": "@baude If you get a chance, can you validate that this doesn't break our stats code? I'm pretty sure it's still working, but you've worked with it more than I have."
+        },
+        {
+            "user": "mheon",
+            "body": "Seeing some issues with cgroup parent, and a 'podman run' flag. Chasing them down."
+        },
+        {
+            "user": "mheon",
+            "body": "Fixed CGroup parent. Unclear if the 'podman run' issue is actually a bug or a flake."
+        },
+        {
+            "user": "mheon",
+            "body": "bot, retest this please"
+        },
+        {
+            "user": "mheon",
+            "body": "bot, retest this please"
+        },
+        {
+            "user": "mheon",
+            "body": "bot, retest this please"
+        },
+        {
+            "user": "nathwill",
+            "body": "is this going to break running a container under podman from a systemd unit like the one below, or would we just need to delegate differently?\n\n```\n[Unit]\nDescription=CRI-O container: %p\n\n[Service]\nType=forking\nExecStartPre=-/bin/podman stop %p\nExecStartPre=-/bin/podman rm %p\nExecStart=/bin/podman run --detach --net=host --volume=/data:/data --log-driver=json-file --log-opt=path=/var/log/redis.log \\\n    --cidfile=/var/run/%p.crio --cgroup-parent=/machine.slice/%p.service \\\n    --name=%p redis:3.2 \nExecStop=/bin/podman stop %p\nExecStop=/bin/podman rm %p\nRestart=always\nSlice=machine.slice\n\n[Install]\nWantedBy=multi-user.target\n```\n\ni've been using `--cgroup-parent=/machine.slice/%p.service` to make sure all contained processes end up in the service unit's cgroup for tracking (e.g. `systemctl status`), and for ensuring full termination on container stop.\n\nit's working pretty well so far:\n\n```\n[root@default-centos-7 ~]# systemd-cgls --no-pager /machine.slice/redis.service\n/machine.slice/redis.service:\n└─libpod-conmon-3594f3290709d0a764d307c4d4f95e62f17e83fd9c2ff2b3717209100ec44d37\n  ├─3868 /usr/libexec/podman/conmon -c 3594f3290709d0a764d307c4d4f95e62f17e83fd9c2ff2b3717209100ec44d37 -u 3594f3290709d0a764d307c4d4f95e6...\n  └─3594f3290709d0a764d307c4d4f95e62f17e83fd9c2ff2b3717209100ec44d37\n    └─3877 redis-server *:6379\n```\n\ni'm using`machine.slice` in anticipation of hooks support landing so units like the above can be used with oci-register-machine to fully integrate the contained processes as services/machines with the host and apply resource-constraints to prioritize system stuff (system.slice) over \"workload\" (machine.slice) services."
+        },
+        {
+            "user": "mheon",
+            "body": "@nathwill I've been digging around under the hood, and I'm fairly certain our cgroup handling for systemd-managed cgroups is very wrong right now - we're inserting ourself into their hierarchy without telling systemd. It seems to be working, but it is definitely not the right way of doing things and is very fragile.\n\nThis patch as written would break using the systemd cgroup hierarchy in an effort to fix cgroupfs, but I think we can get both working with a bit more code. I'll mark this WIP and take a stab at it on Monday.\n\nBe aware that you'll probably need to modify the configuration file or set a flag to use the systemd cgroup manager after these changes land, though. The config change should be a one-liner, but we should call it out in the manpage/readme."
+        },
+        {
+            "user": "mheon",
+            "body": "An update on this: I've enabled proper CGroup handling via the runc systemd cgroup manager, based on the CRI-O code for the same. However, CRI-O places Conmon and the container's own processes in two separate CGroups. This doesn't seem like a particularly nice way of doing things (we get everything under the same CGroup with cgroupfs), so I'm going to talk to the CRI-O devs to see if there is a reason things are done that way."
+        },
+        {
+            "user": "mheon",
+            "body": "bot, retest this please"
+        },
+        {
+            "user": "mheon",
+            "body": "bot, retest this please"
+        },
+        {
+            "user": "nathwill",
+            "body": "fwiw, i tested this out, and things seem to work as intended 👏. \n\ni was also able to get it working from a systemd service unit, but wanted to share a couple of observations on the experience.\n\ncgroupfs: this PR doesn't seem to have broken the method i had been using above (i.e. using cgroupfs as the cgroup-manager and specifying the cgroup-parent as e.g. `/machine.slice/redis.service`).this seems to work quite well, though it sounds as though perhaps it's not intended to? (more questions on this at the end)\n\nsystemd: when specifying systemd as the cgroup-manager, i'm not able to specify the systemd-generated service cgroup (e.g. `/machine.slice/redis.service`) as the cgroup-parent, since `--cgroup-manager=systemd` only takes `--cgroup-parent` arguments like `xxxxx.slice`. \n\nwhen doing so, podman creates `libpod-*.scope` as children of the specified slice, rather than the systemd-generated cgroup, as below:\n\n```\n├─machine.slice\n│ ├─libpod-0411a2a82311fbc65b137ca550d5f7e6b6863bc734759be2f515b0b67062d49a.scope\n│ │ └─19587 redis-server *:637\n│ ├─libpod-conmon-0411a2a82311fbc65b137ca550d5f7e6b6863bc734759be2f515b0b67062d49a.scope\n│ │ └─19579 /usr/libexec/podman/conmon -s -c 0411a2a82311fbc65b137ca550d5f7e6b6863bc734759be2f515b0b67062d49a -u 0411a2a82311fbc65b137ca550d5\n│ └─redis.service\n│   └─19564 /bin/podman --cgroup-manager=systemd run --net=host --volume=/data:/data --log-driver=json-file --log-opt=path=/var/log/redis.log\n```\n\nas a result, the conmon/container processes are un-tracked by the service unit and in order for the service to successfully start, you have to do one of:\n - use `Type=oneshot` & `RemainAfterExit=yes` in the service unit\n - skip `--detach` so that `podman run` is tracked as the `MainPid`\n - move `podman run` to `ExecStartPre` and use `podman wait` as the `ExecStart`.\n\nwhich is more like the `docker run` experience i'm trying to get away from.\n\nin short, `--cgroup-manager=systemd` actually ends up feeling like it integrates less with systemd than `--cgroup-manager=cgroupfs`. i know this is ~~probably~~ down to [runc](https://github.com/opencontainers/runc/blob/9facb87f87c4cdfdfe2729a21434182c607ee7a4/libcontainer/cgroups/systemd/apply_systemd.go#L404-L414) rather than podman, but thought i'd share my impressions in case they're useful.\n\nmy preference given the above would be to continue using cgroupfs. if the sole concern with cgroupfs is:\n\n> we're inserting ourself into their hierarchy without telling systemd\n\nwould specifying [`Delegate=yes`](https://www.freedesktop.org/software/systemd/man/systemd.resource-control.html#Delegate=)  in the service unit reasonably be expected to resolve the risk of using cgroupfs?\n\nthanks in advance for your time and consideration! 🙏 "
+        },
+        {
+            "user": "mheon",
+            "body": "@nathwill I was talking with some of the CRI-O team, and it appears we're missing some CGroup generation logic. We should be grouping the two scopes (conmon and the rest of the container) under a service we create under the parent (individual .service for containers outside a pod, or a shared one for containers in a pod). We're missing a step in the current implementation I pushed (creating that service). Would this work better for what you're doing? You'd lose the ability to name the .service you drop in `machine.slice` (we'd presumably procedurally generate it) but it would otherwise act fairly similar to what you're doing now with cgroupfs"
+        },
+        {
+            "user": "mheon",
+            "body": "Also, this still has some test failures related to kernel memory limits, specifically on CentOS. Need to look into that."
+        },
+        {
+            "user": "nathwill",
+            "body": "> You'd lose the ability to name the .service you drop in machine.slice \n\nThat would definitely break how I'm using it, as the service cgroup name is prescribed by systemd from the unit name, and is relied on heavily by systemd for tracking the service processes.\n\ni totally understand the need for grouping in the pod use case, and wouldn't expect this to work for grouping unit file-launched containers into the same pod, but it'd be super helpful to have an option to specify the service cgroup name for non-pod containers in order to preserve the ability to use podman to run containers from service units that are able to have all the resultant container processes be tracked by systemd.\n\nif the plan is to put all containers into pods by default, could the service cgroup could be more directly based on the pod name when provided (e.g. `podman --cgroup-manager=systemd run --pod redis --cgroup-parent=machine.slice redis:3.2` => `/machine.slice/redis.service` cgroup path)?"
+        },
+        {
+            "user": "mheon",
+            "body": "Hm. We can probably wire out an option to allow setting service name (or potentially detect if there is a `.service` in the cgroup parent?). I'll look into this more."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@mrunalp PTAL"
+        },
+        {
+            "user": "rh-atomic-bot",
+            "body": ":umbrella: The latest upstream changes (presumably 3f5da4d) made this pull request unmergeable. Please resolve the merge conflicts."
+        },
+        {
+            "user": "nathwill",
+            "body": "fwiw, in the latest podman, using --conmon-pidfile when running podman containers as systemd services is working quite well, even without specifying --cgroup-parent. hopefully that simplifies things a bit :)"
+        },
+        {
+            "user": "rh-atomic-bot",
+            "body": ":umbrella: The latest upstream changes (presumably 39a7a77) made this pull request unmergeable. Please resolve the merge conflicts."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@mheon needs a rebase."
+        },
+        {
+            "user": "mheon",
+            "body": "Alright. This should fix cgroupfs CGroup handling, which is increasingly becoming a problem. Systemd-based cgroups are still broken, but can be fixed later. I'm going to try and push this through today."
+        },
+        {
+            "user": "rhatdan",
+            "body": "Actually this might fix another issue we are seeing with systemd, where the cgroup of the container ends up matching the users and systemd, then kills off the user session."
+        },
+        {
+            "user": "mheon",
+            "body": "@rhatdan That's why I'm trying to get it in :smile: "
+        },
+        {
+            "user": "mheon",
+            "body": "Centos is failing kernel memory tests. Could be a kernel version issue?"
+        },
+        {
+            "user": "mheon",
+            "body": "Alright, tests appear to be passing. There are definitely still issues around systemd cgroups, but this resolves our cgroupfs issues.\n@rhatdan @baude @TomSweeneyRedHat PTAL"
+        },
+        {
+            "user": "mheon",
+            "body": "Nevermind, this doesn't actually clean up cgroups. Separating the libpod and conmon CGroups fixed the tests, but the conmon cgroup hierarchy remains after the container exits.\nPotentially can add some code to container.Cleanup() to handle this"
+        },
+        {
+            "user": "aalba6675",
+            "body": "@mheon  I've tested this branch with bind mounts: I'm seeing a stat for a duplicate path failing\n\n```\ncgroup on /sys/fs/cgroup/systemd/\nlibpod_parent/libpod-cd8be22a52efaed7e2790d2eb3421c00542c3eb9763bfe715c3ad23647c419e0/ctr/\nlibpod_parent/libpod-cd8be22a52efaed7e2790d2eb3421c00542c3eb9763bfe715c3ad23647c419e0/ctr```\n```\n```\nunable to start container \"bobby_silver\": container create failed: container_linux.go:348: starting container \nprocess caused \"process_linux.go:402: container init caused \\\"rootfs_linux.go:58: mounting \\\\\\\"cgroup\\\\\\\" \nto rootfs \\\\\\\"/var/lib/containers/storage/overlay\n/52f7959a1a8a171b2c8aee587ea81c964e84130681444f0ff03b3202804a91cb/merged\\\\\\\" at \\\\\\\"/sys\n/fs/cgroup\\\\\\\" caused \\\\\\\"stat /sys/fs/cgroup/systemd/libpod_parent/libpod-\ncd8be22a52efaed7e2790d2eb3421c00542c3eb9763bfe715c3ad23647c419e0/ctr/libpod_parent/libpod-\ncd8be22a52efaed7e2790d2eb3421c00542c3eb9763bfe715c3ad23647c419e0/ctr: no such file or \ndirectory\\\\\\\"\\\"\"\n```"
+        },
+        {
+            "user": "mheon",
+            "body": "@aalba6675 Damn. I was a little optimistic it would fix this, too. Are you using the same reproducer as #730 "
+        },
+        {
+            "user": "mheon",
+            "body": "This does confirm that something is doubling our CGroup path, though (as opposed to pasting another type of path after it). I continue to suspect it's not us, but an OCI hook, given that the method we use to compute CGroup path never changes."
+        },
+        {
+            "user": "mheon",
+            "body": "Cleanup code implemented. Assuming tests are green, this is finally good for review and merge.\n\nSystemd cgroup manager code is next."
+        },
+        {
+            "user": "mheon",
+            "body": "Alright, this is finally ready. @rhatdan PTAL"
+        },
+        {
+            "user": "aalba6675",
+            "body": "I am still seeing doubled/triple/quad cgroup scopes with a container+bind mounts.\n\nBy the second or third start/stop cycle there are 86(!) mounts of this form but only 4 are distinct mounts.\n[cgroup.zip](https://github.com/projectatomic/libpod/files/1991848/cgroup.zip)\n\n\nmount reports 86 cgroup mounts  on\n```\n**/ctr/**\n**/ctr/**/ctr/**\n**/ctr/**/ctr/**/ctr/**\n**/ctr/**/ctr/**/ctr/**/ctr/**\n```\nOf these 86 mounts only 4 are unique. \n\n```\ncgroup on /sys/fs/cgroup/systemd/libpod_parent/libpod-cd8be22a52efaed7e2790d2eb3421c00542c3eb9763bfe715c3ad23647c419e0/ctr/libpod_parent/libpod-cd8be22a52efaed7e2790d2eb3421c00542c3eb9763bfe715c3ad23647c419e0/ctr/libpod_parent/libpod-cd8be22a52efaed7e2790d2eb3421c00542c3eb9763bfe715c3ad23647c419e0/ctr/libpod_parent/libpod-cd8be22a52efaed7e2790d2eb3421c00542c3eb9763bfe715c3ad23647c419e0/ctr type cgroup (rw,nosuid,nodev,noexec,relatime,seclabel,xattr,name=systemd)\ncgroup on /sys/fs/cgroup/systemd/libpod_parent/libpod-cd8be22a52efaed7e2790d2eb3421c00542c3eb9763bfe715c3ad23647c419e0/ctr/libpod_parent/libpod-cd8be22a52efaed7e2790d2eb3421c00542c3eb9763bfe715c3ad23647c419e0/ctr/libpod_parent/libpod-cd8be22a52efaed7e2790d2eb3421c00542c3eb9763bfe715c3ad23647c419e0/ctr type cgroup (rw,nosuid,nodev,noexec,relatime,seclabel,xattr,name=systemd)\ncgroup on /sys/fs/cgroup/systemd/libpod_parent/libpod-cd8be22a52efaed7e2790d2eb3421c00542c3eb9763bfe715c3ad23647c419e0/ctr/libpod_parent/libpod-cd8be22a52efaed7e2790d2eb3421c00542c3eb9763bfe715c3ad23647c419e0/ctr type cgroup (rw,nosuid,nodev,noexec,relatime,seclabel,xattr,name=systemd)\ncgroup on /sys/fs/cgroup/systemd/libpod_parent/libpod-cd8be22a52efaed7e2790d2eb3421c00542c3eb9763bfe715c3ad23647c419e0/ctr type cgroup (rw,nosuid,nodev,noexec,relatime,seclabel,xattr,name=systemd)\n```"
+        },
+        {
+            "user": "mheon",
+            "body": "@aalba6675 I strongly suspect the bug there (and the required fix) are in `oci-systemd-hook`. Our internal CGroup handling follows a strict pattern for generating supported paths and will never append them. Additionally, we don't directly mount CGroups into containers, that must be requested by something else (and the only thing I know of that does this would be `oci-systemd-hook`)."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@aalba6675 could you try without using a container that runs init, and see if the issue goes away.\n\nI believe that there is a bug in oci hooks in runc, that is not calling oci-systemd-hook in the posthook phase.  This is why the cgroup hooks are being left behind."
+        },
+        {
+            "user": "aalba6675",
+            "body": "@rhatdan - yes it goes away: running a /bin/bash container with fedora:28 image there is no cgroup cruft left behind.\n\nBTW - sorry for spamming the `projectatomic` repos with all these issues. I have a few non-orchestrated workflows (i..e not-suitable-for-k8s) which I'm trying to move to `#nobigfatdaemons`; these workflows require systemd and bind mounts. \n\nThere are also no mounts of type cgroup on /sys/fs/cgroup/systemd/libpod_parent/....\n\nWhen the container is stopped, all the `libpod` cgroups  are cleaned up.\n\nRunning `/bin/bash` fedora:28 container\n\n```\n## nothing in /sys/fs/cgroup/systemd/libpod_parent\n## during podman run\n$ mount | grep cgroup \ntmpfs on /sys/fs/cgroup type tmpfs (ro,nosuid,nodev,noexec,seclabel,mode=755)\ncgroup2 on /sys/fs/cgroup/unified type cgroup2 (rw,nosuid,nodev,noexec,relatime,seclabel,nsdelegate)\ncgroup on /sys/fs/cgroup/systemd type cgroup (rw,nosuid,nodev,noexec,relatime,seclabel,xattr,name=systemd)\ncgroup on /sys/fs/cgroup/freezer type cgroup (rw,nosuid,nodev,noexec,relatime,seclabel,freezer)\ncgroup on /sys/fs/cgroup/cpuset type cgroup (rw,nosuid,nodev,noexec,relatime,seclabel,cpuset)\ncgroup on /sys/fs/cgroup/hugetlb type cgroup (rw,nosuid,nodev,noexec,relatime,seclabel,hugetlb)\ncgroup on /sys/fs/cgroup/net_cls,net_prio type cgroup (rw,nosuid,nodev,noexec,relatime,seclabel,net_cls,net_prio)\ncgroup on /sys/fs/cgroup/cpu,cpuacct type cgroup (rw,nosuid,nodev,noexec,relatime,seclabel,cpu,cpuacct)\ncgroup on /sys/fs/cgroup/blkio type cgroup (rw,nosuid,nodev,noexec,relatime,seclabel,blkio)\ncgroup on /sys/fs/cgroup/pids type cgroup (rw,nosuid,nodev,noexec,relatime,seclabel,pids)\ncgroup on /sys/fs/cgroup/devices type cgroup (rw,nosuid,nodev,noexec,relatime,seclabel,devices)\ncgroup on /sys/fs/cgroup/memory type cgroup (rw,nosuid,nodev,noexec,relatime,seclabel,memory)\ncgroup on /sys/fs/cgroup/perf_event type cgroup (rw,nosuid,nodev,noexec,relatime,seclabel,perf_event)\n```\nlscgroup during `podman run`:\n```\nlscgroup | grep libpod\nfreezer:/libpod_parent\nfreezer:/libpod_parent/libpod-e4e3499ef3ee298b9cf5fdf66ee37e4866eb810e2eb648652b68366fc8835fd1\nfreezer:/libpod_parent/libpod-e4e3499ef3ee298b9cf5fdf66ee37e4866eb810e2eb648652b68366fc8835fd1/conmon\nfreezer:/libpod_parent/libpod-e4e3499ef3ee298b9cf5fdf66ee37e4866eb810e2eb648652b68366fc8835fd1/ctr\ncpuset:/libpod_parent\ncpuset:/libpod_parent/libpod-e4e3499ef3ee298b9cf5fdf66ee37e4866eb810e2eb648652b68366fc8835fd1\ncpuset:/libpod_parent/libpod-e4e3499ef3ee298b9cf5fdf66ee37e4866eb810e2eb648652b68366fc8835fd1/conmon\ncpuset:/libpod_parent/libpod-e4e3499ef3ee298b9cf5fdf66ee37e4866eb810e2eb648652b68366fc8835fd1/ctr\nhugetlb:/libpod_parent\nhugetlb:/libpod_parent/libpod-e4e3499ef3ee298b9cf5fdf66ee37e4866eb810e2eb648652b68366fc8835fd1\nhugetlb:/libpod_parent/libpod-e4e3499ef3ee298b9cf5fdf66ee37e4866eb810e2eb648652b68366fc8835fd1/conmon\nhugetlb:/libpod_parent/libpod-e4e3499ef3ee298b9cf5fdf66ee37e4866eb810e2eb648652b68366fc8835fd1/ctr\nnet_cls,net_prio:/libpod_parent\nnet_cls,net_prio:/libpod_parent/libpod-e4e3499ef3ee298b9cf5fdf66ee37e4866eb810e2eb648652b68366fc8835fd1\nnet_cls,net_prio:/libpod_parent/libpod-e4e3499ef3ee298b9cf5fdf66ee37e4866eb810e2eb648652b68366fc8835fd1/conmon\nnet_cls,net_prio:/libpod_parent/libpod-e4e3499ef3ee298b9cf5fdf66ee37e4866eb810e2eb648652b68366fc8835fd1/ctr\ncpu,cpuacct:/libpod_parent\ncpu,cpuacct:/libpod_parent/libpod-e4e3499ef3ee298b9cf5fdf66ee37e4866eb810e2eb648652b68366fc8835fd1\ncpu,cpuacct:/libpod_parent/libpod-e4e3499ef3ee298b9cf5fdf66ee37e4866eb810e2eb648652b68366fc8835fd1/conmon\ncpu,cpuacct:/libpod_parent/libpod-e4e3499ef3ee298b9cf5fdf66ee37e4866eb810e2eb648652b68366fc8835fd1/ctr\nblkio:/libpod_parent\nblkio:/libpod_parent/libpod-e4e3499ef3ee298b9cf5fdf66ee37e4866eb810e2eb648652b68366fc8835fd1\nblkio:/libpod_parent/libpod-e4e3499ef3ee298b9cf5fdf66ee37e4866eb810e2eb648652b68366fc8835fd1/conmon\nblkio:/libpod_parent/libpod-e4e3499ef3ee298b9cf5fdf66ee37e4866eb810e2eb648652b68366fc8835fd1/ctr\npids:/libpod_parent\npids:/libpod_parent/libpod-e4e3499ef3ee298b9cf5fdf66ee37e4866eb810e2eb648652b68366fc8835fd1\npids:/libpod_parent/libpod-e4e3499ef3ee298b9cf5fdf66ee37e4866eb810e2eb648652b68366fc8835fd1/conmon\npids:/libpod_parent/libpod-e4e3499ef3ee298b9cf5fdf66ee37e4866eb810e2eb648652b68366fc8835fd1/ctr\ndevices:/libpod_parent\ndevices:/libpod_parent/libpod-e4e3499ef3ee298b9cf5fdf66ee37e4866eb810e2eb648652b68366fc8835fd1\ndevices:/libpod_parent/libpod-e4e3499ef3ee298b9cf5fdf66ee37e4866eb810e2eb648652b68366fc8835fd1/conmon\ndevices:/libpod_parent/libpod-e4e3499ef3ee298b9cf5fdf66ee37e4866eb810e2eb648652b68366fc8835fd1/ctr\nmemory:/libpod_parent\nmemory:/libpod_parent/libpod-e4e3499ef3ee298b9cf5fdf66ee37e4866eb810e2eb648652b68366fc8835fd1\nmemory:/libpod_parent/libpod-e4e3499ef3ee298b9cf5fdf66ee37e4866eb810e2eb648652b68366fc8835fd1/conmon\nmemory:/libpod_parent/libpod-e4e3499ef3ee298b9cf5fdf66ee37e4866eb810e2eb648652b68366fc8835fd1/ctr\nperf_event:/libpod_parent\nperf_event:/libpod_parent/libpod-e4e3499ef3ee298b9cf5fdf66ee37e4866eb810e2eb648652b68366fc8835fd1\nperf_event:/libpod_parent/libpod-e4e3499ef3ee298b9cf5fdf66ee37e4866eb810e2eb648652b68366fc8835fd1/conmon\nperf_event:/libpod_parent/libpod-e4e3499ef3ee298b9cf5fdf66ee37e4866eb810e2eb648652b68366fc8835fd1/ctr\n```"
+        },
+        {
+            "user": "mheon",
+            "body": "The lack of mounts is expected - we need those for containers running `systemd` as PID 1 (`systemd` will want to manage its own cgroups within the container). Normal containers don't need to change resource constraints, so we don't need the mounts there.\n\nThis seems to confirm it's a hook, though. The theory from @rhatdan that this is a postrun hook failing to fire and clean things up seems to make more sense than my initial bug in the hook theory, but we can't say for sure without looking into it more."
+        },
+        {
+            "user": "baude",
+            "body": "LGTM"
+        },
+        {
+            "user": "baude",
+            "body": "@rh-atomic-bot r+"
+        },
+        {
+            "user": "rh-atomic-bot",
+            "body": ":pushpin: Commit eb4c75a has been approved by `baude`\n\n<!-- @rh-atomic-bot r=baude eb4c75a2222ba0650c5856d106a66eac274e7da9 -->"
+        },
+        {
+            "user": "rh-atomic-bot",
+            "body": ":hourglass: Testing commit eb4c75a with merge 177c27e..."
+        },
+        {
+            "user": "rh-atomic-bot",
+            "body": ":sunny: Test successful - [status-papr](https://s3.amazonaws.com/aos-ci/ghprb/projectatomic/libpod/177c27e75dccdc64f488c240948ad6de88383a29.1526051229369006592/index.html)\nApproved by: baude\nPushing 177c27e75dccdc64f488c240948ad6de88383a29 to master..."
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 730
+        },
+        {
+            "organization": "projectatomic",
+            "repository": "oci-systemd-hook",
+            "number": 94
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 686
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 497
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 496
+        }
+    ]
+}

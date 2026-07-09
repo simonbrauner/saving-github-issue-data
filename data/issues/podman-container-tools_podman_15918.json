@@ -1,0 +1,88 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 15918,
+    "type": "pull_request",
+    "title": "Eval symlinks on XDG_RUNTIME_DIR",
+    "state": "closed",
+    "labels": [
+        "lgtm",
+        "approved",
+        "release-note-none",
+        "locked - please file new issue/PR"
+    ],
+    "user": "rhatdan",
+    "body": "Partial Fix for https://github.com/containers/podman/issues/14606\n\n[NO NEW TESTS NEEDED]\n\nSigned-off-by: Daniel J Walsh <dwalsh@redhat.com>\n\n<!--\nThanks for sending a pull request!\n\nPlease make sure you've read our contributing guidelines and how to submit a pull request (https://github.com/containers/podman/blob/main/CONTRIBUTING.md#submitting-pull-requests).\n\nIn case you're only changing docs, make sure to prefix the pull-request title with \"[CI:DOCS]\". That will prevent functional tests from running and save time and energy.\n\nFinally, be sure to sign commits with your real name. Since by opening\na PR you already have commits, you can add signatures if needed with\nsomething like `git commit -s --amend`.\n-->\n\n#### Does this PR introduce a user-facing change?\n\n<!--\nIf no, just write `None` in the release-note block below. If yes, a release note\nis required: Enter your extended release note in the block below. If the PR\nrequires additional action from users switching to the new release, include the\nstring \"action required\".\n\nFor more information on release notes, please follow the Kubernetes model:\nhttps://git.k8s.io/community/contributors/guide/release-notes.md\n-->\n\n```release-note\nNone\n```\n",
+    "comments": [
+        {
+            "user": "openshift-ci[bot]",
+            "body": "[APPROVALNOTIFIER] This PR is **APPROVED**\n\nThis pull-request has been approved by: *<a href=\"https://github.com/containers/podman/pull/15918#\" title=\"Author self-approved\">rhatdan</a>*\n\nThe full list of commands accepted by this bot can be found [here](https://go.k8s.io/bot-commands?repo=containers%2Fpodman).\n\nThe pull request process is described [here](https://git.k8s.io/community/contributors/guide/owners.md#the-code-review-process)\n\n<details >\nNeeds approval from an approver in each of these files:\n\n- ~~[OWNERS](https://github.com/containers/podman/blob/main/OWNERS)~~ [rhatdan]\n\nApprovers can indicate their approval by writing `/approve` in a comment\nApprovers can cancel approval by writing `/approve cancel` in a comment\n</details>\n<!-- META={\"approvers\":[]} -->"
+        },
+        {
+            "user": "mheon",
+            "body": "Code LGTM, I'm good to merge whenever the tests start passing"
+        },
+        {
+            "user": "rhatdan",
+            "body": "@edsantiago Any idea what is breaking the Windows man page generator?  I don't see how this PR is causing this error?"
+        },
+        {
+            "user": "edsantiago",
+            "body": "The error I see is:\n```\ndocs: no doc file nor link docs/build/man/podman-.1 for 'podman '\n```\nThe space looks suspicious but I don't know this code and have no idea what it means. Am looking into it now.\n\nThe other weird thing I see is:\n```\nlstat podman_tmp_5mgn/podman-run--1/bus: no such file or directory\n```\nI think that's related, because the string `lstat` does not appear on a successful CI run of this step. Continuing to investigate, am posting this in case it triggers a memory in anyone."
+        },
+        {
+            "user": "edsantiago",
+            "body": "Okay..... there's a weird error involving \"bus\", and your PR adds the string \"bus\". I think there's a connection. Maybe `XDG_WHATEVER` is unset on Macs?"
+        },
+        {
+            "user": "edsantiago",
+            "body": "I see your new push but I don't think that's going to fix it: `XDG_RUNTIME_DIR` gets set complicatedly in one of the config.go files. I'm looking right now at https://github.com/containers/podman/blob/f6053cea8d220b8b7af9a9c92b65d9b9d7877eaf/pkg/util/utils_supported.go#L42-L43\n\n...which has the string \"podman-run-%s\" which closely matches the \"podman-run--1\" in the lstat error (except, wtf, is \"-1\" a valid UID in Mac-land???). The other part, `podman_tmp_5mgn`, is set in Makefile: that's `$TMPDIR`. So XDG is getting set to a default value in TMPDIR, and something is then failing later. But I can't reproduce it on my end no matter what I use for TMPDIR and XDG. Still looking."
+        },
+        {
+            "user": "edsantiago",
+            "body": "AHA! Reproduced it via hackery:\n```diff\ndiff --git a/pkg/util/utils_supported.go b/pkg/util/utils_supported.go\nindex 90a2ecf86..c5877ea9f 100644\n--- a/pkg/util/utils_supported.go\n+++ b/pkg/util/utils_supported.go\n@@ -34,7 +34,7 @@ func GetRuntimeDir() (string, error) {\n                }\n \n                uid := fmt.Sprintf(\"%d\", rootless.GetRootlessUID())\n-               if runtimeDir == \"\" {\n+               if runtimeDir == \"xxxx\" {\n                        tmpDir := filepath.Join(\"/run\", \"user\", uid)\n                        if err := os.MkdirAll(tmpDir, 0700); err != nil {\n                                logrus.Debug(err)\n```\nWith that, compile, and run:\n```console\n$ mkdir foo123\n$ env -i TMPDIR=foo123 bin/podman-remote help\nlstat foo123/podman-run-14904/bus: no such file or directory\n$ echo $?\n1\n```"
+        },
+        {
+            "user": "edsantiago",
+            "body": "This patch (against main, not against your PR) fixes it. Obviously there may be a better solution:\n```diff\ndiff --git a/cmd/podman/registry/config.go b/cmd/podman/registry/config.go\nindex a118fdc4d..0f6028888 100644\n--- a/cmd/podman/registry/config.go\n+++ b/cmd/podman/registry/config.go\n@@ -105,7 +105,12 @@ func setXdgDirs() error {\n        if _, found := os.LookupEnv(\"DBUS_SESSION_BUS_ADDRESS\"); !found {\n                sessionAddr := filepath.Join(os.Getenv(\"XDG_RUNTIME_DIR\"), \"bus\")\n                if _, err := os.Stat(sessionAddr); err == nil {\n-                       os.Setenv(\"DBUS_SESSION_BUS_ADDRESS\", \"unix:path=\"+sessionAddr)\n+                       dereferenced, err := filepath.EvalSymlinks(sessionAddr)\n+                       if err != nil {\n+                               return err\n+                       }\n+\n+                       os.Setenv(\"DBUS_SESSION_BUS_ADDRESS\", \"unix:path=\"+dereferenced)\n                }\n        }\n ```"
+        },
+        {
+            "user": "rhatdan",
+            "body": "@containers/podman-maintainers PTAL"
+        },
+        {
+            "user": "edsantiago",
+            "body": "Thanks for the test, @Luap99. Here's a version that doesn't depend on `/var/run` existing and being a symlink.\n```bash\n@test \"podman rootless netns works when XDG_RUNTIME_DIR includes symlinks\" {\n    # regression test for https://github.com/containers/podman/issues/14606\n    is_rootless || skip \"only meaningful for rootless\"\n\n    # Create a tmpdir symlink pointing to /run, and use it briefly\n    ln -s /run $PODMAN_TMPDIR/run\n    local tmp_run=$PODMAN_TMPDIR/run/user/$(id -u)\n    test -d $tmp_run || skip \"/run/user/MYUID unavailable\"\n\n    # This 'run' would previously fail with:\n    #    IPAM error: failed to open database ....\n    XDG_RUNTIME_DIR=$tmp_run run_podman run --network bridge --rm $IMAGE ip a\n    assert \"$output\" =~ \"eth0\"\n}\n```\n(warning: if you run this test with podman @ main, or podman without this patch, you destroy everything and need to run `podman system reset` before you can run podman again. No idea why, don't really care)."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@Luap99 @edsantiago PTAL"
+        },
+        {
+            "user": "edsantiago",
+            "body": "/lgtm"
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "containers",
+            "repository": "common",
+            "number": 1162
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 14606
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 14668
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 16076
+        }
+    ]
+}

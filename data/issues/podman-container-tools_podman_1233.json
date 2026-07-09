@@ -1,0 +1,71 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 1233,
+    "type": "issue",
+    "title": "podman push uploads every layer every time",
+    "state": "closed",
+    "labels": [
+        "locked - please file new issue/PR"
+    ],
+    "user": "steveb",
+    "body": "/kind bug\n\n**Description**\n\n\"podman push\" will push layers already in the destination repository\n\n**Steps to reproduce the issue:**\n\n1. Prepare for an insecure local registry:\nedit /etc/containers/registries.conf to include the following\n```\n[registries.insecure]\nregistries = ['localhost:5000']\n```\n\n2. Install and run docker-distribution locally:\n```\ndnf install docker-distribution\nsystemctl start docker-distribution\n```\n\n3. Pull and tag some multi-layer images which have common layers:\n```\npodman pull docker.io/tripleomaster/centos-binary-heat-engine:current-tripleo\npodman pull docker.io/tripleomaster/centos-binary-heat-api:current-tripleo\npodman tag docker.io/tripleomaster/centos-binary-heat-api:current-tripleo localhost:5000/tripleomaster/centos-binary-heat-api:current-tripleo\npodman tag docker.io/tripleomaster/centos-binary-heat-engine:current-tripleo localhost:5000/tripleomaster/centos-binary-heat-engine:current-tripleo\n```\n\n4. Push to the local repository (duplicate push is deliberate)\n```\npodman push localhost:5000/tripleomaster/centos-binary-heat-api:current-tripleo\npodman push localhost:5000/tripleomaster/centos-binary-heat-api:current-tripleo\npodman push localhost:5000/tripleomaster/centos-binary-heat-engine:current-tripleo\n```\n\n**Describe the results you received:**\nEvery layer was pushed again each time \"podman push\" was run\n\n**Describe the results you expected:**\nThe second push of centos-binary-heat-api should have skipped pushing every layer. The push of centos-binary-heat-engine should have skipped most layers, just like it did for \"podman pull\"\n\n**Additional information you deem important (e.g. issue happens only occasionally):**\n\n**Output of `podman version`:**\npodman version 0.8.1\n\n**Output of `podman info`:**\nhost:\n  MemFree: 340643840\n  MemTotal: 12276117504\n  SwapFree: 5950140416\n  SwapTotal: 6174011392\n  arch: amd64\n  cpus: 4\n  hostname: sbaker-t540s\n  kernel: 4.17.11-200.fc28.x86_64\n  os: linux\n  uptime: 50h 36m 20.13s (Approximately 2.08 days)\ninsecure registries:\n  registries:\n  - localhost:5000\n  - 192.168.20.11:8787\nregistries:\n  registries:\n  - docker.io\n  - registry.fedoraproject.org\n  - quay.io\n  - registry.access.redhat.com\n  - registry.centos.org\nstore:\n  ContainerStore:\n    number: 0\n  GraphDriverName: overlay\n  GraphOptions:\n  - overlay.mountopt=nodev\n  - overlay.override_kernel_check=true\n  GraphRoot: /var/lib/containers/storage\n  GraphStatus:\n    Backing Filesystem: extfs\n    Native Overlay Diff: \"true\"\n    Supports d_type: \"true\"\n  ImageStore:\n    number: 6\n  RunRoot: /var/run/containers/storage\n\n**Additional environment details (AWS, VirtualBox, physical, etc.):**\nIn TripleO we have about 100 images which share a lot of layers. We serve these from a registry available to the cluster. With this number of images, populating this registry needs to be as efficient as possible. Since \"docker push\" handles this deduplication, switching to podman or skopeo would be quite a performance hit for us.\n\nIf I understand [this skopeo RFE](https://github.com/containers/skopeo/issues/395) correctly, containers-storage -> registry de-duplication should be possible in a higher level tool like podman because it has access to the compressed and uncompressed layer hashes.",
+    "comments": [
+        {
+            "user": "baude",
+            "body": "@umohnani8 in your work with the copy functions, have you seen anywhere where we can deal with this sort of caching.  lets discuss tomorrow."
+        },
+        {
+            "user": "mheon",
+            "body": "@mtrmac As the person who wrote the c/image APIs, any pointers here?"
+        },
+        {
+            "user": "steveb",
+            "body": "I've been looking into the REST API required for the 2 cases above.\nFor uploading the same image twice, before a layer is put, a HEAD /v2/namespace/image-1/blobs/sha256:... is made first, and upload only occurs if there is a 404 returned.\n\nFor uploading a layer which is shared by another image, when the HEAD returns a 404, the next request is a POST /v2/namespace/image-2/blobs/uploads/?from=namespace%2Fimage-1&mount=sha256%3A...\n\nThe first case seems fairly trivial, the second case would require querying the containers-storage layer for other images which use this layer (then maybe some extra HEAD calls to see if that layer is in the registry under any other known images)\n\nSee Cross Repository Blob Mount in the [registry spec](https://docs.docker.com/registry/spec/api/#content-digests)"
+        },
+        {
+            "user": "mtrmac",
+            "body": "Three separate aspects to this:\n\n1. Not copying anything about the image when the image is present at the destination ( https://github.com/containers/skopeo/issues/395 ). That should be fairly easy, and higher-level callers can do the check ~independently (like CRI-O does already). The trade-off is that the “is the image present” check itself is a bit expensive, several round-trips, and there’s not _that much_ reason to expect that this will be a net benefit.\n\n2. Not re-pushing layers when the source is uncompressed and we are compressing on the fly ( https://github.com/containers/image/issues/475 ). This is the most important possible improvement, and most complex: it requires $something to store a long-term mapping between DiffID and several possible known digests (and probably their “locations” in different registries/repoistories).\n\n3. Support of cross-repository mounts within a destination registry, if the blob is known to be present in a different repository on the same server ( https://github.com/containers/container-libs/issues/274 ). Basically a corner case of the previous case.\n\nI think ideally we should have 2.+3., and probably not 1.  2.+3. either costs ~nothing (when the local storage does not have any record of the layer existing on the destination), or it is almost certainly a _big_ improvement (when we do have a local record of the layer existing on the destination in the past, it is quite unlikely to have been removed in the meantime—most registries do not support deletion of any kind at all).\n\nIf we have 2.+3., the cost to unnecessarily re-copy an image (possibly prevented by 1.) is a few round-trips, so 1. is much less noticeable, and the expected frequency of copying an already-available image would have to be pretty high for 1. to be useful on average."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@mtrmac SGTM, could you implement something like this?"
+        },
+        {
+            "user": "mtrmac",
+            "body": "Not right this minute, let’s add it to the backlog."
+        },
+        {
+            "user": "rhatdan",
+            "body": "I believe this is fixed in latest podman."
+        },
+        {
+            "user": "kbaegis",
+            "body": "Was this fixed?\n```\nCopying blob sha256:375e25ba0345a45134cc43ca97df8b3949246598972aba5435caf77c2290bcd8\n 218.56 MiB / 218.56 MiB [=================================================] 50s\nCopying blob sha256:e83f96220b502627413a89106b1f1cf25cf8759df3977f517b16f62b252ca0a0\n 514.71 MiB / 514.71 MiB [===============================================] 1m41s\nCopying config sha256:5f99fe99dea0784acebc771c96739f46ab42975e7b790fe001f46900c62623a3\n 4.36 KiB / 4.36 KiB [=====================================================] 22s\nWriting manifest to image destination\nStoring signatures\n\nSuccessfully pushed crucible.lab:4000/oci/go:2019-04-28\nAttempting to copy: crucible.lab:4000/oci/go:latest\nSuccessfully copied crucible.lab:4000/oci/go:latest\nAttempting to push: crucible.lab:4000/oci/icekube:2019-04-28\nGetting image source signatures\nCopying blob sha256:d3cb8c89a774dc9ea9a4aa8f45408e7878afa2d9418c7ad5e2b08ec6b8d88d01\n 1.18 GiB / 1.18 GiB [===================================================] 3m25s\nCopying blob sha256:d5751624bb8eb17ccbd8654c58f5527fabc58ffc280dc3a10aee75c4246ff575\n 93.33 MiB / 93.33 MiB [===================================================] 34s\nCopying blob sha256:375e25ba0345a45134cc43ca97df8b3949246598972aba5435caf77c2290bcd8\n 218.56 MiB / 218.56 MiB [=================================================] 51s\nCopying blob sha256:e83f96220b502627413a89106b1f1cf25cf8759df3977f517b16f62b252ca0a0\n 514.71 MiB / 514.71 MiB [===============================================] 1m40s\nCopying blob sha256:9652cae1f6b9d8bcb5ecfb87c67269c1471eaab8d9b560a68985a3331763dcd3\n 519.02 MiB / 519.02 MiB [===============================================] 1m30s\nCopying config sha256:c767188419a2f4e6a5c68421e27093c6023f9728d1b124d10293bd924a965496\n 4.88 KiB / 4.88 KiB [=====================================================] 22s\nWriting manifest to image destination\nStoring signatures\n\nSuccessfully pushed crucible.lab:4000/oci/icekube:2019-04-28\nAttempting to copy: crucible.lab:4000/oci/icekube:latest\nSuccessfully copied crucible.lab:4000/oci/icekube:latest\nAttempting to push: crucible.lab:4000/oci/ceph:2019-04-28\nGetting image source signatures\nCopying blob sha256:d3cb8c89a774dc9ea9a4aa8f45408e7878afa2d9418c7ad5e2b08ec6b8d88d01\n 1.18 GiB / 1.18 GiB [===================================================] 3m25s\nCopying blob sha256:d5751624bb8eb17ccbd8654c58f5527fabc58ffc280dc3a10aee75c4246ff575\n 93.33 MiB / 93.33 MiB [===================================================] 33s\nCopying blob sha256:b2f130375d38db2f4af946849c229b0cba029c4824912805f7d6acbf936eebcf\n 788.76 MiB / 788.76 MiB [===============================================] 2m30s\nCopying config sha256:117df035cf48b498a29b9f03b792147bd55082cc358ea384a90b95bd7ab51d63\n 4.42 KiB / 4.42 KiB [=====================================================] 22s\nWriting manifest to image destination\nStoring signature\n```"
+        },
+        {
+            "user": "rhatdan",
+            "body": "@vrothberg ptal"
+        },
+        {
+            "user": "vrothberg",
+            "body": "@kbaegis, the output indicates that it's an old version of Podman. Can you check the version and re-try with a more recent one?"
+        },
+        {
+            "user": "kbaegis",
+            "body": "Works. Thanks!"
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "skopeo",
+            "number": 532
+        },
+        {
+            "organization": "containers",
+            "repository": "image",
+            "number": 526
+        }
+    ]
+}

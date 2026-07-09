@@ -1,0 +1,41 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 27527,
+    "type": "issue",
+    "title": "Flaky tests in play_kube_test.go and play_build_test.go",
+    "state": "closed",
+    "labels": [
+        "flakes",
+        "locked - please file new issue/PR"
+    ],
+    "user": "nimdrak",
+    "body": "### Proposal\n- I found some tests often failed in CI.\n- To mitigate this, we could implement a retry mechanism when reading the container logs. A similar approach is already used in logs_test.go and could be adapted for these tests: https://github.com/containers/podman/blob/main/test/e2e/logs_test.go#L62-L69\n\n### Observed flaky tests\n- Some test often failed in CI\n  - [[FAIL] Podman play kube with build [It] Check that command is expanded](https://github.com/containers/podman/pull/27515/checks?check_run_id=55172587878)\n  - [[FAIL] Podman kube play [It] test with init containers and annotation set](https://github.com/containers/podman/pull/27515/checks?check_run_id=55172587783)\n  - [[FAIL] Podman kube play [It] seccomp container level](https://github.com/containers/podman/pull/27473/checks?check_run_id=55231463980)\n  - [[FAIL] Podman kube play [It] seccomp pod level](https://github.com/containers/podman/pull/27473/checks?check_run_id=55231463980)\n- The common thing in them is that they check the string from `podman log`\n```\n# podman [options] logs testPod-testCtr\n\n           [FAILED] Expected\n               <string>: \n           to contain substring\n               <string>: ln: /noPodsShallPass: Operation not permitted\n           In [It] at: /var/tmp/go/src/github.com[/containers/podman/test/e2e/play_kube_test.go:3420](https://github.com/containers/podman/blob/f47f74cad63e4a1fcb3c71a59def30d86d20ff77/test/e2e/play_kube_test.go#L3420) @ 11/12/25 15:03:55.055\n         \n           Full Stack Trace\n             github.com/containers/podman/v6/test/e2e.init.func56.54()\n             \t/var/tmp/go/src/github.com[/containers/podman/test/e2e/play_kube_test.go:3420](https://github.com/containers/podman/blob/f47f74cad63e4a1fcb3c71a59def30d86d20ff77/test/e2e/play_kube_test.go#L3420) +0x978\n```\n\n### Hypothesis and solution\n- I suspect this is a race condition. \n- The podman log command in the test executes immediately, but the container's log output (which needs to be written to a file or journald) has not yet been fully flushed and made available to the client. \n- This results in the test reading an empty or incomplete log, causing the assertion to fail.\n- By wrapping the log check in an Eventually block, we can reliably wait for the logs to be flushed, making the test robust. e.g.: https://github.com/containers/podman/blob/main/test/e2e/logs_test.go#L62-L69",
+    "comments": [
+        {
+            "user": "Honny1",
+            "body": "Here si another `play_kube_test.go` flake: [[FAIL] Podman kube play [It] test with reserved PublishAll annotation in yaml](https://cirrus-ci.com/task/4971323249655808?logs=main#L4849)"
+        },
+        {
+            "user": "Honny1",
+            "body": "- [[FAIL] Podman kube play [It] test with sysctl defined](https://cirrus-ci.com/task/5430813916921856)"
+        },
+        {
+            "user": "Luap99",
+            "body": "Note these logs flakes aren't new they have been there since forever basically, there is\nhttps://github.com/containers/podman/issues/24220 \nhttps://github.com/containers/podman/issues/23682\nhttps://github.com/containers/podman/issues/23615\n\nAnd also note https://github.com/containers/podman/issues/21914 which is broken in a dep but that one got abandoned upstream it seems. https://github.com/nxadm/tail/pull/71"
+        },
+        {
+            "user": "nimdrak",
+            "body": "Thank you for pointing that out. I should have checked the existing flaky test issues earlier.\nTo summarize, the flaky tests seem to fall into three categories:\n\n1. [#21914](https://github.com/containers/podman/issues/21914) / [#23615](https://github.com/containers/podman/issues/23615)\n  * Logs are truncated when using --follow on stopped containers with large logs.\n  * k8s-file logs are missing or partial in CI.\n  * Root Cause: Bug in the upstream nxadm/tail library.\n2. [#24220](https://github.com/containers/podman/issues/24220)\n  * Tests fail with empty output (Race condition).\n  * Root Cause: Tests read logs before journald flushes them to disk.\n  * Potential Fix: Using journalctl --synchronize-on-exit.\n3. [#23682](https://github.com/containers/podman/issues/23682)\n  * podman logs --until times out.\n  * Root Cause: System load issues, likely due to parallel execution.\n\nThis issue specifically relates to category #2. While journalctl --synchronize-on-exit seems like the ideal solution, it requires [systemd v258](https://github.com/systemd/systemd/releases/tag/v258). However, standard CI environments (like Ubuntu 24.04 LTS) are currently on v255, and it may take some time before v258 becomes widely available.\n\nGiven this constraint, I think implementing a retry mechanism for cases #2 and #3 could be a practical workaround to mitigate these flakes until we can utilize the new journalctl feature.\n\nWhat do you think? If this approach isn't viable, it might be better to close this issue for now."
+        },
+        {
+            "user": "Luap99",
+            "body": "> Root Cause: Bug in the upstream nxadm/tail library.\n\nYeah, I guess it is time to fork this somehwere into the repo and maybe rewrite most of it to only use the pars we care about and while at it make the reversereader (tail) actually work with it while at it.\n\n> Potential Fix: Using journalctl --synchronize-on-exit.\n\nI am aware of this new option though haven't looked at how it is exposed via the sd_jounal API which we use to read the jounal files. It would be nice to implement that, even if it is just a additional thing we can use on newer systemd versions because...\n\n> However, standard CI environments (like Ubuntu 24.04 LTS) are currently on v255, and it may take some time before v258 becomes widely available.\n\nThat is not an problem, we don't use ubuntu because it is way to old so there is no point in testing with it. We test debian sid and fedora so most of these systems should either be on the new systemd already or very soon.\n\nAnd in general fixing CI is nice but both 1,2 are problem that any user could run into so it would be nice to have them fix right in the code not via retires in tests.\n\nFor 3 I don't think we need retires, likely just increase the timeout values the test is using to make it less strict."
+        },
+        {
+            "user": "nimdrak",
+            "body": "Thanks for your kind clarification. I agree that since these are race conditions users might face, fixing the root cause in the code is the right approach rather than masking it with test retries.\n\n> That is not an problem, we don't use ubuntu because it is way to old so there is no point in testing with it. We test debian sid and fedora so most of these systems should either be on the new systemd already or very soon.\n\n> And in general fixing CI is nice but both 1,2 are problem that any user could run into so it would be nice to have them fix right in the code not via retires in tests.\n\n> For 3 I don't think we need retires, likely just increase the timeout values the test is using to make it less strict.\n\nI'll close this issue so the focus remains on the actual fixes in the linked issues you mentioned."
+        }
+    ],
+    "cross_references": []
+}

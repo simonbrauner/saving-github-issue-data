@@ -1,0 +1,93 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 14385,
+    "type": "pull_request",
+    "title": "[WIP] [CI:BUILD] Cirrus: More info. on artifact DL failures",
+    "state": "closed",
+    "labels": [
+        "do-not-merge/work-in-progress",
+        "do-not-merge/hold",
+        "release-note-none",
+        "locked - please file new issue/PR"
+    ],
+    "user": "cevich",
+    "body": "There's currently a problem affecting curl downloads using the Cirrus-CI\nartifacts API endpoint, but only on jobs running for branches.  They have\nmade some backend changes to provide more details about these failures.\nSwitch the `curl --fail` argument to the option which provides the full\nmessage returned by the server.  Upon failure, the API returns a JSON\nformatted message.  Use jq to parse and print this, on the off-chance\n`repo.tbz` - like a network error half-way through downloading.  In this\ncase, jq will puke on the file, and give a short error message.\n\nSigned-off-by: Chris Evich <cevich@redhat.com>\n\n#### Does this PR introduce a user-facing change?\n\n```release-note\nNone\n```\n",
+    "comments": [
+        {
+            "user": "openshift-ci[bot]",
+            "body": "[APPROVALNOTIFIER] This PR is **NOT APPROVED**\n\nThis pull-request has been approved by: *<a href=\"https://github.com/containers/podman/pull/14385#\" title=\"Author self-approved\">cevich</a>*\nTo complete the [pull request process](https://git.k8s.io/community/contributors/guide/owners.md#the-code-review-process), please assign **baude** after the PR has been reviewed.\nYou can assign the PR to them by writing `/assign @baude` in a comment when ready.\n\nThe full list of commands accepted by this bot can be found [here](https://go.k8s.io/bot-commands?repo=containers%2Fpodman).\n\n<details open>\nNeeds approval from an approver in each of these files:\n\n- **[OWNERS](https://github.com/containers/podman/blob/main/OWNERS)**\n\nApprovers can indicate their approval by writing `/approve` in a comment\nApprovers can cancel approval by writing `/approve cancel` in a comment\n</details>\n<!-- META={\"approvers\":[\"baude\"]} -->"
+        },
+        {
+            "user": "cevich",
+            "body": "Oof this won't work.  It seems `--fail-with-body` results in the output file containing the error.  That will be difficult to observe from this context :thinking: "
+        },
+        {
+            "user": "cevich",
+            "body": "okay, I think this will work.  Here's an example of a forced failure (I re-ran the `build` task while the `validate` task was trying to start up): https://cirrus-ci.com/task/6072903732035584?logs=clone#L15-L18\n"
+        },
+        {
+            "user": "cevich",
+            "body": "I just re-ran the jobs I induced to fail, they should pass now since the `build` task re-run is complete."
+        },
+        {
+            "user": "edsantiago",
+            "body": "I really have no idea what this is about or what \"induced to fail\" means. My very simpleminded understanding is: `curl` is failing with 404 on URLs that should not fail with 404? If so, I don't think the response body is going to add any value. Have you considered `curl -v ... 2>/path/to/log` and then cat'ing that log on failure? That will show the IP it resolves to (which, best I Can tell, will always be `35.190.41.13` because there are no CNAMEs nor round-robins) and the remote server name/response."
+        },
+        {
+            "user": "cevich",
+            "body": "> what \"induced to fail\" means\n\nJust that I manipulated the tasks in this PR to cause a 404 failure.  Otherwise this problem only appears on `main` :disappointed: \n\n> My very simpleminded understanding is: curl is failing with 404 on URLs that should not fail with 404\n\nMostly correct, yes, for some reason it only fails on branch runs, never PRs (that I could find).  I spent hours yesterday trolling logs from the google storage engine where the repo.tbz is actually stored.  The error is happening w/in Cirrus-CI somewhere, so I'm working with their support to try and figure out why/what/how to fix.\n\n> Have you considered curl -v ... 2>/path/to/log and then cat'ing that log on failure\n\nI tried that and found it overly verbose with all kinds of TLS and handshare/networking crap we're not interested in.  We really just want the message from the API endpoint, after the PR is merged and the job runs on `main` (and presumably fails)"
+        },
+        {
+            "user": "edsantiago",
+            "body": "Okay, so I'm extremely ignorant and really don't understand any of this Cirrus stuff. I've been trying to come up to speed just now, and let's see if my understanding is correct:\n* A bunch of jobs run called 'Build for Foo' which create a repo.tbz file that then magically gets uploaded somewhere by a magical Cirrus step.\n* Another job runs later that tries to pull that repo.tbz\n\nIs that correct so far?\n\nThe next thing I notice is that `ARTCURL` is defined in terms of `/build/${CIRRUS_BUILD_ID}`. Builds are the parents of tasks, right? When I look at [this build-for-f36 task](https://cirrus-ci.com/task/4642490643906560), which is a 464 number, I notice that it has one artifact, a repo.tbz, which is under `464` whereas the parent is a `580` number. This seems like the kind of misunderstanding that would prevent *anything* from ever working, so it's probably my own mistake. Why does this push to 464 (task) and ARTCURL pull from 580 (build)?\n\nThe next thing I wonder is, how are Cirrus jobs cascaded? If job Y depends on X, will Y start when X finished `main`, or when X finishes the entire job (including uploading artifacts)? That is, could this be a trivial race condition?\n\nThis is really hard. I need to take a step back."
+        },
+        {
+            "user": "cevich",
+            "body": " >Is that correct so far?\n\nYes.\n\n> Builds are the parents of tasks, right?\n\nCorrect.\n\n> Why does this push to 464 (task) and ARTCURL pull from 580 (build)?\n\nThis is simply the way the artifacts API [works as documented](https://cirrus-ci.org/guide/writing-tasks/#current-build-artifacts).\nYou'll notice the pull does reference the task name in the URL.\n\n> The next thing I wonder is, how are Cirrus jobs cascaded? If job Y depends on X, will Y start when X finished main, or when X finishes the entire job (including uploading artifacts)? That is, could this be a trivial race condition?\n\nMy understanding (and observation) is Y's `clone_script` will wait for X to completely finish, including upload.  However, this happens really quickly, so it certainly could be a race.  My only evidence against this is the problem _only_ happens on branches, going back weeks :confounded: \n\nI poked through a few dozen running and finished PRs and couldn't find a single case of the clone failing for a PR."
+        },
+        {
+            "user": "cevich",
+            "body": "Ya, I don't think it can be a race.  A task won't boot a VM or container, start running clone or any scripts until Cirrus has a pass/fail status from the dependent task.  Cirrus support said the logic behind this API we're curling from is pretty complex.  So it also could be asking too much for them to fully debug/fix it.  I'm working an alternative that uses a simpler code-path according to support."
+        },
+        {
+            "user": "edsantiago",
+            "body": ">Ya, I don't think it can be a race.\n\nI kind of do, because in the example I linked above, [this is one of the 404 tasks](https://cirrus-ci.com/task/5770336137379840) (\"Test Code Consistency\"), and it does a curl against `/build/580.../whatever`, and gets 404, but I did that same `curl` right now on my own system and it works fine.\n\nIt could be a race, or it could be name resolution (getting the wrong IP for api.cirrus-ci.com) or it could just be something broken on their end. This sentence in their docs concerns me:\n>Note that if several tasks are uploading artifacts with the same name then the ZIP archive from the above link will contain merged content of all artifacts.\n\nIt's not clear to me what \"same name\" means, if they mean \"same name within a build\" or if they differentiate between tasks. And yeah, that only says `zip`, but it still seems an interesting note.\n\nI don't think this is something I can solve."
+        },
+        {
+            "user": "cevich",
+            "body": "> I did that same curl right now on my own system and it works fine.\n\nYes, this is the behavior I've seen and reported to support as well.  It's definitely a race of some sort.\n\n> but it still seems an interesting note.\n\nYa, and in all cases nothing (as a client) we can do anything about.\n\n> I don't think this is something I can solve.\n\nNo it's not, nor can I.  I'm pretty certain it's caused by something within Cirrus.  I'm just trying to do what I can to help debug the situation while I work on an alternative."
+        },
+        {
+            "user": "edsantiago",
+            "body": "Is it worth trying `curl --retry 3 --retry-delay 10 --retry-all-errors --fail` ?"
+        },
+        {
+            "user": "cevich",
+            "body": "> Is it worth trying curl --retry 3 --retry-delay 10 --retry-all-errors --fail ?\n\nIt's a good suggestion.  Based on my experiments on `main` branch failures, the only way to get it un-stuck is re-running the `build for XYZ` tasks.  Until that happens, a local CURL will work just fine and dandy, but it won't matter how many times you re-run the dependent tasks, they always fail with 404.  Feel free to give it a try and see for yourself, here's an untouched failure on `main`: https://cirrus-ci.com/build/5073341227728896\n\nRe-running things there won't hurt anything, it's already failed, it can't fail more :grin: "
+        },
+        {
+            "user": "cevich",
+            "body": "Okay, pushed up #14391 (incomplete and untested ATM).  That should workaround the issue according to cirrus support.  As in, it won't use the complex artifact upload/download API.  I'll work on it more tomorrow."
+        },
+        {
+            "user": "cevich",
+            "body": "/hold"
+        },
+        {
+            "user": "cevich",
+            "body": "re-WIP'd this.  I think the Ubuntu will break.  It's curl doesn't support `--fail-with-body` option."
+        },
+        {
+            "user": "cevich",
+            "body": "Closing in favor of https://github.com/containers/podman/pull/14391"
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 14391
+        }
+    ]
+}

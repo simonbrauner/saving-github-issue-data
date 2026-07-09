@@ -1,0 +1,137 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 13641,
+    "type": "pull_request",
+    "title": "Add log rotation based on log size",
+    "state": "closed",
+    "labels": [
+        "lgtm",
+        "approved",
+        "locked - please file new issue/PR"
+    ],
+    "user": "nicrowe00",
+    "body": "Add a new function to logfile.go for rotating and deleting\nthe events log file once the log file and its contents\nexceed the maximum size limit.\n\nAlso add tests to verify log rotation for different\nscenarios.\n\nSigned-off-by: Niall Crowe <nicrowe@redhat.com>\n\n<!--\nThanks for sending a pull request!\n\nPlease make sure you've read our contributing guidelines and how to submit a pull request (https://github.com/containers/podman/blob/main/CONTRIBUTING.md#submitting-pull-requests).\n\nIn case you're only changing docs, make sure to prefix the pull-request title with \"[CI:DOCS]\".  That will prevent functional tests from running and save time and energy.\n\nFinally, be sure to sign commits with your real name.  Since by opening\na PR you already have commits, you can add signatures if needed with\nsomething like `git commit -s --amend`.\n-->\n",
+    "comments": [
+        {
+            "user": "nicrowe00",
+            "body": "@vrothberg "
+        },
+        {
+            "user": "mheon",
+            "body": "We shouldn't be rotating, IMO. Rotation is good for container logs. The events logs should straight truncate. This matches Docker, which only retains a maximum of... I want to say 4096?... events at one time, purely in-memory."
+        },
+        {
+            "user": "mheon",
+            "body": "And, honestly, this won't solve our memory exhaustion issues - the files are still stored in tmpfs, so having two files versus one doesn't reduce the amount of RAM we consume."
+        },
+        {
+            "user": "vrothberg",
+            "body": "> We shouldn't be rotating, IMO. Rotation is good for container logs. The events logs should straight truncate. This matches Docker, which only retains a maximum of... I want to say 4096?... events at one time, purely in-memory.\n\n@rhatdan and @baude requested rotation/deletion.  The motivation was to keep things simple, solve the disk issue and ultimately get users to use the journald driver.\n\n> the files are still stored in tmpfs, so having two files versus one doesn't reduce the amount of RAM we consume.\n\nThe underlying issue was _disk_ consumption, not RAM."
+        },
+        {
+            "user": "rhatdan",
+            "body": "As long as the logfile-1 is deleted when it is rotated, we should only have as 2x max log size, correct?"
+        },
+        {
+            "user": "vrothberg",
+            "body": "> As long as the logfile-1 is deleted when it is rotated, we should only have as 2x max log size, correct?\n\nWe are free to decide the semantics. Currently, the rotation is really just a deletion."
+        },
+        {
+            "user": "Luap99",
+            "body": "There are many parts in the code which rely on reading events. If we just truncate we run into problem elsewhere. IMO we want rotation. "
+        },
+        {
+            "user": "vrothberg",
+            "body": "> There are many parts in the code which rely on reading events. If we just truncate we run into problem elsewhere. IMO we want rotation.\n\nWe'll always face these risks: at some point a file gets deleted with rotation.  We'd increase the time window for sure if rotating more than 0 files."
+        },
+        {
+            "user": "mheon",
+            "body": "@vrothberg It's definitely a memory issue. These may be stored on disk, but they live in our temporary files directory, which is always on a tmpfs. Disk consumption is also a concern, but unbounded memory growth is much more of one.\n\nI continue to not really see the point of rotation. The events log is definitely referred to, but only for events that have occurred recently - a container that exited seconds ago, for example. Rotation doesn't help with that at all, because `podman events` won't read from the rotated files. Who are we thinking *will* read them? This isn't an auditing tool, it's a streaming log of recent actions with limited lookback, mainly intended for external tools (e.g. Cockpit) to keep up with actions as they occur."
+        },
+        {
+            "user": "Luap99",
+            "body": "I would say the event read code must still read the rotated file. If you just truncate the file a second podman events process called in parallel will show no events. This looks wrong to me."
+        },
+        {
+            "user": "mheon",
+            "body": "My expectation would ideally be that, on exceeding maximum size, we cut off the first N events (lines) of the file and continue writing to the end.\n\nMay be that it's simpler to do this via rotation, given that syscalls to shrink a file seem rather limited; but the behavior must be such that we act like a single logfile in all respects from the outside. Removal of excess files must also be performed automatically to remove potential for unbounded growth."
+        },
+        {
+            "user": "vrothberg",
+            "body": "It's unfortunate that we assigned work to an intern on which we obviously have no consensus on the design.\n\nThe original task was to delete the file once the size limit is exceeded.  This will address the RAM/disk issue since we control the size.\n\n> My expectation would ideally be that, on exceeding maximum size, we cut off the first N events (lines) of the file and continue writing to the end.\n\nThat means that we can only use 50 percent of the specified file limit as we have to create a copy, drop the first N lines and then write it back.  Truncating means double the size for a short moment. (similar problem if we keep more than one file)\n\nThat's why @baude and @rhatdan opted for rotation.\n\nMay I suggest to make this a PS on Monday?  Please have a look at the implementation and if/how the ideas are doable."
+        },
+        {
+            "user": "rhatdan",
+            "body": "Can we just change the reader to read both files.  Current and current-1, then when current == 50% of max, we rotate it to current-1. Since old current-1 is overridden, we solve the problem. Correct?"
+        },
+        {
+            "user": "mheon",
+            "body": "I think that the suggestion from @rhatdan is probably a reasonable solution. The critical aspects, IMO, are:\n1. Do not retain excess events - if `podman events` isn't reading an event, it's useless and we should not retain it.\n2. At all times, a backlog of at least N events must be available to Podman so Podman and other tools can scan backwards for prior events (exact N is up for discussion, but I lean towards 4096). Any rotation of overwrite of the events file thus must retain at least N readable events.\n3. Ideally, we should endeavor to be not too different from what existing Podman is doing, such that upgrades do not create chaos."
+        },
+        {
+            "user": "vrothberg",
+            "body": "@nicrowe00, I'll prepare a fix for cross-build error on Windows and paste the diff here."
+        },
+        {
+            "user": "vrothberg",
+            "body": "The diff below diff the trick for me.  You can apply it by copying the contents to a file (e.g, `foo.diff`) and running `patch -p1 -i foo.diff` in podman's root directory.\n\n```diff\nindex b7f00a4d390e..1745095fb190 100644                                                                                                                     \n--- a/libpod/events/events.go                                                                                                                               \n+++ b/libpod/events/events.go                                                                                                                               \n@@ -3,11 +3,9 @@ package events                                                                                                                             \n import (                                                                                                                                                   \n        \"encoding/json\"                                                                                                                                     \n        \"fmt\"                                                                                                                                               \n-       \"os\"                                                                                                                                                \n        \"time\"                                                                                                                                              \n                                                                                                                                                            \n        \"github.com/containers/storage/pkg/stringid\"                                                                                                        \n-       \"github.com/nxadm/tail\"                                                                                                                             \n        \"github.com/pkg/errors\"                                                                                                                             \n )                                                                                                                                                          \n                                                                                                                                                            \n@@ -221,14 +219,3 @@ func StringToStatus(name string) (Status, error) {                                                                                     \n        }                                                                                                                                                   \n        return \"\", errors.Errorf(\"unknown event status %q\", name)                                                                                           \n }                                                                                                                                                          \n-                                                                                                                                                           \n-func (e EventLogFile) getTail(options ReadOptions) (*tail.Tail, error) {                                                                                   \n-       reopen := true                                                                                                                                      \n-       seek := tail.SeekInfo{Offset: 0, Whence: os.SEEK_END}                                                                                               \n-       if options.FromStart || !options.Stream {                                                                                                           \n-               seek.Whence = 0                                                                                                                             \n-               reopen = false                                                                                                                              \n-       }                                                                                                                                                   \n-       stream := options.Stream                                                                                                                            \n-       return tail.TailFile(e.options.LogFilePath, tail.Config{ReOpen: reopen, Follow: stream, Location: &seek, Logger: tail.DiscardingLogger, Poll: true})\n-}                                                                                                                                                          \ndiff --git a/libpod/events/logfile.go b/libpod/events/logfile.go                                                                                            \nindex 3f6d736c9ab5..6c2cfce77f70 100644                                                                                                                     \n--- a/libpod/events/logfile.go                                                                                                                              \n+++ b/libpod/events/logfile.go                                                                                                                              \n@@ -1,3 +1,6 @@                                                                                                                                             \n+//go:build linux                                                                                                                                           \n+// +build linux                                                                                                                                            \n+                                                                                                                                                           \n package events                                                                                                                                             \n                                                                                                                                                            \n import (                                                                                                                                                   \n@@ -11,6 +14,7 @@ import (                                                                                                                                  \n                                                                                                                                                            \n        \"github.com/containers/podman/v4/pkg/util\"                                                                                                          \n        \"github.com/containers/storage/pkg/lockfile\"                                                                                                        \n+       \"github.com/nxadm/tail\"                                                                                                                             \n        \"github.com/pkg/errors\"                                                                                                                             \n        \"github.com/sirupsen/logrus\"                                                                                                                        \n        \"golang.org/x/sys/unix\"                                                                                                                             \n@@ -69,6 +73,17 @@ func (e EventLogFile) writeString(s string) error {                                                                                      \n        return nil                                                                                                                                          \n }                                                                                                                                                          \n                                                                                                                                                            \n+func (e EventLogFile) getTail(options ReadOptions) (*tail.Tail, error) {                                                                                   \n+       reopen := true                                                                                                                                      \n+       seek := tail.SeekInfo{Offset: 0, Whence: os.SEEK_END}                                                                                               \n+       if options.FromStart || !options.Stream {                                                                                                           \n+               seek.Whence = 0                                                                                                                             \n+               reopen = false                                                                                                                              \n+       }                                                                                                                                                   \n+       stream := options.Stream                                                                                                                            \n+       return tail.TailFile(e.options.LogFilePath, tail.Config{ReOpen: reopen, Follow: stream, Location: &seek, Logger: tail.DiscardingLogger, Poll: true})\n+}                                                                                                                                                          \n+                                                                                                                                                           \n // Reads from the log file                                                                                                                                 \n func (e EventLogFile) Read(ctx context.Context, options ReadOptions) error {                                                                               \n        defer close(options.EventChannel)                                                                                                                   \n```"
+        },
+        {
+            "user": "vrothberg",
+            "body": "Remote system tests can be fixed by adding the following line at the beginning of the new test:\n> skip_if_remote \"setting CONTAINERS_CONF logger options does not affect remote client\""
+        },
+        {
+            "user": "nicrowe00",
+            "body": "@vrothberg Thanks, changes have been applied."
+        },
+        {
+            "user": "vrothberg",
+            "body": "@nicrowe00 feel free to mark the PR as ready for review and drop the `WIP -`"
+        },
+        {
+            "user": "rhatdan",
+            "body": "LGTM.  We need to get LogSize into containers.conf and default it to something reasonable, so everyone will have a limited eventlog if they use file driver."
+        },
+        {
+            "user": "vrothberg",
+            "body": "> LGTM. We need to get LogSize into containers.conf and default it to something reasonable, so everyone will have a limited eventlog if they use file driver.\n\nWe already have it in the containers.conf but it defaults to zero.\n\n@containers/podman-maintainers PTanotherL"
+        },
+        {
+            "user": "rhatdan",
+            "body": "/approve\nLets figure out a reasonable default and get this into podman 4.1"
+        },
+        {
+            "user": "openshift-ci[bot]",
+            "body": "[APPROVALNOTIFIER] This PR is **APPROVED**\n\nThis pull-request has been approved by: *<a href=\"https://github.com/containers/podman/pull/13641#\" title=\"Author self-approved\">nicrowe00</a>*, *<a href=\"https://github.com/containers/podman/pull/13641#issuecomment-1096559341\" title=\"Approved\">rhatdan</a>*\n\nThe full list of commands accepted by this bot can be found [here](https://go.k8s.io/bot-commands?repo=containers%2Fpodman).\n\nThe pull request process is described [here](https://git.k8s.io/community/contributors/guide/owners.md#the-code-review-process)\n\n<details >\nNeeds approval from an approver in each of these files:\n\n- ~~[OWNERS](https://github.com/containers/podman/blob/main/OWNERS)~~ [rhatdan]\n\nApprovers can indicate their approval by writing `/approve` in a comment\nApprovers can cancel approval by writing `/approve cancel` in a comment\n</details>\n<!-- META={\"approvers\":[]} -->"
+        },
+        {
+            "user": "vrothberg",
+            "body": "@edsantiago PTanotherL"
+        },
+        {
+            "user": "vrothberg",
+            "body": "I restarted the failing job - was a flake."
+        },
+        {
+            "user": "TomSweeneyRedHat",
+            "body": "LGTM"
+        },
+        {
+            "user": "rhatdan",
+            "body": "/lgtm"
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 13417
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 14184
+        }
+    ]
+}

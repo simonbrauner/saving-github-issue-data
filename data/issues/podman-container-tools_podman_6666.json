@@ -1,0 +1,157 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 6666,
+    "type": "pull_request",
+    "title": "podman: add new cgroup mode split",
+    "state": "closed",
+    "labels": [
+        "lgtm",
+        "approved",
+        "locked - please file new issue/PR"
+    ],
+    "user": "giuseppe",
+    "body": "add a new cgroup mode split.\n\nWhen running under systemd there is no need to create yet another cgroup for the container.\n    \nWith conmon-delegated the current cgroup will be split in two sub cgroups:\n    \n    - supervisor\n    - container\n    \nThe supervisor cgroup will hold conmon and the podman process, while the container cgroup is used by the OCI runtime (using the cgroupfs backend).\n\nCloses: https://github.com/containers/libpod/issues/6400\n\nSigned-off-by: Giuseppe Scrivano <gscrivan@redhat.com>\n",
+    "comments": [
+        {
+            "user": "giuseppe",
+            "body": "@vrothberg PTAL"
+        },
+        {
+            "user": "mheon",
+            "body": "Overall, I like this. I think it does break `podman stats`/`podman top` though, and it probably doesn't need to - we just need to look in the current cgroup instead"
+        },
+        {
+            "user": "goochjj",
+            "body": "Is there a reason why you did cgroups 2 only?  This approach works for cgroups 1:\nhttps://github.com/goochjj/libpod/commit/3d6ec2043b75744a5fec60088c99ba56a51f6479\n\nI'd happily make this coexist if need be.\n\n"
+        },
+        {
+            "user": "goochjj",
+            "body": "For that matter, why is cgroup-parent so draconian? It only allows items to end in .slice.\n\nAnd yet this works:\n\"cgroupsPath\": \"/machine.slice/rwhod.service/container\",\n\nin config.json\n\nContainer cgroups could be implemented with --cgroup-parent /machine.slice/%n/container, if the cgroup-parent check weren't rejecting it.  This commit proves it works.\n\nWould a better implementation be implementing --conmon-cgroup-parent /machine.slice/%n/supervisor?\n\n\n"
+        },
+        {
+            "user": "giuseppe",
+            "body": "> Container cgroups could be implemented with --cgroup-parent /machine.slice/%n/container, if the cgroup-parent check weren't rejecting it. This commit proves it works.\n\nwe could relax them.\n\n> Would a better implementation be implementing --conmon-cgroup-parent /machine.slice/%n/supervisor?\n\nThe current implementation works well also without systemd, i.e. you have a cgroup you own and you want to create both conmon+container cgroup in it."
+        },
+        {
+            "user": "giuseppe",
+            "body": "> Is there a reason why you did cgroups 2 only? This approach works for cgroups 1:\n> [goochjj@3d6ec20](https://github.com/goochjj/libpod/commit/3d6ec2043b75744a5fec60088c99ba56a51f6479)\n> \n> I'd happily make this coexist if need be.\n\njust simplicity.  We can surely add cgroup v1 support.  It must be done for each controller separately, it is not enough to get the cgroup from the pid controller"
+        },
+        {
+            "user": "goochjj",
+            "body": "> > Is there a reason why you did cgroups 2 only? This approach works for cgroups 1:\n> > [goochjj@3d6ec20](https://github.com/goochjj/libpod/commit/3d6ec2043b75744a5fec60088c99ba56a51f6479)\n> > I'd happily make this coexist if need be.\n> \n> just simplicity. We can surely add cgroup v1 support. It must be done for each controller separately, it is not enough to get the cgroup from the pid controller\n\nI read the cgroup from the pid controller, but in the Move call, I move all of them... that should do it, right?\n\nI don't know if pids will always be 3 - I can fix the find if need be.\n\n"
+        },
+        {
+            "user": "giuseppe",
+            "body": "> > \n> \n> I read the cgroup from the pid controller, but in the Move call, I move all of them... that should do it, right?\n> \n> I don't know if pids will always be 3 - I can fix the find if need be.\n\nthere could be different cgroups for each controller, the safest is to read each controller and then do the move as part of the same loop for that controller"
+        },
+        {
+            "user": "goochjj",
+            "body": "> > > \n> > \n> > \n> > I read the cgroup from the pid controller, but in the Move call, I move all of them... that should do it, right?\n> > I don't know if pids will always be 3 - I can fix the find if need be.\n> \n> there could be different cgroups for each controller, the safest is to read each controller and then do the move as part of the same loop for that controller\n\n... except you were using the same call to determine the name of the supervisor cgroup - so I could only return 1\n\nSo should the supervisor cgroup name be based on the pids namespace, and the move do something else?  i.e. just tack \"container\" onto the end?  tack \"container\" onto the end if it's not /?\n\n"
+        },
+        {
+            "user": "goochjj",
+            "body": "@giuseppe \nhttps://github.com/giuseppe/libpod/pull/2\n\nA couple thoughts here:\n1. The cgroup of the container is handled by the OCI runtime, as passed into the bundle.  All conmon-delegated does is ensure that cgroup passed in the spec is \"<unit>/container\", which needs an additional function (GetPidCgroup()) to determine what cgroups we were passed. \n2. The cgroup of the conmon process is already handled in oci_conmon_linux... So the new function to move to a subtree shouldn't be necessary... The strategy also uses a \"cgroupfs\" method for moving the Pids, not a \"lets create a systemd transition unit to do it\" method.  That code already exists in oci_conmon_linux, it just needs the same as above - use of GetPidCgroup to construct the \"<unit>/supervisor\" cgroup path.  And the cgroups package already deals with \"do all the controllers\" logic.\n\n\n"
+        },
+        {
+            "user": "goochjj",
+            "body": "> Overall, I like this. I think it does break `podman stats`/`podman top` though, and it probably doesn't need to - we just need to look in the current cgroup instead\n\nFYI top is working for me - it properly shows the /slice/unit/container cgroup\n\nStats is not.\n"
+        },
+        {
+            "user": "giuseppe",
+            "body": ">     1. The cgroup of the container is handled by the OCI runtime, as passed into the bundle.  All conmon-delegated does is ensure that cgroup passed in the spec is \"/container\", which needs an additional function (GetPidCgroup()) to determine what cgroups we were passed.\n> \n>     2. The cgroup of the conmon process is already handled in oci_conmon_linux... So the new function to move to a subtree shouldn't be necessary... The strategy also uses a \"cgroupfs\" method for moving the Pids, not a \"lets create a systemd transition unit to do it\" method.  That code already exists in oci_conmon_linux, it just needs the same as above - use of GetPidCgroup to construct the \"/supervisor\" cgroup path.  And the cgroups package already deals with \"do all the controllers\" logic.\n\nfor cgroup v2 there cannot be processes in the inner groups.  We need to make sure the conmon process is already in the right sub cgroup before it starts (or have a way to communicate to conmon to move itself).  We need to do such steps before setting up the container, the previous code path cannot be used.\n\n> ... except you were using the same call to determine the name of the supervisor cgroup - so I could only return 1\n\nthere is only one hierarchy in cgroup v2, so that is enough.\n\nIn any case, I think I can just make my PR more generic to handle cgroup v1 too, even if it is not necessary to move the conmon process in a sub cgroup"
+        },
+        {
+            "user": "goochjj",
+            "body": "pr updated w/ podman stats working\n\nI'll be the first to admit, I don't fully understand all the implications, and I don't have a cgv2 machine to test on.  I do know this all works on cgv1, and it looks simpler and reuses code paths that were already present and seem to make sense.\n\nBut I don't see how podman stats is going to work if you never pass the cgroup parent back through the container object...\n\nThanks!"
+        },
+        {
+            "user": "goochjj",
+            "body": "FCOS appears to be running cg1/2 hybrid, and pkg/cgroups doesn't adjust /sys/fs/cgroup/unified.\n\nIs the long term plan to fix pkg/cgroups or deprecate it?\n"
+        },
+        {
+            "user": "goochjj",
+            "body": "I see what you're saying.\n\nUpdated PR, works on cgroups 1, hybrid, and cg2 unified\n"
+        },
+        {
+            "user": "giuseppe",
+            "body": "I will adjust this PR to work on cgroup v1. Hybrid mode is not supported and it will never be, controllers must either be on cgroup v1 or cgroup v2. Fedora 30 mounts hybrid mode but there are no controllers enabled by default on cgroup v2 so it is equivalent to the legacy mode.  There are also a few other things I need to take care of before I can drop the WIP label"
+        },
+        {
+            "user": "giuseppe",
+            "body": "I've adapted it to work on cgroup v1 too.  I've added the missing bits, like support for stats and raising an error when used in remote mode.\n\nThe option is now called `split-current` as it explains better what Podman does"
+        },
+        {
+            "user": "goochjj",
+            "body": "LGTM"
+        },
+        {
+            "user": "goochjj",
+            "body": "@mheon @vrothberg PTAL"
+        },
+        {
+            "user": "mheon",
+            "body": "We want to hold this until Monday - we're in a semi-feature-freeze state for v2.0.0 release, which should happen in a few hours. Will do a full review once that is cut."
+        },
+        {
+            "user": "openshift-ci-robot",
+            "body": "[APPROVALNOTIFIER] This PR is **APPROVED**\n\nThis pull-request has been approved by: *<a href=\"https://github.com/containers/libpod/pull/6666#\" title=\"Author self-approved\">giuseppe</a>*\n\nThe full list of commands accepted by this bot can be found [here](?repo=containers%2Flibpod).\n\nThe pull request process is described [here](https://git.k8s.io/community/contributors/guide/owners.md#the-code-review-process)\n\n<details >\nNeeds approval from an approver in each of these files:\n\n- ~~[OWNERS](https://github.com/containers/libpod/blob/master/OWNERS)~~ [giuseppe]\n\nApprovers can indicate their approval by writing `/approve` in a comment\nApprovers can cancel approval by writing `/approve cancel` in a comment\n</details>\n<!-- META={\"approvers\":[]} -->"
+        },
+        {
+            "user": "mheon",
+            "body": "Can you add the cgroup-parent validation to `validate()` in `libpod/container_validate.go`?"
+        },
+        {
+            "user": "giuseppe",
+            "body": "> Can you add the cgroup-parent validation to `validate()` in `libpod/container_validate.go`?\n\nadded and pushed a new version"
+        },
+        {
+            "user": "giuseppe",
+            "body": "ready for review"
+        },
+        {
+            "user": "mheon",
+            "body": "LGTM"
+        },
+        {
+            "user": "goochjj",
+            "body": "LGTM"
+        },
+        {
+            "user": "mheon",
+            "body": "/lgtm"
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 6400
+        },
+        {
+            "organization": "giuseppe",
+            "repository": "libpod",
+            "number": 2
+        },
+        {
+            "organization": "containers",
+            "repository": "conmon",
+            "number": 176
+        },
+        {
+            "organization": "containers",
+            "repository": "conmon",
+            "number": 184
+        },
+        {
+            "organization": "ceph",
+            "repository": "ceph",
+            "number": 40025
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 14106
+        }
+    ]
+}

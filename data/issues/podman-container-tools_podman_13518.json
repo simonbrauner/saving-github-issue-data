@@ -1,0 +1,105 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 13518,
+    "type": "pull_request",
+    "title": "Binary growth check, part 1 of 2",
+    "state": "closed",
+    "labels": [
+        "lgtm",
+        "approved",
+        "locked - please file new issue/PR"
+    ],
+    "user": "edsantiago",
+    "body": "Add a CI check to prevent unwanted bloat in binary images,\nby building a baseline (pre-PR) binary then comparing file\nsizes post-PR.\n\nWe piggyback onto the existing 'Build Each Commit' CI check\nbecause it gives us an easy way to run 'make' against the\nparent commit.\n\nThis is part 1 of 2: adding the script, not the Makefile rule.\nWe can't add the Makefile rule now because the script it would\ninvoke does not exist in the parent commit.\n\nSigned-off-by: Ed Santiago <santiago@redhat.com>\n",
+    "comments": [
+        {
+            "user": "openshift-ci[bot]",
+            "body": "[APPROVALNOTIFIER] This PR is **APPROVED**\n\nThis pull-request has been approved by: *<a href=\"https://github.com/containers/podman/pull/13518#\" title=\"Author self-approved\">edsantiago</a>*\n\nThe full list of commands accepted by this bot can be found [here](https://go.k8s.io/bot-commands?repo=containers%2Fpodman).\n\nThe pull request process is described [here](https://git.k8s.io/community/contributors/guide/owners.md#the-code-review-process)\n\n<details >\nNeeds approval from an approver in each of these files:\n\n- ~~[OWNERS](https://github.com/containers/podman/blob/main/OWNERS)~~ [edsantiago]\n\nApprovers can indicate their approval by writing `/approve` in a comment\nApprovers can cancel approval by writing `/approve cancel` in a comment\n</details>\n<!-- META={\"approvers\":[]} -->"
+        },
+        {
+            "user": "edsantiago",
+            "body": "In a nutshell: once part 2 merges, this will fail CI if podman or podman-remote or rootlessport grow by more than **100k** (or whatever value is desired).\n\nIf someone has a better idea on where to fit this in (instead of `Build Each Commit`), I'll be glad to hear it. Likewise if I've missed some important concern with the leave-tree-in-funky-state issue.\n\nedit: MAX_BIN_GROWTH=10"
+        },
+        {
+            "user": "baude",
+            "body": "@edsantiago thanks for taking a lead on this!  awesome start."
+        },
+        {
+            "user": "Luap99",
+            "body": "btw to fix the windows cross build test you need to rebase: https://github.com/containers/podman/pull/13514/commits/33aa2f2d1c8476a973d83dfefacbb60a36d8d4b1"
+        },
+        {
+            "user": "edsantiago",
+            "body": "I pushed an experimental version that uses the following logic:\n* Query github for comments on the PR\n* Look for comments made by users with `MEMBER` status, containing the string `MAX_BIN_GROWTH=nnn`.\n\nGood news: it seemed to work, suggesting that we can use the Cirrus token for queries¹.\n\nBad news: the `authorAssociation` query field seems to be unreliable. When I query from my laptop, I get myself and baude listed as `MEMBER`. When querying from this script in CI, or from the [github explorer using my personal login](https://docs.github.com/en/graphql/overview/explorer), we're both `COLLABORATOR`. Therefore this is not a mechanism we can trust.\n\nSemi-good news: it should be possible to query on labels, so we could add a label such as `growingpains` or `bloat_ok` and pass if that label is set. I don't like that as much as explicitly giving a numeric value in the github history, but shrug.\n\nAnyhow, that's it for me today. I'm on PTO tomorrow (Wednesday March 16).\n\n [1] although it's possible that the query succeeded _despite_ the token, not because of it; i.e., github treated it as an anonymous query. It might be possible to look into this further by logging the http headers, but that's an exercise for later."
+        },
+        {
+            "user": "edsantiago",
+            "body": "The comment-based approach is impossible: `authorAssociation` is broken in github, completely nondeterministic. Proof:\n* [log 1, from last week](https://api.cirrus-ci.com/v1/task/6452326536839168/logs/main.log) shows baude as COLLABORATOR, Luap99 as MEMBER\n*  [log 2, from today](https://api.cirrus-ci.com/v1/task/4643962056081408/logs/main.log) shows the opposite.\n\nUnless/until that is fixed, the only approach seems to be checking for a label. Let's decide on one, please:\n* `bloat_ok`\n* `bloat_approved`\n* `growingpains`\n* `size100k` (possibly with a supplemental `size500k` label and check, to add an extra check on super-duper-huge PRs)\n\n@containers/podman-maintainers please add suggestions as desired, then agree on one (or two, if the 100/500k one)."
+        },
+        {
+            "user": "vrothberg",
+            "body": "> bloat_approved\n\nSounds good to me :+1: "
+        },
+        {
+            "user": "baude",
+            "body": "bloat approved sgtm, and I'm at 50k for size"
+        },
+        {
+            "user": "edsantiago",
+            "body": "`bloat_approved` going once, going twice...\n\n...but sizewise, I'm still nervous about a one-size-fits-all. A single tag can be used to allow any amount of growth, whether 50k or 5M. Any ideas on how to make this safer?"
+        },
+        {
+            "user": "baude",
+            "body": "@edsantiago lets see how 50k goes.  it is binary size, so that is quite a bit?"
+        },
+        {
+            "user": "edsantiago",
+            "body": "Because we're talking about timings:\n\n| type | distro       | user     |    local |   remote | container |\n| ---- | --------     | ----     |    ----: |   -----: | --------: |\n| int  | fedora-35    | root     |    37:13 |    52:36 |     33:14 |\n| int  | ubuntu-2110  | root     |    30:22 |    35:15 |\n| int  | fedora-35    | rootless |    37:54 |          |\n| int  | ubuntu-2110  | rootless |    34:35 |          |\n| sys  | fedora-35    | root     |    27:26 |    18:07 |\n| sys  | ubuntu-2110  | root     |    25:30 |    14:28 |\n| sys  | fedora-35    | rootless |    26:23 |    29:01 |\n| sys  | ubuntu-2110  | rootless |    24:40 |          |\n| bud  | fedora-35    | root     |    21:07 |    20:28 |"
+        },
+        {
+            "user": "cevich",
+            "body": "Maybe I'm reading it wrong, but it looks like this will only check if the size grows unacceptably WITHIN the context of a PR.  I think instead you want the baseline to be one (merged) commit higher.  Probably `$CIRRUS_LAST_GREEN_CHANGE` would be a good starting place. ***Note:*** Running this check in CI (with that variable) for a new tag will likely fail - so task needs `skip: $CIRRUS_TAG != ''`).  Could also use `$CIRRUS_BASE_SHA`, but that will only work on PRs.\n\nRef: https://cirrus-ci.org/guide/writing-tasks/#environment-variables"
+        },
+        {
+            "user": "cevich",
+            "body": "Non-blocking: I think perhaps a simpler (and therefore more reliable & easy to maintain) strategy for this check is to just [download the latest binary](https://github.com/containers/podman/pull/13559), and compare the size vs `bin/whatever` in a dedicated (new) cirrus-CI task.  No compilation is needed, that's already done for you in the `Build for XYZ` tasks and restored in later tasks by `gopath_cache`.  This way also preserves a \"separation-of-concerns\" WRT the build-each-commit task - intended to confirm commit-order sanity and therefore `revert` capability.  Conflating two separate goals in that task may lead to unintended consequences later on (IMHO)."
+        },
+        {
+            "user": "cevich",
+            "body": "> if I've missed some important concern with the leave-tree-in-funky-state issue.\n\nThis is fine...but does beg the question: Should it be in the `Makefile` at all then?  Maybe just do the whole thing from `runner.sh` to keep developers from accidentally doing something only-ever intended for CI."
+        },
+        {
+            "user": "edsantiago",
+            "body": "Good idea, and it's easy. I will do so in part 2."
+        },
+        {
+            "user": "edsantiago",
+            "body": "UPDATE: \"good idea\" refers to doing this in runner.sh. I am not going to do the download-binaries thing for many many reasons, most important of which is, that does not do what we desire (check the growth within a PR). Using prebuilt binaries would check against completely arbitrary, random image sizes. (Reason: prebuilt binaries bear no relation whatsoever to a given PR)"
+        },
+        {
+            "user": "baude",
+            "body": "/lgtm"
+        },
+        {
+            "user": "cevich",
+            "body": "Fair enough.  My concern for **only** checking the size within a PR (and therefore the suggestion for using `$CIRRUS_LAST_GREEN_CHANGE` or `$CIRRUS_BASE_SHA` as a base) is this scenario:\n\n1. First commit in a PR grows binary by 500MB\n2. Check confirms binary hasn't grown (500 == 500).\n3. PR is merged, and binary grows by 500MB\n\nSame concern applies in the context of CI running on a tag, where there isn't anything to rebase, HEAD is disjointed from any branch or other commits.  Though I could easily be not understanding how `make build-all-new-commits GIT_BASE_BRANCH=origin/$DEST_BRANCH` works.  I still think the task or script does need to be bypassed when `$CIRRUS_TAG` is non-empty."
+        },
+        {
+            "user": "edsantiago",
+            "body": ">First commit in a PR grows binary by 500MB\n\nThis tells me that I haven't explained myself well enough. I will try to do better in part 2."
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 13602
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 13679
+        }
+    ]
+}

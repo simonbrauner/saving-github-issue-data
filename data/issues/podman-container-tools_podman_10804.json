@@ -1,0 +1,124 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 10804,
+    "type": "pull_request",
+    "title": "Implement --archive flag for podman cp",
+    "state": "closed",
+    "labels": [
+        "lgtm",
+        "approved",
+        "locked - please file new issue/PR"
+    ],
+    "user": "matejvasek",
+    "body": "Implement --archive flag for `podman cp`\n\nThis PR implements for direction when a container is a destination, not a source.\n\nresolves #10801\n\nSigned-off-by: Matej Vasek <mvasek@redhat.com>",
+    "comments": [
+        {
+            "user": "rhatdan",
+            "body": "You should also add the other `follow-link` option\n\n  -L, --follow-link   Always follow symbol link in SRC_PATH\n\nI am not sure what it does, but we need to have it implemented."
+        },
+        {
+            "user": "matejvasek",
+            "body": "> You should also add the other `follow-link` option\n> \n> -L, --follow-link Always follow symbol link in SRC_PATH\n> \n> I am not sure what it does, but we need to have it implemented.\n\nI would prefer this to be done in another PR."
+        },
+        {
+            "user": "vrothberg",
+            "body": "> > You should also add the other `follow-link` option\n> > -L, --follow-link Always follow symbol link in SRC_PATH\n> > I am not sure what it does, but we need to have it implemented.\n> \n> I would prefer this to be done in another PR.\n\nYes, this should be another PR."
+        },
+        {
+            "user": "matejvasek",
+            "body": ">I just realized it's a breaking change to the bindings.\n\n@vrothberg \nThere should be some compatibility:\nUser can use old `podman-remote` or an application compiled with old `Binding` lib it should work against new server."
+        },
+        {
+            "user": "vrothberg",
+            "body": "> > I just realized it's a breaking change to the bindings.\n> \n> @vrothberg\n> There should be some compatibility:\n> User can use old `podman-remote` or an application compiled with old `Binding` lib it should work against new server.\n\nVery fair point. Seems like we'd break one way or another :(\n\n@baude @rhatdan WDYT?"
+        },
+        {
+            "user": "matejvasek",
+            "body": "> Very fair point. Seems like we'd break one way or another :(\n\nToo bad that Go doesn't have function overloading :disappointed: "
+        },
+        {
+            "user": "vrothberg",
+            "body": "> > Very fair point. Seems like we'd break one way or another :(\n> \n> Too bad that Go doesn't have function overloading disappointed\n\nAn alternative solution would be to add a new function to the bindings which supports the new option.  Add a clear comment that this will be removed with 4.0 and should not be used by any outside user.  It's a trick but sounds like a good compromise at the moment.  We can move on with the work and existing (bindings) users won't suddenly break."
+        },
+        {
+            "user": "matejvasek",
+            "body": ">An alternative solution would be to add a new function to the bindings which supports the new option. Add a clear comment that this will be removed with 4.0 and should not be used by any outside user. It's a trick but sounds like a good compromise at the moment. We can move on with the work and existing (bindings) users won't suddenly break.\n\n>@vrothberg \nor abuse variadic args:\n`func CopyFromArchive(ctx context.Context, nameOrID string, path string, reader io.Reader, options ...*CopyOptions) (entities.ContainerCopyFunc, error)`  making the option argument optional\njust kidding :laughing: \nI'll do as you proposed.\n\nMore sane alternative might be `options pattern` (although it's not used in rest of the API which would be little bit inconsistent):\n\n```diff\ndiff --git a/pkg/bindings/containers/archive.go b/pkg/bindings/containers/archive.go\nindex 723873c80..2c7924b2c 100644\n--- a/pkg/bindings/containers/archive.go\n+++ b/pkg/bindings/containers/archive.go\n@@ -49,7 +49,37 @@ func Stat(ctx context.Context, nameOrID string, path string) (*entities.Containe\n \treturn statReport, finalErr\n }\n \n-func CopyFromArchive(ctx context.Context, nameOrID string, path string, reader io.Reader, options *CopyOptions) (entities.ContainerCopyFunc, error) {\n+type CopyOption interface {\n+\tCopyWith(*CopyOptions)\n+}\n+\n+type copyWithFn func(options *CopyOptions)\n+\n+func (f copyWithFn) CopyWith(options *CopyOptions) {\n+\tf(options)\n+}\n+\n+func WithChown(chown bool) CopyOption {\n+\treturn copyWithFn(func(options *CopyOptions) {\n+\t\toptions.WithChown(chown)\n+\t})\n+}\n+\n+func CopyFromArchive(ctx context.Context, nameOrID string, path string, reader io.Reader, options ...CopyOption) (entities.ContainerCopyFunc, error) {\n+\tvar opts *CopyOptions\n+\n+\tif len(options) > 0 {\n+\t\topts = new(CopyOptions)\n+\t\tfor _, copyOption := range options {\n+\t\t\tcopyOption.CopyWith(opts)\n+\t\t}\n+\t}\n+\n+\treturn CopyFromArchiveWithOptions(ctx, nameOrID, path, reader, opts)\n+}\n+\n+func CopyFromArchiveWithOptions(ctx context.Context, nameOrID string, path string, reader io.Reader, options *CopyOptions) (entities.ContainerCopyFunc, error) {\n+\n \tconn, err := bindings.GetClient(ctx)\n \tif err != nil {\n \t\treturn nil, err\ndiff --git a/pkg/domain/infra/tunnel/containers.go b/pkg/domain/infra/tunnel/containers.go\nindex 7ca93c331..1ca504be8 100644\n--- a/pkg/domain/infra/tunnel/containers.go\n+++ b/pkg/domain/infra/tunnel/containers.go\n@@ -828,7 +828,7 @@ func (ic *ContainerEngine) ContainerPort(ctx context.Context, nameOrID string, o\n }\n \n func (ic *ContainerEngine) ContainerCopyFromArchive(ctx context.Context, nameOrID, path string, reader io.Reader, options entities.CopyOptions) (entities.ContainerCopyFunc, error) {\n-\treturn containers.CopyFromArchive(ic.ClientCtx, nameOrID, path, reader, new(containers.CopyOptions).WithChown(options.Chown))\n+\treturn containers.CopyFromArchive(ic.ClientCtx, nameOrID, path, reader, containers.WithChown(options.Chown))\n }\n \n func (ic *ContainerEngine) ContainerCopyToArchive(ctx context.Context, nameOrID string, path string, writer io.Writer) (entities.ContainerCopyFunc, error) {\n ```\nWDYT @rhatdan @baude @vrothberg \n"
+        },
+        {
+            "user": "matejvasek",
+            "body": ">More sane alternative might be options pattern\n\nalso I think such an API is more convenient to use.\nI based it on: https://pkg.go.dev/github.com/manifestival/manifestival?utm_source=godoc#Manifest.Apply"
+        },
+        {
+            "user": "vrothberg",
+            "body": "> More sane alternative might be options pattern (although it's not used in rest of the API which would be little bit inconsistent):\n\nThat would be a breaking change we want to avoid.  Adding a second function, e.g., `CopyFromArchiveWithOptions` with a comment that clearly indicates that this function will be removed with Podman 4.0 would work."
+        },
+        {
+            "user": "matejvasek",
+            "body": ">That would be a breaking change we want to avoid.\n\n@vrothberg \nWould it be? \n`func CopyFromArchive(ctx context.Context, nameOrID string, path string, reader io.Reader, options ...CopyOption) (entities.ContainerCopyFunc, error)`\n\nThe options are there via variadic args meaning that they are entirely optional so the function is still callable old way, not breaking existing code. Or Am I wrong?"
+        },
+        {
+            "user": "matejvasek",
+            "body": "I think I should be OK if pkg is distributed as source code. "
+        },
+        {
+            "user": "vrothberg",
+            "body": "> I think I should be OK if pkg is distributed as source code.\n\nThat would work as well. Nice idea. Please make sure to drop a `// FIXME: drop variadic args with Podman 4.0`` in the code."
+        },
+        {
+            "user": "matejvasek",
+            "body": "@vrothberg @rhatdan PTAL"
+        },
+        {
+            "user": "matejvasek",
+            "body": ">That would work as well. Nice idea. Please make sure to drop a `// FIXME: drop variadic args with Podman 4.0`` in the code.\n\nI thought we would keep the variadic. If they are to be deleted then I rather do original suggestion."
+        },
+        {
+            "user": "vrothberg",
+            "body": "> > That would work as well. Nice idea. Please make sure to drop a `// FIXME: drop variadic args with Podman 4.0`` in the code.\n> \n> I thought we would keep the variadic. \n\nYes, for consistency with other bindings.\n\n> If they are to be deleted then I rather do original suggestion.\n\nOK, sounds good to me. Thank you!"
+        },
+        {
+            "user": "openshift-ci[bot]",
+            "body": "[APPROVALNOTIFIER] This PR is **APPROVED**\n\nThis pull-request has been approved by: *<a href=\"https://github.com/containers/podman/pull/10804#\" title=\"Author self-approved\">matejvasek</a>*, *<a href=\"https://github.com/containers/podman/pull/10804#pullrequestreview-694842737\" title=\"Approved\">rhatdan</a>*\n\nThe full list of commands accepted by this bot can be found [here](https://go.k8s.io/bot-commands?repo=containers%2Fpodman).\n\nThe pull request process is described [here](https://git.k8s.io/community/contributors/guide/owners.md#the-code-review-process)\n\n<details >\nNeeds approval from an approver in each of these files:\n\n- ~~[OWNERS](https://github.com/containers/podman/blob/main/OWNERS)~~ [rhatdan]\n\nApprovers can indicate their approval by writing `/approve` in a comment\nApprovers can cancel approval by writing `/approve cancel` in a comment\n</details>\n<!-- META={\"approvers\":[]} -->"
+        },
+        {
+            "user": "rhatdan",
+            "body": "/lgtm\n@matejvasek Could you open a PR with containers/common to add --archive as a option, so users who want the Docker defaults can change the way podman works."
+        },
+        {
+            "user": "rhatdan",
+            "body": "BTW @matejvasek nice work and thanks."
+        },
+        {
+            "user": "matejvasek",
+            "body": "> @matejvasek Could you open a PR with containers/common to add --archive as a option, so users who want the Docker defaults can change the way podman works.\n\nto containers/common? where?"
+        },
+        {
+            "user": "rhatdan",
+            "body": "Yes https://github.com/containers/common/tree/main/pkg/config"
+        },
+        {
+            "user": "vrothberg",
+            "body": "To add a new field to containers.conf which, if set, would overwrite the default value of `--archive`.\n\nI think it should go under the \"[engine]\" table.  Naming is always the hardest ... \"chown_copied_files\"? "
+        },
+        {
+            "user": "rhatdan",
+            "body": "Yes this one will need a good description."
+        },
+        {
+            "user": "ocafebabe",
+            "body": "@matejvasek are there still plans to implement \"follow-link\" (-L) like docker?"
+        },
+        {
+            "user": "matejvasek",
+            "body": "@ocafebabe I haven't seen need for it so far (for my use), but feel free to submit PR."
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "buildpacks",
+            "repository": "pack",
+            "number": 1395
+        }
+    ]
+}

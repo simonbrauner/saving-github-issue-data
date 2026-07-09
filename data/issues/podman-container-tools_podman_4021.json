@@ -1,0 +1,119 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 4021,
+    "type": "issue",
+    "title": "Suspected podman-remote container-removal completion race in integration tests.",
+    "state": "closed",
+    "labels": [
+        "kind/bug",
+        "stale-issue",
+        "locked - please file new issue/PR"
+    ],
+    "user": "cevich",
+    "body": "/kind bug\n\n**Description**\n\nA number integration tests expect the presence or absence of containers after a `podman-remote` command returns an exit code.  However, because removal can occur asynchronously to exit, it's possible for these tests to race with removal completion.  Depending on the test, this can either result in a flake, or a false-positive result - i.e. a test sees an expected container, which is removed _after_ the presence-check.\n\n**Steps to reproduce the issue:**\n\n     (example code-path)\n\n1. `podman failed to start with --rm should delete the container (test/e2e/start_test.go)` - `Expect(start.ExitCode()).To(Not(Equal(0)))` is successful but remote container is ***not*** yet removed.\n\n2. Test calls `numContainers := podmanTest.NumberOfContainers()` in `test/utils/utils.go`\n\n3. `ps := p.PodmanBase([]string{\"ps\", \"-aq\"}, true, false)` finds the not-yet removed container and counts it.\n\n4. The container is removed\n\n5. The test fails in `Expect(numContainers).To(BeZero())`\n\n     (negative example code-path)\n\n1. `podman failed to start without --rm should NOT delete the container` - `Expect(start.ExitCode()).To(Not(Equal(0)))` is successful.\n\n2. Test calls `numContainers := podmanTest.NumberOfContainers()` in `test/utils/utils.go`\n\n3. `ps := p.PodmanBase([]string{\"ps\", \"-aq\"}, true, false)` finds the container and counts it.\n\n4. The container is removed because of some other future bug.\n\n5. The test incorrectly passes because `Expect(numContainers).To(Equal(1))` is true, despite container actually being removed.",
+    "comments": [
+        {
+            "user": "cevich",
+            "body": "@mheon @baude (repeated question from #3934)\n\nIs there a way to detect whether or not the removal process has completed or not for a given container ID (like some file that should not exist or something like that)? This would be the ideal solution in both (positive and negative) test scenarios, to prevent racing on an existence-check. For example, test/utils/utils.go could delay until completion before calling ps := p.PodmanBase([]string{\"ps\", \"-aq\"}, true, false)."
+        },
+        {
+            "user": "rhatdan",
+            "body": "Removal is supposed to clean everything up."
+        },
+        {
+            "user": "mheon",
+            "body": "The problem may be that removal is only on the backend, and we may not guarantee that the frontend doesn't exit first"
+        },
+        {
+            "user": "rhatdan",
+            "body": "The backend will not respond to the front-end until the container is removed."
+        },
+        {
+            "user": "cevich",
+            "body": "> The backend will not respond to the front-end until the container is removed.\n\nThen either we're missing something, that statement is incorrect, or I'm misinterpreting https://cirrus-ci.com/task/5760809608675328?command=integration_test#L6994 based on 82ac0d8\n\nTo be clear: The podman ps output shows the container ID that was suppose to be removed, and the wait-for-exit thingie had already returned the non-zero exit expected by the test code."
+        },
+        {
+            "user": "cevich",
+            "body": "here, let me paste a link to the code where that result came from..."
+        },
+        {
+            "user": "cevich",
+            "body": "...here: https://github.com/containers/libpod/blob/master/test/e2e/start_test.go#L103-L114"
+        },
+        {
+            "user": "cevich",
+            "body": "note: My assumption this is true is because we do ***not*** see a failure coming from `Expect(start.ExitCode()).To(Not(Equal(0)))`, rather it comes from `Expect(numContainers).To(BeZero())` - which should not be possible."
+        },
+        {
+            "user": "cevich",
+            "body": "> cevich: Do you have a reproducer for https://github.com/containers/libpod/issues/4021 ?  I may have a solution, at least I haven't broken anything :)\n\n@jhonce Reproducer is:  Run our automation a billion times and check each run for it to break :cry: \n\nWhat's your thinking?"
+        },
+        {
+            "user": "cevich",
+            "body": "Somehow this (or something else, producing identical symptoms) has reproduced with rootless-remote podman:  https://cirrus-ci.com/task/6286729083879424 on F30\n\n```\n[+0668s] [It] podman failed to start with --rm should delete the container\n[+0668s]   /var/tmp/go/src/github.com/containers/libpod/test/e2e/start_test.go:104\n[+0668s] Running: (env: [PODMAN_VARLINK_ADDRESS=unix:/run/user/1310/io.podman-86d10ff42fd6d2e2455f7229538579792c47b41b7527442a4d7a3f4dbd88c521]) /var/tmp/go/src/github.com/containers/libpod/bin/podman-remote create -it --rm docker.io/library/alpine:latest foo\n[+0668s] 186ddd4ae36c7edfe7dbeff8ce5c5c31fbf15981f5446ac652166c1560a1672d\n[+0668s] output: 186ddd4ae36c7edfe7dbeff8ce5c5c31fbf15981f5446ac652166c1560a1672d\n[+0668s] Running: (env: [PODMAN_VARLINK_ADDRESS=unix:/run/user/1310/io.podman-86d10ff42fd6d2e2455f7229538579792c47b41b7527442a4d7a3f4dbd88c521]) /var/tmp/go/src/github.com/containers/libpod/bin/podman-remote start -l\n[+0668s] Error: time=\"2019-10-01T06:20:44-04:00\" level=error msg=\"container_linux.go:346: starting container process caused \\\"exec: \\\\\\\"foo\\\\\\\": executable file not found in $PATH\\\"\\n\"\n[+0668s] container_linux.go:346: starting container process caused \"exec: \\\"foo\\\": executable file not found in $PATH\": OCI runtime command not found error\n[+0668s] output: \n[+0668s] Running: (env: [PODMAN_VARLINK_ADDRESS=unix:/run/user/1310/io.podman-86d10ff42fd6d2e2455f7229538579792c47b41b7527442a4d7a3f4dbd88c521]) /var/tmp/go/src/github.com/containers/libpod/bin/podman-remote ps -aq\n[+0668s] 186ddd4ae36c\n[+0668s] output: 186ddd4ae36c\n[+0758s] [AfterEach] Podman start\n[+0758s]   /var/tmp/go/src/github.com/containers/libpod/test/e2e/start_test.go:29\n[+0758s] Running: (env: [PODMAN_VARLINK_ADDRESS=unix:/run/user/1310/io.podman-86d10ff42fd6d2e2455f7229538579792c47b41b7527442a4d7a3f4dbd88c521]) /var/tmp/go/src/github.com/containers/libpod/bin/podman-remote stop -a --timeout 0\n[+0758s] Running: (env: [PODMAN_VARLINK_ADDRESS=unix:/run/user/1310/io.podman-86d10ff42fd6d2e2455f7229538579792c47b41b7527442a4d7a3f4dbd88c521]) /var/tmp/go/src/github.com/containers/libpod/bin/podman-remote pod stop -a -t 0\n[+0758s] output: \n[+0758s] Running: (env: [PODMAN_VARLINK_ADDRESS=unix:/run/user/1310/io.podman-86d10ff42fd6d2e2455f7229538579792c47b41b7527442a4d7a3f4dbd88c521]) /var/tmp/go/src/github.com/containers/libpod/bin/podman-remote pod rm -fa\n[+0758s] output: \n[+0758s] Running: (env: [PODMAN_VARLINK_ADDRESS=unix:/run/user/1310/io.podman-86d10ff42fd6d2e2455f7229538579792c47b41b7527442a4d7a3f4dbd88c521]) /var/tmp/go/src/github.com/containers/libpod/bin/podman-remote rm -fa\n[+0758s] running: pgrep 28414\n[+0758s] \n[+0758s] • Failure [94.043 seconds]\n[+0758s] Podman start\n[+0758s] /var/tmp/go/src/github.com/containers/libpod/test/e2e/start_test.go:12\n[+0758s]   podman failed to start with --rm should delete the container [It]\n[+0758s]   /var/tmp/go/src/github.com/containers/libpod/test/e2e/start_test.go:104\n[+0758s] \n[+0758s]   Timed out after 90.000s.\n[+0758s]   Expected\n[+0758s]       <int>: 1\n[+0758s]   to be zero-valued\n[+0758s] \n[+0758s]   /var/tmp/go/src/github.com/containers/libpod/test/e2e/start_test.go:113\n```\n\nTo be clear, the test should ***not*** be failing because of:\n```\n[+0668s] Running: (env: [PODMAN_VARLINK_ADDRESS=unix:/run/user/1310/io.podman-86d10ff42fd6d2e2455f7229538579792c47b41b7527442a4d7a3f4dbd88c521]) /var/tmp/go/src/github.com/containers/libpod/bin/podman-remote ps -aq\n[+0668s] 186ddd4ae36c\n[+0668s] output: 186ddd4ae36c\n```\n\nI'm thinking it's inevitable this can happen on the remote-end, and the test should only fail if eventually the ps does not return '0' containers within some timeout.  In other words, treat this as a testing sensitivity problem rather than a podman-remote problem."
+        },
+        {
+            "user": "jwhonce",
+            "body": "@cevich If this screen snap is after https://github.com/containers/libpod/pull/4121 merged then that failure is testing for the container count to be zero. As you can see it waited 90s for the container to be removed. The actual \"start\" command is tested for >0 not ==0 is how I'm determining which test is failing."
+        },
+        {
+            "user": "cevich",
+            "body": "@jwhonce ya that was after 4121 merged :cry: it's failing on line 113, the start failure is expected.  Failing the `eventually()` on 113 means even after 90-seconds the container was still there...wait a sec, I only see one line of output from 'ps -a' (the container id is correct).  Shouldn't there be 90-seconds / polling interval, worth of output lines?"
+        },
+        {
+            "user": "cevich",
+            "body": "Hmmm, default polling interval is 10ms maybe that's a bit fast and something is hanging (remember, this is `podman-remote`)."
+        },
+        {
+            "user": "cevich",
+            "body": "Dangumit!  I'm still able to reproduce this, even in my polling-interval PR:  https://cirrus-ci.com/task/5631043243081728"
+        },
+        {
+            "user": "cevich",
+            "body": "```\n...cut...\n[+1672s]   Timed out after 90.000s.\n[+1672s]   Expected\n[+1672s]       <int>: 1\n[+1672s]   to be zero-valued\n[+1672s] \n[+1672s]   /var/tmp/go/src/github.com/containers/libpod/test/e2e/start_test.go:113\n...cut...\n```\n\n@jwhonce what the heck is going on here that I'm not seeing?"
+        },
+        {
+            "user": "jwhonce",
+            "body": "@cevich With your change the timeout is still 90s, you just test less often which should save on resources. :)  You could try  `Eventually(podmanTest.NumberOfContainers(), 180, 3).Should(BeZero())` That would double the wait time and test less often.\n"
+        },
+        {
+            "user": "cevich",
+            "body": "@jwhonce oh I abandoned that change, it didn't make a difference.  _Somehow_ the problem still reproduces, on my PR and I saw it on master last week too :confused: \n\nOne interesting thing to note is, shouldn't `Eventually(podmanTest.NumberOfContainers()...)...` run the `podman-remote ps -a` command multiple times?  I only see in running once (in the test output) based on the number of 'output: ' lines in the log.  Clue?"
+        },
+        {
+            "user": "cevich",
+            "body": "Caught [this happening on master recently](https://cirrus-ci.com/task/5561482120527872?command=integration_test#L8310) (so it hasn't accidentally been fixed recently)"
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "This issue had no activity for 30 days. In the absence of activity or the \"do-not-close\" label, the issue will be automatically closed within 7 days."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@cevich Do you think this is still an issue?"
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 3934
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 4110
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 4121
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 4181
+        }
+    ]
+}

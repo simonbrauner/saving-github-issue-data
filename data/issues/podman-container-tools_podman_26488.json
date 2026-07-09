@@ -1,0 +1,93 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 26488,
+    "type": "issue",
+    "title": "Idea: Load secrets from external providers",
+    "state": "open",
+    "labels": [
+        "kind/feature",
+        "triaged"
+    ],
+    "user": "nachtjasmin",
+    "body": "### Feature request description\n\nPodman should be able to offload the loading of secrets to external providers on-demand, without relying on the mapping of ID to the name. This would allow secret integrations to lookup secrets by their name instead of being created with Podman first.\n\n(Maybe off-topic: This seems to have an overlap with the `credHelper` feature for pulling images. There seems to be room for a unified interface here.)\n\nFor example, an integration that loads secrets from [systemd credentials](https://systemd.io/CREDENTIALS/) could be used in a Quadlet file like this:\n\n```ini\n[Container]\nImage=docker.io/alpine\nSecret=woof,provider=systemd\n\n[Secret]\nLoadEncryptedCredential=woof\n```\n\n### Suggest potential solution\n\nSecret providers should be able to look up a secret via the key, not just via its ID. Also, it should be possible to add arbitrary options when referencing those secrets in `podman run` or `Secret=` directives.\n\nOpen questions:\n\n- Should we limit such providers to the lookup operation? I think it'd be unexpected if they appear in `podman secret ls` and could be removed from there. This could circumvent the security measurements of providers. However, as a counterargument, such operations could simply return an `ErrUnsupported` or something similar if it really shouldn't be done by users.\n\n### Have you considered any alternatives?\n\n1. The Podman secrets can be replaced at any time. It's therefore possible to fetch a remote store and load the secrets into Podman again. Can be done periodically via a timer or as a `Wants=` and `After=` systemd unit.\n  * Administrators would have to keep track of used secrets so that they're fetched regularly.\n  * If done wrong, the secrets would be persisted on disk and not in a *ramfs*. It also could have the wrong permissions, leading to further exposure of the secrets.\n2. In the case of systemd, the secret is already provided as a mount. We can mount it again inside the container. I haven't verified it, but I think it'll be persisted to the disk if someone would execute `podman commit`, so it actually has downsides to podman's own secrets.\n\n\n### Additional context\n\nExternal integrations for secret stores are already possible via the `shell` provider.\nHowever, it has the limitation that it cannot do anything useful with the secret ID, as the secret is only resolvable via the name (in the case of systemd).\n\nI realised this pretty quickly after [hacking a systemddriver secret driver implementation together](https://github.com/nachtjasmin/containers-common/commit/02fc37ef8b1a09abc967bb0c8fa103824966e92d).\n\nIn the case above, it is systemd. However, a more dynamic approach to secrets could also solve the integration of other external secret stores like HashiCorp Vault. The command `vault read my/secret`, could be integrated somehow via an external provider and be used like the Quadlet definition below:\n\n```ini\n[Container]\nImage=docker.io/alpine\nSecret=woof,provider=vault,name=my/secret\nExec=cat /run/secrets/woof\n```",
+    "comments": [
+        {
+            "user": "ygalblum",
+            "body": "In your example, you add the provider to the `Secret` key in the `.container` files, but, this key, which translates to the `--secret` argument, does not create secrets, it only consumes them. So, the secret needs to first be created. This also links to your comment about the `shell` provider. `--provider` is a `podman secret create` argument.\n\nSo, in order to support this request, support for new providers needs to be added to `podman secret create`. This will probably require separate code per provider.\n\nOnce the secret exists, the Quadlet `.container` unit will not need to change as it will point to the existing secret. There is an feature request to support a `.secret` unit: https://github.com/containers/podman/issues/26462. So, users will not need to create the secret manually."
+        },
+        {
+            "user": "Luap99",
+            "body": "@ygalblum I think the proposal here is to skip the entire podman secret create process to simplify things. The ideal goal here would be that podman run --secret just looks up the secret directly and mounts that and not copy the secret in the local (unencrypted) file driver which podman secret create does.\n\nThis here likely needs a larger design discussion if we would want to do that. cc @baude @mheon "
+        },
+        {
+            "user": "nachtjasmin",
+            "body": "@Luap99 That's exactly the idea, thanks a lot for clarifying it. 😊 "
+        },
+        {
+            "user": "PhrozenByte",
+            "body": "> This here likely needs a larger design discussion if we would want to do that.\n\nI like the idea of ​​supporting \"secret providers\" (the [`org.freedesktop.secrets`](https://www.freedesktop.org/wiki/Specifications/secret-storage-spec/) API (like GNOME Keyring and KDE Wallet, but also password managers like KeePassXC) immediately came to mind), even though I personally probably wouldn't use it. However, given the necessary design discussion on simplifying the Podman API, it would be desirable if this simplification weren't limited to secret providers, but also supported anything that `secret create` supports. `secret` is currently designed to share secrets between multiple containers, but I've never personally done that. I always create secrets per container, usually by adding a prefix that identifies the container.\n\nSo, instead of\n\n```\npodman secret create my-container_my-secret ~/my-container/my-secret.txt\npodman run --name my-container … --secret my-container_my-secret,target=my-secret,mode=0400 …\n```\n\nPodman could support \"anonymous secrets\" (similar to anonymous volumes) with the following (i.e. adding the `driver`, `driver_opts`, `file`, and `env` (not as bool, but as alternative to `file`) options from `secret create` to `run --secret`):\n\n```\npodman run --name my-container … --secret my-secret,file=~/my-container/my-secret.txt,mode=0400 …\n```\n\n\"Secret providers\" could then hook into Podman as new custom `driver`, also supporting custom `driver_opts`. I imagine this to work similar to `secret create --driver=shell`.\n\nI'm not so sure about whether Podman should add a `[Secret]` section to Quadlet `.container` units though (which could use the same syntax as #26462, just as anonymous secret and implying a `Secret=` directive within the `[Container]` section), or stay with the \"Value of `Secret=` matches the `--secret` option\" principle (I tend towards the latter)."
+        },
+        {
+            "user": "p5",
+            "body": "I think this would solve a _huge_ stumbling block around running Podman containers in Bootc.\nWe don't want to store secrets in OCI images (for obvious reasons), so storing references to external secrets in Quadlets sounds like a pretty good idea!\n\nOther solutions involve generating secrets in Pre hooks, or scripting the secret fetching / creation process in systemd units, which are suboptimal.\n\nI'd be especially interested in a Vault/OpenBao and AWS SSM/Secrets Manager integration!"
+        },
+        {
+            "user": "nachtjasmin",
+            "body": "Although it's not in conflict with the original proposal, I just realized that the [SecretsDriver](https://github.com/containers/common/blob/main/pkg/secrets/secrets.go#L99) and the [ConfigMapsDriver](https://github.com/containers/common/blob/main/pkg/configmaps/configmaps.go#L89) are fundamentally the same. If this feature gets implemented, I think it could be done for both ConfigMaps and Secrets together, even though I don't see a potential for config maps that cannot be solved with anonymous volumes so far.\n\nNonetheless: Assuming one (maybe even me ^^) wants to contribute this feature, I assume it should be done in `containers/common`. How's the overall approach in that regard? It's presumably a bigger feature and there are already some ideas in this issue. Is there a process similar to [Kubernetes Enhancement Proposals (KEPs)](https://www.kubernetes.dev/resources/keps/) or are potential API and feature discussions just done \"on the fly\" within this issue or a PR?\n\nI'm primarily asking for myself to avoid potential conflicts like \"we closed your PR, please create a proposal first\" upfront. 😅 "
+        },
+        {
+            "user": "Luap99",
+            "body": "We don't have any formal process, in general the discussion should happen on this issue here. Nobody would stop you from opening a PR but it is best to get some agreement from us that this is the right thing to do and if so then how should it look like.\n\nAnother possibility is to join our public cabal meeting for design discussions as most maintainer will attend them, anyone can suggest or add a topic there: https://podman.io/community https://hackmd.io/gQCfskDuRLm7iOsWgH2yrg"
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "scottcwang",
+            "body": "What's the reason that podman currently has a single `$graphroot/secrets/secrets.json` secrets database file across all drivers?\n\nI notice that podman requires there to be a `list` command on the `shell` driver, but never actually calls it. `podman secret ls` has no `--driver` option.\n\nMight it be cleaner to instead have each driver manage its own mapping of names to IDs (or not have separate IDs at all)? In other words, secrets are keyed on the *pair* of key and driver, with the default driver being that defined in `containers.conf`."
+        },
+        {
+            "user": "mheon",
+            "body": "What I think we need is a command similar to `podman volume reload` for secrets - read in available secrets from all drivers and add them into the database. Our current single-list approach has value in that it solves name conflicts between secrets in multiple drivers - in case of a conflict, we know which one the user actually created (and which one we created)"
+        },
+        {
+            "user": "Luap99",
+            "body": "> What I think we need is a command similar to podman volume reload for secrets - read in available secrets from all drivers and add them into the database. Our current single-list approach has value in that it solves name conflicts between secrets in multiple drivers - in case of a conflict, we know which one the user actually created (and which one we created)\n\nFrankly I think our secrets design is broken in many ways, first and foremost the biggest issue I have with it is the use of extractSecretToCtrStorage() which copies the secret out of the driver in a plain text file at container creation on persistent disk so no matter what driver you use it is not encrypted (well it cannot be anyway as we need to leak a file into the container but we could at least have it limited to tmpfs). That causes problem number two that secrets cannot be updated via container restart as they are copied at creation time once.\n\nI think the concept of needing a \"db\" at all here confusing and a podman volume reload would double down on that design aspect.\n\nI like the proposal direction here. Having a simple external secret concept that pulls out the secret and turns it into a plain text file on tmpfs would IMO go a long way. We just would need some form of provider plugin that only needs to perform this one task. Then we do not need to know how to list all secrets or how to create/remove one. If users are using systemd or some other vault they like to manage it via the native tooling and not worry about keeping them with podman secret db in sync.\n\nIMO all podman secret should do is manage the file driver to allow basic secrets like we have today for the basic use case where user do not have their own secret store/\"vault\" and then we could get rid of the existing secret plugin concept."
+        },
+        {
+            "user": "mheon",
+            "body": "The security implications of the on-disk DB is pretty convincing to me. I would like to see a design written out for how we handle conflicts between drivers before implementing, though."
+        },
+        {
+            "user": "Luap99",
+            "body": "Well the way the proposal works here is you must always specify the provider as part of the secret option, so there should never be conflicts in the same provider.\n\n> Secret=woof,provider=systemd"
+        },
+        {
+            "user": "mheon",
+            "body": "I was more thinking `podman secret rm` -- we probably need a provider flag there that is optional unless multiple drivers have secrets with the same name, in which case it's mandatory?"
+        },
+        {
+            "user": "Luap99",
+            "body": "Well the point here is no create, remove or list or anything. Just a provider who looks up the secret data on container start and we write that to a tmpfile and once the container exits we can remove the tmpfile.\nThat means podman does not need to care about any major store management it just needs to know how to read the secrets from a provider.\nIMO we could keep the current podman secret commands as is with only the file driver and deprecate the existing other secret drivers in favour of this \"provider\" feature, that should simplify the interface and reduce our maintenance burden."
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 26507
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 27856
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 28144
+        }
+    ]
+}

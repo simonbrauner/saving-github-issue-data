@@ -1,0 +1,208 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 10710,
+    "type": "issue",
+    "title": "podman-exec tty resize: stty: standard input",
+    "state": "open",
+    "labels": [
+        "flakes"
+    ],
+    "user": "edsantiago",
+    "body": "Fallout from #10683 (tty resize). The test even flaked in that very same PR:\n```\n# # podman exec -it mystty stty size\n# stty: standard input\n\n# #/vvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv\n# #|     FAIL: stty under podman exec reads the correct dimensions\n# #| expected: '41 62'\n# #|   actual: 'stty: standard input\n'\n# #\\^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n```\n\n## sys: podman detects correct tty size\n* ubuntu-2104 : sys podman ubuntu-2104 root host\n  * PR #10683\n    * [06-16 11:55](https://storage.googleapis.com/cirrus-ci-6707778565701632-fcae48/artifacts/containers/podman/6429990330826752/html/sys-podman-ubuntu-2104-root-host.log.html)\n\n...and it just [triggered in a new PR](https://storage.googleapis.com/cirrus-ci-6707778565701632-fcae48/artifacts/containers/podman/5626898622447616/html/sys-podman-ubuntu-2104-root-host.log.html), also ubuntu-2104.",
+    "comments": [
+        {
+            "user": "edsantiago",
+            "body": "Yikes - the #10688 flake was a triple:\n* [06-17 12:26](https://storage.googleapis.com/cirrus-ci-6707778565701632-fcae48/artifacts/containers/podman/6350591485018112/html/sys-podman-ubuntu-2104-root-host.log.html)\n* [06-17 11:20](https://storage.googleapis.com/cirrus-ci-6707778565701632-fcae48/artifacts/containers/podman/5626898622447616/html/sys-podman-ubuntu-2104-root-host.log.html)\n* [06-17 07:46](https://storage.googleapis.com/cirrus-ci-6707778565701632-fcae48/artifacts/containers/podman/6446074882686976/html/sys-podman-ubuntu-2104-root-host.log.html)\n"
+        },
+        {
+            "user": "Luap99",
+            "body": "@edsantiago Are you able to reproduce locally?"
+        },
+        {
+            "user": "edsantiago",
+            "body": "I have not been able to reproduce, because I'm plagued by #10701 on my laptop."
+        },
+        {
+            "user": "mheon",
+            "body": "I'm struggling to see how this could happen - the resize is now happening in a way that can't race."
+        },
+        {
+            "user": "edsantiago",
+            "body": "I just reproduced on f34, podman-3.2.1-1.fc34 rootless. Passed on retry."
+        },
+        {
+            "user": "edsantiago",
+            "body": "Reproduced on same f34 system as above, this time in podman-remote rootless. Does the warning message help?\n```\n   $ podman-remote run -it --name mystty quay.io/libpod/testimage:20210427 stty size\n   stty: standard input\n   time=\"2021-06-17T16:38:39-04:00\" level=warning msg=\"failed to resize TTY: can only resize created or running containers: container state improper\"\n   #/vvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv\n   #|     FAIL: stty under podman reads the correct dimensions\n   #| expected: '55 28'\n'  #|   actual: 'stty: standard input\n   #|         > 'time=\"2021-06-17T16:38:39-04:00\" level=warning msg=\"failed to resize TTY: can only resize created or running containers: container state improper\"'\n   #\\^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n```"
+        },
+        {
+            "user": "mheon",
+            "body": "OK, so the resize is happening too soon, presumably? That at least makes sense."
+        },
+        {
+            "user": "edsantiago",
+            "body": "Recommendation: try `wait_for_ready`."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@Luap99 PTAL"
+        },
+        {
+            "user": "Luap99",
+            "body": "> Reproduced on same f34 system as above, this time in podman-remote rootless. Does the warning message help?\n> \n> ```\n>    $ podman-remote run -it --name mystty quay.io/libpod/testimage:20210427 stty size\n>    stty: standard input\n>    time=\"2021-06-17T16:38:39-04:00\" level=warning msg=\"failed to resize TTY: can only resize created or running containers: container state improper\"\n>    #/vvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv\n>    #|     FAIL: stty under podman reads the correct dimensions\n>    #| expected: '55 28'\n> '  #|   actual: 'stty: standard input\n>    #|         > 'time=\"2021-06-17T16:38:39-04:00\" level=warning msg=\"failed to resize TTY: can only resize created or running containers: container state improper\"'\n>    #\\^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n> ```\n\nWell you managed to reproduced this issue with `podman-remote run` so this is not the same problem as `podman exec`.\n\n@mheon I believe the race is between podman and conmon. The resize call will simply write to a named pipe and after that podman will write to another pipe to signal conmon that it should start the process.  I can imagine a case where conmon reads the start pipe before the resize pipe.\n\nConmon never signals podman if the resize even worked."
+        },
+        {
+            "user": "mheon",
+            "body": "Could we also be looking at an internal latency in Conmon, where the process is not immediately ready after the start pipe is read?\n\nRegardless, this sounds like a reasonable conclusion. I don't see an easy way around it, though - Conmon doesn't tell us that the start signal was received, either, so there's no easy way to syncronize"
+        },
+        {
+            "user": "vrothberg",
+            "body": "Any progress on that?  It's a quite consistent and stubborn flake in the main branch at the moment."
+        },
+        {
+            "user": "vrothberg",
+            "body": "I opened https://github.com/containers/podman/pull/10758 to disable the flaky tests. We need to make sure to reenable the tests once the underlying issue is fixed (I made sure to drop a comment).\n\nI usually feel strongly about disabling tests but the flakes are just too frequent."
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@edsantiago @vrothberg Any update on this issue?"
+        },
+        {
+            "user": "edsantiago",
+            "body": "The multiarch testing group is [still seeing this](https://gitlab.com/cki-project/kernel-tests/-/issues/683#note_657928149). Podman 3.2.3 on s390x; I don't know if it's Fedora or RHEL. If I read the log correctly, August 19."
+        },
+        {
+            "user": "vrothberg",
+            "body": "Let's wait for the results on v3.3.0.  We increased the sizes of signal buffers \"in hope\" to resolve such issues which made it into v3.3.0."
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "rhatdan",
+            "body": "Well it is a month later, so I am going to assume this is fixed.  Reopen if it happens again."
+        },
+        {
+            "user": "edsantiago",
+            "body": "The last instance of this in Cirrus CI was June 23. I agree, issue is fixed. (The multiarch folks may still see it, because they test RHEL)"
+        },
+        {
+            "user": "Luap99",
+            "body": "It is not fixed, the test is disabled due the flake. https://github.com/containers/podman/pull/10758"
+        },
+        {
+            "user": "edsantiago",
+            "body": "Uh, I just saw this right now, f35, manual testing rootless:\n```\n ✗ podman detects correct tty size\n   (from function `is' in file /usr/share/podman/test/system/helpers.bash, line 491,\n    in test file /usr/share/podman/test/system/450-interactive.bats, line 60)\n     `is \"$output\" \"$rows $cols\" \"stty under podman run reads the correct dimensions\"' failed\n   $ podman rm --all --force\n   $ podman ps --all --external --format {{.ID}} {{.Names}}\n   $ podman images --all --format {{.Repository}}:{{.Tag}} {{.ID}}\n   quay.io/libpod/testimage:20210610 9f9ec7f2fdef\n   $ podman run -it --name mystty quay.io/libpod/testimage:20210610 stty size\n   stty: standard input\n   #/vvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv\n   #|     FAIL: stty under podman run reads the correct dimensions\n   #| expected: '71 36'\n'  #|   actual: 'stty: standard input\n   #\\^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n   # [teardown]\n   $ podman pod rm --all --force\n   $ podman rm --all --force\n   3173e7cebc3d34af49d521f76ddf4fd8d03066276b8395c5e992ae73c1ba2642\n```\nNote that this is in the non-disabled part of the test -- a simple `podman run`. (What was disabled was `podman exec`)."
+        },
+        {
+            "user": "edsantiago",
+            "body": "...and it reproduces fairly quickly, too:\n```console\n$ bats /usr/share/podman/test/system/450-interactive.bats\n  ✗ podman detects correct tty size\n   (from function `is' in file /usr/share/podman/test/system/helpers.bash, line 491,\n    in test file /usr/share/podman/test/system/450-interactive.bats, line 60)\n     `is \"$output\" \"$rows $cols\" \"stty under podman run reads the correct dimensions\"' failed\n   $ podman rm --all --force\n   $ podman ps --all --external --format {{.ID}} {{.Names}}\n   $ podman images --all --format {{.Repository}}:{{.Tag}} {{.ID}}\n   quay.io/libpod/testimage:20210610 9f9ec7f2fdef\n   $ podman run -it --name mystty quay.io/libpod/testimage:20210610 stty size\n   stty: standard input\n   #/vvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv\n   #|     FAIL: stty under podman run reads the correct dimensions\n   #| expected: '35 42'\n'  #|   actual: 'stty: standard input\n   #\\^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n   # [teardown]\n   $ podman pod rm --all --force\n   $ podman rm --all --force\n   633ccc6992b9b29e4b74fcef87df8aeff54a9d5e721d5fa23d0dddece98c719b\n ✓ podman load - will not read from tty\n ✓ podman run --tty -i failure with no tty\n\n3 tests, 1 failure\n```\nHeck, I don't even need bats to reproduce it:\n```console\n$ podman run -it quay.io/libpod/testimage:20210610 stty size\nstty: standard input\n```\npodman-3.4.1-1.fc35 , conmon-2.0.30-2.fc35, crun-1.2-1.fc35, 5.14.0-0.rc6.46.fc35"
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "edsantiago",
+            "body": "I just saw this on gating tests for podman-3:3.4.3-1.fc35, rootless:\n```\n ✗ podman detects correct tty size\n   (from function `is' in file /usr/share/podman/test/system/helpers.bash, line 491,\n    in test file /usr/share/podman/test/system/450-interactive.bats, line 60)\n     `is \"$output\" \"$rows $cols\" \"stty under podman run reads the correct dimensions\"' failed\n   $ podman rm --all --force\n   $ podman ps --all --external --format {{.ID}} {{.Names}}\n   $ podman images --all --format {{.Repository}}:{{.Tag}} {{.ID}}\n   quay.io/libpod/testimage:20210610 9f9ec7f2fdef\n   $ podman run -it --name mystty quay.io/libpod/testimage:20210610 stty size\n   stty: standard input\n   #/vvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv\n   #|     FAIL: stty under podman run reads the correct dimensions\n   #| expected: '21 58'\n'  #|   actual: 'stty: standard input\n   #\\^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n```"
+        },
+        {
+            "user": "edsantiago",
+            "body": "root, too. And I just realized, this is `podman run`, not `exec`. The `exec` test is commented out, completely disabled. We now have `podman run` flaking on this, and it's like over 50%:\n```console\n# while :;do podman run -it --rm quay.io/libpod/testimage:20210610 stty size;done\nstty: standard input\nstty: standard input\n60 160\nstty: standard input\nstty: standard input\n60 160\n60 160\nstty: standard input\nstty: standard input\nstty: standard input\n60 160\nstty: standard input\nstty: standard input\nstty: standard input\nstty: standard input\nstty: standard input\nstty: standard input\nstty: standard input\n60 160\nstty: standard input\nstty: standard input\n60 160\n^C\n```"
+        },
+        {
+            "user": "rhatdan",
+            "body": "This is happening to you on podman not podman-remote.  I do not get any reproducers.\n"
+        },
+        {
+            "user": "edsantiago",
+            "body": "I've got a 1minutetip VM right now that's reproducing it super-easily. Ping me for access.\n\nThe \"remote\" connection (in comments above) was me grasping at straws. I don't know if this merits a new issue. My gut tells me no, that the common factor is \"stty is broken\", not whether it's via exec or remote."
+        },
+        {
+            "user": "Luap99",
+            "body": "My [comment](https://github.com/containers/podman/issues/10710#issuecomment-863981334) is still valid."
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "edsantiago",
+            "body": "I can no longer reproduce this: not with the `podman run` reproducer above (Dec 7), and not with `exec` either. Not on f35 with compiled podman, nor on Rawhide with 4.0rc6.\n\nIs it time to reenable the commented-out `exec ... stty` test, and see what happens?"
+        },
+        {
+            "user": "edsantiago",
+            "body": "Flaked in [the very PR that was going to reintroduce the test](https://storage.googleapis.com/cirrus-ci-6707778565701632-fcae48/artifacts/containers/podman/5756524143312896/html/sys-remote-fedora-35-rootless-host.log.html#t--00293). Problem still exists, even if I can't reproduce it on my laptop or a Rawhide VM."
+        },
+        {
+            "user": "Luap99",
+            "body": "I guess this can be fixed with conmon-rs in the future."
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "edsantiago",
+            "body": "After a long absence, this is back. [rawhide rootless](https://api.cirrus-ci.com/v1/artifact/task/4673935556476928/html/sys-podman-rawhide-rootless-host-sqlite.log.html#t--00416):\n```\nnot ok 416 podman detects correct tty size\n...\n$ podman run -it --name mystty quay.io/libpod/testimage:20221018 stty size\nstty: standard input\n\n#/vvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv\n#|     FAIL: stty under podman run reads the correct dimensions\n#| expected: '31 32\n'\n#|   actual: 'stty: standard input\n'\n#\\^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n```"
+        },
+        {
+            "user": "Luap99",
+            "body": "Yeah at this point I don't think this is ever going to be fixed, we would need a bidirectional channel to get a success response back from conmon and only then start the container. I guess conmon-rs is your best hope here."
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 10758
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 10754
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 12388
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 12540
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 13331
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 10927
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 20539
+        }
+    ]
+}

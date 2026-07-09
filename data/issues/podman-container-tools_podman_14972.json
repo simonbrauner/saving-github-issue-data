@@ -1,0 +1,242 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 14972,
+    "type": "pull_request",
+    "title": "Bump VMs, to Ubuntu 2204 with cgroups v1",
+    "state": "closed",
+    "labels": [
+        "lgtm",
+        "approved",
+        "release-note",
+        "locked - please file new issue/PR"
+    ],
+    "user": "edsantiago",
+    "body": "\n...and enable the at-test-time confirmation, the one that\ndouble-checks that if CI requests runc we actually use runc.\nThis exposed a nasty surprise in our setup: there are steps to\ndefine $OCI_RUNTIME, but that's actually a total fakeout!\nOCI_RUNTIME is used only in e2e tests, it has no effect\nwhatsoever on actual podman itself as invoked via command\nline such as in system tests. Solution: use containers.conf\n \nGiven how fragile all this runtime stuff is, I've also added\nnew tests (e2e and system) that will check $CI_DESIRED_RUNTIME.\n \nImage source: https://github.com/containers/automation_images/pull/146\n \nSince we haven't actually been testing with runc, we need\nto fix a few tests:\n \n  - handle an error-message change (make it work in both crun and runc)\n  - skip one system test, \"survive service stop\", that doesn't\n    work with runc and I don't think we care.\n \n...and skip a bunch, filing issues for each:\n \n  - #15013 pod create --share-parent\n  - #15014 timeout in dd\n  - #15015 checkpoint tests time out under $CONTAINER\n  - #15017 networking timeout with registry\n  - #15018 restore --pod gripes about missing --pod\n  - #15025 run --uidmap broken\n  - #15027 pod inspect cgrouppath broken\n  - ...and a bunch more (\"podman pause\") that probably don't\n    even merit filing an issue.\n \nAlso, use /dev/urandom in one test (was: /dev/random) because\nthe test is timing out and /dev/urandom does not block. (But\nthe test is still timing out anyway, even with this change)\n \nAlso, as part of the VM switch we are now using go 1.18 (up\nfrom 1.17) and this broke the gitlab tests. Thanks to @Luap99\nfor a quick fix.\n \nAlso, slight tweak to #15021: include the timeout value, and\nreword message so command string is at end.\n \nAlso, fixed a misspelling in a test name.\n \nFixes: #14833 \n\nSigned-off-by: Ed Santiago <santiago@redhat.com>\n```release-note\nWe are now testing with runc again. Golang has been updated from 17 to 18.\n```",
+    "comments": [
+        {
+            "user": "edsantiago",
+            "body": "Ubuntu (cgroups v1, runc) is failing on restore with what looks like the same issue as https://github.com/checkpoint-restore/criu/issues/1935:\n```console\n# bin/podman --runtime runc --storage-driver vfs run -d --name foo quay.io/libpod/testimage:20220615 top\n186bb39301e62a9bf3376a6b3ef0fcd77f268ce78cd1fca94fd095062679893b\n# bin/podman --runtime runc --storage-driver vfs container checkpoint foo\n186bb39301e62a9bf3376a6b3ef0fcd77f268ce78cd1fca94fd095062679893b\n# bin/podman --runtime runc --storage-driver vfs container restore foo\nError: OCI runtime error: runc: criu failed: type NOTIFY errno 0\nlog file: /var/lib/containers/storage/vfs-containers/186bb39301e62a9bf3376a6b3ef0fcd77f268ce78cd1fca94fd095062679893b/userdata/restore.log\n...\n(00.070611) pie: 1: Preadv 0x55aa68fd5000:4096... (7 iovs)\n(00.070677) pie: 1: `- returned 65536\n(00.070680) pie: 1:    `- skip pagemap\n(00.070682) pie: 1:    `- skip pagemap\n(00.070685) pie: 1:    `- skip pagemap\n(00.070687) pie: 1:    `- skip pagemap\n(00.070690) pie: 1:    `- skip pagemap\n(00.070692) pie: 1:    `- skip pagemap\n(00.070695) pie: 1:    `- skip pagemap\n(00.070757) Error (criu/cr-restore.c:1492): 219029 stopped by signal 11: Segmentation fault\n(00.071136) mnt: Switching to new ns to clean ghosts\n(00.071492) Error (criu/cr-restore.c:2447): Restoring FAILED.\n```\n@adrianreber any advice on how to get criu rebuilt for Ubuntu?"
+        },
+        {
+            "user": "edsantiago",
+            "body": "Confirming evidence, I think:\n```console\n# grep -R RSEQ_SIG /usr/include\n/usr/include/x86_64-linux-gnu/bits/rseq.h:/* RSEQ_SIG is a signature required before each abort handler code.\n/usr/include/x86_64-linux-gnu/bits/rseq.h:   RSEQ_SIG is used with the following reserved undefined instructions, which\n/usr/include/x86_64-linux-gnu/bits/rseq.h:#define RSEQ_SIG        0x53053053\n```\n`dpkg -l` shows `criu 3.16.1-2` and `libc6 3.16.1-2`"
+        },
+        {
+            "user": "adrianreber",
+            "body": "@rst0git knows how to update the obs and launchpad packages"
+        },
+        {
+            "user": "rst0git",
+            "body": "@edsantiago I pushed an update for version 3.17.1 in [OBS](https://build.opensuse.org/package/show/devel:tools:criu/criu)."
+        },
+        {
+            "user": "edsantiago",
+            "body": "@rst0git thank you! I see what looks like an [ubuntu 2204 log](https://build.opensuse.org/package/live_build_log/devel:tools:criu/criu/xUbuntu_22.04/x86_64) indicating that it succeeded (assuming 'xUbuntu' == 'Ubuntu'). Do you have a sense for how long that will then take to get into standard Ubuntu repos?"
+        },
+        {
+            "user": "rst0git",
+            "body": "> Do you have a sense for how long that will then take to get into standard Ubuntu repos?\n\nA simple test with Ubuntu 22.04 container indicates that the criu package has been updated:\n```\npodman run -it ubuntu:22.04 bash\n\napt-get update && apt-get install -y sudo curl gpg\necho 'deb http://download.opensuse.org/repositories/devel:/tools:/criu/xUbuntu_22.04/ /' | tee /etc/apt/sources.list.d/devel:tools:criu.list\ncurl -fsSL https://download.opensuse.org/repositories/devel:tools:criu/xUbuntu_22.04/Release.key | gpg --dearmor | tee /etc/apt/trusted.gpg.d/devel_tools_criu.gpg > /dev/null\napt update\napt install -y criu\ncriu --version\n```"
+        },
+        {
+            "user": "edsantiago",
+            "body": "Thanks again. I've restarted the [VM build](https://github.com/containers/automation_images/pull/146), which will take a few hours; then I'll need to resubmit this PR using those images (plus some runc fixes); that too will take a few hours. Progress!"
+        },
+        {
+            "user": "edsantiago",
+            "body": "Sigh. [nope](https://api.cirrus-ci.com/v1/artifact/task/4913843032817664/html/int-podman-ubuntu-2204-root-host.log.html). I'll try again tomorrow."
+        },
+        {
+            "user": "edsantiago",
+            "body": "Failing in [pod create --share-parent test](https://api.cirrus-ci.com/v1/artifact/task/6491108266999808/html/int-podman-ubuntu-2204-root-host.log.html#t--podman-pod-create-share-parent-test--1):\n```\nExpected\n      <string>: host\n  to contain substring\n      <string>: 1e6d7d50e0d46c60c9906a5518d06969235bf521ea7e71db6dc153131e977e6c\n```\nThe string in question is something to do with cgroups.\n\n@cdoern this is your code, could you spare some cycles to tell me how to fix it? The problem here is that it's failing in cgroupsv1 with runc, because we haven't been testing runc. TIA."
+        },
+        {
+            "user": "edsantiago",
+            "body": "Failing in [Remote build .containerignore filtering embedded directory](https://api.cirrus-ci.com/v1/artifact/task/4661520918380544/html/int-remote-fedora-36-root-host.log.html#t--Remote-build--containerignore-filtering-embedded-directory-13535---1) with a timeout in the `dd`, even after I switched to `/dev/urandom`.\n\n@jwhonce this is your code, could you please tell me how to fix it? Like, for instance, is it absolutely necessary for the file to be `1G`? Is there something else that could be causing the timeout?"
+        },
+        {
+            "user": "edsantiago",
+            "body": "@containers/podman-maintainers cry for help: all checkpoint tests are [hanging in container environment](https://api.cirrus-ci.com/v1/task/6106816739278848/logs/main.log). Everything that runs `podman checkpoint` or `restore` times out in 90s.\n\nI can't reproduce. I've tried:\n```console\n$ sudo bin/podman run --rm --privileged --cgroupns=host -v $(pwd):/home/podman -v /dev/fuse:/dev/fuse -it quay.io/libpod/fedora_podman:c6706201604915200 bash\n[root@9fcf6ce7a5a1 podman]# pm() { /home/podman/bin/podman --network-backend netavark --storage-driver vfs --cgroup-manager cgroupfs --events-backend file \"$@\"; }\n\n[root@9fcf6ce7a5a1 podman]# pm all-sorts-of-things\n```\nMaybe I'm missing some magic option.\n\nTwo requests:\n1. Can someone please tell me how to fix this?\n2. Can some Go expert please fix this stupid code so it actually emits useful output? https://github.com/containers/podman/blob/b5612df55060317bcef92de48e5b2cd400374814/test/utils/utils.go#L367-L372\n\nRight now that fails with \"command timed out but I'm not going to tell you what command it was nor what its output was\". I think it might be slightly more helpful to say \"this was the command that timed out, and this was the output I got up to this point\". I can't figure it out from the GInkgo docs, and have spent much too long on it already.\n\nThank you!"
+        },
+        {
+            "user": "edsantiago",
+            "body": "Sigh, another one. @containers/podman-maintainers who owns the gitlab tests? They're [failing hard](https://api.cirrus-ci.com/v1/task/6691036612263936/logs/setup.log):\n```\nObtaining necessary gitlab-runner testing bits\n+ ssh some12100dude@localhost -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no -o CheckHostIP=no env GOPATH=/var/tmp/go go get -u github.com/jstemmer/go-junit-report  # /var/tmp/go/src/github.com/containers/podman/./contrib/cirrus/setup_environment.sh:353 in main()\nWarning: Permanently added 'localhost' (ED25519) to the list of known hosts.\ngo: go.mod file not found in current directory or any parent directory.\n\t'go get' is no longer supported outside a module.\n\tTo build and install a command, use 'go install' with a version,\n\tlike 'go install example.com/cmd@latest'\n\tFor more information, see https://golang.org/doc/go-get-install-deprecation\n\tor run 'go help get' or 'go help install'.\n```\n...and I bet a nickel it's because of the switch go `go 1.18`. This is not something I'm going to try to solve right now, sorry."
+        },
+        {
+            "user": "edsantiago",
+            "body": "Another new one having to do with checkpoint/restore and pods, I think? [log](https://api.cirrus-ci.com/v1/artifact/task/5879373692665856/html/int-remote-ubuntu-2204-root-host.log.html#t--podman-checkpoint-and-restore-container-out-of-and-into-pod--ipc-net-uts-pid---1). Symptom:\n```\n # podman-remote [options] container restore --pod POD-SHA -i /tmp/checkpoint-bar.tar.gz\n  Error: cannot restore pod container without --pod\n```"
+        },
+        {
+            "user": "edsantiago",
+            "body": "And another hard failure, [timed out waiting for port XXXX](https://api.cirrus-ci.com/v1/artifact/task/5879373692665856/html/int-remote-ubuntu-2204-root-host.log.html#t--authenticated-push--1), ubuntu remote only:\n```\nExpected\n               <*fmt.wrapError | 0xc000a35440>: {\n                   msg: \"error running \\\"podman-registry\\\": : `podman-registry -i docker-archive:/tmp/quay.io-libpod-registry-2.6.tar start` failed: Getting image source signatures\\nCopying blob sha256:9d08b7a37338462dc618dd3c25c2c4f713fe3e833f75561950a92bd9130f77ac\\nCopying blob sha256:d91b7ec2cc52de561af295d6ea89c55c0c891f8728e65d794e96422f9e815ca7\\nCopying blob sha256:849b4a0a6bf5273a3ea90c036c62439d058946f28bb4ad4a8d19255d6237f475\\nCopying blob sha256:0341148c78bcafac0ba6f9e0b9056f91af7a380ac1b67ca8d770bdd4eb532bb2\\nCopying blob sha256:7444ea29e45e927abea1f923bf24cac20deaddea603c4bb1c7f2f5819773d453\\nCopying config sha256:10b45af23ff36baa99dda944a461425494a4bd103f3d4361d30e929f13aa8dda\\nWriting manifest to image destination\\nStoring signatures\\npodman-registry: Timed out waiting for port 5353\\n  (exit status 1)\",\n                   err: <*errors.errorString | 0xc0008971c0>{\n                       s: \"`podman-registry -i docker-archive:/tmp/quay.io-libpod-registry-2.6.tar start` failed: Getting image source signatures\\nCopying blob sha256:9d08b7a37338462dc618dd3c25c2c4f713fe3e833f75561950a92bd9130f77ac\\nCopying blob sha256:d91b7ec2cc52de561af295d6ea89c55c0c891f8728e65d794e96422f9e815ca7\\nCopying blob sha256:849b4a0a6bf5273a3ea90c036c62439d058946f28bb4ad4a8d19255d6237f475\\nCopying blob sha256:0341148c78bcafac0ba6f9e0b9056f91af7a380ac1b67ca8d770bdd4eb532bb2\\nCopying blob sha256:7444ea29e45e927abea1f923bf24cac20deaddea603c4bb1c7f2f5819773d453\\nCopying config sha256:10b45af23ff36baa99dda944a461425494a4bd103f3d4361d30e929f13aa8dda\\nWriting manifest to image destination\\nStoring signatures\\npodman-registry: Timed out waiting for port 5353\\n  (exit status 1)\",\n                   },\n               }\n```\nSeems networking-related. Are netavark et al up-to-date on Ubuntu?"
+        },
+        {
+            "user": "edsantiago",
+            "body": "Another sigh. [containerized failed again](https://api.cirrus-ci.com/v1/task/6216834272722944/logs/main.log), with checkpoint hangs as expected. But I instrumented the timeout code so it would dump stdout/stderr... and nothing."
+        },
+        {
+            "user": "edsantiago",
+            "body": "Good news is, `int non-remote ubuntu` tests all pass (root and rootless), indicating that we have a working `criu` again."
+        },
+        {
+            "user": "Luap99",
+            "body": "> Sigh, another one. @containers/podman-maintainers who owns the gitlab tests? They're [failing hard](https://api.cirrus-ci.com/v1/task/6691036612263936/logs/setup.log):\n> \n> ```\n> Obtaining necessary gitlab-runner testing bits\n> + ssh some12100dude@localhost -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no -o CheckHostIP=no env GOPATH=/var/tmp/go go get -u github.com/jstemmer/go-junit-report  # /var/tmp/go/src/github.com/containers/podman/./contrib/cirrus/setup_environment.sh:353 in main()\n> Warning: Permanently added 'localhost' (ED25519) to the list of known hosts.\n> go: go.mod file not found in current directory or any parent directory.\n> \t'go get' is no longer supported outside a module.\n> \tTo build and install a command, use 'go install' with a version,\n> \tlike 'go install example.com/cmd@latest'\n> \tFor more information, see https://golang.org/doc/go-get-install-deprecation\n> \tor run 'go help get' or 'go help install'.\n> ```\n> \n> ...and I bet a nickel it's because of the switch go `go 1.18`. This is not something I'm going to try to solve right now, sorry.\n\nI don't know anything about the gitlab test but go 1.18 uses module mode by default and without go.mod this fails. The correct way to install things is `go install` not `go get -u`"
+        },
+        {
+            "user": "Luap99",
+            "body": "@edsantiago This also pins the version to prevent breaking PRs when the tool is updated:\n```diff\ndiff --git a/contrib/cirrus/setup_environment.sh b/contrib/cirrus/setup_environment.sh\nindex 4952f8dd2..e2d0c655a 100755\n--- a/contrib/cirrus/setup_environment.sh\n+++ b/contrib/cirrus/setup_environment.sh\n@@ -351,7 +351,7 @@ case \"$TEST_FLAVOR\" in\n         slug=\"gitlab.com/gitlab-org/gitlab-runner\"\n         helper_fqin=\"registry.gitlab.com/gitlab-org/gitlab-runner/gitlab-runner-helper:x86_64-latest-pwsh\"\n         ssh=\"ssh $ROOTLESS_USER@localhost -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no -o CheckHostIP=no env GOPATH=$GOPATH\"\n-        showrun $ssh go get -u github.com/jstemmer/go-junit-report\n+        showrun $ssh go install github.com/jstemmer/go-junit-report/v2@v2.0.0\n         showrun $ssh git clone https://$slug $GOPATH/src/$slug\n         showrun $ssh make -C $GOPATH/src/$slug development_setup\n         showrun $ssh bash -c \"'cd $GOPATH/src/$slug && GOPATH=$GOPATH go get .'\"\n```\n\nAlthough I guess it would make more sense to directly install this into the VM images to reduce downloads and compile time at runtime."
+        },
+        {
+            "user": "Luap99",
+            "body": "> And another hard failure, [timed out waiting for port XXXX](https://api.cirrus-ci.com/v1/artifact/task/5879373692665856/html/int-remote-ubuntu-2204-root-host.log.html#t--authenticated-push--1), ubuntu remote only:\n> \n> ```\n> Expected\n>                <*fmt.wrapError | 0xc000a35440>: {\n>                    msg: \"error running \\\"podman-registry\\\": : `podman-registry -i docker-archive:/tmp/quay.io-libpod-registry-2.6.tar start` failed: Getting image source signatures\\nCopying blob sha256:9d08b7a37338462dc618dd3c25c2c4f713fe3e833f75561950a92bd9130f77ac\\nCopying blob sha256:d91b7ec2cc52de561af295d6ea89c55c0c891f8728e65d794e96422f9e815ca7\\nCopying blob sha256:849b4a0a6bf5273a3ea90c036c62439d058946f28bb4ad4a8d19255d6237f475\\nCopying blob sha256:0341148c78bcafac0ba6f9e0b9056f91af7a380ac1b67ca8d770bdd4eb532bb2\\nCopying blob sha256:7444ea29e45e927abea1f923bf24cac20deaddea603c4bb1c7f2f5819773d453\\nCopying config sha256:10b45af23ff36baa99dda944a461425494a4bd103f3d4361d30e929f13aa8dda\\nWriting manifest to image destination\\nStoring signatures\\npodman-registry: Timed out waiting for port 5353\\n  (exit status 1)\",\n>                    err: <*errors.errorString | 0xc0008971c0>{\n>                        s: \"`podman-registry -i docker-archive:/tmp/quay.io-libpod-registry-2.6.tar start` failed: Getting image source signatures\\nCopying blob sha256:9d08b7a37338462dc618dd3c25c2c4f713fe3e833f75561950a92bd9130f77ac\\nCopying blob sha256:d91b7ec2cc52de561af295d6ea89c55c0c891f8728e65d794e96422f9e815ca7\\nCopying blob sha256:849b4a0a6bf5273a3ea90c036c62439d058946f28bb4ad4a8d19255d6237f475\\nCopying blob sha256:0341148c78bcafac0ba6f9e0b9056f91af7a380ac1b67ca8d770bdd4eb532bb2\\nCopying blob sha256:7444ea29e45e927abea1f923bf24cac20deaddea603c4bb1c7f2f5819773d453\\nCopying config sha256:10b45af23ff36baa99dda944a461425494a4bd103f3d4361d30e929f13aa8dda\\nWriting manifest to image destination\\nStoring signatures\\npodman-registry: Timed out waiting for port 5353\\n  (exit status 1)\",\n>                    },\n>                }\n> ```\n> \n> Seems networking-related. Are netavark et al up-to-date on Ubuntu?\n\nLikely still some parallel cni and netavark use?"
+        },
+        {
+            "user": "edsantiago",
+            "body": ">Likely still some parallel cni and netavark use?\n\nWell, the failure is 100% and it's been happening since my first iteration on this PR. That is: I've never seen it pass. That suggests something harder than a race condition."
+        },
+        {
+            "user": "Luap99",
+            "body": "> > Likely still some parallel cni and netavark use?\n> \n> Well, the failure is 100% and it's been happening since my first iteration on this PR. That is: I've never seen it pass. That suggests something harder than a race condition.\n\nI am not saying it is a race, just that something is still using CNI while the e2e test use netavark, check the iptables output to be sure."
+        },
+        {
+            "user": "Luap99",
+            "body": "\n\n> \n>     2. Can some Go expert please fix this stupid code so it actually emits useful output? https://github.com/containers/podman/blob/b5612df55060317bcef92de48e5b2cd400374814/test/utils/utils.go#L367-L372\n> \n> \n> Right now that fails with \"command timed out but I'm not going to tell you what command it was nor what its output was\". I think it might be slightly more helpful to say \"this was the command that timed out, and this was the output I got up to this point\". I can't figure it out from the GInkgo docs, and have spent much too long on it already.\n> \n> Thank you!\n\n2. https://github.com/containers/podman/pull/15021 should fix the command output.\n"
+        },
+        {
+            "user": "edsantiago",
+            "body": "OK, we need to get rid of `registry.redhat` from our tests. It is flaking way too much."
+        },
+        {
+            "user": "cevich",
+            "body": "@edsantiago FWIW, [these images passed in buildah CI.](https://github.com/containers/buildah/pull/4074).  I haven't opened PRs in any of the others.  Most don't depend on Ubuntu (so the new version here won't be of much consequence).  When CI passes here, will you help me update the other repos?\n\n> OK, we need to get rid of registry.redhat from our tests. It is flaking way too much.\n\nI've seen this recently as well.  However, IIRC the `ubi` image is used in a lot of different places :S  I'm not certain how locked to that image the tests are or if they could use something else like alpine from our libpod quay namespace.\n\n> [`int podman fedora-36 root container`](https://cirrus-ci.com/task/4603560670265344)\n\nI didn't look at the underlying errors, but I question if those tests should be running as part of the podman-in-podman tests?"
+        },
+        {
+            "user": "cevich",
+            "body": "The `bud podman fedora-36 root host` [failure is a flake.](https://cirrus-ci.com/task/6433148018884608)"
+        },
+        {
+            "user": "cevich",
+            "body": "@edsantiago in case it's a useful comparison, the [Cirrus: Use pre-installed bats](https://github.com/containers/podman/pull/14719) PR has these same images but a smaller diff.  Besides any flakes, that might be a useful point for comparison for any script/code changes here."
+        },
+        {
+            "user": "edsantiago",
+            "body": "@cevich that PR cannot merge as-is. It can merge with older VM images, or it can wait for this 2204 PR, but not both. The runc changes are enormous (and still in progress) and you need those in your PR. I suggest just waiting for this to merge."
+        },
+        {
+            "user": "cevich",
+            "body": "> I suggest just waiting for this to merge.\n\nYep, that's what I was intending.  It's using the same images as this, for extra testing of non-Ubuntuj VMs w/o the changes here.  That was my \"comparison\" suggestion/point."
+        },
+        {
+            "user": "openshift-ci[bot]",
+            "body": "[APPROVALNOTIFIER] This PR is **APPROVED**\n\nThis pull-request has been approved by: *<a href=\"https://github.com/containers/podman/pull/14972#pullrequestreview-1047025109\" title=\"Approved\">cevich</a>*, *<a href=\"https://github.com/containers/podman/pull/14972#\" title=\"Author self-approved\">edsantiago</a>*\n\nThe full list of commands accepted by this bot can be found [here](https://go.k8s.io/bot-commands?repo=containers%2Fpodman).\n\nThe pull request process is described [here](https://git.k8s.io/community/contributors/guide/owners.md#the-code-review-process)\n\n<details >\nNeeds approval from an approver in each of these files:\n\n- ~~[OWNERS](https://github.com/containers/podman/blob/main/OWNERS)~~ [edsantiago]\n\nApprovers can indicate their approval by writing `/approve` in a comment\nApprovers can cancel approval by writing `/approve cancel` in a comment\n</details>\n<!-- META={\"approvers\":[]} -->"
+        },
+        {
+            "user": "edsantiago",
+            "body": "@containers/podman-maintainers PTAL and treat as urgent. CI is still running, but I'm dearly hoping that the tenth time is the charm.\n\nI am truly sorry for the disgusting size of this PR. There is no choice. To recap the problem: we haven't been testing with runc, and a lot of don't-work-with-runc tests have snuck in during that window. Some are easy fixes, others, I've filed issues for. I've also had to file issues for not-obviously-related-to-runc problems that are cropping up. It is my considered belief that it will be much easier to fix those gradually than for this PR to wait for them to be solved.\n\nI cannot be around for most of Friday, but will check in early morning and then midafternoon."
+        },
+        {
+            "user": "edsantiago",
+            "body": "Whew - CI is finally green."
+        },
+        {
+            "user": "edsantiago",
+            "body": "...and, re-pushing because #14876 merged and nobody's going to look at this PR until tomorrow anyway."
+        },
+        {
+            "user": "cdoern",
+            "body": "> ...and, re-pushing because #14876 merged and nobody's going to look at this PR until tomorrow anyway.\n\nGetting my test writing skills ready for whatever 14867 introduced... I think I avoided most of the issues. "
+        },
+        {
+            "user": "edsantiago",
+            "body": "@cdoern your PR includes lots of \"bps\" strings, so I'm guessing all these new [bps failures](https://api.cirrus-ci.com/v1/artifact/task/5640505697501184/html/int-podman-ubuntu-2204-root-host.log.html) are related. I'm outta here for the day (LONG DAY) but would appreciate your help. TIA."
+        },
+        {
+            "user": "cdoern",
+            "body": "> @cdoern your PR includes lots of \"bps\" strings, so I'm guessing all these new [bps failures](https://api.cirrus-ci.com/v1/artifact/task/5640505697501184/html/int-podman-ubuntu-2204-root-host.log.html) are related. I'm outta here for the day (LONG DAY) but would appreciate your help. TIA.\n\nsorry about that, the good news is these failures are cropping up with both iops and bps devices so I can narrow it down. will keep you updated"
+        },
+        {
+            "user": "edsantiago",
+            "body": "Don't sweat it. I really want to get this merged, because I don't want to be here on Friday, so I've resubmitted with `Skips` which you can then fix at your leisure."
+        },
+        {
+            "user": "Luap99",
+            "body": "/lgtm"
+        },
+        {
+            "user": "edsantiago",
+            "body": "Thanks everyone.\n\nThere may be in-flight PRs that break cgroups V1, such that once they merge they will break CI for everyone. Please consider that during your PR reviews over the next week, and please suggest that everyone rebase."
+        },
+        {
+            "user": "cevich",
+            "body": "Thanks @edsantiago for your efforts here, so much fun isn't it :wink: Seriously though, I'm happy to see you successfully navigated building new VM images and integrating them into podman CI.  I know there's some testing fallout from this merging, however I don't believe I got an answer to my update question:  Could you help me update these VM images in c/skopeo, c/image, and c/storage?  [I've got one going for buildah already.](https://github.com/containers/buildah/pull/4074)"
+        },
+        {
+            "user": "edsantiago",
+            "body": "@cevich I'm sorry, I seem to have missed that question, and can't even find it in my email archives. If I understand your reference correctly, you would like me to submit `.cirrus.yml` PRs for those three projects, updating the `cXXX` number? If so, would you like me to wait until https://github.com/containers/automation_images/pull/157 merges instead? \n\nIf I misunderstood, could you please point me at your original request, or help me understand? Again, I'm sorry for not being able to find it."
+        },
+        {
+            "user": "cevich",
+            "body": "> submit .cirrus.yml PRs for those three projects, updating the cXXX number? If so, would you like me to wait until https://github.com/containers/automation_images/pull/157 merges instead?\n\nYes please.  There's no need to wait on 157, it doesn't change anything in the VM images, only a few tooling containers.  There are 14-repos total that use GCE images, and probably 8 desperately in need of an update. Most of the time once podman CI is passing, it goes pretty smoothly, though the Ubuntu version and runc update could cause some hiccups.  So help with this is very much appreciated.  \n\n- aardvark-dns  (**Good enough**)\n- buildah  (**DONE**)\n- BuildSourceImage\n- common\n- conmon\n- dnsname\n- image (I got it)\n- netavark  (**Good enough**)\n- oci-seccomp-bpf-hook\n- podman  (**DONE**)\n- podman-py (I got it)\n- skopeo  (I got it)\n- storage (I got it)\n- udica (I got it)\n\n> If I misunderstood, could you please point me at your original request, or help me understand? Again, I'm sorry for not being able to find it.\n\nNo worries, comments get eaten by github sometimes, and it's not like we receive a small amount of github mail.\nFound it (it was burried): https://github.com/containers/podman/pull/14972#issuecomment-1191521107\n\n"
+        },
+        {
+            "user": "edsantiago",
+            "body": "Well, we need to rebuild VMs anyway (#15025), so I'll wait until that's fixed.\n\nI tried Re-run on your PR, it still fails (same criu bug on ubuntu), so no point in doing anything until that's fixed."
+        },
+        {
+            "user": "cevich",
+            "body": "Ugh, -sigh-, okay, I guess I thought it would be simple this time :cry: Okay, I'll /hold all the PR's I already opened."
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 14719
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 15013
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 15021
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 14801
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 14876
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 14793
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 15031
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 15015
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 15326
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 15365
+        }
+    ]
+}

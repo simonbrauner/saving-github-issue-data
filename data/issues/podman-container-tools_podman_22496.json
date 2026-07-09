@@ -1,0 +1,84 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 22496,
+    "type": "issue",
+    "title": "Container dependencies using `podman play kube`",
+    "state": "open",
+    "labels": [
+        "kind/feature",
+        "kube",
+        "bugweek"
+    ],
+    "user": "joshmalbrecht",
+    "body": "### Feature request description\n\nWe are in the process of migrating our CI from using docker-compose to `podman play kube` and we used the `podman generate kube` command to generate a Kubernetes YAML file based on our existing docker-compose.yml.  However, it appears that there is no container dependency functionality that is equivalent to the docker-compose `depends_on` functionality.\n\nWe would like to create a dependency between our application container and a database container so that the application container does not attempt to start until the database container is created and has a healthy healthcheck. This would guarantee that the application container can connect to the database container. Currently both containers are started in parallel using the `podman play kube` command and it is possible that the database container is not available by the time that the application container attempts to connect and causes issues.\n\n### Suggest potential solution\n\n_No response_\n\n### Have you considered any alternatives?\n\nAn alternative would be adding database connection retry logic to the application to give the database container more time to get to a healthy state and then make a connection. This will work as alternative and I have a PR out for these changes (https://github.com/candlepin/candlepin/pull/4656), but I was wondering if this would be helpful functionality for others.\n\n### Additional context\n\nExample docker-compose.yml using `depends_on`:\n\n```\nversion: '3.8'\n\nservices:\n  postgres:\n    image: postgres:latest\n    container_name: postgres\n    environment:\n      POSTGRES_USER: candlepin\n      POSTGRES_PASSWORD: candlepin\n      POSTGRES_DB: candlepin\n      POSTGRES_HOST_AUTH_METHOD: trust\n    ports:\n      - \"5432:5432\"\n    healthcheck:\n      test: [\"CMD-SHELL\", \"pg_isready -U candlepin -d candlepin\"]\n      interval: 5s\n      timeout: 5s\n      retries: 10\n\n  candlepin:\n    image: quay.io/candlepin/candlepin:dev-latest\n    container_name: candlepin\n    environment:\n      JPA_CONFIG_HIBERNATE_CONNECTION_URL: jdbc:postgresql://postgres/candlepin\n      CANDLEPIN_AUTH_CLOUD_ENABLE: \"false\"\n      CANDLEPIN_AUTH_TRUSTED_ENABLE: \"true\"\n      CANDLEPIN_STANDALONE: \"false\"\n      MODULE_CONFIG_HOSTED_CONFIGURATION_MODULE: org.candlepin.testext.hostedtest.HostedTestModule\n\n    ports:\n      - \"8443:8443\"\n    healthcheck:\n      test: curl --fail -k https://localhost:8443/candlepin/status\n      timeout: 5s\n      retries: 10\n      start_period: 30s\n    depends_on:\n      postgres:\n        condition: service_healthy\n```",
+    "comments": [
+        {
+            "user": "rhatdan",
+            "body": "@ygalblum @umohnani8 @haircommander PTAL"
+        },
+        {
+            "user": "rhatdan",
+            "body": "Is this the function of an init container? I think there is a special one that continues to run after init is complete."
+        },
+        {
+            "user": "haircommander",
+            "body": "yeah initContainers are started and run to completion before the main containers. There's also the notion of [sidecar containers](https://kubernetes.io/docs/concepts/workloads/pods/sidecar-containers/) which are also initContainers, but have restartPolicy Always, so they're started before the main containers but don't complete before the others are started"
+        },
+        {
+            "user": "joshmalbrecht",
+            "body": "> yeah initContainers are started and run to completion before the main containers. There's also the notion of [sidecar containers](https://kubernetes.io/docs/concepts/workloads/pods/sidecar-containers/) which are also initContainers, but have restartPolicy Always, so they're started before the main containers but don't complete before the others are started\n\nIf we added a sidecar container under `initContainers` that was able to check the health of the database container in the `postStart` lifecycle using a script, would that be able to halt **only** the application container from attempting to start while the database container is starting? One thing to note, is that the k8s yaml that is generated from the `podman generate kube` puts the database and application containers in the same pod.\n\nOur generated Kubernetes yaml file for reference:\nhttps://github.com/candlepin/candlepin/blob/main/dev-container/candlepin-deployment.yaml\n"
+        },
+        {
+            "user": "ygalblum",
+            "body": "Hi,\nThere's a pull request addressing sidecar containers. While it is not yet merged, @joshmalbrecht is this what you are looking for?"
+        },
+        {
+            "user": "joshmalbrecht",
+            "body": "@ygalblum are you suggesting to run the application image as a sidecar container? I think that would work with the pull request you linked and the added restart functionality. I believe the sidecar container would first startup and fail and then continue retrying to restart until the database container in the same pod is healthy and the application can make a database connection.\n\nI'm not very familiar with Kubernetes, so please let me know if this isn't correct, but it seems like the database container and the application container should be in two separate pods. To get similar functionality to the docker-compose `depends_on`, you would need an init container in the application pod that waits until the database pod is healthy before completing and allowing the application container to start. From doing some reading it seems like this is the Kubernetes equivalent of the docker compose `depends_on` functionality, so maybe this is the pattern we should follow?\n\nBoth of these options should work for this use case!"
+        },
+        {
+            "user": "ygalblum",
+            "body": "@joshmalbrecht first, my suggestion was the other way around (that is having the DB as a sidecar to the application). Having said that, I agree that ideally they should be in different pods. However, as you've mentioned podman does not handle dependencies between pods. \n\nThe second option you suggested does look promising. Podman will not start the main container until the init container has returned successfully (regular init containers, not the ones supported by the PR I linked). So, having an init container wait until the DB connection is up should do the trick.\n\nAnother option is to use Quadlet which allows you to define dependencies between containers (or pods) using Systemd. I actually wrote a blog post about it: https://www.redhat.com/sysadmin/multi-container-application-podman-quadlet which also has some code accompanying it:  https://github.com/ygalblum/quadlet-demo along"
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "apparle",
+            "body": "Was there a solution figured out for this?\n\n> ideally they should be in different pods. \n\nWhy so? Is this a limitation of the kube yaml format or a limitation of podman itself that it cannot orchestrate dependencies between containers of the same pod ?\n\nI'm also in process of porting over bunch of my compose files to podman and toying with kube yaml, but running into this inability to express depends on ability."
+        },
+        {
+            "user": "ygalblum",
+            "body": "@apparle first, my comment about separating the pods was an agreement on:\n> I'm not very familiar with Kubernetes, so please let me know if this isn't correct, but it seems like the database container and the application container should be in two separate pods\n\nThe idea here is separation on concerns. Each pod does one thing. While other containers may run in the pod, they will usually either handle setup (init) or helpers such as forward/reverse proxy, logging, etc (sidecar).\n\nSecond, keep in mind that the path you chose is not docker-compose to podman but rather docker-compose to K8S to podman. As a result, in addition to some benefits, you may be adding some complexities and limitations. In general K8S does not like tight dependencies. In K8S, workloads can fail and all the rest should adapt to it.\nHaving said that, as described, inside a pod, there are two types of containers - init and main. When init containers were added, the idea was that they will be a single shot containers that will be executed and return before the main containers are started. Not long ago, K8S added official support for sidecar containers via init containers that do not return. But, AFAIK podman does not yet support it.\n\nHave you considered taking other paths to Podman? E.g use Quadlets. Since Quadlet is a systemd generator, you can use systemd to define dependencies  "
+        },
+        {
+            "user": "apparle",
+            "body": "> keep in mind that the path you chose is not docker-compose to podman but rather docker-compose to K8S to podman. As a result, in addition to some benefits, you may be adding some complexities and limitations. \n\nThat's fair characterization. I suppose I jumped on to k8s yaml directly because it was a single file for all containers and not separate file for every volume, container, network etc. Just a matter of preference, but maybe a wrong choice giving k8s limitations. Related issue - https://github.com/containers/podman/issues/26447 \n\n> Have you considered taking other paths to Podman? E.g use Quadlets. Since Quadlet is a systemd generator, you can use systemd to define dependencies\n\nYes, I've been reading about this from your blog post. A clarification question which I couldn't find a good answer for anywhere -- do pods work with quadlets? Can inter-container dependencies be created within the same pod, or is pod itself a similar borrowed-from-kubernetes concept that lacks this ability?"
+        },
+        {
+            "user": "ygalblum",
+            "body": "My blog post on Quadlet is pretty old, maybe I should write a new one detailing all the new unit types that were added since. As for your questions:\n\n> do pods work with quadlets? \n\nYes. Quadlet has a `.pod` unit type. You can create one and link containers to it by setting the `Pod` key of the `.container` file to the name of the pod unit. E.g. if the pod unit is `myapp.pod` set `Pod=myapp.pod`. Quadlet will know to link between them.\n\n> Can inter-container dependencies be created within the same pod, or is pod itself a similar borrowed-from-kubernetes concept that lacks this ability?\n\nGenerally speaking, pods also in podman do not support order dependencies between the containers. But, I think you can use `systemd` dependencies to handle it. I haven't tried it myself, but I think you can do the following:\n\nmyapp.pod\n```\n[Pod]\n...\n```\n\nindependent.container\n```\n[Container]\nPod=myapp.pod\n...\n```\n\ndependent.container\n```\n[Unit]\nAfter=independent.container\nRequires=independent.container\n\n[Container]\nPod=myapp.pod\n```\n\nStarting the pod unit should trigger both container units and systemd should follow the added dependency. "
+        },
+        {
+            "user": "apparle",
+            "body": "@ygalblum can you also clarify how autoupdate will work with such systemd `Requires=` relationship?\n\nBased on what I could find through documentation / glean for AI chatbots -- the podman-auto-update service will restart the corresponding service file for a container that has `Label=io.containers.autoupdate=registry` and has a new image update available.\n\nNow if I've a multi-container app made of 3 containers such that\n- `A.container` is independent by itself\n- `B.container` is independent by itself\n- `C.container` that has\n  ```\n  [Unit]\n  After=A.container B.container\n  Requires=A.container B.container\n  ```\n- `myapp.target` that has below just for my convenience:\n  ```\n  [Unit]\n  Wants=A.service\n  Wants=B.service\n  Wants=C.service\n  ```\n\nNow let's say I've an update for `A.container`. When the corresponding `A.service` gets restart, that won't restart `C.service` and may result in a broken dependency for C right? What's the right way to express that any update to A should restart `myapp.target` ?\n\nWould autoupdate work differently if I were using pods?\nI'm not using pods yet, because I don't have a good cross-pod isolation mechanism ([relevant reddit discussion](https://www.reddit.com/r/podman/comments/1lhktr3/port_restrictions_and_network_isolation_in_podman/) and related issue https://github.com/containers/podman/discussions/26605), but I'm just curious."
+        },
+        {
+            "user": "ygalblum",
+            "body": "@apparle I can't say that I'm 100% sure since I haven't tried it myself. But, at the end of the day, the dependency management is handled by Systemd. So, this is not a Podman or Quadlet question but rather a Systemd one.\n\nReading the unit man page: https://www.freedesktop.org/software/systemd/man/latest/systemd.unit.html I see that systemd supports dependencies stronger than `Requires`, such as `BindsTo` or `PartOf`. I'm not sure which one of them is the right one.\n\nMy own understanding of the man page and https://unix.stackexchange.com/questions/326181/systemd-unit-service-restart-if-another-service-start-or-reload points to `PartOf`. But I saw some other places preferring `BindTo`."
+        },
+        {
+            "user": "apparle",
+            "body": "Thanks for the pointers. I did some trials and found that `PartOf` is working well. \nI need to set up the `C.container` as in above example with:\n```\n[Unit]\nAfter=A.container B.container\nRequires=A.container B.container\nPartOf=A.container B.container\n```\n\nWith this an update to just A.container triggers a restart of both A and C."
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 20647
+        }
+    ]
+}

@@ -1,0 +1,79 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 27311,
+    "type": "pull_request",
+    "title": "libpod: replace listen with socket+bind for dual-stack port reservation",
+    "state": "closed",
+    "labels": [
+        "6.0"
+    ],
+    "user": "danishprakash",
+    "body": "Opening this pull request to continue the discussion from https://github.com/containers/netavark/issues/1338\n\nThis commit addresses two concerns.\n\nBind dual stack when hostIP unless it is explicitly specified. Since we\nuse listen(), this change resulted in blocked connections on stacks\nwithout matching DNAT rules (e.g. connecting to [::1] on an IPv4-only\nnetwork) because the TCP handshake on the reservation socket would complete\ninstead of returning ECONNREFUSED allowing the client to fallback to IPv4.\n\nReplacing listen() with raw socket() and bind() syscalls fixes this by\nallowing us to reserve this port without accepting connections; clients\nget ECONNREFUSED and fall back to IPv4 automatically, as is desired.\n\nFixes: https://github.com/containers/netavark/issues/1338\n\ncc/ @Luap99 \n\n",
+    "comments": [
+        {
+            "user": "openshift-ci[bot]",
+            "body": "Adding the \"do-not-merge/release-note-label-needed\" label because no release-note block was detected, please follow our [release note process](https://git.k8s.io/community/contributors/guide/release-notes.md) to remove it.\n\n<details>\n\nInstructions for interacting with me using PR comments are available [here](https://git.k8s.io/community/contributors/guide/pull-requests.md).  If you have questions or suggestions related to my behavior, please file an issue against the [kubernetes-sigs/prow](https://github.com/kubernetes-sigs/prow/issues/new?title=Prow%20issue:) repository.\n</details>"
+        },
+        {
+            "user": "openshift-ci[bot]",
+            "body": "[APPROVALNOTIFIER] This PR is **NOT APPROVED**\n\nThis pull-request has been approved by: *<a href=\"https://github.com/containers/podman/pull/27311#\" title=\"Author self-approved\">danishprakash</a>*\n**Once this PR has been reviewed and has the lgtm label**, please assign [ashley-cui](https://github.com/ashley-cui) for approval. For more information see [the Code Review Process](https://git.k8s.io/community/contributors/guide/owners.md#the-code-review-process).\n\nThe full list of commands accepted by this bot can be found [here](https://go.k8s.io/bot-commands?repo=containers%2Fpodman).\n\n<details open>\nNeeds approval from an approver in each of these files:\n\n- **[OWNERS](https://github.com/containers/podman/blob/main/OWNERS)**\n\nApprovers can indicate their approval by writing `/approve` in a comment\nApprovers can cancel approval by writing `/approve cancel` in a comment\n</details>\n<!-- META={\"approvers\":[\"ashley-cui\"]} -->"
+        },
+        {
+            "user": "mheon",
+            "body": "I would lean towards retaining current behavior for binding ports and just changing the bind to the port to be IPv4 only - but, if we do want to do this, the Podman 6 merge window opens next week, giving us the opportunity to make breaking changes like this."
+        },
+        {
+            "user": "Luap99",
+            "body": "> I would lean towards retaining current behavior for binding ports and just changing the bind to the port to be IPv4 only - but, if we do want to do this, the Podman 6 merge window opens next week, giving us the opportunity to make breaking changes like this.\n\nI disagree, binding v4 only is a bug as we do not correctly prevent another v6 application on the host from taking the port.\nI do agree though that this is a breaking change as it could break people having these duplicated port definitions so it goes into podman 6 only."
+        },
+        {
+            "user": "mheon",
+            "body": "Second and third points sound like there would be benefits to offloading the port binding to Conmon - just give it a list of things to listen on, instead of passing an arbitrary number of FDs for ports"
+        },
+        {
+            "user": "Luap99",
+            "body": "> Second and third points sound like there would be benefits to offloading the port binding to Conmon - just give it a list of things to listen on, instead of passing an arbitrary number of FDs for ports\n\nThat doesn't work, the network setup without a userns (PostConfigureNetNS) happens before conmon is even started but ports have to be bound before the network setup. That is what I meant point 2 is basically unfixable because of these two different order that I tried to remove int he past but doesn't work due the somewhat broken checkpoint/restore support."
+        },
+        {
+            "user": "danishprakash",
+            "body": "> - no HostIP: bind dual stack, e.g. tcp proto\n> - ipv4 HostIP (including 0.0.0.0): bind v4, e.g. tcp4\n> - ipv6 HostIP (including ::): bind v6 only, e.g. tcp\n> \n\nBy default, podman will now bind dual-stack unless or until an IP is specified; in that case, podman parses and determines the protocol (as was the case before) and uses either [tcp|udp]4 or 6. The problem with 0.0.0.0 still lies, perhaps can be discussed in another PR given the impact on compat that would have.\n\n---\n\nThough netavark currently fails to properly set up nftable rules with rootless containers:\n\n```\n$ podman run -d --name netavark-test-container -it --network test_net -p 8080:8080 -p '[::]:8080:8080' alpine /bin/sh -c 'sleep 2'\ninternal:0:0-0: Error: Could not process rule: No such file or directory\n\ninternal:0:0-0: Error: Could not process rule: No such file or directory\n\ninternal:0:0-0: Error: Could not process rule: No such file or directory\n\ninternal:0:0-0: Error: Could not process rule: No such file or directory\n\ninternal:0:0-0: Error: Could not process rule: No such file or directory\n\ninternal:0:0-0: Error: Could not process rule: No such file or directory\n\nWARN[0003] failed to teardown network after failed setup: netavark: nftables error: \"nft\" did not return successfully while applying ruleset\nError: rootlessport listen tcp 0.0.0.0:8080: bind: address already in use\n```"
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this PR had no activity for 30 days."
+        },
+        {
+            "user": "Luap99",
+            "body": "> Since IPv6 localhost hairpin is not supported, on IPv4-only network, HostIP=\"\" should not bind dual-stack. One solution would be to bind dual stack only when the container's network is IPv6-enabled.\n\nSo the problem there is that ports can only be bound on startup while something like podman network connect/disconnect can add/remove v4/v6 ip addresses during runtime by modifying the firewall rules.\n\nSo not always doing dual stack might be problematic.\n\n> Some of the tests that employ publish ports are failing on an IPv4-only network (the default network). Because podman does an unconditional dual-stack port bind, it seems that the client tries IPv6 first, and since the container gets no IPv6 address, the dual-stack socket seems to accept [::1] connections, and since no DNAT rules exist for IPv6, the connection hangs.\n\nI think the main issue is we call listen() on the socket, if we do not do that than at least tcp connections should fail on ::1 and the client retires on v4 normally. That requires some more code changes I wanted to do for some time to do the socket/bind calls manually instead of using the go std lib."
+        },
+        {
+            "user": "Honny1",
+            "body": "@danishprakash, any updates on this?"
+        },
+        {
+            "user": "Luap99",
+            "body": "@danishprakash had a try locally with the helper, please feel free to take this commit https://github.com/containers/podman/commit/f088733011c4e4f70e98728cb0f922cb24ac5ef2"
+        },
+        {
+            "user": "danishprakash",
+            "body": "Thanks for the patch! much cleaner now; waiting for the tests."
+        },
+        {
+            "user": "Luap99",
+            "body": "please rebase to latest main that should fix the weird macos lint issue, ref https://github.com/containers/podman/pull/28665"
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "container-libs",
+            "number": 422
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 28162
+        }
+    ]
+}

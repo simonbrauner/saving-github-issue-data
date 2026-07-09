@@ -1,0 +1,129 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 649,
+    "type": "issue",
+    "title": "podman save: (multi) tag handling",
+    "state": "closed",
+    "labels": [
+        "locked - please file new issue/PR"
+    ],
+    "user": "vrothberg",
+    "body": "**Is this a BUG REPORT or FEATURE REQUEST?**:\n\n> /kind bug\n\n**Description**\n\nThis issue describes two issues related to how `podman-save` deals with tags. I did not want to split it into two issues as it may cause a discussion about how libpod should behave with respect to tags and also if it should behave as Docker does.\n\n#### (1) Using image ID adds a tag to the manifest.json\n- `podman save -o example.tar $ID`\n\nThe `manifest.json` file in `example.tar` will include a tag of the image. Docker behaves differently as it will set `\"RepoTags\":null`, which is something I would expect from libpod/Podman as well.\n\n#### (2) Using multiple images fails\n- `podman save -o example.tar $IMAGE-1 $IMAGE-2 $IMAGE-3`\n\nExample:\n```\n# podman save -o foo.tar docker.io/library/alpine:latest docker.io/library/foo:bar docker.io/library/foo:123\nGetting image source signatures\nCopying blob sha256:cd7100a72410606589a54b932cabd804a17f9ae5b42a1882bd56d263e02b6215\n 4.20 MB / 4.20 MB [========================================================] 0s\nCopying config sha256:3fd9065eaf02feaf94d68376da52541925650b81698c53c6824d92ff63f98353\n 1.48 KB / 1.48 KB [========================================================] 0s\nWriting manifest to image destination\nStoring signatures\nunable to save \"docker.io/library/foo:bar\": Error copying image to the remote destination: Error initializing destination docker-archive:foo.tar:docker.io/library/foo:bar: docker-archive doesn't support modifying existing images\n```\n\nNotice that `foo:bar` and `foo:123` are just tags for `alpine:latest`, so they all refer to the same image. In this case, Docker would create an archive with all three tags set in `manifest.json`.\n\n**Output of `podman version`:**\n\n```\nVersion:       0.4.2\nGo Version:    go1.9.4\nOS/Arch:       linux/amd64\n```",
+    "comments": [
+        {
+            "user": "rhatdan",
+            "body": "@umohnani8 WDYT"
+        },
+        {
+            "user": "rhatdan",
+            "body": "@mtrmac PTAL"
+        },
+        {
+            "user": "mtrmac",
+            "body": "(Related: https://github.com/containers/image/issues/447 )\n\n> Using image ID adds a tag to the manifest.json\n\nDo you mean a hexadecimal ID? Looking at https://github.com/projectatomic/libpod/blob/master/cmd/podman/save.go#L113, the argument should be passed unmodified to `archiveTransport.ParseReference`, which should reject such input completely. Am I overlooking something?\n\nIf you mean a name, it seems to me rather useful to include a name:tag in the archive, otherwise after `docker load` the image is inaccessible unless the user somehow out-of-band passes the image ID.  (OTOH, yes, it is annoying that one can’t `docker load` an archive without allowing the archive to override all tags, IIRC). I don’t feel strongly about this.\n\n> (2) Using multiple images fails\n\nYes, that’s awkward to do in the `c/image` design, which works one image at a time and does not really have a concept of “repositories” (apart from `PolicyConfigurationNamespaces`), let alone open/WIP/finished repositories.\n\nIf you are willing to pay the performance cost, it would of course be possible to unpack the archive, add more images into it, and repack it, or something like that. At O(avg_image_size^2) I/O operations that’s fairly costly—but as long as only people who really want this need to pay that cost, why not."
+        },
+        {
+            "user": "mtrmac",
+            "body": "> If you are willing to pay the performance cost, it would of course be possible to unpack the archive, add more images into it, and repack it\n\nOr, well, make the functionality available only to a knowledgeable caller willing to go beyond the “image at a time” abstraction (which could be `podman save`): like we already have the “unpacked directory structure” `oci:` transport, provide a similar transport for a `docker save`-formatted-unpacked archive; the caller would have to knowingly initialize the directory structure, and knowingly convert it into a tarball."
+        },
+        {
+            "user": "vrothberg",
+            "body": "> Do you mean a hexadecimal ID? Looking at https://github.com/projectatomic/libpod/blob/master/cmd/podman/save.go#L113, the argument should be passed unmodified to archiveTransport.ParseReference, which should reject such input completely. Am I overlooking something?\n\n@mtrmac Yes, I used the image ID provided by `podman-images`. I had a look a the code and also ended up in `ParseReference`, which is not rejecting IDs (see `idOrDigest`) but it seems to always compute a name for the returned image. In this special case, I think we could skip the name computation. However, I am not familiar with potential side-effects."
+        },
+        {
+            "user": "mtrmac",
+            "body": ">  I had a look a the code and also ended up in ParseReference, which is not rejecting IDs (see idOrDigest)\n\nThat’s the source side, in `storageTransport.ParseReference`? I am looking at `archiveTransport.ParseReference`→`reference.ParseNormalizedNamed`→`anchoredIdentifierRegexp.MatchString`. Also\n```console\n$ skopeo --insecure-policy copy docker://busybox docker-archive:foo:4de1899892c07c1e16b0f67dc228b6fa151e799c2529fa17ce69a0997635be77\nFATA[0000] Invalid destination name docker-archive:foo:4de1899892c07c1e16b0f67dc228b6fa151e799c2529fa17ce69a0997635be77: docker-archive parsing reference: invalid repository name (4de1899892c07c1e16b0f67dc228b6fa151e799c2529fa17ce69a0997635be77), cannot specify 64-byte hexadecimal strings \n```\n\nif using a hexadecimal ID as a tag works for you, I must be overlooking something basic in the `podman` code."
+        },
+        {
+            "user": "mtrmac",
+            "body": "Apart from the above, me not seeing how any of this works right now — I can’t immediately see why a name:tag would _have_ to be mandatory in the created archive; the code requires it now, but it seems easy to make it optional, if there really are valuable uses for that.\n\nThe only rationale for making it mandatory that I can find now is https://github.com/containers/image/blob/e51d350816912bbd09a91f690cd394b6225c043d/docker/daemon/daemon_transport.go#L46 ."
+        },
+        {
+            "user": "vrothberg",
+            "body": "> if using a hexadecimal ID as a tag works for you, I must be overlooking something basic in the podman code.\n\nIn case of `podman-save`, we jump pretty soon to `storageTransport.ParseStoreReference`, and I don't see the one from `archiveTransport` (which would fail parsing as you've mentioned). We're calling it here: https://github.com/projectatomic/libpod/blob/master/libpod/image/image.go#L318\n\n> Apart from the above, me not seeing how any of this works right now — I can’t immediately see why a name:tag would have to be mandatory in the created archive; the code requires it now, but it seems easy to make it optional, if there really are valuable uses for that.\n\nI agree. Given there are no unexpected side-effects, we could special case if the specified reference string is an ID (see https://github.com/containers/image/blob/e51d350816912bbd09a91f690cd394b6225c043d/storage/storage_transport.go#L164) and skip the tagging."
+        },
+        {
+            "user": "mtrmac",
+            "body": "> In case of `podman-save`, we jump pretty soon to `storageTransport.ParseStoreReference`, and I don't see the one from `archiveTransport` (which would fail parsing as you've mentioned). We're calling it here: https://github.com/projectatomic/libpod/blob/master/libpod/image/image.go#L318\n\nSure, that’s from https://github.com/projectatomic/libpod/blob/master/cmd/podman/save.go#L116 .\n\nBut I’m looking at https://github.com/projectatomic/libpod/blob/master/cmd/podman/save.go#L114 →https://github.com/projectatomic/libpod/blob/master/libpod/image/image.go#L418 , which should AFAICS end up as `archiveTransport.ParseReference`.  (After all, _some_ input must be passed to `docker/archive.ParseReference`, because that’s the only way to get a `docker-archive:` destination to write to.)\n\n> Given there are no unexpected side-effects, we could special case if the specified reference string is an ID (see https://github.com/containers/image/blob/e51d350816912bbd09a91f690cd394b6225c043d/storage/storage_transport.go#L164) and skip the tagging.\n\nI can’t see how the tagging, or not tagging, in containers/storage, affects the reference used when writing to `docker-archive:`. https://github.com/projectatomic/libpod/blob/master/cmd/podman/save.go#L110 decides to base both the source and destination on the same string input, but the destination is not computed from the source.\n\nMaybe it’s time for me to actually install podman :)"
+        },
+        {
+            "user": "umohnani8",
+            "body": "From what I can see, podman save fails if a hexadecimal is used as a tag:\n```\n➜  libpod git:(master) ✗ sudo podman save -o alp.tar alpine:3fd9065eaf02feaf94d68376da52541925650b81698c53c6824d92ff63f98353\nunable to find 'alpine:3fd9065eaf02feaf94d68376da52541925650b81698c53c6824d92ff63f98353' in local storage: unable to find a name and tag match for alpine in repotags\n```\nBut just giving the image ID instead works fine:\n```\n➜  libpod git:(master) sudo podman save -o alp.tar 3fd9065eaf02f                                                   \nGetting image source signatures\nCopying blob sha256:cd7100a72410606589a54b932cabd804a17f9ae5b42a1882bd56d263e02b6215\n 4.20 MB / 4.20 MB [========================================================] 0s\nCopying config sha256:3fd9065eaf02feaf94d68376da52541925650b81698c53c6824d92ff63f98353\n 1.48 KB / 1.48 KB [========================================================] 0s\nWriting manifest to image destination\nStoring signatures\n```\nHowever the id is saved as the name of the image in the repo tags, which I agree is a bug.\n\nI agree to change it such that repoTags is empty if an image ID is used for save. When loading the image back, we can generate a hexadecimal for it and save it as \"none\". @mtrmac WDYT?"
+        },
+        {
+            "user": "mtrmac",
+            "body": "> `➜  libpod git:(master) sudo podman save -o alp.tar 3fd9065eaf02f`\n\nAh, so that works because the supplied ID is not full 64 characters. That’s what I’ve been missing. Thanks!\n\n> However the id is saved as the name of the image in the repo tags, which I agree is a bug.\n\nYes… and awkward, when `abcde` can be both an ID prefix and a name.\n\n---\n\n> When loading the image back, we can generate a hexadecimal for it and save it as \"none\".\n\nThere is already code to handle unnamed _sources_ in `Runtime.getPullListFromRef`.  Is that sufficient?  (If you mean using the literal name `\"none\"` for the image, that seems surprising to me. Can we keep the image unnamed, reachable only using the ID, instead?)"
+        },
+        {
+            "user": "umohnani8",
+            "body": "@mtrmac I meant leave the image unnamed. When an image is unnamed it shows up as \"none\" when you do podman images (sorry should have phrased that better earlier).\nYeah, I know we already handle the pulling part for unnamed sources as I came across images when doing load that did not have a Repo Tag. Just need to modify the save part to not save the id as the name.\nAs for the save multiple tags to one archive, is that something we really want to do even though it is not great performance wise as you pointed out?"
+        },
+        {
+            "user": "mtrmac",
+            "body": "> As for the save multiple tags to one archive, is that something we really want to do even though it is not great performance wise as you pointed out?\n\nPer https://github.com/containers/image/issues/447#issuecomment-383074842 , it seems not necessary right now. Maybe `podman` could expose the capability in https://github.com/containers/image/issues/447 to use multiple tags for a single image."
+        },
+        {
+            "user": "umohnani8",
+            "body": "Fixed in #819"
+        },
+        {
+            "user": "Asgoret",
+            "body": "Still here. I tried save 43 images at once. Save only one image and stopped.\n`$podman save > okd.tar {REGISTRY}/okd/coreos/configmap-reload:v0.0.1 {REGISTRY}/okd/openshift/origin-node:v3.11.0 .....`\nPodman info\n```\nhost:\n  BuildahVersion: 1.5-dev\n  Conmon:\n    package: podman-0.11.1.1-3.git594495d.el7.centos.x86_64\n    path: /usr/libexec/podman/conmon\n    version: 'conmon version 1.12.0-dev, commit: d61f1d176b2b01a5e46efbf236427ece745b92f2-dirty'\n  Distribution:\n    distribution: '\"centos\"'\n    version: \"7\"\n  MemFree: 145330176\n  MemTotal: 8201146368\n  OCIRuntime:\n    package: containerd.io-1.2.2-3.el7.x86_64\n    path: /usr/sbin/runc\n    version: |-\n      runc version 1.0.0-rc6+dev\n      commit: 96ec2177ae841256168fcf76954f7177af9446eb\n      spec: 1.0.1-dev\n  SwapFree: 0\n  SwapTotal: 0\n  arch: amd64\n  cpus: 4\n  hostname: okd-master1\n  kernel: 3.10.0-957.1.3.el7.x86_64\n  os: linux\n  rootless: false\n  uptime: 4h 52m 2.73s (Approximately 0.17 days)\ninsecure registries:\n  registries: []\nregistries:\n  registries:\n  - docker.io\nstore:\n  ContainerStore:\n    number: 212\n  GraphDriverName: overlay\n  GraphOptions:\n  - overlay.override_kernel_check=true\n  GraphRoot: /var/lib/containers/storage\n  GraphStatus:\n    Backing Filesystem: extfs\n    Native Overlay Diff: \"true\"\n    Supports d_type: \"true\"\n  ImageStore:\n    number: 43\n  RunRoot: /var/run/containers/storage\n```"
+        },
+        {
+            "user": "mheon",
+            "body": "We added a test case in #819 which should have caught any regressions here, so this is strange\n@umohnani8 PTAL"
+        },
+        {
+            "user": "umohnani8",
+            "body": "@Asgoret I just tried it locally with about 10 tags and it worked fine for me. What is your podman version `podman version`?"
+        },
+        {
+            "user": "Asgoret",
+            "body": "@umohnani8 It's dev stend and destroyed every time when tests end, i can't get any information from there( I can say, that we didn't use any specific repos, only base for centos7 and epel."
+        },
+        {
+            "user": "mtrmac",
+            "body": "> Still here. I tried save 43 images at once. Save only one image and stopped.\n> `$podman save > okd.tar {REGISTRY}/okd/coreos/configmap-reload:v0.0.1 {REGISTRY}/okd/openshift/origin-node:v3.11.0 .....`\n\n@Asgoret Are those 43 different _tags_ for the _same_ image, or 43 different _images_? All of this issue, and #819, only supports different tags for a single image."
+        },
+        {
+            "user": "Asgoret",
+            "body": "@mtrmac different images, tags and repo. For example:\nimage #1: docker.io/openshift/node:v3.11.0\nimage #2: quau.io/coreos/prom:wed2dea\nimage: #3: redhat.registry.io/etcd:1.25"
+        },
+        {
+            "user": "umohnani8",
+            "body": "@Asgoret that is not going to work, we only have support for the same image but different tags. for example: docker.io/library/alpine:3.1, docker.io/library/alpine:3.4 etc."
+        },
+        {
+            "user": "mtrmac",
+            "body": "To be explicit, it has to be the _very same image_; not a same repo with different tags pointing to different images (as would be common with different versions of the same product)."
+        },
+        {
+            "user": "Asgoret",
+            "body": "@umohnani8 @mtrmac ok...i understand my mistake. Thanks for helping!"
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "containers",
+            "repository": "image",
+            "number": 447
+        },
+        {
+            "organization": "containers",
+            "repository": "image",
+            "number": 458
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 782
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 819
+        }
+    ]
+}

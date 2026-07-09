@@ -1,0 +1,201 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 14929,
+    "type": "issue",
+    "title": "deadlock(?) in podman rm(?)",
+    "state": "closed",
+    "labels": [
+        "locked - please file new issue/PR"
+    ],
+    "user": "edsantiago",
+    "body": "Sorry, I really don't know what happened nor how to even report it. While testing #14772 my podman got stuck, and remains stuck. It looks like a deadlock. I don't actually know where it stuck in `apiv2` tests, but _think_ it's in a DELETE. I was able to run a `ps`:\n```console\n$ bin/podman --root /dev/shm/test-apiv2.tmp.ZK2Ovh/server_root --runroot /run/user/14904/containers ps -a\nCONTAINER ID  IMAGE                                        COMMAND     CREATED        STATUS                      PORTS       NAMES\nef964cc9f594  localhost/podman-pause:4.2.0-dev-1657739704              6 minutes ago  Exited (137) 6 minutes ago              dbdb45542af1-infra\n36f1f1caf0d2  quay.io/libpod/alpine_labels:latest                      6 minutes ago  Stopping                                gallantmahavira-pod-gallantmahavira\n```\n...but `rm` has hung for at least ten minutes:\n```console\n$ bin/podman --root /dev/shm/test-apiv2.tmp.ZK2Ovh/server_root --runroot /run/user/14904/containers rm -f -a\n```\n`lsof` pointed me at `/dev/shm/libpod_rootless_lock_MYUID`, which surprised me because I would expect all the `--root/--runroot` args to use a different lockfile. The four processes shown by lsof are (edited for clarity):\n```\n    podman system service    <---- this is apiv2 tests\n    podman [lots of args I never added] container cleanup ef9... [SHA of the podman-pause container above]\n    podman [lots of args I never added] container cleanup 36f... [SHA of the alpine_labels container above]\n    podman rm -f -a        <--- this is the \"rm\" that I ran on the command line\n```\nCouldn't think of anything else to check, so I `kill`ed (TERM) all the processes, and have my system back now.",
+    "comments": [
+        {
+            "user": "Luap99",
+            "body": "Maybe related https://github.com/containers/podman/issues/14921"
+        },
+        {
+            "user": "edsantiago",
+            "body": "Could be, but when I filed this I looked at the `kube.yaml` file and did not see the string `restart` in it. I just double-checked, still absent.\n\nSuper trivial reproducer:\n```console\n$ ./test/apiv2/test-apiv2 80\n```\nThis seems to hang three out of four times on my laptop."
+        },
+        {
+            "user": "vrothberg",
+            "body": "I try to take a look today.\n\n@edsantiago, `kill -SIGABRT` will let go print a stack trace which can be extremely useful for such deadlocks."
+        },
+        {
+            "user": "vrothberg",
+            "body": "Also happens locally.  An easy reproducer:\n`./bin/podman kube play ~/kube.yaml && ./bin/podman kube play --down ~/kube.yaml`\n\nWith `~/kube.yaml`:\n```\napiVersion: v1                                                \nkind: Pod                                                     \nmetadata:                                                     \n  annotations:                                                \n    io.kubernetes.cri-o.TTY/gallantmahavira: \"false\"          \n    io.podman.annotations.autoremove/gallantmahavira: \"FALSE\" \n    io.podman.annotations.init/gallantmahavira: \"FALSE\"       \n    io.podman.annotations.privileged/gallantmahavira: \"FALSE\" \n    io.podman.annotations.publish-all/gallantmahavira: \"FALSE\"\n  creationTimestamp: \"2022-07-13T11:35:48Z\"                   \n  labels:                                                     \n    app: gallantmahavira-pod                                  \n  name: gallantmahavira-pod                                   \nspec:                                                         \n  containers:                                                 \n  - image: docker.io/library/alpine:latest                    \n    name: gallantmahavira                                     \n    securityContext:                                          \n      capabilities:                                           \n        drop:                                                 \n        - CAP_MKNOD                                           \n        - CAP_NET_RAW                                         \n        - CAP_AUDIT_WRITE                                     \n```\n\nIt smells like another exit-code issue."
+        },
+        {
+            "user": "vrothberg",
+            "body": "```\ngoroutine 1 [syscall, locked to thread]:                                                                                                                                                    \ngithub.com/containers/podman/v4/libpod/lock/shm._Cfunc_lock_semaphore(0x7fd49c0bf000, 0x6)                                                                                                  \n        _cgo_gotypes.go:199 +0x4c                                                                                                                                                           \ngithub.com/containers/podman/v4/libpod/lock/shm.(*SHMLocks).LockSemaphore(0xc000ae2a20, 0x6)                                                                                                \n        /home/vrothberg/go/src/github.com/containers/podman/libpod/lock/shm/shm_lock.go:225 +0x58                                                                                           \ngithub.com/containers/podman/v4/libpod/lock.(*SHMLock).Lock(0xc000b90fc0?)                                                                                                                  \n        /home/vrothberg/go/src/github.com/containers/podman/libpod/lock/shm_lock_manager_linux.go:114 +0x25                                                                                 \ngithub.com/containers/podman/v4/libpod.(*Runtime).removePod(0xc000098fc0, {0x197d1c0, 0xc000a72690}, 0xc0006eca20, 0x1, 0x0, 0xc00058a000?)                                                 \n        /home/vrothberg/go/src/github.com/containers/podman/libpod/runtime_pod_linux.go:223 +0x304                                                                                          \ngithub.com/containers/podman/v4/libpod.(*Runtime).RemovePod(0xc000098fc0, {0x197d1c0, 0xc000a72690}, 0xc0006eca20, 0xc0?, 0x8f?, 0xc00037b958?)                                             \n        /home/vrothberg/go/src/github.com/containers/podman/libpod/runtime_pod.go:46 +0x137                                                                                                 \ngithub.com/containers/podman/v4/pkg/domain/infra/abi.(*ContainerEngine).PodRm(0xc00059ae68, {0x197d1c0, 0xc000a72690}, {0xc000c530c0?, 0xc00037b9b8?, 0x4e42a5?}, {0x0, 0x0, 0x0, 0x0, ...})\n        /home/vrothberg/go/src/github.com/containers/podman/pkg/domain/infra/abi/pods.go:274 +0x1d8                                                                                         \ngithub.com/containers/podman/v4/pkg/domain/infra/abi.(*ContainerEngine).PlayKubeDown(0x7ffc2eb20222?, {0x197d1c0, 0xc000a72690}, {0x1973da0, 0xc00059ae80}, {})                             \n        /home/vrothberg/go/src/github.com/containers/podman/pkg/domain/infra/abi/play.go:960 +0x209                                                                                         \ngithub.com/containers/podman/v4/cmd/podman/kube.teardown({0x7ffc2eb20222, 0x19})                                                                                                            \n        /home/vrothberg/go/src/github.com/containers/podman/cmd/podman/kube/play.go:264 +0x103                                                                                              \ngithub.com/containers/podman/v4/cmd/podman/kube.Play(0x22f2860?, {0xc0000d75e0, 0x1, 0x2?})                                                                                                 \n        /home/vrothberg/go/src/github.com/containers/podman/cmd/podman/kube/play.go:239 +0x33d                                                                                              \ngithub.com/spf13/cobra.(*Command).execute(0x22f2860, {0xc00003c0d0, 0x2, 0x2})                                                                                                              \n        /home/vrothberg/go/src/github.com/containers/podman/vendor/github.com/spf13/cobra/command.go:872 +0x694                                                                             \ngithub.com/spf13/cobra.(*Command).ExecuteC(0x23006e0)                                                                                                                                       \n        /home/vrothberg/go/src/github.com/containers/podman/vendor/github.com/spf13/cobra/command.go:990 +0x3b4                                                                             \ngithub.com/spf13/cobra.(*Command).Execute(...)                                                                                                                                              \n        /home/vrothberg/go/src/github.com/containers/podman/vendor/github.com/spf13/cobra/command.go:918                                                                                    \ngithub.com/spf13/cobra.(*Command).ExecuteContext(...)                                                                                                                                       \n        /home/vrothberg/go/src/github.com/containers/podman/vendor/github.com/spf13/cobra/command.go:911                                                                                    \nmain.Execute()                                                                                                                                                                              \n        /home/vrothberg/go/src/github.com/containers/podman/cmd/podman/root.go:99 +0xc5                                                                                                     \nmain.main()                                                                                                                                                                                 \n        /home/vrothberg/go/src/github.com/containers/podman/cmd/podman/main.go:40 +0x7c                                                                                                     \n```"
+        },
+        {
+            "user": "vrothberg",
+            "body": "Also happens when using `podman pod rm`."
+        },
+        {
+            "user": "vrothberg",
+            "body": "@mheon WDYT?"
+        },
+        {
+            "user": "mheon",
+            "body": "Need to know what that lock is assigned to (`LockSemaphore(0xc000ae2a20, 0x6)` would indicate it's SHM lock 6). `removePod` unfortunately takes basically every lock in existence (locks the pod, but also every container in the pod) so I can't really tell what it's waiting on.\n\nIt could be the same as #14291 in that we seem to have a case where normal `podman rm` takes the container lock then the pod lock, but `podman pod rm` does the opposite, which can lead to the two deadlocking."
+        },
+        {
+            "user": "Luap99",
+            "body": "Stack trace is point at https://github.com/containers/podman/blob/b4c09bef668dd41e1cc55b8d379992e2d22714b7/libpod/runtime_pod_linux.go#L223 so it is a container lock."
+        },
+        {
+            "user": "vrothberg",
+            "body": "Yes, the stack trace points there as well\n>         /home/vrothberg/go/src/github.com/containers/podman/libpod/runtime_pod_linux.go:223 +0x304 \n\nI do not yet see why though.\n\n> removePod unfortunately takes basically every lock in existence (locks the pod, but also every container in the pod) so I can't really tell what it's waiting on.\n\nI sent something there as well but it's clearly racy.  My theory is that container cleanup and `pod rm` run concurrently to hit this race."
+        },
+        {
+            "user": "mheon",
+            "body": "Cleanup should not take the pod lock, so it shouldn’t be able to force a\nlock ordering deadlock. Maybe cleanup is stuck instead?\n\nOn Fri, Jul 15, 2022 at 09:41 Valentin Rothberg ***@***.***>\nwrote:\n\n> Yes, the stack trace points there as well\n>\n>     /home/vrothberg/go/src/github.com/containers/podman/libpod/runtime_pod_linux.go:223 +0x304\n>\n> I do not yet see why though.\n>\n> removePod unfortunately takes basically every lock in existence (locks the\n> pod, but also every container in the pod) so I can't really tell what it's\n> waiting on.\n>\n> I sent something there as well but it's clearly racy. My theory is that\n> container cleanup and pod rm run concurrently to hit this race.\n>\n> —\n> Reply to this email directly, view it on GitHub\n> <https://github.com/containers/podman/issues/14929#issuecomment-1185558373>,\n> or unsubscribe\n> <https://github.com/notifications/unsubscribe-auth/AB3AOCBOEAKTK4VIIU43XBTVUFS7TANCNFSM53P5CSTQ>\n> .\n> You are receiving this because you were mentioned.Message ID:\n> ***@***.***>\n>\n"
+        },
+        {
+            "user": "vrothberg",
+            "body": "That could be it, yes.  It's always the first `(*Container).Lock()` so either another process already has the lock or the _same_ process has it.  Probably worth checking if this can be called in a batched context."
+        },
+        {
+            "user": "mheon",
+            "body": "There is no pod batching mechanism so that shouldn’t be possible. The Kube\nteardown code could be taking a container lock, but it would have to be\ndoing something to hold it indefinitely and I don’t know of many operations\nthat can do that. Something is probably freezing in a critical section,\nonly question is where. Killing all cleanup processes would probably tell\nus if it’s that versus the play kube teardown deadlocking itself.\n\nOn Fri, Jul 15, 2022 at 11:14 Valentin Rothberg ***@***.***>\nwrote:\n\n> That could be it, yes. It's always the first (*Container).Lock() so\n> either another process already has the lock or the *same* process has it.\n> Probably worth checking if this can be called in a batched context.\n>\n> —\n> Reply to this email directly, view it on GitHub\n> <https://github.com/containers/podman/issues/14929#issuecomment-1185642921>,\n> or unsubscribe\n> <https://github.com/notifications/unsubscribe-auth/AB3AOCD3JKTSSB55MJ5FGGLVUF547ANCNFSM53P5CSTQ>\n> .\n> You are receiving this because you were mentioned.Message ID:\n> ***@***.***>\n>\n"
+        },
+        {
+            "user": "tyler92",
+            "body": "> Cleanup should not take the pod lock, so it shouldn’t be able to force a lock ordering deadlock.\n\nI think that it is root cause. As I understand `podman cleanup` locks not only container's lock, but also other infra (?) container. See output from https://github.com/containers/podman/issues/14291\n\n```\nProcess 'podman pod rm -f -a':\n\nLock 0                                       \nLocked 0                                     \nLock 1                                       \nLocked 1                                     \nLock 2\n\nProcess 'podman ... container cleanup ...':\n\nLock 2\nLocked 2\nLock 1\nLocked 1\nUnlock 1\nUnlocked 1\nLock 1\n```\n\n0 - Pod\n1 - infra container\n2 - container"
+        },
+        {
+            "user": "mheon",
+            "body": "You are looking at cleanup with a restart policy. Restart policy involves a potential start of dependency containers and requires locking said dependencies to ascertain their state - in this case, the infra container of a pod. It is not applicable in this case as no container has a restart policy (or `--rm` set)."
+        },
+        {
+            "user": "edsantiago",
+            "body": "Hey, could someone make a fix for this, even if it's a subobtimal fix? The flake is triggering pretty frequently."
+        },
+        {
+            "user": "vrothberg",
+            "body": "I do not yet know _why_ it's happening.  It reproduces easily but I just don't yet understand the source."
+        },
+        {
+            "user": "mheon",
+            "body": "I can take a look once I am done with RC2"
+        },
+        {
+            "user": "tyler92",
+            "body": "There is a simple C code that is able to print mutexes owners:\n\n```\n#include \"shm_lock.h\"\n#include <stdio.h>\n#include <string.h>\n\nint main()\n{\n    int error = 0;\n    shm_struct_t *mem;\n    struct __pthread_mutex_s *mutex_data;\n    int owner;\n\n    mem = open_lock_shm(strdup(\"/libpod_rootless_lock_1000\"), 2048, &error);\n\n    if(!mem) {\n        printf(\"%s\\n\", strerror(error));\n        return 1;\n    }\n\n    if(mem->segment_lock.__data.__owner) {\n        printf(\"segment_lock owner %d\\n\", mem->segment_lock.__data.__owner);\n    }\n\n    for(int i = 0, k = 0; i < BITMAP_SIZE; ++i) {\n        for(int j = 0; j < 2048 / BITMAP_SIZE; ++j) {\n            mutex_data = &mem->locks[i].locks[j].__data;\n\n            if(mutex_data->__owner) {\n                owner = mutex_data->__owner;\n                printf(\"Lock #%d owner is process %d\\n\", k, owner);\n            }\n\n            ++k;\n        }\n    }\n\n    return 0;\n}\n```\n\nI found it useful when investigating deadlock."
+        },
+        {
+            "user": "giuseppe",
+            "body": "From what I can see the issue happens when `removePod` attempts to lock sequentially all the containers in the pod and at the same time there is already a cleanup process that has a lock on a container and then it needs to lock the dependency container as well.\n\nI think one possible way to solve it is to make sure the container cleanup first gets the lock on its pod.\n\nThere might be other combinations of commands that bring to this same situation, in general whenever we need to lock the container dependencies, as it can race with `removePod`.\n\n```diff\ndiff --git a/libpod/container_api.go b/libpod/container_api.go\nindex 742eb6d3e..579fc7f79 100644\n--- a/libpod/container_api.go\n+++ b/libpod/container_api.go\n@@ -667,6 +667,16 @@ func (c *Container) WaitForConditionWithInterval(ctx context.Context, waitTimeou\n // It also cleans up the network stack\n func (c *Container) Cleanup(ctx context.Context) error {\n        if !c.batched {\n+               // if the container is part of a pod, we need to first lock its pod\n+               pod, err := c.runtime.state.Pod(c.config.Pod)\n+               if err != nil {\n+                       return fmt.Errorf(\"container %s is in pod %s, but pod cannot be retrieved: %w\", c.ID(), c.config.Pod, err)\n+               }\n+               if pod != nil {\n+                       pod.lock.Lock()\n+                       defer pod.lock.Unlock()\n+               }\n+\n                c.lock.Lock()\n                defer c.lock.Unlock()\n```\n\nI am still testing this patch but so far I could not reproduce the issue anymore\n\nAlternatively, we could probably simplify `removePod` and avoid to keep all the locks.  The disadvantage would be that we might delete some containers before realizing there are some running containers that prevent the pod removal, but IMHO it is an acceptable cost."
+        },
+        {
+            "user": "mheon",
+            "body": "Fixing this in pod removal certainly seems safer. Otherwise we'll be chasing races elsewhere (anything that looks at dependencies, e.g. `podman start`, could also cause this). Furthermore, serializing `podman cleanup` in a pod seems unnecessary and potentially a negative for performance."
+        },
+        {
+            "user": "mheon",
+            "body": "I'm also very curious as to why cleanup is locking dependency containers. I know that can happen with a restart policy set, but I don't see a code path that would need to inspect dependencies otherwise."
+        },
+        {
+            "user": "vrothberg",
+            "body": "I believe that the problem can also be fixed when `pod rm` sorts the list of containers according to their dependencies.\n\nLet's assume `A depends-on B depends-on C`:\n\nThe current deadlock can happen when we cleanup `A` who wants to lock `B`.  In parallel we have `pod rm` running which wants to lock the containers in order `C, B, A`. Boom ... deadlock.\n\nIf we make sure that `pod rm` always sorts the slice/list of containers according to their (inter) dependencies, the locking order would `A, B, C`.  Then `pod rm` would have to wait for the cleanup of `A` to be done before it can acquire it's lock and the other ones after."
+        },
+        {
+            "user": "tyler92",
+            "body": "> I am still testing this patch but so far I could not reproduce the issue anymore\n\nI already tried this approach in PR https://github.com/containers/podman/pull/14969 and it has a bug - Cleanup function might be called from Pod.stopWithTimeout (pod_api.go) and mutex will be double-locked.\n\nUPD: I just pushed fix for this issue.\n"
+        },
+        {
+            "user": "tyler92",
+            "body": "> I believe that the problem can also be fixed when pod rm sorts the list of containers according to their dependencies.\n\nWrong lock order is occurred not only between containers, but also between Pod and containers. For example there is a case when Pod's lock is happened after Container's lock.\n\n`P1, C1` vs `C1, P1`"
+        },
+        {
+            "user": "vrothberg",
+            "body": "> Wrong lock order is occurred not only between containers, but also between Pod and containers. For example there is a case when Pod's lock is happened after Container's lock.\n> \n> `P1, C1` vs `C1, P1`\n\nPlease point to the exact location.  I don't think that is possible."
+        },
+        {
+            "user": "vrothberg",
+            "body": "The only place I know is https://github.com/containers/podman/blob/main/libpod/container_internal.go#L1955 and it's documented in the comment how the dead lock is resolved."
+        },
+        {
+            "user": "giuseppe",
+            "body": "> > I am still testing this patch but so far I could not reproduce the issue anymore\n> \n> I already tried this approach in PR #14969 and it has a bug - Cleanup function might be called from Pod.stopWithTimeout (pod_api.go) and mutex will be double-locked.\n\nthanks, you are right, another attempt that I am still testing:\n\n```diff\ndiff --git a/libpod/runtime_pod_linux.go b/libpod/runtime_pod_linux.go\nindex 75ff24e41..e2cc4e0db 100644\n--- a/libpod/runtime_pod_linux.go\n+++ b/libpod/runtime_pod_linux.go\n@@ -214,34 +214,46 @@ func (r *Runtime) removePod(ctx context.Context, p *Pod, removeCtrs, force bool,\n                return fmt.Errorf(\"pod %s contains containers and cannot be removed: %w\", p.ID(), define.ErrCtrExists)\n        }\n \n-       // Go through and lock all containers so we can operate on them all at\n-       // once.\n-       // First loop also checks that we are ready to go ahead and remove.\n-       containersLocked := true\n+       ctrNamedVolumes := make(map[string]*ContainerNamedVolume)\n+\n+       // Second loop - all containers are good, so we should be clear to\n+       // remove.\n+       for _, ctr := range ctrs {\n+               // Remove the container.\n+               // Do NOT remove named volumes. Instead, we're going to build a\n+               // list of them to be removed at the end, once the containers\n+               // have been removed by RemovePodContainers.\n+       }\n+\n+       var removalErr error\n        for _, ctr := range ctrs {\n-               ctrLock := ctr.lock\n-               ctrLock.Lock()\n-               defer func() {\n-                       if containersLocked {\n+               err := func() error {\n+                       ctrLock := ctr.lock\n+                       ctrLock.Lock()\n+                       defer func() {\n                                ctrLock.Unlock()\n+                       }()\n+\n+                       if err := ctr.syncContainer(); err != nil {\n+                               return err\n                        }\n-               }()\n \n-               // If we're force-removing, no need to check status.\n-               if force {\n-                       continue\n-               }\n+                       for _, vol := range ctr.config.NamedVolumes {\n+                               ctrNamedVolumes[vol.Name] = vol\n+                       }\n \n-               // Sync all containers\n-               if err := ctr.syncContainer(); err != nil {\n-                       return err\n-               }\n+                       return r.removeContainer(ctx, ctr, force, false, true, timeout)\n+               }()\n \n-               // Ensure state appropriate for removal\n-               if err := ctr.checkReadyForRemoval(); err != nil {\n-                       return fmt.Errorf(\"pod %s has containers that are not ready to be removed: %w\", p.ID(), err)\n+               if removalErr == nil {\n+                       removalErr = err\n+               } else {\n+                       logrus.Errorf(\"Removing container %s from pod %s: %v\", ctr.ID(), p.ID(), err)\n                }\n        }\n+       if removalErr != nil {\n+               return removalErr\n+       }\n \n        // We're going to be removing containers.\n        // If we are Cgroupfs cgroup driver, to avoid races, we need to hit\n@@ -268,30 +280,6 @@ func (r *Runtime) removePod(ctx context.Context, p *Pod, removeCtrs, force bool,\n                }\n        }\n \n-       var removalErr error\n-\n-       ctrNamedVolumes := make(map[string]*ContainerNamedVolume)\n-\n-       // Second loop - all containers are good, so we should be clear to\n-       // remove.\n-       for _, ctr := range ctrs {\n-               // Remove the container.\n-               // Do NOT remove named volumes. Instead, we're going to build a\n-               // list of them to be removed at the end, once the containers\n-               // have been removed by RemovePodContainers.\n-               for _, vol := range ctr.config.NamedVolumes {\n-                       ctrNamedVolumes[vol.Name] = vol\n-               }\n-\n-               if err := r.removeContainer(ctx, ctr, force, false, true, timeout); err != nil {\n-                       if removalErr == nil {\n-                               removalErr = err\n-                       } else {\n-                               logrus.Errorf(\"Removing container %s from pod %s: %v\", ctr.ID(), p.ID(), err)\n-                       }\n-               }\n-       }\n-\n        // Clear infra container ID before we remove the infra container.\n        // There is a potential issue if we don't do that, and removal is\n        // interrupted between RemoveAllContainers() below and the pod's removal\n@@ -326,12 +314,6 @@ func (r *Runtime) removePod(ctx context.Context, p *Pod, removeCtrs, force bool,\n                }\n        }\n \n-       // let's unlock the containers so if there is any cleanup process, it can terminate its execution\n-       for _, ctr := range ctrs {\n-               ctr.lock.Unlock()\n-       }\n-       containersLocked = false\n-\n        // Remove pod cgroup, if present\n        if p.state.CgroupPath != \"\" {\n                logrus.Debugf(\"Removing pod cgroup %s\", p.state.CgroupPath)\n```\n\n"
+        },
+        {
+            "user": "vrothberg",
+            "body": "@giuseppe I think your patch would work but at the cost of having small races in case a container transitions state (e.g., gets restarted)."
+        },
+        {
+            "user": "mheon",
+            "body": "It looks like it's accessing containers without a lock, which isn't safe. We'd need to sync, get anything we need out of the container structs, then unlock and use the local variables we created, then lock again when the time came to remove."
+        },
+        {
+            "user": "vrothberg",
+            "body": "@mheon, what's your take on https://github.com/containers/podman/issues/14929#issuecomment-1189106564?"
+        },
+        {
+            "user": "mheon",
+            "body": "We have code that does that (but in reverse) to start the pod. Using the existing graph-traversal code to stop the pod seems sensible to me. However, it doesn't fully resolve races, I think; we can't lock everything at once, otherwise we get the same issues as this, so while we are working on the outermost containers on the graph (those without dependencies), the inner containers can be locked and restarted and etc. Doesn't really matter for a force removal, but it'd be a semantic change for a normal removal - a container can restart during it and prevent removal of the entire pod. We could do a sequential locking (one by one, not holding more than a single lock at a time) of all containers at the beginning to verify state and then proceed if all are stopped, and just go ahead and force-remove any running containers that restarted while we were going?"
+        },
+        {
+            "user": "giuseppe",
+            "body": "> It looks like it's accessing containers without a lock, which isn't safe. We'd need to sync, get anything we need out of the container structs, then unlock and use the local variables we created, then lock again when the time came to remove.\n\nthat is what I've tried to do, what more do we need to lock?"
+        },
+        {
+            "user": "vrothberg",
+            "body": ">  we can't lock everything at once, otherwise we get the same issues as this, so while we are working on the outermost containers on the graph (those without dependencies), the inner containers can be locked and restarted and etc.\n\nThey can still be locked and unlocked at any time.  IMHO, the crux of the matter is the _order_ in which containers are locked.  The order in `pod rm` does not follow the order in which `cleanup` locks.  That opens the race for an ABBA lock."
+        },
+        {
+            "user": "vrothberg",
+            "body": "To rephrase it to a rule: if two containers are locked at the same time (by the same process), the order of the locking must follow their dependencies.  If the order is random - which it is in `pod rm` - we will have deadlocks when running concurrently."
+        },
+        {
+            "user": "mheon",
+            "body": "I see what you're saying. My brain initially insisted that it can't be safe, but thinking about it more I can't see any cases where it wouldn't be."
+        },
+        {
+            "user": "vrothberg",
+            "body": "Sorry for insisting on it so much, but I really believe having a way of sorting AND accessing containers in that order for pods is the right way.  If we put it into a method `(*Pod).GetContainers()` or something like that, future maintainers can just use that method whenever they need to access all containers."
+        },
+        {
+            "user": "mheon",
+            "body": "We have preexisting graph creation and traversal code in `container_graph.go`. I think the graph itself can be reused, but the traversal code will need a new function that does an outside-in traversal, as opposed to an inside-out one."
+        },
+        {
+            "user": "vrothberg",
+            "body": "But I am cool using @giuseppe's patch as well. Short-lived locks that avoid keeping two containers locked at the same time in `pod rm` will also solve this issue."
+        },
+        {
+            "user": "giuseppe",
+            "body": "opened a PR:\n\n- https://github.com/containers/podman/pull/14976"
+        },
+        {
+            "user": "tyler92",
+            "body": "> Please point to the exact location. I don't think that is possible.\n\nYou are right, sorry, it's my inattention."
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 14938
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 14947
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 14969
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 14976
+        }
+    ]
+}

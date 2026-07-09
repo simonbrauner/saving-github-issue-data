@@ -1,0 +1,60 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 25572,
+    "type": "issue",
+    "title": "CI: podman run - idmapped mounts issue with vfs",
+    "state": "closed",
+    "labels": [
+        "locked - please file new issue/PR"
+    ],
+    "user": "Luap99",
+    "body": "```\nnot ok 67 |030| podman run - idmapped mounts in 1214ms\n         # tags: ci:parallel\n         # (from function `bail-now' in file test/system/[helpers.bash, line 187](https://github.com/containers/podman/blob/a2810f492480de043c52287ccddd57013d8a4565/test/system/helpers.bash#L187),\n         #  from function `die' in file test/system/[helpers.bash, line 970](https://github.com/containers/podman/blob/a2810f492480de043c52287ccddd57013d8a4565/test/system/helpers.bash#L970),\n         #  in test file test/system/[030-run.bats, line 1420](https://github.com/containers/podman/blob/a2810f492480de043c52287ccddd57013d8a4565/test/system/030-run.bats#L1420))\n         #   `die \"Cannot create idmap mount: $output\"' failed\n         #\n<+     > # # podman image mount quay.io/libpod/testimage:20241011\n<+077ms> # /var/lib/containers/storage/vfs/dir/5fb2677d7366b1f97f4a4d2851f47b11938cf2d6310523a61f43ab71b2b14e13\n         #\n<+093ms> # # podman image unmount quay.io/libpod/testimage:20241011\n<+149ms> # b82e560ed57b77a897379e160371adcf1b000ca885e69c62cbec674777a83850\n         #\n<+031ms> # # podman run --security-opt label=disable --rm --uidmap=0:1000:10000 --rootfs /tmp/CI_X5P0/podman_bats.nlXqdd/rootfs:idmap true\n<+324ms> # Error: crun: open `/tmp/CI_X5P0/podman_bats.nlXqdd/rootfs/run/.containerenv`: No such file or directory: OCI runtime attempted to invoke a command that was not found\n<+015ms> # [ rc=127 ]\n         # #/vvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv\n         # #| FAIL: Cannot create idmap mount: Error: crun: open `/tmp/CI_X5P0/podman_bats.nlXqdd/rootfs/run/.containerenv`: No such file or directory: OCI runtime attempted to invoke a command that was not found\n         # #\\^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n         # # [teardown]\n```\n\nI have seen this a few times already so reporting this, AFAICT it always fails on the `run/.containerenv` path, not idea why this would be flaky.\n\nLog:\nhttps://api.cirrus-ci.com/v1/artifact/task/4599002940833792/html/sys-podman-fedora-41-root-host-boltdb.log.html",
+    "comments": [
+        {
+            "user": "Luap99",
+            "body": "@giuseppe PTAL\nOne thing to note here is that this is a parallel running system tests so it operates on a store that might be modified in parallel. However given that test is using --rootfs we are using our own private path so I don't know why this would fail like this."
+        },
+        {
+            "user": "giuseppe",
+            "body": "`\"podman run - check workdir\"` doesn't seem safe to run parallel.  It mounts an overlay on top of the image mount, so it affects any other container using the image from that store.\n\nSaid so, don't see how it could affect this test though, since we perform a `cp -r` anyway and `/run/.containerenv` is created when it doesn't exist.\n\nEDIT: no, wrong analysis, that should not happen even with :O"
+        },
+        {
+            "user": "Luap99",
+            "body": "It failed 6 times now on https://github.com/containers/podman/pull/25506 (https://cirrus-ci.com/task/6193661458776064), I do have a c/common update there but if you look at the diff this is only my DiskUsage() bug fix. I cannot see how this diff would influences that flake and its only a single task all the others passed already and of course it passes locally fine as well.\n\nAnd I think I have seen it on other PRs as well.\n\n\n> /run/.containerenv is created when it doesn't exist.\n\nI agree that parts confuses me as well.\n\n\n\n> \"podman run - check workdir\" doesn't seem safe to run parallel. \n\nWait I think you are right no test that does `podman image mount $IMAGE` and unmount can be parallel safe, if the other tests unmount it we could copy an empty rootfs. And in the overlay case it could mean the lower dir is empty then. \n\nThat doesn't explain the containerenv error message but I don't think it safe for parallel testing.\n"
+        },
+        {
+            "user": "giuseppe",
+            "body": "we refcount how many times the image was mounted:\n\n```\n➜ sudo bin/podman image mount docker.io/library/alpine\n/var/lib/containers/storage/overlay/08000c18d16dadf9553d747a58cf44023423a9ab010aab96cf263d2216b8b350/merged\n➜ sudo ls /var/lib/containers/storage/overlay/08000c18d16dadf9553d747a58cf44023423a9ab010aab96cf263d2216b8b350/merged\nbin  dev  etc  home  lib  media  mnt  opt  proc  root  run  sbin  srv  sys  tmp  usr  var\n➜ sudo bin/podman image mount docker.io/library/alpine\n/var/lib/containers/storage/overlay/08000c18d16dadf9553d747a58cf44023423a9ab010aab96cf263d2216b8b350/merged\n➜ sudo ls /var/lib/containers/storage/overlay/08000c18d16dadf9553d747a58cf44023423a9ab010aab96cf263d2216b8b350/merged\nbin  dev  etc  home  lib  media  mnt  opt  proc  root  run  sbin  srv  sys  tmp  usr  var\n➜ sudo bin/podman image umount docker.io/library/alpine\naded1e1a5b3705116fa0a92ba074a5e0b0031647d9c315983ccba2ee5428ec8b\n# it is still mounted after one umount\n➜ sudo ls /var/lib/containers/storage/overlay/08000c18d16dadf9553d747a58cf44023423a9ab010aab96cf263d2216b8b350/merged\nbin  dev  etc  home  lib  media  mnt  opt  proc  root  run  sbin  srv  sys  tmp  usr  var\n➜ sudo bin/podman image umount docker.io/library/alpine\naded1e1a5b3705116fa0a92ba074a5e0b0031647d9c315983ccba2ee5428ec8b\n➜ sudo bin/podman image umount docker.io/library/alpine\naded1e1a5b3705116fa0a92ba074a5e0b0031647d9c315983ccba2ee5428ec8b\n```"
+        },
+        {
+            "user": "giuseppe",
+            "body": "one small improvement that I've noticed while staring at this code for too long: https://github.com/containers/podman/pull/25575"
+        },
+        {
+            "user": "Luap99",
+            "body": "Ok, so this is still failing in all my runs on the PR. I have no idea what the hell is going on there as code wise. I have used hack/get_ci_vm to get the same VM. When I run the test individually I am not able to reproduce either. When I ran the full 030-run.bats file it did not reproduce either, even with the parallel tag set.\n\nHowever when I ran everything with `make localsystem` it did fail, and given it doesn't fail on other PRs like this it must be related to my changes.\nIt is only `sys podman fedora-41 root host boltdb` that fails, the important bits here is that that is using boltdb (which I guess does not matter for this) but what might is this uses vfs not overlay. So maybe some weird vfs thing?\n\nAnything I can/should add to the test in order to debug?"
+        },
+        {
+            "user": "Luap99",
+            "body": "Ok it doesn't seem to be flake although it still totally unclear how to reproduce properly.\n\nThe only thing I narrowed down so for that if I remove the image prune from the test it seems to work: https://github.com/containers/podman/pull/25589/commits/8cefffefedb8019b4fbedef68488269dd583d7bd\n\nRunning the new test and the idmapped only doesn't seem to trigger the issue either. This make no sense to me... \n"
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 25588
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 25589
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 25687
+        }
+    ]
+}

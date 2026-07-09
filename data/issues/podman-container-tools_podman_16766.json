@@ -1,0 +1,157 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 16766,
+    "type": "pull_request",
+    "title": "Pick a random port on the host for play kube deployments",
+    "state": "closed",
+    "labels": [
+        "release-note",
+        "locked - please file new issue/PR"
+    ],
+    "user": "dcermak",
+    "body": "#### Does this PR introduce a user-facing change?\n\n```release-note\nPick a random port on the host when exposing `containerPort`s for `podman play kube`\n```\n\n`podman play kube` started to expose the port of containers in k8s deployments on the same port on the host with https://github.com/containers/podman/pull/15946. However, that breaks once replicas are involved, as they would then bind to the same port on the host.\n\nWith this PR, we change the default behavior so that podman will pick a random port for the container instead of using `containerPort`, but only if no `hostPort` is set.\n\nAs this can lead to user-unfriendly error messages, if the user sets `hostPort` and `replicas > 1`, we provide a better error message for that case.",
+    "comments": [
+        {
+            "user": "openshift-ci[bot]",
+            "body": "[APPROVALNOTIFIER] This PR is **NOT APPROVED**\n\nThis pull-request has been approved by: *<a href=\"https://github.com/containers/podman/pull/16766#\" title=\"Author self-approved\">dcermak</a>*\n**Once this PR has been reviewed and has the lgtm label**, please assign jwhonce for approval by writing `/assign @jwhonce` in a comment. For more information see [the Kubernetes Code Review Process](https://git.k8s.io/community/contributors/guide/owners.md#the-code-review-process).\n\nThe full list of commands accepted by this bot can be found [here](https://go.k8s.io/bot-commands?repo=containers%2Fpodman).\n\n<details open>\nNeeds approval from an approver in each of these files:\n\n- **[OWNERS](https://github.com/containers/podman/blob/main/OWNERS)**\n\nApprovers can indicate their approval by writing `/approve` in a comment\nApprovers can cancel approval by writing `/approve cancel` in a comment\n</details>\n<!-- META={\"approvers\":[\"jwhonce\"]} -->"
+        },
+        {
+            "user": "dcermak",
+            "body": "> This doesn't look right to me. I don't really know how the ports are used in k8s but ignored them here feels wrong.\n> \n> I agree that the PR #15946 looks wrong but only because it forces the host port to equal the container port. By default we should use a random free port, e.g. compare how `podman run -p 80 ...` behaves. This would ensure that each replica gets a unique port.\n\nI am everything but a k8s expert, but according to my limited knowledge `containerPort` implies no publishing at all. The publishing & routing to the replicas is done via an ingress. So exposing all replicas on the host honestly feels wrong as well to me."
+        },
+        {
+            "user": "rhatdan",
+            "body": "Can we add an option to podman play kube --expose? Then we can argue which should be the default?\n\n"
+        },
+        {
+            "user": "dcermak",
+            "body": "> Can we add an option to podman play kube --expose? Then we can argue which should be the default?\n\nImho setting `hostPort` is equivalent to `--expose`, so I don't really see the need for such a duplication."
+        },
+        {
+            "user": "rhatdan",
+            "body": "I think the difference is that when users play a kube they expect to be able to reach the ports.  Now they will get confused."
+        },
+        {
+            "user": "dcermak",
+            "body": "@rhatdan Done, please take a look if you like it the way it is."
+        },
+        {
+            "user": "rhatdan",
+            "body": "Needs a rebase\n@vrothberg @Luap99 @umohnani8 @haircommander PTAL"
+        },
+        {
+            "user": "Luap99",
+            "body": "I cannot really comment on how it should work since I do not use kubernetes.\n\nIn any case not exposing by default will cause regressions for many podman users which I consider unacceptable, they should not be forced to type --expose every time.\n"
+        },
+        {
+            "user": "dcermak",
+            "body": "> In any case not exposing by default will cause regressions for many podman users which I consider unacceptable, they should not be forced to type --expose every time.\n\nSo rather change this to `--no-expose`? Would it then even make sense to have such an option?"
+        },
+        {
+            "user": "haircommander",
+            "body": "I agree with @Luap99 that this would be breaking, but I actually think this is the correct behavior. an exposed port in kube is something the pod author opts into, and shouldn't happen by default. As far as breaking users, this may have to wait until podman has a major version bump, but this behavior looks correct to me"
+        },
+        {
+            "user": "haircommander",
+            "body": "> I agree with @Luap99 that this would be breaking, but I actually think this is the correct behavior. an exposed port in kube is something the pod author opts into, and shouldn't happen by default. As far as breaking users, this may have to wait until podman has a major version bump, but this behavior looks correct to me\n\nactually, wait, I have read this more clearly and I'm not sure this makes sense. I misunderstood as podman was default exposing a random port from the container to the host which could cause conflicts, not that the user specified port was conflicting.\n\nIn the [best practices](https://kubernetes.io/docs/concepts/configuration/overview/) it says\n> Don't specify a hostPort for a Pod unless it is absolutely necessary. When you bind a Pod to a hostPort, it limits the number of places the Pod can be scheduled, because each <hostIP, hostPort, protocol> combination must be unique. If you don't specify the hostIP and protocol explicitly, Kubernetes will use 0.0.0.0 as the default hostIP and TCP as the default protocol.\n\nWhich means maybe podman play kube should warn when a replica is being created that also has a container port? I don't think we should not expose the ports by default just because replicas will break"
+        },
+        {
+            "user": "dcermak",
+            "body": "> actually, wait, I have read this more clearly and I'm not sure this makes sense. I misunderstood as podman was default exposing a random port from the container to the host which could cause conflicts, not that the user specified port was conflicting.\n\nWell the current behavior is that podman will automatically expose a `containerPort` as a `hostPort` and not pick a random one instead. So replicas with a `containerPort` **cannot** work at all currently.\n\n> Which means maybe podman play kube should warn when a replica is being created that also has a container port? I don't think we should not expose the ports by default just because replicas will break\n\nI would suggest that we modify the behavior slightly:\n- if a container defines a `containerPort` then podman will pick a random port on the host for exposing it\n- if a container defines a `hostPort` as well, podman will use that one, unless replicas are involved. If replicas are involved, podman will print an error telling that this is not possible instead of the current error that you cannot bind to the specified port (which looks more like a bug)\n- optionally allow to turn off port exposing via `--no-expose`?"
+        },
+        {
+            "user": "dcermak",
+            "body": "@rhatdan @Luap99 @haircommander I have reworked this PR. The `--expose` flag is gone and podman will now pick a random port on the host unless a `hostPort` is provided. To prevent users from using replicas in that case, I have also added a new error message."
+        },
+        {
+            "user": "Syquel",
+            "body": "By setting the \"hostPort\" field automatically if not defined each and every \"containerPort\" is automatically published, which in my opinion is not desirable.\n\nIn Kubernetes the \"containerPort\" field is only used as metadata to expose / publish these ports via [Kubernetes Services](https://kubernetes.io/docs/concepts/services-networking/service/) AFAIK.  \n\nI would like to be able to NOT publish ports on the host, which is currently not possible.  \nTherefore I would like to completely remove generating the \"hostPort\".  \nIf someone wants to publish a port on the host he may set the \"hostPort\" field, but that choice should be up to the user and would be in line with the Kubernetes behavior.\n\nAddendum: I have never seen \"hostPort\" being used in any Helm chart up until now. The Kubernetes-way to expose / publish ports is to use [Kubernetes Services](https://kubernetes.io/docs/concepts/services-networking/service/).  \nAs long as Podman does not support Services the hostPort is a good workaround, but should definitely not be handled as a default."
+        },
+        {
+            "user": "ygalblum",
+            "body": "This PR conflicts in some ways with my PR #16880 that allows overriding the published ports configuration from the command line. So, I would like to resolve the discussion before either of them gets merged.\n\nThe reason I think the command line option is required is that we would like to allow users to use the the same YAML file with both K8S and Podman. Having to set the `hostPort` field in the YAML file will require users to keep two versions of the same deployment; a practice that breaks what we want to achieve.\n\nNow, I'm not saying that this PR is wrong in creating the default ports, but since it generates the default value before where my code merges the command line with the YAML file, I would like to make sure we are not breaking each other, racing to which PR gets merged first."
+        },
+        {
+            "user": "dcermak",
+            "body": "> By setting the \"hostPort\" field automatically if not defined each and every \"containerPort\" is automatically published, which in my opinion is not desirable.\n\nI have no strict opinion on this, but as this used to be the default behavior of podman so far, I was advised to modify my PR to not change the default behavior. The initial version of this PR added the `--expose` option to `podman play kube` and without that ports would not be exposed.\n\n> In Kubernetes the \"containerPort\" field is only used as metadata to expose / publish these ports via [Kubernetes Services](https://kubernetes.io/docs/concepts/services-networking/service/) AFAIK.\n> \n> I would like to be able to NOT publish ports on the host, which is currently not possible. Therefore I would like to completely remove generating the \"hostPort\". If someone wants to publish a port on the host he may set the \"hostPort\" field, but that choice should be up to the user and would be in line with the Kubernetes behavior.\n\nNo, that completely breaks port publishing with replicas in place (podman will create multiple copies of the same pod and try to bind every pod to the same host port, which is not possible).\n\n> Addendum: I have never seen \"hostPort\" being used in any Helm chart up until now. The Kubernetes-way to expose / publish ports is to use [Kubernetes Services](https://kubernetes.io/docs/concepts/services-networking/service/). As long as Podman does not support Services the hostPort is a good workaround, but should definitely not be handled as a default.\n\nYes, Kubernetes uses service meshes for handling replicas, but I think that's completely out of scope for podman."
+        },
+        {
+            "user": "dcermak",
+            "body": "> This PR conflicts in some ways with my PR #16880 that allows overriding the published ports configuration from the command line. So, I would like to resolve the discussion before either of them gets merged.\n> \n> The reason I think the command line option is required is that we would like to allow users to use the the same YAML file with both K8S and Podman. Having to set the `hostPort` field in the YAML file will require users to keep two versions of the same deployment; a practice that breaks what we want to achieve.\n\nWell, with this PR you wouldn't have to set `hostPort` either. Podman would either use the `containerPort` or pick a random one if you are using replicas.\n\n> \n> Now, I'm not saying that this PR is wrong in creating the default ports, but since it generates the default value before where my code merges the command line with the YAML file, I would like to make sure we are not breaking each other, racing to which PR gets merged first.\n\nI think your PR should go in first then and I'll try to adjust this one accordingly."
+        },
+        {
+            "user": "ygalblum",
+            "body": "> Well, with this PR you wouldn't have to set hostPort either. Podman would either use the containerPort or pick a random one if you are using replicas.\n\nYes, you are right. But, it comes with some issues. Using the containerPort doesn't always work since in many cases it is a privileged port (e.g. Web Server on ports 80 or 443). Working with random port means you need to adjust the client of the endpoint on every deployment. "
+        },
+        {
+            "user": "dcermak",
+            "body": "> > Well, with this PR you wouldn't have to set hostPort either. Podman would either use the containerPort or pick a random one if you are using replicas.\n> \n> Yes, you are right. But, it comes with some issues. Using the containerPort doesn't always work since in many cases it is a privileged port (e.g. Web Server on ports 80 or 443). Working with random port means you need to adjust the client of the endpoint on every deployment.\n\nYou are of course correct. The random ports are just a workaround for the lack of a load balancer in podman."
+        },
+        {
+            "user": "rhatdan",
+            "body": "Isn't there another PR to help handle this situation?"
+        },
+        {
+            "user": "dcermak",
+            "body": "> Isn't there another PR to help handle this situation?\n\nThere is https://github.com/containers/podman/pull/16880, but that will not help with replicas."
+        },
+        {
+            "user": "rhatdan",
+            "body": "We want to get @ygalblum PR in first and then base this one off of it."
+        },
+        {
+            "user": "vrothberg",
+            "body": "> We want to get @ygalblum PR in first and then base this one off of it.\n\nDo we?  I thought we gravitated more toward enforcing replicas to 1 and emit a warning because of all the limitations we face when running Podman on a single node in contrast to an orchestrated environment such as K8s.\n\n@dcermak, how are you using replicas with Podman?  Would limiting replicas to 1 break some of your use cases?"
+        },
+        {
+            "user": "dcermak",
+            "body": "> @dcermak, how are you using replicas with Podman? Would limiting replicas to 1 break some of your use cases?\n\nIt would break one of our openQA test cases, that was testing this specific feature (exposed ports and replicas set to 3). So limiting it to 1 would be an option.\n\nHowever, we should still do something about that case to prevent users from pondering about the strange error messages that podman would produce as a result."
+        },
+        {
+            "user": "vrothberg",
+            "body": "> It would break one of our openQA test cases, that was testing this specific feature (exposed ports and replicas set to 3). So limiting it to 1 would be an option.\n\nDoes the test check for something particular beyond that the file can be run?\n\n> However, we should still do something about that case to prevent users from pondering about the strange error messages that podman would produce as a result.\n\nDo you have particular messages in mind?  I think that enforcing replicas to 1 would avoid many such errors.  Ports are one possibly more resources that are hard to \"multiplex\" for Podman.\n"
+        },
+        {
+            "user": "dcermak",
+            "body": "> > It would break one of our openQA test cases, that was testing this specific feature (exposed ports and replicas set to 3). So limiting it to 1 would be an option.\n> \n> Does the test check for something particular beyond that the file can be run?\n\nNo, it is just testing if this yaml can be deployed. Setting the replicas to 1 would be fine as well.\n\n> > However, we should still do something about that case to prevent users from pondering about the strange error messages that podman would produce as a result.\n> \n> Do you have particular messages in mind? I think that enforcing replicas to 1 would avoid many such errors. Ports are one possibly more resources that are hard to \"multiplex\" for Podman.\n\nYes, the error messages mentioned in https://github.com/containers/podman/issues/16765#issue-1481402481.\n\nEnforcing replicas to be 1 sounds like a good idea to me. Shall I send a different PR for that instead of this one then?"
+        },
+        {
+            "user": "vrothberg",
+            "body": "> Enforcing replicas to be 1 sounds like a good idea to me. Shall I send a different PR for that instead of this one then?\n\nThat would be great, thank you!  In case of replicas > 1, Podman should emit `logrus.Warnf` indicating to the user what's happening.  But ultimately, it shouldn't error out."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@ygalblum PTAL"
+        },
+        {
+            "user": "ygalblum",
+            "body": "I guess this one is now pending #17082 as well, right?"
+        },
+        {
+            "user": "dcermak",
+            "body": "> I guess this one is now pending #17082 as well, right?\n\nI am not entirely convinced that this PR is really needed with https://github.com/containers/podman/pull/16880 and https://github.com/containers/podman/pull/17082. At least once https://github.com/containers/podman/pull/17082 has been merged, there is really no need to handle the case of multiple replicas anymore, which is the primary issue that this PR addresses."
+        },
+        {
+            "user": "rhatdan",
+            "body": "Then I will close this PR."
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 16880
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 17028
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 17082
+        }
+    ]
+}

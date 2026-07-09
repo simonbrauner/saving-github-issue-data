@@ -1,0 +1,24 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 28993,
+    "type": "issue",
+    "title": "RUN --mount=type=bind scripts are not executable when podman remote API daemon stages build context on a noexec filesystem",
+    "state": "open",
+    "labels": [],
+    "user": "ide-developer",
+    "body": "### Issue Description\n\nWhen using `podman build` through the remote API socket (`CONTAINER_HOST`), the client tarballs the build context and sends it to the daemon. The daemon extracts it to a temporary directory (typically `/var/tmp`). If that filesystem is mounted with `noexec`, the `noexec` flag propagates through `RUN --mount=type=bind` into the container, making bind-mounted scripts non-executable.\n\nThe same build succeeds with direct `sudo podman build` (no socket), because the build context is accessed in-place from the host filesystem.\n\n### Steps to reproduce the issue\n\n```bash\n# 1. Mount /var/tmp as noexec\nexport TMPDIR=/tmp/test-noexec\nmkdir -p \"$TMPDIR\"\nsudo mount --bind -o rw,noexec,nosuid,nodev,bind \"$TMPDIR\" /var/tmp\n\n# 2. Create a build context with an executable script\nmkdir -p /tmp/test-ctx/utils\ncat > /tmp/test-ctx/utils/helper.sh <<'SH'\n#!/bin/bash\necho \"helper ran successfully\"\nSH\nchmod 755 /tmp/test-ctx/utils/helper.sh\n\ncat > /tmp/test-ctx/Dockerfile <<'DF'\nFROM registry.access.redhat.com/ubi9/ubi-minimal:latest\nUSER 0\nRUN --mount=type=bind,source=utils/helper.sh,target=/helper.sh,ro \\\n    /helper.sh\nDF\n\n# 3. Direct build works\nsudo podman build --security-opt label=disable --no-cache -t test-direct /tmp/test-ctx\n# → PASS: \"helper ran successfully\"\n\n# 4. Remote API build fails\nsudo systemctl start podman.socket\nCONTAINER_HOST=unix:///run/podman/podman.sock \\\n  podman --remote build --security-opt label=disable --no-cache -t test-remote /tmp/test-ctx\n# → FAIL: /bin/sh: line 1: /helper.sh: Permission denied\n\n# Cleanup\nsudo umount /var/tmp\nrm -rf \"$TMPDIR\" /tmp/test-ctx\n```\n\n### Describe the results you received\n\n```\nSTEP 3/3: RUN --mount=type=bind,source=utils/helper.sh,target=/helper.sh,ro     /helper.sh\n/bin/sh: line 1: /helper.sh: Permission denied\nError: building at STEP \"RUN --mount=type=bind,source=utils/helper.sh,target=/helper.sh,ro /helper.sh\": while running runtime: exit status 126\n```\n\n### Describe the results you expected\n\nThe build should succeed. The `noexec` mount flag on the daemon's staging directory should not propagate through `RUN --mount=type=bind` into the build container, since the Dockerfile author expects bind-mounted files to be executable based on their file permissions.\n\nDirect `sudo podman build` (without the socket) succeeds because the build context is accessed in-place and the source file is on a normal (exec-allowed) filesystem.\n\n### podman info output\n\n```\n$ podman --version\npodman version 5.8.2\n\n$ uname -r\n6.14.7-200.fc44.x86_64\n```\n\nAlso reproduced on GitHub Actions ubuntu-24.04 runners with Podman 5.5.0 installed via Homebrew (Linuxbrew), running as a rootful systemd service.\n\n### Podman in a container\n\nNo\n\n### Privileged Or Rootless\n\nRootful\n\n### Upstream Latest Release\n\nYes\n\n### Additional environment details\n\nThe scenario arises naturally in CI environments where:\n1. `/var/tmp` is mounted `noexec` for security hardening (or to redirect podman's temp I/O to a different volume)\n2. `podman build` is invoked through the remote API socket (`CONTAINER_HOST`)\n3. Dockerfiles use `RUN --mount=type=bind` to bind-mount helper scripts from the build context\n\nThe root cause is that the remote API client tarballs the build context, the daemon extracts it to its temp directory (`/var/tmp` by default), and the `noexec` mount flag on that filesystem is inherited by the bind mount inside the container.\n\n### Additional information\n\n**Workarounds:**\n- Use direct `podman build` instead of the remote API\n- Ensure the daemon's temp directory is not on a `noexec` filesystem\n- Replace `RUN --mount=type=bind` with `COPY` + `RUN` + cleanup\n- Use `bash /path/to/script.sh` instead of direct execution `/path/to/script.sh`\n\n**Possible fix:** The daemon could either:\n- Strip `noexec` from bind mounts created by `RUN --mount=type=bind` during builds\n- Stage the extracted build context on a filesystem without `noexec`\n- Detect and warn when the staging directory has `noexec`",
+    "comments": [
+        {
+            "user": "ide-developer",
+            "body": "Related: #20839 — same class of issue where the podman remote daemon ignores `TMPDIR` and hardcodes `/var/tmp` for temporary files. That issue reports it for container image pulls; this one is for build context extraction during `podman build` via the API."
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "opendatahub-io",
+            "repository": "notebooks",
+            "number": 3882
+        }
+    ]
+}

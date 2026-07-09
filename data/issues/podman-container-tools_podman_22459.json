@@ -1,0 +1,74 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 22459,
+    "type": "issue",
+    "title": "Ability to mount a volume without stopping container",
+    "state": "closed",
+    "labels": [
+        "kind/feature",
+        "stale-issue",
+        "locked - please file new issue/PR"
+    ],
+    "user": "vikas-goel",
+    "body": "### Feature request description\n\nVeritas data protection appliance hosts containerized backup applications with persistent storage to keep backup images. Appliance users extends allocated storage at runtime depending on the storage utilization. Increasing storage size can result in adding new volumes. The backup application requires significant time to warm up as it is memory intensive. It loads info from disk to memory.\n\nIn order to avoid downtime, it is desired to mount new volumes without stopping containers.\n\n### Suggest potential solution\n\nA podman CLI to volume to a running container.\n\n### Have you considered any alternatives?\n\nUse of nsenter does not work.\n\n### Additional context\n\nAdd any other context or screenshots about the feature request here.",
+    "comments": [
+        {
+            "user": "vikas-goel",
+            "body": "/assign @rhatdan "
+        },
+        {
+            "user": "mheon",
+            "body": "This would involve a nonstandard extension to the OCI runtime, and I really do not think it is a good idea as such. You may want to open a Red Hat support case about the nsenter issue, though, it may be possible to help there (our support folks are rather familiar with it from debugging)."
+        },
+        {
+            "user": "vikas-goel",
+            "body": "Could you elaborate on “and I really do not think it is a good idea as such”?"
+        },
+        {
+            "user": "mheon",
+            "body": "Sure.\n\nFirst, this isn't really a Podman ask, it's an OCI runtime ask. Podman does not create containers; we ask the OCI runtime to do so. Some of our runtimes do this in unique ways (most notably, virtual machines). Because of this, Podman tries its best to stay out of the runtime's way - we don't like directly interacting with the inside of a container after it's launched. Things that do that, like `podman exec`, are OCI runtime primitives.\n\nThere are two existing OCI runtime primitives that update existing containers - exec and update. Exec only runs commands, so it's definitely not suited for this. Update changes aspects of a created container, so it would be the correct place to put this, but right now it's deliberately limited to only altering resource limits, which can be done without entering the container. To add mounts is much more invasive - the runtime will have to safely enter a running container's namespaces and insert an additional bit of the host's filesystem. This is a large change, and runs against the intent of OCI containers (cattle, not pets), so I don't think it has much chance of being accepted upstream, which adds to the risks of implementing it."
+        },
+        {
+            "user": "rhatdan",
+            "body": "Currect this would either need to be done with an modifications to the OCI Runtime Specification. Either add a new command or change the behaviour of the update mechanism. Because update seems to be tied to updating container resource constraints, it is not likely these changes would be accepted.\n\n```\n$ runc --help  | grep update\n   update      update container resource constraints\n$ crun --help  | grep update\n\tupdate      - update container resource constraints\n```\n\nThe other mechanism would be to use a tool external to OCI Runtimes to modify a running container, which would need to be developed outside of Podman. Which is why we originally suggested doing this with nsenter. This is the most likely way forward with this.\n\nOther alternatives is to volume mount a parent directory and then have volumes added as subdirs to said volume mount on the host.  These mount points will show up within the container when they are mounted.\n\n```\n# podman run -d -v /mnt:/mnt IMAGE:rslave COMMAND\n# mkdir /mnt/mount1\n# mount /dev/abc /mnt/mount1\n```\n"
+        },
+        {
+            "user": "vikas-goel",
+            "body": "I understand the concerns about OCI primitives. The directory based option as mentioned in the meeting is not viable.\n\nUse of an independent tool is fine but with the considerations that the lifecycle aspects of the volume from podman point of view are complied. For example, when a volume is mounted inside container at start, podman tracks the volume usage count. There could be many other aspects the community will know better. It can change over a period of time.\n\nPlease share a set of steps to achieve this outside the podman CLI and yet meet the lifecycle aspects."
+        },
+        {
+            "user": "mheon",
+            "body": "Regarding lifecycle tracking - `podman volume mount` and `podman volume unmount` should allow manual management of volume lifecycle outside of Podman - mount the volume at start of use, unmount at end of use"
+        },
+        {
+            "user": "vikas-goel",
+            "body": "Sounds good. With that we need steps to mount a host mount-point inside container."
+        },
+        {
+            "user": "vikas-goel",
+            "body": "> Regarding lifecycle tracking - `podman volume mount` and `podman volume unmount` should allow manual management of volume lifecycle outside of Podman - mount the volume at start of use, unmount at end of use\n\nWill `podman inspect <container>` output show the new mount point in the `Mounts` section?"
+        },
+        {
+            "user": "vikas-goel",
+            "body": "I tried mounting from host to container directly using the namespace.\n\n1. Find container mount namespace path, say /var/lib/containers/storage/overlay/c7b9dc790ebfcd55f853bb25824194ea5155e9a9637c582f66711a134be0884c/diff\n2. Create mount path, say `mkdir /var/lib/containers/storage/overlay/c7b9dc790ebfcd55f853bb25824194ea5155e9a9637c582f66711a134be0884c/diff/mnt/newvol`\n3. Mount from host inside container, say `mount -o bind /mnt/newvol /var/lib/containers/storage/overlay/c7b9dc790ebfcd55f853bb25824194ea5155e9a9637c582f66711a134be0884c/diff/mnt/newvol`\n\n- Will this create any issue?\n- The `podman inspect`, of course, won't show this newvol as the path is mounted outside it's knowledge. What can be done to update the inspect output?"
+        },
+        {
+            "user": "vikas-goel",
+            "body": "@mheon , @rhatdan ,\nAny thoughts on the previous comment?"
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "giuseppe",
+            "body": "> * Will this create any issue?\n\nyes that won't work.  You are creating the mount in the wrong namespace.\n\nYou need first to open the mount on the host, then join the container mount namespace and perform the attach there.\n\nI don't think you can achieve it with a shell script, you need a custom tool to do that.\n\nAs an easier alternative, you could create a parent mount with \"shared\" propagation, so each mount happening under the parent mount will be propagated inside the container:\n\n```\n# mkdir /tmp/parent\n# mount --make-shared --bind /tmp/parent /tmp/parent\n# podman run --rm -ti -v /tmp/parent:/mounts:shared fedora bash\n# findmnt -R /mounts\nTARGET  SOURCE         FSTYPE OPTIONS\n/mounts tmpfs[/parent] tmpfs  rw,nosuid,nodev,seclabel,size=16240872k,nr_inodes=1048576,inode64\n```\n\nNow from the host, you can create a new mount:\n\n```\n# mkdir /tmp/parent/sub\n# mount -t tmpfs tmpfs /tmp/parent/sub\n```\n\nand from inside the container:\n\n```\n# findmnt -R /mounts\nTARGET        SOURCE         FSTYPE OPTIONS\n/mounts       tmpfs[/parent] tmpfs  rw,nosuid,nodev,seclabel,size=16240872k,nr_inodes=1048576,i\n└─/mounts/sub tmpfs          tmpfs  rw,relatime,seclabel,inode64\n```"
+        },
+        {
+            "user": "Luap99",
+            "body": "This is not something we are going to provide in podman, if this is something the container runtimes should be able to do natively then it should be proposed to crun/runc, etc... as this level of mounting is not what podman deals with"
+        }
+    ],
+    "cross_references": []
+}

@@ -1,0 +1,56 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 27574,
+    "type": "pull_request",
+    "title": "[WIP] Fix race condition in concurrent artifact additions",
+    "state": "open",
+    "labels": [
+        "do-not-merge/work-in-progress",
+        "stale-pr",
+        "release-note"
+    ],
+    "user": "rhatdan",
+    "body": "This fixes a race condition where concurrent 'podman artifact add' commands for different artifacts would result in only one artifact being created, without any error messages.\n\nThe root cause was in the artifact store's Add() method, which would:\n1. Acquire lock\n2. Read OCI layout index\n3. Create ImageDestination (which snapshots the index)\n4. RELEASE lock (optimization for blob copying)\n5. Copy blobs (while unlocked)\n6. Reacquire lock\n7. Commit changes (write new index)\n\nWhen two concurrent additions happened:\n- Process A: Lock → Read index → Create dest A → Unlock → Copy blobs\n- Process B: Lock → Read index (no artifact A!) → Create dest B → Unlock\n- Process A: Lock → Commit (write index with A)\n- Process B: Lock → Commit (write index with B, OVERWRITING A)\n\nThe fix keeps the lock held for the entire operation. While this reduces concurrency for blob copying, it prevents the index file corruption that caused artifacts to be lost.\n\nChanges:\n- Remove lock release/reacquire around blob copying in store.Add()\n- Simplify lock management (no more conditional unlock)\n- Add e2e test for concurrent artifact additions\n- Add standalone test script to verify the fix\n\nFixes: https://github.com/containers/podman/issues/27569\n\nGenerated-with: Cursor AI\n\n<!--\nThanks for sending a pull request!\n\nFor more detailed information, please review our contributing guidelines:\nhttps://github.com/containers/podman/blob/main/CONTRIBUTING.md#submitting-pull-requests\n-->\n\n#### Checklist\n\nEnsure you have completed the following checklist for your pull request to be reviewed:\n<!-- Use [x] to mark as done, or click the checkbox after opening PR -->\n\n- [x] Certify you wrote the patch or otherwise have the right to pass it on as an open-source patch by signing all\ncommits. (`git commit -s`). (If needed, use `git commit -s --amend`).  The author email must match\nthe sign-off email address. See [CONTRIBUTING.md](https://github.com/containers/podman/blob/main/CONTRIBUTING.md#sign-your-prs)\nfor more information.\n- [ ] Referenced issues using `Fixes: #00000` in commit message (if applicable)\n- [ ] [Tests](https://github.com/containers/podman/tree/main/test#readme) have been added/updated (or no tests are needed)\n- [ ] [Documentation](https://github.com/containers/podman/blob/main/docs/README.md) has been updated (or no documentation changes are needed)\n- [ ] All commits pass `make validatepr` (format/lint checks)\n- [ ] [Release note](https://github.com/kubernetes/community/blob/master/contributors/guide/release-notes.md) entered in the section below (or `None` if no user-facing changes)\n\n#### Does this PR introduce a user-facing change?\n\n<!--\nWrite `None` if there are no user-facing changes, otherwise enter your release note below.\nInclude \"action required\" if users need to take action when upgrading.\n-->\n\n```release-note\npodman artifact add can now run without race conditions on adds.\n```\n",
+    "comments": [
+        {
+            "user": "openshift-ci[bot]",
+            "body": "[APPROVALNOTIFIER] This PR is **NOT APPROVED**\n\nThis pull-request has been approved by: *<a href=\"https://github.com/containers/podman/pull/27574#\" title=\"Author self-approved\">rhatdan</a>*\n**Once this PR has been reviewed and has the lgtm label**, please assign [mtrmac](https://github.com/mtrmac) for approval. For more information see [the Code Review Process](https://git.k8s.io/community/contributors/guide/owners.md#the-code-review-process).\n\nThe full list of commands accepted by this bot can be found [here](https://go.k8s.io/bot-commands?repo=containers%2Fpodman).\n\n<details open>\nNeeds approval from an approver in each of these files:\n\n- **[OWNERS](https://github.com/containers/podman/blob/main/OWNERS)**\n\nApprovers can indicate their approval by writing `/approve` in a comment\nApprovers can cancel approval by writing `/approve cancel` in a comment\n</details>\n<!-- META={\"approvers\":[\"mtrmac\"]} -->"
+        },
+        {
+            "user": "baude",
+            "body": "@rhatdan you know you cannot do this in podman, it has to be done in common"
+        },
+        {
+            "user": "packit-as-a-service[bot]",
+            "body": "[NON-BLOCKING] Packit jobs failed. @containers/packit-build please check. Everyone else, feel free to ignore."
+        },
+        {
+            "user": "mheon",
+            "body": "This is going to badly hurt usability - artifact addition on large artifacts can be slow, and now it's going to block all other artifact operations. The locking @Luap99 is doing for pulls could potentially be adapted to improve matters, but the amount of effort he had to put in to get that working was substantial, and this is a different enough codepath that I don't think much would carry over from that work. "
+        },
+        {
+            "user": "mheon",
+            "body": "Not that we shouldn't merge this, once it's migrated to container-libs... Just that it's going to suck once we do.\n\nNot sure how I feel about the test, honestly. Is the race 100% consistent on main? I don't like deterministic tests, if it doesn't fail with 100% consistency, we can break without realizing it, and it just shows up as a flake after the fact."
+        },
+        {
+            "user": "Luap99",
+            "body": "> This is going to badly hurt usability - artifact addition on large artifacts can be slow, and now it's going to block all other artifact operations. The locking @Luap99 is doing for pulls could potentially be adapted to improve matters, but the amount of effort he had to put in to get that working was substantial, and this is a different enough codepath that I don't think much would carry over from that work.\n\nYeah this is going to suck. IMO the design to use the oci layout as backing store was not to great as we funnel all updates thought the index.json writes where in many cases a more parallel approach could have been possible I suppose. The content addressed sha based file store does make sense for me overall but having the metdata in this one file is causing to much contention and since we just slapped locking on top without fine grade locking around index.json we are in this situation now.\n\nLike in many other parts of our codebase when doing state updates once must take the lock, then read the state from disk, then update state and write it back to disk and only then unlock.\n\nSo what we did wrong here is that the state was no loaded back from disk as such we wrote an older in memory kept copy back to disk, so the actual fix should be to re-read the store which is more or less what my unlocked layer add work in storages comes down to.  \n\n---\n\nwe do have a some parallel testing for a few things, i.e. this one https://github.com/containers/podman/blob/3922526b945fea6844a7a42d5cd06ab4c6c979a4/test/system/070-build.bats#L247\n\nI don't mind such tests as long as they actually somewhat reliable reproduce the current issue and it help to safe guard again other bugs in the future. If this actually do flakes we know the fix didn't work and can always disable the test until we can fix the code."
+        },
+        {
+            "user": "rhatdan",
+            "body": "> @rhatdan you know you cannot do this in podman, it has to be done in common\n\nCursor, did it, I will take a look and move it to container-libs"
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this PR had no activity for 30 days."
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "container-libs",
+            "number": 483
+        }
+    ]
+}

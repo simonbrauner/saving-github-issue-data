@@ -1,0 +1,81 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 19917,
+    "type": "pull_request",
+    "title": "Use url with scheme and path for the unix address",
+    "state": "closed",
+    "labels": [
+        "lgtm",
+        "approved",
+        "release-note-none",
+        "locked - please file new issue/PR"
+    ],
+    "user": "afbjorklund",
+    "body": "Shortcuts like `unix:path` and `unix:/path` do not work everywhere,\nso make sure to use `unix://path` when quoting the url (or address)\n\nThis avoids errors such as: (when trying to use it as the `DOCKER_HOST`)\n`error during connect: Get \"http://unix:2375/run/user/1000/podman/podman.sock/v1.24/version\": dial tcp: lookup unix: no such host`\n\n#### Does this PR introduce a user-facing change?\n\n```release-note\nNone\n```\n\n\nHelp before:\n\n```\n      --url string                URL to access Podman service (CONTAINER_HOST) (default \"unix:/run/user/1000/podman/podman.sock\")\n```\n\nHelp after:\n\n```\n      --url string                URL to access Podman service (CONTAINER_HOST) (default \"unix:///run/user/1000/podman/podman.sock\")\n```",
+    "comments": [
+        {
+            "user": "afbjorklund",
+            "body": "I didn't add any \"deprecation warnings\" or anything, because then it would there for years (like in kubernetes). I think that `podman-remote` was fine with either, the problem was when using `docker`. Adding a bats test sounds reasonable."
+        },
+        {
+            "user": "openshift-ci[bot]",
+            "body": "[APPROVALNOTIFIER] This PR is **APPROVED**\n\nThis pull-request has been approved by: *<a href=\"https://github.com/containers/podman/pull/19917#\" title=\"Author self-approved\">afbjorklund</a>*, *<a href=\"https://github.com/containers/podman/pull/19917#pullrequestreview-1619774714\" title=\"Approved\">Luap99</a>*\n\nThe full list of commands accepted by this bot can be found [here](https://go.k8s.io/bot-commands?repo=containers%2Fpodman).\n\nThe pull request process is described [here](https://git.k8s.io/community/contributors/guide/owners.md#the-code-review-process)\n\n<details >\nNeeds approval from an approver in each of these files:\n\n- ~~[OWNERS](https://github.com/containers/podman/blob/main/OWNERS)~~ [Luap99]\n\nApprovers can indicate their approval by writing `/approve` in a comment\nApprovers can cancel approval by writing `/approve cancel` in a comment\n</details>\n<!-- META={\"approvers\":[]} -->"
+        },
+        {
+            "user": "baude",
+            "body": "im willing to merge once tests are passing, thanks @afbjorklund "
+        },
+        {
+            "user": "TomSweeneyRedHat",
+            "body": "LGTM once the tests are hip.\nI think we may have a test system issue.  I'm seeing similar failures in other PRs."
+        },
+        {
+            "user": "afbjorklund",
+            "body": "One strange thing about the default address is that the error message talks about the \"connections\":\n\nCannot connect to Podman. Please verify your connection to the Linux system using `podman system connection list`, or try `podman machine init` and `podman machine start` to manage a new Linux VM\n\nBut yet there is **no** mention about the default connection, in the `podman system connection list`?\n\n```\nName        URI         Identity    Default\n```\n\nIt does mention the file-not-found error, but that only comes on the second line and is mixed with an imaginary `http://` scheme so it is hard to know what to use for CONTAINER_CONNECTION or CONTAINER_HOST\n\n`Error: unable to connect to Podman socket: Get \"http://d/v4.6.0/libpod/_ping\": dial unix ///run/user/1000/podman/podman.sock: connect: no such file or directory`\n\nThe user has to know that there is a colon involved in urls, or check the `--help` for the addresses.\n\n`export CONTAINER_HOST=\"unix:/run/user/1000/podman/podman.sock\"`\n`export CONTAINER_HOST=\"unix:/run/podman/podman.sock\"`\n\nThis is different from the docker client output, when running `docker context ls`:\n\n```\nNAME         DESCRIPTION                               DOCKER ENDPOINT                     ERROR\ndefault      Current DOCKER_HOST based configuration   unix:///var/run/docker.sock         \nrootless *   Rootless mode                             unix:///run/user/1000/docker.sock   \n```"
+        },
+        {
+            "user": "mheon",
+            "body": "Test failure looks legitimate:\n\n```\n# #|     FAIL: RemoteSocket.Path using unix:\n         # #| expected: '/tmp/podman_bats.Usi7rb/myunix.sock'\n         # #|   actual: 'unix:/tmp/podman_bats.Usi7rb/myunix.sock'\n```"
+        },
+        {
+            "user": "afbjorklund",
+            "body": "So yet another regression, will have to see where _this_ one comes from\n\npodman3 had:\n`/run/user/1000/podman/podman.sock`\n\npodman4 says:\n`unix:///run/user/1000/podman/podman.sock`\n\nBut none of them is showing the mix between the two, like in the test fail.\n\n```go\n                uri := url.URL{\n                        Scheme: \"unix\",\n                        Path:   filepath.Join(xdg, \"podman\", \"podman.sock\"),\n                }\n                ic.Libpod.SetRemoteURI(uri.String())\n                info.Host.RemoteSocket.Path = uri.Path\n```\n\nEDIT: `podman-remote` uses a different code path from `podman`\n\n```go\n        info.Host.RemoteSocket = &define.RemoteSocket{Path: ic.Libpod.RemoteURI()}\n```"
+        },
+        {
+            "user": "afbjorklund",
+            "body": "This got broken in\n* https://github.com/containers/podman/pull/14037\n\nWhich changed the test, rather than report a path...\n\nSo now `Path` contains an `Url`, including the scheme.\n\nSometimes. Depending on which program you run.\n\n----\n\n```console\n$ ./bin/podman info --format '{{.Host.RemoteSocket.Path}}'\n/run/user/1000/podman/podman.sock\n$ ./bin/podman-remote info --format '{{.Host.RemoteSocket.Path}}'\nunix:///run/user/1000/podman/podman.sock\n```\n\nIf you start it with a string, it will just echo that back.\n\nEDIT:\nmy terminology was off, it's part of \"authority\" not \"scheme\"\n\nThat is the scheme is `unix`. And `unix:/some/path` is still legal.\n\nhttps://en.wikipedia.org/wiki/URL#syntax\n\n`URI = scheme \":\" [\"//\" authority] path [\"?\" query] [\"#\" fragment]`"
+        },
+        {
+            "user": "afbjorklund",
+            "body": "Side note: This was already happening in `podman machine`, by hardcoding the `unix://` everywhere.\n\n```go\n        setDockerHost := `export DOCKER_HOST=\"unix://$(podman info -f \"{{.Host.RemoteSocket.Path}}\")\"\n`\n```\n\n```go\n                        fmtString = `You can %sconnect Docker API clients by setting DOCKER_HOST using the\nfollowing command in your terminal session:\n\n        export DOCKER_HOST='unix://%s'\n\n`\n\n                        fmt.Printf(fmtString, stillString, forwardSock)\n```\n\nOr in the other documentation, that was constructing the remote docker socket address from scratch.\n\n* https://docs.podman.io/en/latest/markdown/podman-system-service.1.html#examples\n\n```console\n$ export DOCKER_HOST=unix://$XDG_RUNTIME_DIR/podman/podman.sock\n$ docker-compose up\n```\n\n* https://github.com/containers/podman/blob/main/docs/tutorials/socket_activation.md\n\n```console\n$ export DOCKER_HOST=unix://$XDG_RUNTIME_DIR/podman/podman.sock\n$ docker-compose up\n```"
+        },
+        {
+            "user": "afbjorklund",
+            "body": "Unfortunately the broken URL \"unix://run\" appears both in documentation and in upstream library...\n\ndocs/source/markdown/podman-remote.1.md\ndocs/source/markdown/podman.1.md\npkg/bindings/README.md\nvendor/github.com/containers/common/pkg/config/containers.conf\n\nIt needs to be fixed as well, it is supposed to be \"unix:///run\" (or unix:/run, but) and not relative path.\n\ni.e. it only works if you do `cd /` before the command...\n\n`Cannot connect to the Docker daemon at unix://run/user/1000/podman/podman.sock. Is the docker daemon running?`\n\n----\n\nEDIT:\n\n* https://github.com/containers/podman/pull/20005"
+        },
+        {
+            "user": "rhatdan",
+            "body": "/lgtm"
+        },
+        {
+            "user": "rhatdan",
+            "body": "Thanks @afbjorklund "
+        },
+        {
+            "user": "xduugu",
+            "body": "I don't know your plans for the 4.8 / 5.0 release, but would it be possible to apply this fix to the 4.7 branch?\n\nI have run into this issue when I switched from docker-compose 1.29 to docker-compose v2, which apparently requires the `unix://` prefix. For now, I worked around this issue by manually setting `DOCKER_HOST` to the correct address, but this goes against the intention of `podman compose`."
+        },
+        {
+            "user": "rhatdan",
+            "body": "4.8 should be released before the holidays."
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "JoinColony",
+            "repository": "colonyCDapp",
+            "number": 1316
+        }
+    ]
+}

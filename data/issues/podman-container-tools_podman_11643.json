@@ -1,0 +1,238 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 11643,
+    "type": "pull_request",
+    "title": "[WIP] Introduce unix socket proxying for Docker API clients",
+    "state": "closed",
+    "labels": [
+        "do-not-merge/work-in-progress",
+        "locked - please file new issue/PR"
+    ],
+    "user": "n1hility",
+    "body": "Consider this PR a proposal to generate discussion. Should everyone decide this is the direction to go I can clean it up and add tests.\n\n### Overview\n\nThe main goal of this proposal is to add support for clients (such as testcontainers) that do not support ssh (or if they do (e.g. docker compose), they do not support podman's style of ssh which rightly appends the unix socket path to the URI: docker ~~doesn't support unix domain sockets over ssh, only~~ only supports the usage of the host defined default sock or tcp/tls connections nested under ssh)\n\nTo achieve this, this PR introduces a new command `podman system unix-proxy`, which operates similarly to podman system service, but instead creates a unix domain socket that points to the specified connection entry (e.g. via -c or the default), provided that connection entry is an ssh destination.\n\nAdditionally, it modifies docker machine start to automatically launch two child processes (one for rootless, one for rootful), unless `--nocompat is specified`. It then prints the DOCKER_HOST settings to the screen, so that the user can cut and paste (assumes bash atm). \n\nAdditionally, `init` and `start` will create a symlink to the root socket. This acquires root privileges via sudo on the first usage (reusing thereafter until moby or some other provider reclaims it). This can be disabled by passing --nolink.\n\nSince the proxy is long-running, there is some logic in this patch to auto-reconnect and retry.\n\n### Challenges / Thoughts\n\n- gvproxy is currently noisy, so in the process of waiting for connection availability, which requires polling the connection, it can generate scary looking logs. The machine start code in this patch adds a 1 second sleep to try to hide some of these, but it's marginally effective at suppressing the noise. \n- I am interested in discussions around the security impact of this. My thinking is that it is no less secure than what is achievable via podman connection entries, since the files are created with a umask of 1777, as is the case with the podman system service handler \n- There seems to be a short delay on the first SSH connections (~1 second), this might be related to /dev/random entropy and key negotiation, but I did not dive into that. \n- **Windows Support** - A future PR will add windows support specifics, and possibly named pipe support since unfortunately moby has not yet added support for Windows AF_UNIX\n\n\n### Example Output (Using compatibility mode)\n ./bin/darwin/podman machine start\nINFO[0000] waiting for clients...                       \nINFO[0000] listening tcp://0.0.0.0:7777                 \nINFO[0000] new connection from  to /var/folders/5p/1gyddrwn4cj6w3ccfy8bj4kr0000gs/T/podman/qemu_podman-machine-default.sock \nWaiting for VM ...\nWaiting on SSH to come up..\nWaiting on initial proxy connections..\nMachine \"podman-machine-default\" started successfully!\n\nPodman Clients\n--------------\nPodman clients can now access this machine using standard podman commands.\nFor example, to run a date command on a *rootless* container:\n\n    podman run ubi8/ubi-micro date\n\nTo bind port 80 using a *root* container:\n\n    podman -c podman-machine-default-root run -dt -p 80:80/tcp docker.io/library/httpd\n\nDocker API Clients\n------------------\nCompatibility socket link is present. Docker API clients require no special environment for *root* containers.\n\nDocker API clients can also access *rootless* podman with the following environment:\n\n    export DOCKER_HOST=unix:///var/folders/5p/1gyddrwn4cj6w3ccfy8bj4kr0000gs/T/podman/podman-machine-default-api.sock",
+    "comments": [
+        {
+            "user": "openshift-ci[bot]",
+            "body": "[APPROVALNOTIFIER] This PR is **NOT APPROVED**\n\nThis pull-request has been approved by: *<a href=\"https://github.com/containers/podman/pull/11643#\" title=\"Author self-approved\">n1hility</a>*\nTo complete the [pull request process](https://git.k8s.io/community/contributors/guide/owners.md#the-code-review-process), please assign **luap99** after the PR has been reviewed.\nYou can assign the PR to them by writing `/assign @luap99` in a comment when ready.\n\nThe full list of commands accepted by this bot can be found [here](https://go.k8s.io/bot-commands?repo=containers%2Fpodman).\n\n<details open>\nNeeds approval from an approver in each of these files:\n\n- **[OWNERS](https://github.com/containers/podman/blob/main/OWNERS)**\n\nApprovers can indicate their approval by writing `/approve` in a comment\nApprovers can cancel approval by writing `/approve cancel` in a comment\n</details>\n<!-- META={\"approvers\":[\"luap99\"]} -->"
+        },
+        {
+            "user": "afbjorklund",
+            "body": "Surely this needs to be opt-in, for modern clients. And then enabled on-demand, for the legacy clients ?\n\nOnly clients before Docker 18.09 (such as Java docker) need this workaround, the rest can use SSH...\n\nhttps://docs.docker.com/engine/release-notes/18.09/#18090\n> Added support for remote connections using SSH \n\nIf using the Podman clients instead of the compatibility socket, then these should _never_ be needed.\n\nI had the same issues with gvproxy and waiting on ssh, when trying to add the virtfs mounting feature."
+        },
+        {
+            "user": "afbjorklund",
+            "body": "I know that right now CoreOS has a feature to let **Docker** handle the docker socket, instead of Podman...\n\nSo that might be another reason for \"opting in\", but it _still_ doesn't need tunneling (just other workarounds\\*)\n\n* uninstall moby-engine\n\n* install podman-docker"
+        },
+        {
+            "user": "afbjorklund",
+            "body": "> I am interested in discussions around the security impact of this.\n\nNote that eventually the VM will have access to **all** files in your home directory, as per design (inherited from Docker)...\n\nThat is, the plan is to mount the home directory from the host under a similar home mountpoint inside the virtual machine.\n\nSo the created sockets should probably be restricted to the user. Similar to the podman SSH keys, being stored in `~/.ssh`."
+        },
+        {
+            "user": "n1hility",
+            "body": "> Surely this needs to be opt-in, for modern clients. And then enabled on-demand, for the legacy clients ?\n> \n> Only clients before Docker 18.09 (such as Java docker) need this workaround, the rest can use SSH...\n\nLast I checked docker could not use podman ssh URLs as it only supported TCP over ssh and not Unix socket tunneling. I will double check this tomorrow.  \n\nAlthough IMHO, as long as the negatives are small defaulting to a mode which maximizes compatibility is a good move when you have a potential mass move of users. \n\nAnother approach if it’s decided to disabled by default would be to print the command to cut and paste fo enable it and set DOCKER_HOST.\n\n> \n> https://docs.docker.com/engine/release-notes/18.09/#18090\n> \n> > Added support for remote connections using SSH\n> \n> If using the Podman clients instead of the compatibility socket, then these should _never_ be needed.\n\nAbsolutely agree. It’s redundant in that scenario. Although it does open the door to a wider array of clients. For example you can curl on a host with docker running locally but you can’t in the docker machine / remote case, without first doing podman machine ssh \n> \n> I had the same issues with gvproxy and waiting on ssh, when trying to add the virtfs mounting feature.\n\nInteresting I wonder if (in addition to sending this stuff to the log) there should be an up event that is tied to systemd status.\n\n"
+        },
+        {
+            "user": "afbjorklund",
+            "body": "You can use Docker, as long as you remove the socket path and add the ssh key (to the ssh-agent).\n\nHowever, if you try this stunt with the new Podman Machine it will be Docker (Moby) Engine answering!\n\n```console\n$ podman system connection ls\nName                         Identity                                    URI\npodman-machine-default*      /home/anders/.ssh/podman-machine-default  ssh://core@localhost:33475/run/user/1000/podman/podman.sock\npodman-machine-default-root  /home/anders/.ssh/podman-machine-default  ssh://root@localhost:33475/run/podman/podman.sock\n$ export DOCKER_HOST=ssh://root@localhost:33475\n$ docker version\nClient: Docker Engine - Community\n Version:           20.10.8\n API version:       1.41\n Go version:        go1.16.6\n Git commit:        3967b7d\n Built:             Fri Jul 30 19:54:27 2021\n OS/Arch:           linux/amd64\n Context:           default\n Experimental:      true\n\nServer:\n Engine:\n  Version:          20.10.8\n  API version:      1.41 (minimum version 1.12)\n  Go version:       go1.16.6\n  Git commit:       75249d8\n  Built:            Sun Aug 15 00:00:00 2021\n  OS/Arch:          linux/amd64\n  Experimental:     false\n containerd:\n  Version:          1.5.5\n  GitCommit:        \n runc:\n  Version:          1.0.1\n  GitCommit:        06fb178\n docker-init:\n  Version:          0.19.0\n  GitCommit:        \n```\n\nYou might have expected a Podman service, rather than the Docker daemon ?\n\nBut for that, you need to hack CoreOS (as per above) to replace `docker.sock`"
+        },
+        {
+            "user": "n1hility",
+            "body": "> You can use Docker, as long as you remove the socket path and add the ssh key (to the ssh-agent).\n> \n> However, if you try this stunt with the new Podman Machine it will be Docker Engine answering\n> You can use Docker, as long as you remove the socket path and add the ssh key (to the ssh-agent).\n> \n> However, if you try this stunt with the new Podman Machine it will be Docker (Moby) Engine answering!\n> \n> ```\n> $ podman system connection ls\n> Name                         Identity                                    URI\n> podman-machine-default*      /home/anders/.ssh/podman-machine-default  ssh://core@localhost:33475/run/user/1000/podman/podman.sock\n> podman-machine-default-root  /home/anders/.ssh/podman-machine-default  ssh://root@localhost:33475/run/podman/podman.sock\n> $ export DOCKER_HOST=ssh://root@localhost:33475\n> $ docker version\n> Client: Docker Engine - Community\n>  Version:           20.10.8\n>  API version:       1.41\n>  Go version:        go1.16.6\n>  Git commit:        3967b7d\n>  Built:             Fri Jul 30 19:54:27 2021\n>  OS/Arch:           linux/amd64\n>  Context:           default\n>  Experimental:      true\n> \n> Server:\n>  Engine:\n>   Version:          20.10.8\n>   API version:      1.41 (minimum version 1.12)\n>   Go version:       go1.16.6\n>   Git commit:       75249d8\n>   Built:            Sun Aug 15 00:00:00 2021\n>   OS/Arch:          linux/amd64\n>   Experimental:     false\n>  containerd:\n>   Version:          1.5.5\n>   GitCommit:        \n>  runc:\n>   Version:          1.0.1\n>   GitCommit:        06fb178\n>  docker-init:\n>   Version:          0.19.0\n>   GitCommit:        \n> ```\n> \n> You might have expected a Podman service, rather than the Docker daemon ?\n> \n> But for that, you need to hack CoreOS (as per above) to replace `docker.sock`\n\nAh yes they support their sock location only just not custom ones.  Then the next question for the user doing that is does that point to rootless or rootful. "
+        },
+        {
+            "user": "afbjorklund",
+            "body": "> > But for that, you need to hack CoreOS (as per above) to replace `docker.sock`\n> \n> Ah yes they support their sock location only just not custom ones. Then the next question for the user doing that is does that point to rootless or rootful.\n\nAdding rootless to the mix as well just makes it worse, but it's basically the same circus in /run/user/1000.\n\nThe quick hack is ` sudo ln -sf /run/podman/podman.sock /var/run/docker.sock`, the long way is `rpm-ostree`\n\n```console\n$ podman machine ssh sudo ln -sf /run/podman/podman.sock /var/run/docker.sock\nCould not create directory '/root/.ssh'.\nWarning: Permanently added '[localhost]:33475' (ECDSA) to the list of known hosts.\n$ docker version\nClient: Docker Engine - Community\n Version:           20.10.8\n API version:       1.40\n Go version:        go1.16.6\n Git commit:        3967b7d\n Built:             Fri Jul 30 19:54:27 2021\n OS/Arch:           linux/amd64\n Context:           default\n Experimental:      true\n\nServer: linux/amd64/fedora-34\n Podman Engine:\n  Version:          3.3.1\n  APIVersion:       3.3.1\n  Arch:             amd64\n  BuildTime:        2021-08-30T20:46:36Z\n  Experimental:     true\n  GitCommit:        \n  GoVersion:        go1.16.6\n  KernelVersion:    5.13.13-200.fc34.x86_64\n  MinAPIVersion:    3.1.0\n  Os:               linux\n Engine:\n  Version:          3.3.1\n  API version:      1.40 (minimum version 1.24)\n  Go version:       go1.16.6\n  Git commit:       \n  Built:            Mon Aug 30 20:46:36 2021\n  OS/Arch:          linux/amd64\n  Experimental:     true\n```\n\nThis is because it only allows modifications in `/var`, but not any changes in `/usr` (and there is no `yum`/`dnf` tool).\n\nhttps://developers.redhat.com/blog/2020/03/12/how-to-customize-fedora-coreos-for-dedicated-workloads-with-ostree"
+        },
+        {
+            "user": "rhatdan",
+            "body": "We should change podman machine init to disable moby sockets by default and install docker.sock by default within the VM. \nPodman machine should not be running docker at all within the VM,(In a perfect world we convince Fedora CoreOS to replalce Moby with podman-docker."
+        },
+        {
+            "user": "rhatdan",
+            "body": "I would want a --compat flag on podman machine start, which would tell it to listen in the standard locations where Docker listens.  So the Docker clients would just work. I would guess this would be with a rootfull podman."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@ashley-cui @baude @jwhonce @flouthoc WDYT?"
+        },
+        {
+            "user": "afbjorklund",
+            "body": "Doing explicit tunneling of the unix sockets with ssh should be a usable workaround, in the meantime ?\n(while waiting for Docker to support paths in their host urls, or CoreOS to stop supporting docker engine)\n\nSome runtimes even _prefer_ tunneling, for instance using containerd / buildkitd are _quite_ horrible to use:\nhttps://minikube.sigs.k8s.io/docs/handbook/pushing/#6-pushing-directly-to-in-cluster-containerd-buildkitd\n\nLima works around this by running `ssh nerdctl`, instead of remoting.\n\nMinikube has a similar workaround, instead of docker-env/podman-env"
+        },
+        {
+            "user": "afbjorklund",
+            "body": "And if one really really wants to, it is also possible to install rootless docker using good ole curlpipesh.\n\n```console\n$ podman machine ssh\n[core@localhost ~]$ curl -fsSL https://get.docker.com/rootless | sh\n...\n[INFO] Creating /var/home/core/.config/systemd/user/docker.service\n[INFO] starting systemd service docker.service\n...\n[INFO] Installed docker.service successfully.\n[INFO] To control docker.service, run: `systemctl --user (start|stop|restart) docker.service`\n[INFO] To run docker.service on system startup, run: `sudo loginctl enable-linger core`\n\n[INFO] Creating CLI context \"rootless\"\nSuccessfully created context \"rootless\"\n\n[INFO] Make sure the following environment variables are set (or add them to ~/.bashrc):\n\nexport PATH=/var/home/core/bin:$PATH\nexport DOCKER_HOST=unix:///run/user/1000/docker.sock\n\n```\n\nhttps://docs.docker.com/engine/security/rootless/\n\nNot sure what would be the _point_ of having 4 different daemons running, but that's another story..."
+        },
+        {
+            "user": "n1hility",
+            "body": "> I would want a --compat flag on podman machine start, which would tell it to listen in the standard locations where Docker listens. So the Docker clients would just work. I would guess this would be with a rootfull podman.\n\nGood idea I’ll add that to the draft"
+        },
+        {
+            "user": "afbjorklund",
+            "body": "Totally unrelated, but trying to run rootless docker just results in some epic fail.\n\n```console\n$ export DOCKER_HOST=ssh://core@localhost:42759\n$ docker version\nClient: Docker Engine - Community\n Version:           20.10.8\n API version:       1.41\n Go version:        go1.16.6\n Git commit:        3967b7d\n Built:             Fri Jul 30 19:54:27 2021\n OS/Arch:           linux/amd64\n Context:           default\n Experimental:      true\nCannot connect to the Docker daemon at http://docker.example.com. Is the docker daemon running?\n```\n\nHmm, nice url there. 😀 Wonder if the debugging logs has any more input...\n\n```\nDEBU[0000] commandconn: starting ssh with [-l core -p 42759 -- localhost docker system dial-stdio] \nDEBU[0000] commandconn (ssh):failed to open the raw stream connection: dial unix /var/run/docker.sock: connect: permission denied \nDEBU[0000] commandconn: starting ssh with [-l core -p 42759 -- localhost docker system dial-stdio] \nDEBU[0000] commandconn (ssh):failed to open the raw stream connection: dial unix /var/run/docker.sock: connect: permission denied \nDEBU[0000] commandconn: starting ssh with [-l core -p 42759 -- localhost docker system dial-stdio] \nDEBU[0000] commandconn (ssh):failed to open the raw stream connection: dial unix /var/run/docker.sock: connect: permission denied \nDEBU[0000] FIXME: Got an status-code for which error does not match any expected type!!!: -1  module=api status_code=-1\n```\n----\n\nApparently one is supposed to tweak the login shell, so that it sets the env var.\n\nhttps://docs.docker.com/engine/security/rootless/#expose-docker-api-socket-through-ssh\n> To expose the Docker API socket through SSH, you need to make sure $DOCKER_HOST is set on the remote host.\n\nSo **that** is how you are supposed to make rootless connections work, you change the ~/.bashrc\n\n> [INFO] Make sure the following environment variables are set (or add them to ~/.bashrc):\n>\n> export PATH=/var/home/core/bin:$PATH\n> export DOCKER_HOST=unix:///run/user/1000/docker.sock\n\n```console\n[core@localhost ~]$ cat .bashrc.d/docker \nexport DOCKER_HOST=unix:///run/user/1000/podman/podman.sock\n```\n\nAnd now docker can use the rootless podman socket, by choosing the _other_ connection.\n\n`export CONTAINER_HOST=ssh://core@localhost:42759/run/user/1000/podman/podman.sock`\n`export DOCKER_HOST=ssh://core@localhost:42759`\n\nSimilar can be done for root, to make it run podman instead of the default docker socket:\n\n```console\n[root@localhost ~]# cat .bashrc.d/docker \nexport DOCKER_HOST=unix:///run/podman/podman.sock\n```\n\n`export CONTAINER_HOST=ssh://root@localhost:42759/run/podman/podman.sock`\n`export DOCKER_HOST=ssh://root@localhost:42759`\n\nWhich means the ssh tunneling workaround is not needed anymore, for Docker 18.09+\n\nOnly these two files need adding:\n\n```\n/var/home/core/.bashrc.d/docker\n/var/roothome/.bashrc.d/docker\n```\n\nLegacy clients that don't support `ssh:` but only `unix:` and `tcp:` still needs the workaround."
+        },
+        {
+            "user": "bsideup",
+            "body": "> Only clients before Docker 18.09 (such as Java docker) need this workaround, the rest can use SSH...\n\nNote that Docker 18.09 has nothing to do with SSH protocol support in Docker clients in languages other than Golang. Each client library (and docker-java is one of them) needs to support SSH transport, and this is not safe to assume that every other client can use SSH.\nAFAIK https://github.com/dotnet/Docker.DotNet is another very popular Docker client library that does not support SSH transport.\nAlso https://github.com/softprops/shiplift/issues/291 (Rust)\nAlso https://github.com/swipely/docker-api/issues/447 (Ruby)\nNo SSH here as well: https://github.com/proger/erldocker (Erlang)\n\nSo, it looks like, \"the rest\" is so far Golang/Python/NodeJS, while other clients are lagging behind :)\n\nJust my 2c, and thank you @n1hility for addressing this! 👍 "
+        },
+        {
+            "user": "afbjorklund",
+            "body": "> Note that Docker 18.09 has nothing to do with SSH protocol support in Docker clients in languages other than Golang. Each client library (and docker-java is one of them) needs to support SSH transport, and this is not safe to assume that every other client can use SSH.\n\nSeems more safe to assume that they do **not** support SSH, and that most of them are using the legacy HTTPS (2376) still...\n\n(Note that legacy varlink and legacy http are **not** supported in podman, but this ssh tunneling of unix should work in most places)\n\nBut yeah, guess I meant \"CLI client\" there. 🙂\n\nGood to know that Go and Python are on par."
+        },
+        {
+            "user": "matejvasek",
+            "body": "Speaking of `Go` client: I belive that standard `Go` **_CLI_** client does support ssh however the `Go` client **_library_** doesn't."
+        },
+        {
+            "user": "afbjorklund",
+            "body": "So only Python SDK then. 😀\n\nBoth (CLI and Python) also require that `docker` (client) is installed on the server, even if you don't have to install `dockerd` (server) on the server when running Podman"
+        },
+        {
+            "user": "rhatdan",
+            "body": "Theoretically we would need to implement this in the podman cli for docker emulation?"
+        },
+        {
+            "user": "afbjorklund",
+            "body": "Seems that way, there was a reference in the Moby code\n\nhttps://github.com/moby/moby/blob/master/client/client.go#L286"
+        },
+        {
+            "user": "afbjorklund",
+            "body": "For some reason, they lost the path support in the urls on the way - original PR did use it, but it doesn't work in what got merged..."
+        },
+        {
+            "user": "matejvasek",
+            "body": "Having something like `podman system unix-proxy unix:///tmp/podman.sock` seems like viable solution, just user needs to know about such a sub-command."
+        },
+        {
+            "user": "matejvasek",
+            "body": "@afbjorklund I am little bit lost in discussion here (I started looking at in just now):\n>For some reason, they lost the path support in the urls on the way - original PR did use it, but it doesn't work in what got merged...\n\nwhat do you mean by that"
+        },
+        {
+            "user": "afbjorklund",
+            "body": "Currently DOCKER_HOST fails, if you include a socket path"
+        },
+        {
+            "user": "matejvasek",
+            "body": "even if `moby` supported path part it sill requires additional binary to be present on server (basically `socat`), also as you mentioned we cannot expect that every docker API client support ssh."
+        },
+        {
+            "user": "matejvasek",
+            "body": "I would be best to automatically proxy socket from the VM into `/var/run/docker.sock` upon `podman machine start`. But I don't know if that's feasible. "
+        },
+        {
+            "user": "afbjorklund",
+            "body": "It will be a flag\n\nSee https://github.com/containers/podman/pull/11643#issuecomment-922252507"
+        },
+        {
+            "user": "matejvasek",
+            "body": "@n1hility it looks like that known_hosts should be used to verify identity of server. Who is supposed to put pubkey there? Does user first need to use `ssh` to save fingerprint?"
+        },
+        {
+            "user": "n1hility",
+            "body": "> I would want a --compat flag on podman machine start, which would tell it to listen in the standard locations where Docker listens. So the Docker clients would just work. I would guess this would be with a rootfull podman.\n\n@rhatdan I finally got around to implementing this. I also updated the notes in the PR."
+        },
+        {
+            "user": "matejvasek",
+            "body": "```go\n\tcallback := ssh.InsecureIgnoreHostKey()\n\tif secure {\n\t\thost := _url.Hostname()\n\t\tif port != \"22\" {\n\t\t\thost = fmt.Sprintf(\"[%s]:%s\", host, port)\n\t\t}\n\t\tkey := terminal.HostKey(host)\n\t\tif key != nil {\n\t\t\tcallback = ssh.FixedHostKey(key)\n\t\t}\n\t}\n```\nActually it looks like that if the key is not known then `ssh.InsecureIgnoreHostKey()` is used, which doesn't sound much secure.\nYeah I know it's not code from this PR."
+        },
+        {
+            "user": "n1hility",
+            "body": "> ```go\n> ```go\n> \tcallback := ssh.InsecureIgnoreHostKey()\n> \tif secure {\n> \t\thost := _url.Hostname()\n> \t\tif port != \"22\" {\n> \t\t\thost = fmt.Sprintf(\"[%s]:%s\", host, port)\n> \t\t}\n> \t\tkey := terminal.HostKey(host)\n> \t\tif key != nil {\n> \t\t\tcallback = ssh.FixedHostKey(key)\n> \t\t}\n> \t}\n> ```\n\n> Actually it looks like that if the key is not known then ssh.InsecureIgnoreHostKey() is used, which doesn't sound much secure.\n> Yeah I know it's not code from this PR.\n> ```\n\n@matejvasek  Right there is a secure URL parameter in connection definitions to enable it. In the case of podman machine, and other situations where you have a host in a VM, I think it's not critical since traffic is directed locally."
+        },
+        {
+            "user": "matejvasek",
+            "body": ">@matejvasek Right there is a secure URL parameter in connection definitions to enable it. In the case of podman machine, and other situations where you have a host in a VM, I think it's not critical since traffic is directed locally.\n\nfair enough"
+        },
+        {
+            "user": "n1hility",
+            "body": "Question for the pile:\n\nShould I add graphical dialog auth support on MacOS when --compat needs to create the link and there is no tty (e.g. launched from some sort of launcher)? This would support biometric and watch auth. I don't prefer to do dialogs in terminals generally since the user can lose their terminal window when they have a bunch open, so I didn't do it this way originally.\n\n\n"
+        },
+        {
+            "user": "n1hility",
+            "body": "> Seems that way, there was a reference in the Moby code\n> \n> https://github.com/moby/moby/blob/master/client/client.go#L286\n\n@afbjorklund Just to clarify this point (and not to argue we should not add dial-stdio support). This is only required for podman to support docker clients that use DOCKER_HOST to point to SSH of a podman system. If they point it to a unix socket (e.g. with the proxy, or the default with the compatibility unix socket) this is not required. Is that accurate? "
+        },
+        {
+            "user": "mheon",
+            "body": "@ashley-cui @baude PTAL"
+        },
+        {
+            "user": "afbjorklund",
+            "body": "> Is that accurate?\n\nThat seems accurate, so in that sense it is somewhat off-topic. The unix socket is still needed for other clients.\n\nBut the `ssh:` syntax was added in 2018, in order to **not** have to set up manual SSH tunnels, that is the relation."
+        },
+        {
+            "user": "Luap99",
+            "body": "Why do we need the proxy logic inside podman, this could use ssh to proxy a socket, e.g. `ssh -nNT -L/local/path/podman.sock:/run/user/1000/podman/podman.sock ssh://user@host`"
+        },
+        {
+            "user": "matejvasek",
+            "body": "@Luap99 I believe that having it automatically set up by `podman machine` is much more convenient to user."
+        },
+        {
+            "user": "matejvasek",
+            "body": "Otherwise there would be each week new issue from some new user asking how to use docker client with `podman` VM, we will have to explain ssh tunneling all over again."
+        },
+        {
+            "user": "Luap99",
+            "body": "Podman machine can still do this automatically by calling the ssh command. This commit add a lot of logic just to create proxy."
+        },
+        {
+            "user": "matejvasek",
+            "body": "Ah I see, well there is already ssh logic for libpod so why not to use it?"
+        },
+        {
+            "user": "matejvasek",
+            "body": "Or you mean logic for unix socket serving?"
+        },
+        {
+            "user": "n1hility",
+            "body": "> Why do we need the proxy logic inside podman, this could use ssh to proxy a socket, e.g. `ssh -nNT -L/local/path/podman.sock:/run/user/1000/podman/podman.sock ssh://user@host`\n\nGood question. The benefits of this approach are:\n\n1. Improved Compatibility - we don't have to care what version of ssh is on the box, what bugs it has, what user configuration it has, where it's located, etc\n2. Consistency - As @matejvasek mentions this reuses the connection binding ssh client, so 100% equivalent behavior. We don't have to keep redundant sections of code in sync (making sure the ssh command line policy + whatever defaults it currently has semantically match the connection code)\n3. Improved  Robustness - If the ssh connection drops for whatever reason (vm pause, service timeout etc) we can hold the line with the unix socket client while reestablishing the connection on the backend. \n4. Improved Error Reporting - Since we control all interconnection points, we get a richer interface with error conditions and can translate them appropriately (vs say parsing an ssh log)\n\nFrom a cost perspective, since the ssh client code is reused it amounts to just the unix socket handling, which is just a basic accept loop and two trivial io copy goroutines to form a pipe.  "
+        },
+        {
+            "user": "n1hility",
+            "body": "FYI I split the last commit off into a separate PR since it's orthogonal.  (#11703)"
+        },
+        {
+            "user": "Luap99",
+            "body": "@n1hility Thanks for the detailed answer, this SGTM."
+        },
+        {
+            "user": "n1hility",
+            "body": "PR rebased against the commit moved to the other PR.\n\nI will include a test and doc for unix-proxy as the next step and reduce some of the verbosity. "
+        },
+        {
+            "user": "n1hility",
+            "body": "So thinking about this a little bit this morning and I think I should move the docker.sock creation and auth to init and warn on start. It could then be on by default prompt the user if the file exists and points elsewhere to ask if sure and overwrite. Then start could warn to re-run init to fix the link if  docker takes it back. "
+        },
+        {
+            "user": "n1hility",
+            "body": "PR is updated to create the symlinks on init by default. Options were added to disable the proxies/sockets and the link if so desired. "
+        },
+        {
+            "user": "n1hility",
+            "body": "Based on some recent discussions we are looking at putting this logic in gvproxy to avoid having extra daemon processes. An initial draft proposal of this is here: https://github.com/containers/gvisor-tap-vsock/pull/58\n\nClosing this PR since it will be superseded. "
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 11422
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 11462
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 11703
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 11668
+        }
+    ]
+}

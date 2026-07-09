@@ -1,0 +1,64 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 23404,
+    "type": "issue",
+    "title": "nftables: internal:0:0-0: Error: Could not process rule: Device or resource busy",
+    "state": "closed",
+    "labels": [
+        "flakes",
+        "network",
+        "locked - please file new issue/PR"
+    ],
+    "user": "edsantiago",
+    "body": "Very weird one-off:\n```\n→ Enter [AfterEach] TOP-LEVEL - /var/tmp/go/src/github.com[/containers/podman/test/e2e/common_test.go:120](https://github.com/containers/podman/blob/4831981cd98b83a54f8b71e795794b3eb36aaa9f/test/e2e/common_test.go#L120) @ 07/24/24 22:18:04.589\n           # podman [options] stop --all -t 0\n           internal:0:0-0: Error: Could not process rule: Device or resource busy\n         \n           time=\"2024-07-24T22:18:04Z\" level=error msg=\"Unable to clean up network for container e654e08b54b76a7b7385a5a5fb7114d7abf252e312f5426845c2cd1b22d7a29b: \\\"netavark: nftables error: nft did not return successfully while applying ruleset\\\"\"\n```\nSeen twice in [one f40 root run](https://api.cirrus-ci.com/v1/artifact/task/5865078484893696/html/int-podman-fedora-40-root-container-sqlite.log.html).\n\nWhat's weird about it:\n* I've never seen this one before.\n* It failed _on all ginkgo retries_. That is: this isn't my pet no-retry PR, this was a real PR. Normally these kinds of failures are masked by the evil ginkgo flake retry.\n* failed on two tests. Timestamps (548s, 551s) suggest that both tests may have been parallel-running at close to the same time\n\nIt is possible that this has been happening all along, but ginkgo-retry has been hiding it. We have no sane way to find out, aside from downloading and grepping all logs for all CI runs. Or, as I will suggest in a future Cabal, disabling flake retries.",
+    "comments": [
+        {
+            "user": "edsantiago",
+            "body": "(If this is a netavark bug, could you please copy it there instead of moving? My flake log needs a podman issue number. Thanks.)"
+        },
+        {
+            "user": "Luap99",
+            "body": "This sounds like the error we are seeing https://bugzilla.redhat.com/show_bug.cgi?id=2013173 but I haven't yet looked if this is something that netavark causes or if there is some other cause.\n\ncc @mheon "
+        },
+        {
+            "user": "Luap99",
+            "body": "So if I read https://wiki.nftables.org/wiki-nftables/index.php/Configuring_chains correctly the EBUSY error just means the chain is not empty when we try to remove it.\nIn theory we delete all rules from the chain before we remove the chain but maybe there is some chance that we missed a rule somehow?"
+        },
+        {
+            "user": "mheon",
+            "body": "There is also the potential of a race against something else adding rules, though that something can't be Netavark because of locking."
+        },
+        {
+            "user": "Luap99",
+            "body": "Well it should be safe to assume that on a CI VM nothing besides netavark would mess with our nftables chains... So if locking works then we have some bug where rules are not deleted properly "
+        },
+        {
+            "user": "karuboniru",
+            "body": "Might be related to this: https://github.com/containers/netavark/issues/1068\n\n```\n$ cat /etc/containers/containers.conf\n[containers]\nuserns = \"auto\"\n\n[network]\nfirewall_driver = \"nftables\"\n\n$ sudo podman system reset -f \n...\n\n$ sudo podman run -it --rm -p 10.0.1.10:10222:10222/udp -p 10.0.1.10:10222:10222/tcp alpine:latest sh\n/ # // left it running\n\n// In another Terminal\n$ sudo podman network reload --all\ninternal:0:0-0: Error: Could not process rule: No such file or directory\n\ninternal:0:0-0: Error: Could not process rule: No such file or directory\n\ninternal:0:0-0: Error: Could not process rule: No such file or directory\n\ninternal:0:0-0: Error: Could not process rule: No such file or directory\n\ninternal:0:0-0: Error: Could not process rule: No such file or directory\n\ninternal:0:0-0: Error: Could not process rule: No such file or directory\n\ninternal:0:0-0: Error: Could not process rule: No such file or directory\n\ninternal:0:0-0: Error: Could not process rule: No such file or directory\n\ninternal:0:0-0: Error: Could not process rule: No such file or directory\n\ninternal:0:0-0: Error: Could not process rule: No such file or directory\n\ninternal:0:0-0: Error: Could not process rule: No such file or directory\n\ninternal:0:0-0: Error: Could not process rule: No such file or directory\n\ninternal:0:0-0: Error: Could not process rule: No such file or directory\n\ninternal:0:0-0: Error: Could not process rule: No such file or directory\n\ninternal:0:0-0: Error: Could not process rule: No such file or directory\n\ninternal:0:0-0: Error: Could not process rule: No such file or directory\n\nERRO[0000] netavark: nftables error: nft did not return successfully while applying ruleset \nc652403742bc95392bfea0da8e7d37cff1d057c2b744fb22a393b39daf07498d\n```\n\nThis can stabily reproduce the issue on my system (Fedora), doing `sudo nft delete table inet netavark` before reloading can workaround such error.\n\n***\nFor `Unable to clean up network for container`, I believe I have seen such log when restart such containers with the firewall issue, don't know if related"
+        },
+        {
+            "user": "Luap99",
+            "body": "> This can stabily reproduce the issue on my system (Fedora), doing sudo nft delete table inet netavark before reloading can workaround such error.\n\nI don't think it is related to this issue. This is about a specific CI flake and the error is EBUSY not ENOENT like in your case. If it only triggers with the specific port forwarding setup from https://github.com/containers/netavark/issues/1068 then this is most likely the cause for your problem. I take a look next week."
+        },
+        {
+            "user": "Luap99",
+            "body": "I am going to close this one as I don't think we saw since then, we can reopen if we see it again."
+        },
+        {
+            "user": "siegy22",
+            "body": "I am running into this issue on a fresh Fedora 41 installation (on WSL).\n\n- Fedora 41\n- podman-5.2.5-1.fc41.x86_64\n- netavark-1.13.0-1.fc41.x86_64\n\n```\nroot@Wintrash:~# podman run --rm -it docker.io/library/busybox:latest\nTrying to pull docker.io/library/busybox:latest...\nGetting image source signatures\nCopying blob a46fbb00284b done   |\nCopying config 27a71e19c9 done   |\nWriting manifest to image destination\n\ninternal:0:0-0: Error: Could not process rule: No such file or directory\ninternal:0:0-0: Error: Could not process rule: No such file or directory\nError: netavark: nftables error: nft did not return successfully while applying ruleset\n```\n\nAny ideas what to look for? It's not a race condition in my case, I can't run any container using podman."
+        },
+        {
+            "user": "Luap99",
+            "body": "File a new issue on netavark, try running the command with `strace -f -s 300`  and provide the output there. That should hopefully tell us where it fails."
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "containers",
+            "repository": "netavark",
+            "number": 1129
+        }
+    ]
+}

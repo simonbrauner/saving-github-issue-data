@@ -1,0 +1,132 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 13667,
+    "type": "pull_request",
+    "title": "podman machine init: add a --with-foreign-arch flag",
+    "state": "closed",
+    "labels": [
+        "locked - please file new issue/PR"
+    ],
+    "user": "zhenya-1007",
+    "body": "The flag is qemu-specific.  It causes `qemu-static` & friends to be installed on the machine so that, e.g., x86_64 binaries can be run on aarch64 (aka \"arm64\").  This is \"scratching an itch\" for me because I am on Mac M1, but I want to build Docker images whose Dockerfiles contain RUN instruction(s) for x86_64.\n\nI did manual testing as follows, so (I believe it is the case that) [NO TESTS NEEDED].\n\n- Preparation:\n  - built `podman` per instructions in `build_osx.md`\n  - establish a clean starting state: `./bin/podman machine stop && ./bin/podman machine rm -f`\n   \n- Run without the new option:\n    - `./bin/podman machine init --now`\n    - `./bin/podman machine ssh`\n       - `sudo systemctl status install-qemu-static.service`:  shows up as `disabled` and `inactive`\n       - `sudo systemctl edit ready.service`: the `After` line looks like this: \n           `# After=remove-moby.service sshd.socket sshd.service`\n       - <log out from the SSH session>\n    - `./bin/podman machine run --arch amd64 fedora:35 uname -a`: fails with `{\"msg\":\"exec container process `/usr/bin/uname`: Exec format error\",\"level\":\"error\",\"time\":\"2022-03-26T08:07:03.000635889Z\"}` (as expected)\n    \n- Clean up: `./bin/podman machine stop && ./bin/podman machine rm -f`\n\n- Run with the new option:\n    - `./bin/podman machine init --with-foreign-arch --now` (unfortunately it's now perceptably slower)\n    - `./bin/podman machine ssh`\n       - `sudo systemctl status install-qemu-static.service`:  shows up as `enabled` and having run successfully\n       - `sudo systemctl edit ready.service`: the `After` line looks like this: \n           `# After=remove-moby.service sshd.socket sshd.service install-qemu-static.service`\n       - <log out from the SSH session>\n    - `./bin/podman machine run --arch amd64 fedora:35 uname -a`: prints `Linux 81c4b2d16270 5.15.18-200.fc35.aarch64 #1 SMP Sat Jan 29 12:44:33 UTC 2022 x86_64 x86_64 x86_64 GNU/Linux`\n\n<!--\nThanks for sending a pull request!\n\nPlease make sure you've read our contributing guidelines and how to submit a pull request (https://github.com/containers/podman/blob/main/CONTRIBUTING.md#submitting-pull-requests).\n\nIn case you're only changing docs, make sure to prefix the pull-request title with \"[CI:DOCS]\".  That will prevent functional tests from running and save time and energy.\n\nFinally, be sure to sign commits with your real name.  Since by opening\na PR you already have commits, you can add signatures if needed with\nsomething like `git commit -s --amend`.\n-->\n",
+    "comments": [
+        {
+            "user": "openshift-ci[bot]",
+            "body": "[APPROVALNOTIFIER] This PR is **NOT APPROVED**\n\nThis pull-request has been approved by: *<a href=\"https://github.com/containers/podman/pull/13667#\" title=\"Author self-approved\">zhenya-1007</a>*\nTo complete the [pull request process](https://git.k8s.io/community/contributors/guide/owners.md#the-code-review-process), please assign **mtrmac** after the PR has been reviewed.\nYou can assign the PR to them by writing `/assign @mtrmac` in a comment when ready.\n\nThe full list of commands accepted by this bot can be found [here](https://go.k8s.io/bot-commands?repo=containers%2Fpodman).\n\n<details open>\nNeeds approval from an approver in each of these files:\n\n- **[OWNERS](https://github.com/containers/podman/blob/main/OWNERS)**\n\nApprovers can indicate their approval by writing `/approve` in a comment\nApprovers can cancel approval by writing `/approve cancel` in a comment\n</details>\n<!-- META={\"approvers\":[\"mtrmac\"]} -->"
+        },
+        {
+            "user": "rhatdan",
+            "body": "@baude @n1hility Is this just fixing a bug?  IE Shouldn't these services be enabled by default?"
+        },
+        {
+            "user": "zhenya-1007",
+            "body": "@rhatdan  Wouldn't enabling qemu-static & Co by default, \"make people pay for what they don't use\" in many cases?\nConsider a developer who is using a Linux x86_64 machine, and is only interested in building x86_64 container images.\nWhat do you imagine would be their reaction when they found out that Podman pulled down a bunch of binaries they, as likely as not, will never use, \"just in case\"? This stuff isn't exactly light-weight to install...\n"
+        },
+        {
+            "user": "zhenya-1007",
+            "body": "/cc @baude @Luap99 @vrothberg\n"
+        },
+        {
+            "user": "baude",
+            "body": "I want some time to think about this one and to see what others think. I was thinking this would eventually be something to GUI would enable rather than built into podman.\n\nIf we were to move forward with it, I'm wondering if it should be an opt in thing vs default.  From the code snippets, I could not confirm if it was ... anyways, the installation of those packages are not trivial in time.\n\nThe real goal should be that qemu-static be shipped as part of the image itself, imho."
+        },
+        {
+            "user": "zhenya-1007",
+            "body": "> I want some time to think about this one and to see what others think. I was thinking this would eventually be something to GUI would enable rather than built into podman.\n\nPlease _do_ take time to think about it.  \n\nAre there any GUIs for podman that exist today?  If so, could you point me to it/them?[^1]\n\nIn the end, I want to have _some_ way for users to run \"foreign\" arch binaries.  I appreciate that users have the _theoretical_ option of coming up with an ignition file, and providing it as the `--ignition-path` argument to `podman machine init` today -- but asking that _each_ user who wishes to run \"foreign\" arch binaries with podman should create a custom ignition file _and_ keep it up to date with whatever changes podman makes as it evolves is asking _way_ too much of the user, IMO.\n\n> If we were to move forward with it, I'm wondering if it should be an opt in thing vs default. From the code snippets, I could not confirm if it was ... anyways, the installation of those packages are not trivial in time.\n\nIt  _is_ an opt-in in the current implementation, precisely because I didn't want to make everyone pay for what only some people will use.  Take another look at line 255 in `ignition.go`.  I appreciate that it may have been easy to miss on first read.\n \n> The real goal should be that qemu-static be shipped as part of the image itself, imho.\n\nWhat would motivate FCOS to make this change?  The \"I want to run binaries for 'foreign' CPU(s)\" use case strikes me as _very_ far fetched in the context in which [I am imagining] the team that works on FCOS operates.\n\n[^1]: I have found `podmand-desktop-comanion`, but [the current state of their machine creation code](https://github.com/iongion/podman-desktop-companion/blob/39d56ac73ab422c1bc6182056c453245fa96ec36/packages/container-client/src/index.js#L282) doesn't exactly fill me with optimism that they will have a workable system for provisioning custom FCOS images any time soon."
+        },
+        {
+            "user": "zhenya-1007",
+            "body": "/cc @rhatdan\n\nAdding to the reviewers list since @baude says he, \"wants to see what people think.\""
+        },
+        {
+            "user": "cevich",
+            "body": "There's no need to install the binaries directly on the host.  All that's needed is pointing the kernel at *some* available binaries to use.  This is easily done by using the pre-built container images from https://github.com/multiarch/qemu-user-static or taking that as a pattern to build your own.  The `README.md` in that repo. has all the details and documentation needed."
+        },
+        {
+            "user": "zhenya-1007",
+            "body": "> There's no need to install the binaries directly on the host. All that's needed is pointing the kernel at _some_ available binaries to use. This is easily done by using the pre-built container images from https://github.com/multiarch/qemu-user-static or taking that as a pattern to build your own. The `README.md` in that repo. has all the details and documentation needed.\n\n@cevich Yes,  I remember coming across that project.\n\nIs the [\"only for x86_64 hosts\"](https://github.com/multiarch/qemu-user-static/blob/386863992a5d93daa63ce3f10d2a4f48b9da21e4/README.md?plain=1#L216-L221) part of the README accurate?  \n\nIf so, then I am afraid your proposed solution does not address my primary use case, which is running x86_64 binaries on Mac M1 (i.e., the host is aarch64) -- or at least not \"out of the box.\"   \n\nThat said, maybe it _would_ be more productive for me to contribute an \"`aarch64` -> `x86_64`\" piece to the multiarch/qemu-user-static project than to see this PR to completion...  \n\nParenthetically, I have found documentation for multiarch/qemu-user-static to be quite hard to follow.  In fact, I was thoroughly confused as to what was going on until I found a reference to `.github` directory in the documentation, and looked at the `workflow/actions.yml` file in that directory.  Then things (finally!) started to make sense -- even though, among other things, [the description of the input to \"the pipeline\"](https://github.com/multiarch/qemu-user-static/blob/386863992a5d93daa63ce3f10d2a4f48b9da21e4/docs/developers_guide.md?plain=1#L87) is out of date with respect to what `workflow.yml` is actually doing."
+        },
+        {
+            "user": "cevich",
+            "body": "Those specific container images aren't actually needed, you can roll your own.  All you need is a aarch64 container image with the qemu-user-static binaries available.  Run that on the host (VM) with `--privileged`, and you can tickle `/proc/sys/fs/binfmt_misc` by hand if need be.  Or copy and use the [multiarch/qemu-user-static](https://github.com/multiarch/qemu-user-static) [script that does the business](https://github.com/multiarch/qemu-user-static/blob/master/containers/latest/register.sh#L23) + [it's qemu helper script.](https://github.com/multiarch/qemu-user-static/blob/master/containers/latest/Dockerfile#L4)"
+        },
+        {
+            "user": "zhenya-1007",
+            "body": "\n\n\n> Those specific container images aren't actually needed, you can roll your own. All you need is a aarch64 container image with the qemu-user-static binaries available. Run that on the host (VM) with `--privileged`, and you can tickle `/proc/sys/fs/binfmt_misc` by hand if need be. Or copy and use the [multiarch/qemu-user-static](https://github.com/multiarch/qemu-user-static) [script that does the business](https://github.com/multiarch/qemu-user-static/blob/master/containers/latest/register.sh#L23) + [it's qemu helper script.](https://github.com/multiarch/qemu-user-static/blob/master/containers/latest/Dockerfile#L4)\n\n@cevich Thank you for explaining!\n\nSo, it sounds like, with a bit of copying-pasting of existing code, running amd64 binaries on Mac M1 under podman _could_ be as simple as\n```\nuser@mac $ podman machine init && podman machine ssh\ncore@localhost $ podman run --privileged fedora:<latest_stable> /bin/bash -c 'sh <(curl -fsSL https://raw.githubusercontent.com/.../enable.sh)' && logout\nuser@mac $ podman run --arch amd64 <whatever> \n```\n\nOne just needs to fill in the ellipses in the `curl` invocation above. ;-)"
+        },
+        {
+            "user": "rhatdan",
+            "body": "I would rather document this via the container image and potentially ship the container image for qemu-user-static rather then modify the podman machine command.  Since podman machine can support multiple different VM images, it seems like it would make sense to either ship qemu-user-static preinstalled in the VM (My preference) or to create an multi platform container image on quay.io/podman with qemu-user-static and tell people how to use it."
+        },
+        {
+            "user": "cevich",
+            "body": "> ship the container image for qemu-user-static\n\nIf we want to build and ship something multi-arch outselves, my [build-push PR brings that in to podman](https://github.com/containers/podman/pull/13478).  All we need is a `contrib/blah` directory with `Containerfiles` for me to point it at."
+        },
+        {
+            "user": "zhenya-1007",
+            "body": "> I would rather document this via the container image and potentially ship the container image for qemu-user-static rather then modify the podman machine command. Since podman machine can support multiple different VM images, it seems like it would make sense to either ship qemu-user-static preinstalled in the VM (My preference) or to create an multi platform container image on quay.io/podman with qemu-user-static and tell people how to use it.\n\nI agree with the sentiment, actually: I just didn't recognize `multiarch/qemu-user-static` as a viable option until @cevich explained.[^1]  Let me work out the details of that, and I can either PR against that repo or make it available in some other way (quay.io/podman sounds like a good option).\n\nParenthetically, I don't know that you'll have much luck convincing even the FCOS team[^2] to ship qemu-user-static as part of FCOS, because of the, \"why make every user pay for what only a few users will actually need\" argument -- but I have been wrong before (occasionally). ;-)\n\n[^1]: I blame the somewhat lacklustre (IMO) state of that project's documentation.\n[^2]: not to even mention the Ubuntu, Debian, etc. teams"
+        },
+        {
+            "user": "zhenya-1007",
+            "body": "> If we want to build and ship something multi-arch outselves, my [build-push PR brings that in to podman](https://github.com/containers/podman/pull/13478). All we need is a `contrib/blah` directory with `Containerfiles` for me to point it at.\n\nThis PR really isn't about \"building multi-arch images as part of Podman/OpenShift infrastructure\": it's about enabling users of podman to build/run multi-arch images in the context of _their_ podman installation.  I appreciate that your PR does good things, but, AFAICS, it's at best tangentially related to this PR.\n\n"
+        },
+        {
+            "user": "evgeny-roubinchtein",
+            "body": "@cevich I am looking at it again, and, from what I have seen so far, the \"have the kernel eagerly load, and then persist an interpreter for binfmt_misc\" game that [multiarch/qemu-user-static](https://github.com/multiarch/qemu-user-static) is playing doesn't work when the host system has SELinux enabled (as FCOS does in its default configuration).  Can you point me to an example where the multiarch/qemu-user-static approach works even when SELinux is enabled on the host system?\n\nWhat I have tried (prompts are intended to be suggestive of command running on the FCOS host vs the container):\n\n```\nfcos $ sudo -i\nfcos # podman run --privileged --rm -it fedora:35 /bin/bash -i\ncontainer # dnf -y install qemu-user-static\ncontainer # mount binfmt_misc -t binfmt_misc /proc/sys/fs/binfmt_misc\ncontainer # cat /usr/lib/binfmt.d/qemu-x86_64-static.conf >/proc/sys/fs/binfmt_misc/register\ncontainer # exit\nfcos # cat /proc/sys/fs/binfmt_misc/qemu-x86_64\nenabled\ninterpreter /usr/bin/qemu-x86_64-static\nflags: F\n[...] \nfcos # podman run --arch amd64 --rm -it alpine:latest uname -m\nfcos # exit\n# <a bunch of output from podman about pulling image, but no output from `uname`>\nfcos $ podman run --arch amd64 --rm -it alpine:latest uname -m\n# <ditto>\n```\n\nCould you please provide a transcript of a _working_ example at a similar level of detail?[^1]\n\n[^1]: I already know that copying out the binary and the registration file, and then placing the registration file in /etc/binfmt.d, where it gets picked up by `systemd-binfmt.service` works -- but you said that, \"There's no need to install the binaries directly on the host.\", so I imagine you can provide a transcript to back up that claim?"
+        },
+        {
+            "user": "cevich",
+            "body": "Oof, I did not encounter SELinux related problems AFAIR, it basically \"just worked\" :confounded: \n\nWhat I'm using right now (in automation) under CentOS Stream-8, and does a:\n\n```\n    podman run --rm --privileged \\\n        docker.io/multiarch/qemu-user-static:latest \\\n        --reset -p yes\n```\n\nBut then it runs multi-arch operations from within a super-privileged container:\n\n```\npodman run --detach --name=buildah\n            --net=host --ipc=host --pid=host\n            --cgroupns=host --privileged\n            --security-opt label=disable\n            --security-opt seccomp=unconfined\n            --device /dev/fuse:rw\n            ...\n```\n\nThat works with SELinux enabled on the host, but obvious it's been disabled for the container, along with seccomp.  I'm not an expert in either, but I think that's necessary in this case."
+        },
+        {
+            "user": "cevich",
+            "body": "Update: Just tried on F35, installed `qemu-user-static` and `qemu-user-binfmt`, then `podman run --arch arm64 --rm -it quay.io/libpod/alpine:latest uname -m` ran just fine (on my amd64 laptop).  So hmmm :thinking: I see:\n\n```\n $ ls -Z /usr/bin/qemu-aarch64-static\nsystem_u:object_r:bin_t:s0 /usr/bin/qemu-aarch64-static\n```\n\nHave you tried running the initial container with `--security-opt label=disable`?  Not sure if that will help or not :cry: "
+        },
+        {
+            "user": "zhenya-1007",
+            "body": "@cevich Thank you for following up on this!  \n\nTurns out, if I add, `--security-opt label=disable` to all the `podman run` invocations in my original \"transcript\", then I _do_ get `x86_64` printed by `uname -m`, so:\n\n```\nfcos $ sudo -i\nfcos # podman run --privileged --rm -it --security-opt label=disable fedora:35 /bin/bash -i\ncontainer # dnf -y install qemu-user-static\ncontainer # mount binfmt_misc -t binfmt_misc /proc/sys/fs/binfmt_misc\ncontainer # cat /usr/lib/binfmt.d/qemu-x86_64-static.conf >/proc/sys/fs/binfmt_misc/register\ncontainer # exit\nfcos # cat /proc/sys/fs/binfmt_misc/qemu-x86_64\nenabled\ninterpreter /usr/bin/qemu-x86_64-static\nflags: F\n[...] \nfcos # podman run --arch amd64 --rm -it --security-opt label=disable alpine:latest uname -m\nx86_64 #  :-)\nfcos # exit\nfcos $ podman run --arch amd64 --rm -it --security-opt label=disable  alpine:latest uname -m\nx86_64 # :-)\n```\nCase closed.   Thanks again for all your help with this!"
+        },
+        {
+            "user": "zhenya-1007",
+            "body": "Perhaps this should be documented somewhere  -- ideally somewhere that's easy to find from Podman documentation..."
+        },
+        {
+            "user": "rhatdan",
+            "body": "What AVCs were you seeing?\n"
+        },
+        {
+            "user": "cevich",
+            "body": "Dan, I think the exact AVC's maybe don't matter since the binaries are coming from within another container (which also has `--security-opt label=disable`).  That is to say, I'm not sure any sane SELinux module could actually be written in this case, we probably want it to always fail out of an abundance of caution.   It does work properly/safely (without `--security-opt label=disable`) if you install `qemu-user-static` and `qemu-user-binfmt` on the host directly.  That's possible in FCOS with rpm overrides (assuming that's the right term).  But you're the expert, is there a way to force a label onto binaries coming from within a container like this?"
+        },
+        {
+            "user": "rhatdan",
+            "body": "SGTM"
+        },
+        {
+            "user": "zhenya-1007",
+            "body": "But, but... Installing `qeum-user-static`[^1] on the FCOS host is exactly how this PR started out.  At some point in the discussion, we declared that, \"there is no need to install anything on the host\", and closed the PR.  However, now it sounds like, if one wants to stick with fairly simple system configuration one has to choose between running with `--security-opt label=disable` _or_ installing something on the host, and I am not entirely certain that one of those two options is unambiguously less drastic than the other.  Granted, intermediate to advanced users have a range of options available to them, but my hope here was to provide something beginners could use.  Should we consider reopening this PR?\n\n[^1]: Upon closer examination, I see that one really ought to pick _either_ `qemu-user-static` _or_ `qemu-user-binfmt`, but _not_ both; I might even try submitting a patch that makes one conflict with the other, and see what the distro people think..."
+        },
+        {
+            "user": "n1hility",
+            "body": "IMO bundling it on the machine OS is the right way to go. With aarch64 becoming more prevalent on developer systems and increasing usage of multi arch deployments usage of it is likely to be common. FWIW Docker also bundles it on M1, so —platform just works out of the box "
+        },
+        {
+            "user": "rhatdan",
+            "body": "I agree it should be in the machine."
+        },
+        {
+            "user": "zhenya-1007",
+            "body": "@n1hility @rhatdan:  \"bundling it on the machine OS\" doesn't specify how such bundling is to be accomplished.  I see at least two options:\n\n- podman will arrange to layer the `qemu-*` binaries when it provisions the VM; this is the approach this PR is taking\n- the FCOS team will arrange to include the `qemu-*` binaries into the OS image(s) it distributes\n\nAre you speaking in support of one of the options above, and if, so which one?   Or are you suggesting a completely different approach?"
+        },
+        {
+            "user": "n1hility",
+            "body": "@zhenya-1007 i am just a contributor so don’t take this response as any sort of authority, but i would suggest both directions: propose this to the base FCOS since it seems to be on-mission and then consider a layer approach as a transition solution (or final if they decline) - I personally think it should be included by default without a required option to init.  Note that if everyone agrees this is the way to go there would need to be a port for WSL as well (I can help with that). "
+        },
+        {
+            "user": "rhatdan",
+            "body": "I would prefer that it comes by default from FCOS.  The issue might be size.  If not then I say Podman installs it by default from a container image.  I don't think we should have it as an option, since I don't think most users would understand or care."
+        }
+    ],
+    "cross_references": []
+}

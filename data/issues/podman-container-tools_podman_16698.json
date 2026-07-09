@@ -1,0 +1,67 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 16698,
+    "type": "pull_request",
+    "title": "Init containers should not be restarted",
+    "state": "closed",
+    "labels": [
+        "lgtm",
+        "approved",
+        "release-note-none",
+        "locked - please file new issue/PR"
+    ],
+    "user": "rhatdan",
+    "body": "This is causing podman to wait about 25 seconds before starting\nthe primary container.\n\nFixes: https://github.com/containers/podman/issues/16343\n\n[NO NEW TESTS NEEDED]\n\nSigned-off-by: Daniel J Walsh <dwalsh@redhat.com>\n\n<!--\nThanks for sending a pull request!\n\nPlease make sure you've read our contributing guidelines and how to submit a pull request (https://github.com/containers/podman/blob/main/CONTRIBUTING.md#submitting-pull-requests).\n\nIn case you're only changing docs, make sure to prefix the pull-request title with \"[CI:DOCS]\". That will prevent functional tests from running and save time and energy.\n\nFinally, be sure to sign commits with your real name. Since by opening\na PR you already have commits, you can add signatures if needed with\nsomething like `git commit -s --amend`.\n-->\n\n#### Does this PR introduce a user-facing change?\n\n<!--\nIf no, just write `None` in the release-note block below. If yes, a release note\nis required: Enter your extended release note in the block below. If the PR\nrequires additional action from users switching to the new release, include the\nstring \"action required\".\n\nFor more information on release notes, please follow the Kubernetes model:\nhttps://git.k8s.io/community/contributors/guide/release-notes.md\n-->\n\n```release-note\nNone\n```\n",
+    "comments": [
+        {
+            "user": "openshift-ci[bot]",
+            "body": "[APPROVALNOTIFIER] This PR is **APPROVED**\n\nThis pull-request has been approved by: *<a href=\"https://github.com/containers/podman/pull/16698#\" title=\"Author self-approved\">rhatdan</a>*\n\nThe full list of commands accepted by this bot can be found [here](https://go.k8s.io/bot-commands?repo=containers%2Fpodman).\n\nThe pull request process is described [here](https://git.k8s.io/community/contributors/guide/owners.md#the-code-review-process)\n\n<details >\nNeeds approval from an approver in each of these files:\n\n- ~~[OWNERS](https://github.com/containers/podman/blob/main/OWNERS)~~ [rhatdan]\n\nApprovers can indicate their approval by writing `/approve` in a comment\nApprovers can cancel approval by writing `/approve cancel` in a comment\n</details>\n<!-- META={\"approvers\":[]} -->"
+        },
+        {
+            "user": "rhatdan",
+            "body": "@vrothberg Need to talk  on this one.\n\nTrying a Pod YAML file like:\n```\napiVersion: v1\nkind: Pod\nmetadata:\n  name: pod\nspec:\n  containers:\n  - command:\n    - ls\n    - /dev/shm/test1\n    image: docker.io/library/alpine:latest\n    name: testCtr\n  initContainers:\n  - command:\n    - touch\n    - /dev/shm/test1\n    image: docker.io/library/alpine:latest\n    name: initCtr\n```\nYou see podman waiting around 30 seconds to finish the container.\n"
+        },
+        {
+            "user": "vrothberg",
+            "body": "We need to keep the timeout.  The timeout should only kick in if conmon has forcefully been killed, which is not the case your example.  I will take a look."
+        },
+        {
+            "user": "vrothberg",
+            "body": "Head's up, do not merge the below diff:\n```diff\ndiff --git a/libpod/container_api.go b/libpod/container_api.go\nindex 9abe0a189e66..598bd98632dd 100644\n--- a/libpod/container_api.go\n+++ b/libpod/container_api.go\n@@ -566,7 +566,7 @@ func (c *Container) WaitForExit(ctx context.Context, pollInterval time.Duration)\n                        case <-conmonTimer.C:\n                                logrus.Debugf(\"Exceeded conmon timeout waiting for container %s to exit\", id)\n                        default:\n-                               if !c.ensureState(define.ContainerStateExited, define.ContainerStateConfigured) {\n+                               if !c.ensureState(define.ContainerStateExited, define.ContainerStateConfigured, define.ContainerStateStopped) {\n                                        return false, -1, nil\n                                }\n                        }\n```\n\nThe timer is not the problem since the loop continues to check and wait for the exit code to show up etc. until the timer kicks in (it's a non-blocking wait). Usually containers should transition from stopped to exited but that doesn't seem to be the case here. And I do not know why.\n\nWe cannot merge the above as we really really really need to wait for the container to transition to exited to make sure all conmon buffers etc. are cleared - remember the Gitlab rabbit hole.  So the diff above really is a symptomatic patch.  What we need to figure out is: why doesn't the container transition to exited?"
+        },
+        {
+            "user": "vrothberg",
+            "body": "Seems to be a unique fart for init containers."
+        },
+        {
+            "user": "vrothberg",
+            "body": " There's much more strangeness going on.  Just run `podman events` in parallel and you'll see the testCtr being restarted _all the time_."
+        },
+        {
+            "user": "vrothberg",
+            "body": "> There's much more strangeness going on. Just run podman events in parallel and you'll see the testCtr being restarted all the time.\n\nThat's because we default to setting --restart=always.  Not sure that makes so much sense for Podman but it's ~compatible with the kubelet."
+        },
+        {
+            "user": "vrothberg",
+            "body": "OK, finally got it:\n```diff\ndiff --git a/pkg/domain/infra/abi/play.go b/pkg/domain/infra/abi/play.go\nindex e73bf6614d60..b26f55367738 100644\n--- a/pkg/domain/infra/abi/play.go\n+++ b/pkg/domain/infra/abi/play.go\n@@ -620,7 +620,7 @@ func (ic *ContainerEngine) playKubePod(ctx context.Context, podName string, podY\n                        PodInfraID:         podInfraID,\n                        PodName:            podName,\n                        PodSecurityContext: podYAML.Spec.SecurityContext,\n-                       RestartPolicy:      ctrRestartPolicy,\n+                       RestartPolicy:      define.RestartPolicyNo,\n                        SeccompPaths:       seccompPaths,\n                        SecretsManager:     secretsManager,\n                        UserNSIsHost:       p.Userns.IsHost(),\n```\n\nThe init containers were restarted **always**.  That will have caused a race with waiting for the init container to exit. I think they should never restart, should they?"
+        },
+        {
+            "user": "rhatdan",
+            "body": "@containers/podman-maintainers PTAL\n"
+        },
+        {
+            "user": "rhatdan",
+            "body": "After the init container is run, it is removed, as far as I can see, so no way to examine it."
+        },
+        {
+            "user": "vrothberg",
+            "body": "> After the init container is run, it is removed, as far as I can see, so no way to examine it.\n\nThat seems like something we can test for.  `podman container exists $init-container` should return  non-0. Before, it was restarted all the time, so Podmans before this change would return 0."
+        },
+        {
+            "user": "umohnani8",
+            "body": "changes LGTM"
+        }
+    ],
+    "cross_references": []
+}

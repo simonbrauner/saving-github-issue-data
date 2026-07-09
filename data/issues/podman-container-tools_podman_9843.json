@@ -1,0 +1,61 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 9843,
+    "type": "issue",
+    "title": "Fedora:: Running \"podman pull\" during a \"docker build\" (i.e. within it's Dockerfile(5)) fails with:: \"cannot clone: Operation not permitted; Error: cannot re-exec process\" ...",
+    "state": "closed",
+    "labels": [
+        "podman-in-container",
+        "locked - please file new issue/PR"
+    ],
+    "user": "nmvega",
+    "body": "Dear Friends:\n\n`GUEST: Fedora-33` -- docker-ce image that I'm trying to build.\n`HOST:  Fedora-30` -- There's a reason I need Fedora-30 here (I don't like the mismatch either). LoL\n\n\nI successfully built a BASE `docker-ce` image where, among other items, I installed the `podman v3.0.1 ` ecosystem via `Fedora` RPMs. `FROM` that BASE `docker-ce` image, I'm trying to build a `CHILD` image during which I run `podman pull [...]` commands at build-time, as a `non-ROOT` user.\n\nThus when I run:\n\n`root@HOST# docker build --tag acme/acme-foo:1.0 -f ./Dockerfile .`\n\nwhen the `build` reaches the following statements:\n```\nFROM ${BASE_CONTAINER}  # Which has podman(1) installed.\n[ ... snip ... ]\nUSER ${JANEDOE_UID}\nRUN podman pull docker.io/library/mongo:latest\n[ ... snip ... ]\n```\nit fails with the following message:\n\n```\n[ ... snip ... ]\ncannot clone: Operation not permitted\nError: cannot re-exec process\nroot@HOST#\n```\n\nIn fact, this failure doesn't only happen when building the `CHILD` image. When I `interactively` run the `BASE` image, I get the same error, as shown now:\n\n```\nroot@HOST# docker run -it --user janedoe --workdir /home/janedoe <base-image-id> /bin/bash\n\njanedoe@GUEST$ id\nuid=1000(janedoe) gid=100(users) groups=100(users)\n\njanedoe@GUEST$ pwd\n/home/janedoe\n\njanedoe@GUEST$ podman info\ncannot clone: Operation not permitted\nError: cannot re-exec process\n\njanedoe@GUEST$\njanedoe@GUEST$ exit\nroot@HOST# \n```\n\nAny ideas friends? Thank you in advance! =:)",
+    "comments": [
+        {
+            "user": "mheon",
+            "body": "@rhatdan Looks like a podman-in-container"
+        },
+        {
+            "user": "nmvega",
+            "body": "@mheon @rhatdan\nThat's correct. :relaxed:\n\nNote that if the `GUEST docker-ce` container is fully up and running, meaning `NOT being built` and ` detached and NOT running in -it interactive mode`, `podman pull [...]` runs successfully. It's only during `build time` or `-it interactive session time` that I see this issue. I suspect that those operating contexts are missing something that `podman pull [...]` needs or expects.\n\nWorst coming to worst, I can start the `GUEST` container fully detached, then connect to it and issue the needed `podman pull [...]` commands, and finally exit and perform a `docker commit [...]` to get an image that I need. But that workaround unfortunately strays from `Infrastructure As Code` somewhat. :laughing:\n\nThank you!"
+        },
+        {
+            "user": "rhatdan",
+            "body": "In order to run podman inside of Docker, you need to run a privileged container.  There are potentially other ways to do this a little more locked down, but for now, just run --privileged."
+        },
+        {
+            "user": "rhatdan",
+            "body": "If all you want to do is build images using Containerfile/Dockerfile, I would recommend you use buildah.\nhttps://developers.redhat.com/blog/2019/08/14/best-practices-for-running-buildah-in-a-container/"
+        },
+        {
+            "user": "nmvega",
+            "body": "> In order to run podman inside of Docker, you need to run a privileged container. There are potentially other ways to do this a little more locked down, but for now, just run --privileged.\n\n@rhatdan Good morning!\n\nAgreed: I simply forgot to mention that when I run a fully `-d detached` container (i.e. not with `-it`), I do indeed also launch it with the `--privileged` option. `podman(1)` fully works in that case (... though this is not the `build` case). And for the interactive case previously mentioned (i.e. with `-it`), I simply forgot to supply that same `--privileged` option. That scenario works, too. My fault (red herring).\n\nSo we're back to my original `docker build [ ... ]` problem,  where the `--privileged` option isn't available. `podman(1) pull` statements inside the `Dockerfile` being built, causes the error mentioned in the `subject line`.\n\nTo review, here's what I'm doing:\n\n1. On the bare-metal host which is running (and requires) the `docker-ce` engine, I need to build the docker image. I'm using `docker build [ ... ]` to do that, but running into the issue described because `podman pull [...]` statements are inside the `Dockerfile`.\n\n2. Next, that built image will (later) be launched by an application using the traditional docker `API`. Meaning, it will expect a `docker` compatible image, located at the classic `docker repository` location, and using the `docker-ce` engine.\n\nSo I need to use the classic `docker build [ ... ]` command. `buildah` wouldn't work here, sadly, since it writes to a different repository (... unless it can be made to seamlessly write to docker's repository, which sounds unsupported and in the danger-zone. 😆).\n\nI hope that helps clarify. Thank you again!"
+        },
+        {
+            "user": "rhatdan",
+            "body": "Podman and Buildah will need mount/clone syscalls to run. Docker prevents these by default. So you at least needs Docker's seccomp filters modified in order to run the containers.  \n\nYou will also need at least CAP_SETUID and CAP_SETGID within the container in order to setup a user namespace."
+        },
+        {
+            "user": "nmvega",
+            "body": "So for the `docker build` part, something like this:\n\n`docker build --security-opt seccomp=unconfined [ ... ]`\n\nThat's what I found with a quick web search. I'll have to separately search for how to do second part: `CAP_SETUID` and `CAP_SETGID`.\n\nAlternatively, perhaps it `could` be better to build the images (the `parent` and `child` images) using `buildah`, and then find a way to `copy` the resulting images to the `docker-ce` registry. Might that work? Is there a `copy/migration` command?\n\nSorry. I didn't intend this to be a tutorial."
+        },
+        {
+            "user": "rhatdan",
+            "body": "You can use buildah push to push directly into a Docker daemon.\n\nbuildah push IMAGE docker-daemon:IMAGE\n"
+        },
+        {
+            "user": "nmvega",
+            "body": "@rhatdan Good morning. Thank you for that. I'll try this route. :)"
+        },
+        {
+            "user": "nmvega",
+            "body": "Hi @rhatdan Sorry for the delay. I'm still working on trying the `buildah(1)` route. I first ran into the `Dockerfile COPY` command issue that an earlier version of `buildah(1)` had (where it basically hung forever), so I needed to stop and upgrade my `Fedora-30` servers (plural) to `Fedora-33` in order to upgrade the version of `buildah(1)`. That resolved the `Dockerfile COPY` issue.\n\nSadly, I just ran into [this issue](https://github.com/containers/buildah/issues/1888), where I posted my variation of it. So I'm still plugging away at this.\n=:)"
+        },
+        {
+            "user": "nmvega",
+            "body": "I'm going to close this since I decided to abandon performing a `podman pull` during a `docker build` (I need to simplify). The above guidance helped in other areas though, so a giant thank you."
+        }
+    ],
+    "cross_references": []
+}

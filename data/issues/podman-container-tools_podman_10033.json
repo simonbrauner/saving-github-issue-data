@@ -1,0 +1,123 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 10033,
+    "type": "pull_request",
+    "title": "rmi: don't break when the image is missing a manifest",
+    "state": "closed",
+    "labels": [
+        "lgtm",
+        "approved",
+        "locked - please file new issue/PR"
+    ],
+    "user": "nalind",
+    "body": "In `libpod/image/Image.Remove()`, don't go looking for the image's parent before actually deleting the image.  If the attempt to find the image's parent fails for any reason, we're basically stuck, when we could fail in a way that at least gets the caller closer to where they wanted to be.\n\nIn `libpod/Runtime.RemoveImage()`, if we can't determine if an image has children because of some error, assume that it doesn't instead of bailing out.\n\nCombined, these changes allow removal of an image that's lost its manifest for whatever reason, as we're seeing in https://bugzilla.redhat.com/show_bug.cgi?id=1884043.",
+    "comments": [
+        {
+            "user": "mheon",
+            "body": "Tests are red, but changes LGTM\n/approve\n@vrothberg PTAL"
+        },
+        {
+            "user": "openshift-ci-robot",
+            "body": "[APPROVALNOTIFIER] This PR is **APPROVED**\n\nThis pull-request has been approved by: *<a href=\"https://github.com/containers/podman/pull/10033#issuecomment-820419576\" title=\"Approved\">mheon</a>*, *<a href=\"https://github.com/containers/podman/pull/10033#\" title=\"Author self-approved\">nalind</a>*\n\nThe full list of commands accepted by this bot can be found [here](https://go.k8s.io/bot-commands?repo=containers%2Fpodman).\n\nThe pull request process is described [here](https://git.k8s.io/community/contributors/guide/owners.md#the-code-review-process)\n\n<details >\nNeeds approval from an approver in each of these files:\n\n- ~~[OWNERS](https://github.com/containers/podman/blob/master/OWNERS)~~ [mheon]\n\nApprovers can indicate their approval by writing `/approve` in a comment\nApprovers can cancel approval by writing `/approve cancel` in a comment\n</details>\n<!-- META={\"approvers\":[]} -->"
+        },
+        {
+            "user": "nalind",
+            "body": "I missed that we're not able to correctly calculate an image's \"parent\" after we delete it, which is what's breaking the tests.\n/retitle WIP: rmi: don't break when the image is missing a manifest"
+        },
+        {
+            "user": "rhatdan",
+            "body": "Can't we just make the parent not existing and expected error and just log it was debugf or warnf.  And continue on?"
+        },
+        {
+            "user": "nalind",
+            "body": "/retitle rmi: don't break when the image is missing a manifest"
+        },
+        {
+            "user": "nalind",
+            "body": "Updated tests to not try `podman system reset` when testing the remote client, which doesn't implement `system reset`, and added tests that try removing the config blob instead of the manifest."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@edsantiago PTAL at the tests."
+        },
+        {
+            "user": "edsantiago",
+            "body": "Looking. I don't like the duplication, will offer a suggestion later. And I *REALLY* don't like the `system reset`... but don't see a way around it.\n\nFirst things first though: the final test barfs (root) with:\n```\n...\n   [ rc=125 (expected) ]\n   # /home/esm/src/atomic/2018-02.podman/libpod/bin/podman system reset -f\n   time=\"2021-04-19T14:45:02-06:00\" level=warning msg=\"error determining parent of image: error reading image \\\"961769676411f082461f9ef46626dd7a2d1e2b2a38e6a44364bcbecf51e66dd4\\\" as image: error locating item named \\\"manifest\\\" for image with ID \\\"961769676411f082461f9ef46626dd7a2d1e2b2a38e6a44364bcbecf51e66dd4\\\": file does not exist, ignoring the error\"\n   A storage.conf file exists at /etc/containers/storage.conf\n   You should remove this file if you did not modified the configuration.\n   time=\"2021-04-19T14:45:02-06:00\" level=error msg=\"unlinkat /var/lib/containers/storage/overlay-containers/1d9ac53d745d3ed1ce5d981b072ee002f52d23b7a8a0471f376aa7044044a0b0/userdata/shm: device or resource busy\"\n   [ rc=125 (** EXPECTED 0 **) ]\n   #/vvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv\n   #| FAIL: exit code is 125; expected 0\n   #\\^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n```"
+        },
+        {
+            "user": "nalind",
+            "body": "Why is there a container present?  The test doesn't create one."
+        },
+        {
+            "user": "edsantiago",
+            "body": "There are no containers: `images -a` and `ps -a` are empty. There was a stray mount, probably a leftover from some prior test run. `umount /var/lib/containers/.../shm` makes the failure go away. "
+        },
+        {
+            "user": "edsantiago",
+            "body": "Tests need a pretty major rewrite; I'm going to have to finish it tomorrow, sorry. (Quick rundown: too much duplication, and we need a `teardown()` because any failure anywhere in a test will leave the entire system unusable. This is podman, where tests use `/var/lib/containers`, not buildah which uses a custom root for each test.)"
+        },
+        {
+            "user": "edsantiago",
+            "body": "Help, please. To minimize `podman pull`s, I'm trying `podman save/load`, and that completely ruins everything. Basically, if I `podman load` a saved image, and `rm .../manifest`, `podman images` still complains but now it exits 0 (success) instead of 125:\n```bash\n#!/bin/bash\n\n# SETUP\nimg=quay.io/libpod/alpine@sha256:634a8f35b5f16dcf4aaa0822adc0b1964bb786fca12f6831de8ddc45e5986a00\nid=961769676411f082461f9ef46626dd7a2d1e2b2a38e6a44364bcbecf51e66dd4\n\ntmpdir=$(mktemp -d --tmpdir podman_manifest_test.XXXXXXX)\nmkdir $tmpdir/root\n\nPODMAN=\"./bin/podman --root $tmpdir/root\"\n\n$PODMAN pull -q $img\n$PODMAN save -o $tmpdir/img.tar $img\n\n# Test 1\necho\necho \"Test 1: this 'podman images' will fail\"\nrm -v $tmpdir/root/*-images/$id/manifest\n$PODMAN images\necho status=$? expect=125\n\numount $tmpdir/root/overlay\n\necho \"--------------------------------------------------------------\"\nrm -rf $tmpdir/root\nmkdir $tmpdir/root\n$PODMAN load -q -i $tmpdir/img.tar\n\necho\necho \"Test 2: this 'podman images' will succeed????\"\nrm -v $tmpdir/root/*-images/$id/manifest\n$PODMAN images\necho status=$? expect=125\n```\nIs this the same as #3761? Is it even a bug? Whatever it is: how can I work around this?"
+        },
+        {
+            "user": "nalind",
+            "body": "Apparently we weren't treating this as an error for images with no names attached to them.  Manually untagging the image after pulling it also sidesteps the error.  `images -a` still produces an error when it fails to retrieve labels from the image's configuration blob, which we can't find without consulting the manifest."
+        },
+        {
+            "user": "nalind",
+            "body": "Conversely, manually tagging the image after re-loading it but before removing its manifest will re-trigger the errors."
+        },
+        {
+            "user": "edsantiago",
+            "body": "That works - thank you!"
+        },
+        {
+            "user": "edsantiago",
+            "body": "@nalind would you consider this instead? (Save as [330-corrupt-images.bats](https://github.com/containers/podman/files/6345333/330-corrupt-images.bats.txt))\n\nI choose to disable entirely for podman-remote, because there's no sane way to restart the server for each test. If the code paths in podman-remote are sufficiently different that they MUST be tested, lmk, I can (grumblingly) make this work with the default root."
+        },
+        {
+            "user": "nalind",
+            "body": "I'm not particularly invested in testing with the remote-client configuration (Red Hat bug 1884043 is concerned with local podman on an OpenShift node), but the CI configuration was running the ones I was adding with it.  Removed the tests I was adding in favor of yours, rebasing, and repushing."
+        },
+        {
+            "user": "nalind",
+            "body": "Rebased."
+        },
+        {
+            "user": "edsantiago",
+            "body": "/lgtm\n/hold\n\nThe aforementioned nitwit has privately told me that he will volunteer to clean up the 'prune' in a followup PR."
+        },
+        {
+            "user": "vrothberg",
+            "body": "/hold cancel"
+        },
+        {
+            "user": "rhatdan",
+            "body": "/hold cancel"
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 9965
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 10102
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 10052
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 10604
+        }
+    ]
+}

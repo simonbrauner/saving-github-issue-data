@@ -1,0 +1,75 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 28535,
+    "type": "pull_request",
+    "title": "auto-add user to Hyper-V Administrators group",
+    "state": "closed",
+    "labels": [
+        "machine",
+        "6.0"
+    ],
+    "user": "lstocchi",
+    "body": "Currently, running Podman on Hyper-V as a non-administrator requires the user to be a member of the \"Hyper-V Administrators\" local group. If they are not, various WMI calls fail with access denied.\n\nThis commit automates the permission setup.\n1. During podman machine init, if Podman is running with elevated privileges (required for registry/networking setup anyway), it will now automatically add the current user to the localized \"Hyper-V Administrators\" group\n2. If a user is added to the group, the change is not reflected until the next login. We now detect this state and explicitly instruct the user to log out and back in.\n3. Modified the Hyper-V stubber to handle permission checks at the method level rather than the provider selection level (GetAll). This allows init to continue far enough to perform the elevation and setting.\n\nit fixes #25037 \n\n#### Checklist\n\nEnsure you have completed the following checklist for your pull request to be reviewed:\n<!-- Use [x] to mark as done, or click the checkbox after opening PR -->\n\n- [x] Certify you wrote the patch or otherwise have the right to pass it on as an open-source patch by signing all\ncommits. (`git commit -s`). (If needed, use `git commit -s --amend`).  The author email must match\nthe sign-off email address. See [CONTRIBUTING.md](https://github.com/containers/podman/blob/main/CONTRIBUTING.md#sign-your-prs)\nfor more information.\n- [x] Referenced issues using `Fixes: #00000` in commit message (if applicable)\n- [x] [Tests](https://github.com/containers/podman/tree/main/test#readme) have been added/updated (or no tests are needed)\n- [ ] [Documentation](https://github.com/containers/podman/blob/main/docs/README.md) has been updated (or no documentation changes are needed)\n- [x] All commits pass `make validatepr` (format/lint checks)\n- [x] [Release note](https://github.com/kubernetes/community/blob/master/contributors/guide/release-notes.md) entered in the section below (or `None` if no user-facing changes)\n\n#### Does this PR introduce a user-facing change?\n\nYes. During the initialization of the first Hyper-V machine, Podman will now silently handle the group assignment for the user. It also detects if the user has been added to the group but has not yet logged out, and will inform the user to do so to refresh the session tokens.\n\n```release-note\nPodman now automatically adds the user to the \"Hyper-V Administrators\" group during machine initialization and provides a clear notification if a logout is required to refresh permissions.\n```\n",
+    "comments": [
+        {
+            "user": "lstocchi",
+            "body": "PTAL @l0rd "
+        },
+        {
+            "user": "Luap99",
+            "body": "> During podman machine init, if Podman is running with elevated privileges (required for registry/networking setup anyway), it will now automatically add the current user to the localized \"Hyper-V Administrators\" group\n\nIs that what users would actually expect? I don't use windows but having a totally unrelated command add my user to an \"admin\" group without me knowing seem like a really bad default? Like when a user runs the command with elevated privileges they authorized us to run one command with extra privileges not then use that to escalate them indefinitely via the group?\n\nAt least on the linux side I would go crazy if a tool like podman would decide to modify my users properties.\n\nI don't doubt that some might this useful but maybe this should be gated behind some opt in prompt?\n"
+        },
+        {
+            "user": "l0rd",
+            "body": "> > During podman machine init, if Podman is running with elevated privileges (required for registry/networking setup anyway), it will now automatically add the current user to the localized \"Hyper-V Administrators\" group\n> \n> Is that what users would actually expect? I don't use windows but having a totally unrelated command add my user to an \"admin\" group without me knowing seem like a really bad default? Like when a user runs the command with elevated privileges they authorized us to run one command with extra privileges not then use that to escalate them indefinitely via the group?\n> \n> At least on the linux side I would go crazy if a tool like podman would decide to modify my users properties.\n> \n> I don't doubt that some might this useful but maybe this should be gated behind some opt in prompt?\n\nYes, the user should be prompted. Something like \"You need to be a member of the Hyper-V admins to start/stop machines. Do you want Podman to add you to this group?\" And of course, the user must already be an administrator of the system, Podman won't be able to add the user to the group otherwise. \n\nWe already do something similar for adding the registry keys:\n<img width=\"305\" height=\"143\" alt=\"image\" src=\"https://github.com/user-attachments/assets/11418571-8609-4136-aa3d-929de7e91a8e\" />\n\n@lstocchi I have rapidly looked at the code, but it doesn't seem like you have added a prompt for that."
+        },
+        {
+            "user": "lstocchi",
+            "body": "The PR is reusing that same prompt. Maybe i should have updated the text, but do you want a separate prompt for adding the user to the group?\n\nThe way we're refactoring podman for hyperv is to run it as an unprivileged user, so having the user in the Hyperv admin group should be mandatory. As we leverage the first init command to set up the system, i don't find it weird to do everything in the same prompt. We're not actually elevating the user but downgrading it. Otherwise podman would need to be run as admin everytime and this is not what we want."
+        },
+        {
+            "user": "l0rd",
+            "body": "> We're not actually elevating the user but downgrading it. Otherwise podman would need to be run as admin everytime and this is not what we want.\n\nYou are absolutely right. 👍 \n\nBut a specific message, when we are adding the user to the group, is better in my opinion because the current message:\n- says \"...to set up the Windows registry\" but Podman is about to add the user to a group. That's not exactly the same.\n- says \"...the first Hyper-V machine...\" but this pop-up may be shown even after the first machine, if there is a pre-existing machine created from an elevated terminal, for instance."
+        },
+        {
+            "user": "lstocchi",
+            "body": "> * says \"...the first Hyper-V machine...\" but this pop-up may be shown even after the first machine, if there is a pre-existing machine created from an elevated terminal, for instance.\n\nnot sure to get it. If you run in an elevated shell and the user is not in the group, she is added automatically. There is no way to create a machine, adds the Registry entries and not being added in the group, no? \n\nI changed the message to this. WDYT?\n\n```\nPodman needs to prepare the host to run Hyper-V machines \nwithout requiring Administrator rights in the future. \nThis involves a one-time setup of the Windows Registry and \nadding your account to the 'Hyper-V Administrators' group.\n```\n\n<img width=\"512\" height=\"282\" alt=\"image\" src=\"https://github.com/user-attachments/assets/3a073899-1af9-4aa8-8e7a-40dd32defaf5\" />\n"
+        },
+        {
+            "user": "l0rd",
+            "body": "> There is no way to create a machine, adds the Registry entries and not being added in the group, no?\n\nYou are right that after this PR this can't happen anymore. But for existing machines, machines created from an elevated terminal with a Podman 5.8 or earlier, can this happen?\n\n > I changed the message to this. WDYT?\n\nMuch better 👍"
+        },
+        {
+            "user": "baude",
+            "body": "what happens if this is scripted?"
+        },
+        {
+            "user": "lstocchi",
+            "body": "> what happens if this is scripted?\n\nThere should be no problem. If, for some reason, podman tries to add the user to the Hyper-v admin group when she's already a member, the AddMember win32 function will fail with a ERROR_MEMBER_IN_ALIAS and podman will treat it as a success.\n\nIf the user tries to start a machine already created by some script, we check that her session token is a valid one, and if not, we verify the user is an admin so we can inform her that the active session must be refreshed and she must log out/in. \n\nWhen you add a user to the admin group, the session must be refreshed. So if you just check the token it will say \"the user is not admin\". What we then do is checking all users in the group, if there is a match, we know the user has been added but the session token has not been refreshed.\n"
+        },
+        {
+            "user": "packit-as-a-service[bot]",
+            "body": "[NON-BLOCKING] Packit jobs failed. @containers/packit-build please check. Everyone else, feel free to ignore."
+        },
+        {
+            "user": "packit-as-a-service[bot]",
+            "body": "[NON-BLOCKING] Packit jobs failed. @containers/packit-build please check. Everyone else, feel free to ignore."
+        },
+        {
+            "user": "l0rd",
+            "body": "LGTM great work thank you @lstocchi "
+        },
+        {
+            "user": "baude",
+            "body": "LGTM\n"
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 28568
+        }
+    ]
+}

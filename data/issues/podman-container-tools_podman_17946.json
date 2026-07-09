@@ -1,0 +1,84 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 17946,
+    "type": "issue",
+    "title": "ci: unable to find network with name or ID podman-default-kube-network",
+    "state": "closed",
+    "labels": [
+        "flakes",
+        "kind/bug",
+        "locked - please file new issue/PR"
+    ],
+    "user": "edsantiago",
+    "body": "In [e2e tests](https://api.cirrus-ci.com/v1/artifact/task/5692933098176512/html/int-podman-fedora-36-rootless-host-sqlite.log.html#t--podman-play-kube-no-host--1):\n```\npodman play kube --no-host\n...\npodman [options] play kube --no-hosts /tmp/podman_test3817601232/kube.yaml\n...\nstarting container <sha>: unable to find network with name or ID podman-default-kube-network: network not found\nstarting container <sha>: a dependency of container <sha> failed to start: container state improper\nError: failed to start 2 containers\n```\nProbably a collision between multiple tests. Predicted solution: rewrite tests to stop using default network, or at least so there's at most one test that does so.",
+    "comments": [
+        {
+            "user": "edsantiago",
+            "body": "...but then again, there's [this flake](https://api.cirrus-ci.com/v1/artifact/task/6674634645438464/html/int-podman-fedora-37-root-host-sqlite.log.html#t--podman-network-create-with-name-and-IPv6-flag--dual-stack---1):\n```\n  podman network create with name and IPv6 flag (dual-stack)\n...\n# podman [options] run -it --rm --network dual-36384dcdcad634f5feb9a53eadb5e202d18e479679d0d891d61b6cf7340b1a56 quay.io/libpod/alpine:latest sh -c ip addr show eth0 |  grep global | awk ' /inet6 / {print $2}'\ntime=\"2023-03-24T18:57:46-05:00\" level=warning msg=\"The input device is not a TTY. The --tty and --interactive flags might not work properly\"\nfd00:4:3:2::2/64\n\n# podman [options] run -it --rm --network dual-36384dcdcad634f5feb9a53eadb5e202d18e479679d0d891d61b6cf7340b1a56 quay.io/libpod/alpine:latest sh -c ip addr show eth0 |  awk ' /inet / {print $2}'\ntime=\"2023-03-24T18:57:47-05:00\" level=warning msg=\"The input device is not a TTY. The --tty and --interactive flags might not work properly\"\nError: unable to find network with name or ID dual-36384dcdcad634f5feb9a53eadb5e202d18e479679d0d891d61b6cf7340b1a56: network not found\n```\nThe string \"3638\" does not appear anywhere else in this log. And it's generated via `stringid.GenerateRandomID()`, hence is unlikely to be a collision. I'm wondering if some test is doing `podman network rm -a` (could not find that in test dir), or maybe the `system reset` test is not being properly locked?"
+        },
+        {
+            "user": "Luap99",
+            "body": "There is no `--all` flag for `podman network rm`, but yes the system reset or prune commands can cause issues.\nIn the past I fixed these test to use their own custom network config dir but I guess there are still some without that fix."
+        },
+        {
+            "user": "edsantiago",
+            "body": "Yet another [possibly-similar failure](https://api.cirrus-ci.com/v1/artifact/task/5944004907368448/html/int-remote-fedora-37-root-host-sqlite.log.html#t--podman-verify-network-scoped-DNS-server-and-also-verify-updating-network-dns-server--1)\n```\n  podman verify network scoped DNS server and also verify updating network dns server\n...\n# podman-remote [options] network update IntTestf438e02a77 --dns-add 7.7.7.7\nError: unable to find network with name or ID IntTestf438e02a77: network not found\n# podman-remote [options] network rm -f IntTestf438e02a77\ntime=\"2023-03-27T17:05:55-05:00\" level=error msg=\"IPAM error: could not find network \\\"IntTestf438e02a77\\\"\"\ntime=\"2023-03-27T17:05:55-05:00\" level=error msg=\"Unable to clean up network for\n      container 528ec6ba9f4e0d266b138bb10579250e83dd9d7fa5ce6fbc77e8bee3ce367d7d:\n      \\\"tearing down network namespace configuration for\n      container 528ec6ba9f4e0d266b138bb10579250e83dd9d7fa5ce6fbc77e8bee3ce367d7d: \n     failed to convert net opts: unable to find network with name or ID IntTestf438e02a77: network not found\\\"\"\n```"
+        },
+        {
+            "user": "Luap99",
+            "body": "I think it is time to go with the big hammer and make every test case use its own config dir just likes --root and --runroot.\nThis will make sure there are no conflicts and we can in theory remove this stupid extra `defer podmanTest.removeNetwork(...)` that we have to use in every single test."
+        },
+        {
+            "user": "vrothberg",
+            "body": "That sounds very reasonable, @Luap99."
+        },
+        {
+            "user": "Luap99",
+            "body": "Just linking https://github.com/containers/podman/pull/17975#issuecomment-1490525106 here again, my change will not work so we actually have to go through all test which do prune or reset."
+        },
+        {
+            "user": "edsantiago",
+            "body": "Flakes in the past six days, am reporting in case it's helpful to see which tests are failing so you can at least target those:\n\n* debian-12 : int remote debian-12 root host sqlite [remote]\n  * PR #17831\n    * [04-05 19:32](https://api.cirrus-ci.com/v1/artifact/task/6485262457372672/html/int-remote-debian-12-root-host-sqlite.log.html#t--podman-verify-network-scoped-DNS-server-and-also-verify-updating-network-dns-server--1) in Podman run networking [It] podman verify network scoped DNS server and also verify updating network dns server\n* fedora-36 : int podman fedora-36 root host sqlite\n  * PR #17831\n    * [04-05 18:33](https://api.cirrus-ci.com/v1/artifact/task/6188009549201408/html/int-podman-fedora-36-root-host-sqlite.log.html#t--Check-that-image-is-built-using-Containerfile--1) in Podman play kube with build [It] Check that image is built using Containerfile\n* fedora-37 : int podman fedora-37 root host sqlite\n  * PR #17831\n    * [04-05 18:29](https://api.cirrus-ci.com/v1/artifact/task/5062109642358784/html/int-podman-fedora-37-root-host-sqlite.log.html#t--Aardvark-Test-2--Two-containers--same-subnet--1) in Podman run networking [It] Aardvark Test 2: Two containers, same subnet\n* fedora-37 : int remote fedora-37 root host boltdb [remote]\n  * PR #17831\n    * [04-05 18:35](https://api.cirrus-ci.com/v1/artifact/task/6750959502622720/html/int-remote-fedora-37-root-host-boltdb.log.html#t--podman-verify-network-scoped-DNS-server-and-also-verify-updating-network-dns-server--1) in Podman run networking [It] podman verify network scoped DNS server and also verify updating network dns server\n"
+        },
+        {
+            "user": "edsantiago",
+            "body": "Seen yesterday, in a fully-rebased PR, [f36 root](https://api.cirrus-ci.com/v1/artifact/task/5407598556479488/html/int-podman-fedora-36-root-host-sqlite.log.html#t--Check-that-image-is-built-using-Dockerfile--1). Reopening."
+        },
+        {
+            "user": "Luap99",
+            "body": "I found two prune tests which were missing the custom network dir. "
+        },
+        {
+            "user": "Luap99",
+            "body": "`podman system prune --volume` is directly logged after the failing test which deletes the config so it explains the flake. I create a PR."
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 17967
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 17975
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 18085
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 18273
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 18281
+        }
+    ]
+}

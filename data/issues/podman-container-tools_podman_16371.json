@@ -1,0 +1,124 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 16371,
+    "type": "pull_request",
+    "title": "Support transient store mode",
+    "state": "closed",
+    "labels": [
+        "lgtm",
+        "approved",
+        "release-note-none",
+        "kind/api-change",
+        "locked - please file new issue/PR"
+    ],
+    "user": "alexlarsson",
+    "body": "This adds a boolean option `transient_store` to storage.conf, or via the CLI `--transient-store`. If this is enabled then all containers state is considered transient and will not survived reboot, as discussed in #16245.\n\nIn particular the changes are these:\n\n * `$rootdir/libpod/bolt_state.db` moves to `$runroot/libpod`\n * `$rootdir/overlay-containers/containers.json` moves to `$runroot/overlay-containers`\n * There is a new set of storage directories `overlay-containerlayers` which is similar to `overlay-layers` (uses the same layer store code). This is used for layers that are part of containers (i,e. not image layers).\n * The layer store now has a transient mode where the `layers.json` is stored in `$runroot`. This is used for the `overlay-containerlayers` dir.\n\nThe end result of this is that all metadata that is stored related to containers and volumes (but not images) end up on tmpfs. This has two main advantages. First of all database writes much faster, in particular for `podman run` which now has no database writes outside tmpfs. And secondly, since the databases are not persisted we can't run into weird issues on unclean shutdowns or other corner case. Every boot always starts from a clean slate.\n\nNote, while the databases (bolt_state.db, containers.json and layers.json) don't persist, we do use persistant storage for some of the content (such as the \"upper\" of the overlayfs). This shouldn't cause problems in practice because all such data is indexed by layer/container id which is unlikely to be reused across boots. However, ideally `$rootdir/overlay-container` and `$rootdir/overlay-containerlayers` should be cleaned on boot to avoid leftover data to waste space.\n\nThe performance improvement of this depends on system performance and characteristics. But here is an example on my desktop:\n\nWithout transient mode:\n```\nBenchmark 1: bin/podman run --transient-store=false --rm --pull=never --network=host --security-opt seccomp=unconfined fedora true\n  Time (mean ± σ):     229.4 ms ±  31.3 ms    [User: 76.2 ms, System: 39.9 ms]\n  Range (min … max):   196.0 ms … 298.3 ms    11 runs\n```\n\nWith transient mode:\n```\nBenchmark 1: bin/podman run --transient-store=true --rm --pull=never --network=host --security-opt seccomp=unconfined fedora true\n  Time (mean ± σ):      90.5 ms ±   3.2 ms    [User: 39.1 ms, System: 18.9 ms]\n  Range (min … max):    86.4 ms … 103.6 ms    27 runs\n```\n\n*NOTE*: This commit touches both podman code and vendored containers/storage code, so will need to be split out.  But I think reviewing is easier this way.\n\n<!--\nThanks for sending a pull request!\n\nPlease make sure you've read our contributing guidelines and how to submit a pull request (https://github.com/containers/podman/blob/main/CONTRIBUTING.md#submitting-pull-requests).\n\nIn case you're only changing docs, make sure to prefix the pull-request title with \"[CI:DOCS]\". That will prevent functional tests from running and save time and energy.\n\nFinally, be sure to sign commits with your real name. Since by opening\na PR you already have commits, you can add signatures if needed with\nsomething like `git commit -s --amend`.\n-->\n\n#### Does this PR introduce a user-facing change?\n\n<!--\nIf no, just write `None` in the release-note block below. If yes, a release note\nis required: Enter your extended release note in the block below. If the PR\nrequires additional action from users switching to the new release, include the\nstring \"action required\".\n\nFor more information on release notes, please follow the Kubernetes model:\nhttps://git.k8s.io/community/contributors/guide/release-notes.md\n-->\n\n```release-note\nNone\n```\n",
+    "comments": [
+        {
+            "user": "rhatdan",
+            "body": "@mheon @vrothberg @nalind @baude PTAL"
+        },
+        {
+            "user": "mheon",
+            "body": "Can you add this to `podman info` as well, to make it easy to discover?"
+        },
+        {
+            "user": "rhatdan",
+            "body": "Missing man page changes.\n\nCan I run both --transient containers and non transient containers at the same time?"
+        },
+        {
+            "user": "alexlarsson",
+            "body": "> Can I run both --transient containers and non transient containers at the same time?\n\nThis is more of a storage configuration similar to --runroot= or --root=, as it affects everything. Might it still work? I dunno? Maybe? You'll have double databases for some things (bolt_state.db, etc) but shared for some (images.json, etc). My guess is that it would look like it works, but there are some issues in the locking etc if you look at it more carefully.\n\n"
+        },
+        {
+            "user": "alexlarsson",
+            "body": "New version with some feedback applied. Still lacks man page updates and splitting up into two PRs."
+        },
+        {
+            "user": "alexlarsson",
+            "body": "I split out the containers/storage part here: https://github.com/containers/storage/pull/1424\nIt is then vendored back in here, but that is a hack which I will redo properly when that PR lands."
+        },
+        {
+            "user": "alexlarsson",
+            "body": "Note, this doesn't currently move container `userdata` files like config.json, secrets and shm to runroot. Maybe we should do that too for minor performance reasons. I assume only the `artifacts` subdir will really contain large files, right? Those should probably still go on the disk."
+        },
+        {
+            "user": "alexlarsson",
+            "body": "Interestingly we heard some feedback in a customer meeting today of another reason why this is good. They didn't like all the writes to disk that writing the container state changes does. In an embedded systems (in this case a car), the flash wear of this is problematic in the long run (say after 10 years). That issue goes away with the container state on tmpfs."
+        },
+        {
+            "user": "Luap99",
+            "body": "I don't understand why you need `podman system gc`? To me this sounds like something podman image prune should be able to get rid of, no?"
+        },
+        {
+            "user": "alexlarsson",
+            "body": "@Luap99 No, this is not the same as prune. Prune works within an existing set of databases (the bolt db + the json files). So if the database lists a container, prune will remove it and its files. However, if you accidentally lost the database, or a transient database got lost due to a reboot, then the container id is not listed in any database, so the files from it on disk will never get removed by prune."
+        },
+        {
+            "user": "alexlarsson",
+            "body": "I mean, I guess we could make this part of the `podman system prune` operation, by adding some flag to change its default behavior to do a GC instead. I'm not sure what the point of that is though."
+        },
+        {
+            "user": "Luap99",
+            "body": "Ok fair enough. I will leave it for others but I think it makes sense to have this in system/image prune."
+        },
+        {
+            "user": "alexlarsson",
+            "body": "> Ok fair enough. I will leave it for others but I think it makes sense to have this in system/image prune.\n\nThe primary difference is that we don't want a gc operation to delete any images, containers or whatnot that are in the database. We *just* want to delete completely unreachable files. So, what we could do is always run a GC in prune, and then add a `podman system prune --none` operation to only trigger the GC. Seems weird to me though.\n"
+        },
+        {
+            "user": "alexlarsson",
+            "body": "Ok, need some tests for this now."
+        },
+        {
+            "user": "rhatdan",
+            "body": "What about using \npodman image prune --filter ..."
+        },
+        {
+            "user": "alexlarsson",
+            "body": "> podman image prune --filter ...\n\nI'm not sure what you mean by this. The prune operation looks at the content of the bolt database (containers, images, etc) and remove database items based on some kind of selection. So for example if you have no containers in the database, then it does nothing.\n\nGC instead doesn't care about the bolt database at all. It is a completely different operation, which looks for (e.g.) sub directories in `/var/lib/containers/storage/overlay-containers/` which are not listed in `/var/lib/containers/storage/overlay-containers/containers.json` and removes them. \n\nOf course, nothing prohibits us from adding special handling of `podman container prune --diskdata` (or whatever), that completely change what the code does. However no usage of the current code for `--filter=` will ever work for this operation as it only does thing because it filters on database content, not filesystem content.\n\nOf course, maybe the operations are similar enough from a high-level that having two visible CLI options for them is confusing. In that case multiplexing them into different arguments of prune may make sense."
+        },
+        {
+            "user": "rhatdan",
+            "body": "Yes I was thinking more of this from a usability point of view, then from a developer point of view. (Of course I used the wrong prune command.)\n\n`podman container prune` should be enhanced to remove containers from temporal storage.\nAnd then add either a --filter temporal  or a temporal option, another option would be --external,\n\nThe --external option we use in other places to refer to containers/images that were not in the boltdb, for example buildah containers.\n\n$ podman ps --help | grep extern\n      --external         Show containers in storage not controlled by Podman\n"
+        },
+        {
+            "user": "alexlarsson",
+            "body": "New version drops system gc` in favour of `system prune --external`"
+        },
+        {
+            "user": "alexlarsson",
+            "body": "So, it seems the moval of bundlePath() for transient containers is breaking the checkpoint/restore test, because it can't find the config.json file. Probably looking in the wrong place due to not calling bundlePath() but instead open coding it somewhere. Will look into it."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@mheon @vrothberg PTAL"
+        },
+        {
+            "user": "rhatdan",
+            "body": "/approve\n/lgtm"
+        },
+        {
+            "user": "openshift-ci[bot]",
+            "body": "[APPROVALNOTIFIER] This PR is **APPROVED**\n\nThis pull-request has been approved by: *<a href=\"https://github.com/containers/podman/pull/16371#\" title=\"Author self-approved\">alexlarsson</a>*, *<a href=\"https://github.com/containers/podman/pull/16371#issuecomment-1339481202\" title=\"LGTM\">rhatdan</a>*\n\nThe full list of commands accepted by this bot can be found [here](https://go.k8s.io/bot-commands?repo=containers%2Fpodman).\n\nThe pull request process is described [here](https://git.k8s.io/community/contributors/guide/owners.md#the-code-review-process)\n\n<details >\nNeeds approval from an approver in each of these files:\n\n- ~~[OWNERS](https://github.com/containers/podman/blob/main/OWNERS)~~ [rhatdan]\n\nApprovers can indicate their approval by writing `/approve` in a comment\nApprovers can cancel approval by writing `/approve cancel` in a comment\n</details>\n<!-- META={\"approvers\":[]} -->"
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "containers",
+            "repository": "storage",
+            "number": 1424
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 16789
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 17599
+        }
+    ]
+}

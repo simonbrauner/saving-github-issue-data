@@ -1,0 +1,78 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 7944,
+    "type": "pull_request",
+    "title": "Cirrus: Fix obtaining a CI VM",
+    "state": "closed",
+    "labels": [
+        "lgtm",
+        "approved",
+        "locked - please file new issue/PR"
+    ],
+    "user": "cevich",
+    "body": "Also removed automatic exection of setup_environment.sh since most\npeople using this script are podman developers (not automation/CI\nfolks).  If executing the automation scripts is necessary, manual\nattendance to required variables like `$TEST_FLAVOR` is mandatory.",
+    "comments": [
+        {
+            "user": "cevich",
+            "body": "@edsantiago when you have a moment, if you could give this a try?  I spent quite a lot of time modernizing this (still) hacky script to run entirely using rootless podman.  No more sudo requirement :smiley:  I haven't tested out the \"new user\" one-time setup experience, so I'm curious how it works (or fails) for you."
+        },
+        {
+            "user": "edsantiago",
+            "body": "After ~20m of pulling a 700M image, it just errors out (lots of repetitions of the same thing). The relevant part seems to be:\n```\nThere was a problem refreshing your current auth tokens: ('invalid_grant: Bad Request\n```\nI don't see a README or obvious code comments explaining what to do, so I'll try again in the morning. Thanks for tackling this."
+        },
+        {
+            "user": "edsantiago",
+            "body": "Friendly suggestion:\n```diff\n\ndiff --git a/hack/get_ci_vm.sh b/hack/get_ci_vm.sh\nindex ab667aacf..2e9a95cf1 100755\n--- a/hack/get_ci_vm.sh\n+++ b/hack/get_ci_vm.sh\n@@ -165,10 +165,24 @@ mkdir -p $TMPDIR/.ssh\n mkdir -p {$HOME,$TMPDIR}/.config/gcloud/ssh\n chmod 700 {$HOME,$TMPDIR}/.config/gcloud/ssh $TMPDIR/.ssh\n\n-# Attempt to determine if named 'libpod' gcloud configuration exists\n-showrun $PGCLOUD info > $TMPDIR/gcloud-info\n-if egrep -q \"Account:.*None\" $TMPDIR/gcloud-info\n-then\n+# Returns true if user has run an 'init' and has a valid token for this gcloud\n+function has_valid_token() {\n+    # Attempt to determine if named 'libpod' gcloud configuration exists\n+    # (FIXME: what does this comment mean anyway?)\n+    if $PGCLOUD info | egrep -q 'Account:.*None'; then\n+        return 1\n+    fi\n+\n+    # It's possible for 'gcloud info' to list expired credentials,\n+    # e.g. 'ERROR:  ... invalid grant: Bad Request'\n+    if $PGCLOUD auth print-access-token |& grep ERROR; then\n+        return 1\n+    fi\n+\n+    return 0\n+}\n+\n+if ! has_valid_token; then\n     echo -e \"\\n${YEL}WARNING: Can't find gcloud configuration for libpod, running init.${NOR}\"\n     echo -e \"         ${RED}Please choose \\\"#1: Re-initialize\\\" and \\\"login\\\" if asked.${NOR}\"\n     showrun $PGCLOUD init --project=$PROJECT --console-only --skip-diagnostics\n```\n\nUnfortunately I'm still not going to be able to use or even test this script: the `Transferring tarball` step currently was claiming a 56-minute ETA, so I ^C'ed. "
+        },
+        {
+            "user": "cevich",
+            "body": "@edsantiago thanks for taking a peek...\n\n> so I'll try again in the morning\n\nDid that message stop spewing after trying again? Your latest comment says you got to the \"upload\" stage, so that makes me think you progressed pass the gcloud initialization.\n\nhmmm, so it seems there's some big assumptions on available network bandwidth...Valentine hit this as well, but it was more about the VM being located in the us-central zone, and so hard to work with.  I found a workaround there, and the image-download should be a one-time cost.  The upload part is quite a bit trickier though :confused: \n\nI've found it immensely useful to have a copy of my current local repo. on the remote VM to play with.  Combined with all the CI-env. var. work the script does for you, makes it really easy to tinker on automation-specific stuff, but outside of Cirrus-CI.  Perhaps if instead of uploading a full tarball, the script could leverage the VM's fat-pipe.  For example, by initially cloning the podman repo. directly, and then somehow only uploading the developer's diff with their local changes.\n\nAny suggestions how to do that?  Could a `git push` from the developers workstation, be used to update the clone on the VM?  I'm worried the script would need to make some big assumptions about the local state, like what branch it's on."
+        },
+        {
+            "user": "edsantiago",
+            "body": ">Did that message stop spewing after trying again?\n\nNo. See my diff above; I had to instrument the code so it would detect \"bad token\" and run the re-init code. Only after that did I get to tar-upload.\n\n>Any suggestions how to [push local git tree, changes-only]\n\nWow, interesting question. It sounds really tricky, figuring out branch state, local changes (committed and uncommitted), and dealing with `gcloud ssh/scp` on top of all that. No, I have no suggestions, sorry!"
+        },
+        {
+            "user": "cevich",
+            "body": "> Wow, interesting question. It sounds really tricky, figuring out branch state, local changes (committed and uncommitted), and dealing with gcloud ssh/scp on top of all that. No, I have no suggestions, sorry!\n\nI can get the VM's external IP address, but without monkeying with copying the developers ssh public keys, or using an (insecure) shared key, setting up normal (non-gcloud) `ssh` is a PITA :frowning_face: \n\nHmmm...Yeah, tricky...maybe it's  possible to partially solve this.  I can do a repo clone easy enough on the VM, that would provide a starting place.  Then perhaps it's okay to just rely on the developer to get the remote code in-line with their needs.  Let me try that on for size..."
+        },
+        {
+            "user": "cevich",
+            "body": "@edsantiago okay how about this, the only initial setup it does now is a full clone of the upstream repository on the VM.  Oh, and I added your suggested \"bad token\" fix as well."
+        },
+        {
+            "user": "edsantiago",
+            "body": "Hmmm, how about adding an early `podman pull` of the monster-huge image? \n\nReason: I just tried running the script, and it just hung. Likely reason is that my podman testing had rmi'ed the monster image, so there was a pull going on that I didn't see. I have it cached (since last night), so I just ^C'ed and `podman load`ed, and all is working now. But the hang gave no hint of what was going on."
+        },
+        {
+            "user": "cevich",
+            "body": "Good idea..."
+        },
+        {
+            "user": "cevich",
+            "body": "Updated:  Found a 7x smaller gcloud image to use :smile: added suggested `podman pull...` and also added ability for some personal VM customization through a \"hook\" script.  @edsantiago I think you'll find this version ***MUCH*** faster :grinning: "
+        },
+        {
+            "user": "cevich",
+            "body": "@baude mind taking a peek at this.  It's working a bit different from before, in the interest of both speed and bandwidth use.  On the other hand, it's a lot more flexible with a new hook-script for every developer to customize the VM setup to their own needs."
+        },
+        {
+            "user": "edsantiago",
+            "body": "New image pulls in only two minutes, much nicer, thank you! The script is now working fine for me. LGTM!"
+        },
+        {
+            "user": "cevich",
+            "body": "> The script is now working fine for me.\n\nFantastic, I'm glad to hear it.  This has ***REALLY*** come in handy for debugging automation scripting problems and helping reproduce those \"it only happens in CI\" problems.  Thanks for the review and helpful feedback."
+        },
+        {
+            "user": "rhatdan",
+            "body": "/approve\n/lgtm\n"
+        },
+        {
+            "user": "openshift-ci-robot",
+            "body": "[APPROVALNOTIFIER] This PR is **APPROVED**\n\nThis pull-request has been approved by: *<a href=\"https://github.com/containers/podman/pull/7944#\" title=\"Author self-approved\">cevich</a>*, *<a href=\"https://github.com/containers/podman/pull/7944#issuecomment-706095194\" title=\"LGTM\">rhatdan</a>*\n\nThe full list of commands accepted by this bot can be found [here](https://go.k8s.io/bot-commands?repo=containers%2Fpodman).\n\nThe pull request process is described [here](https://git.k8s.io/community/contributors/guide/owners.md#the-code-review-process)\n\n<details >\nNeeds approval from an approver in each of these files:\n\n- ~~[OWNERS](https://github.com/containers/podman/blob/master/OWNERS)~~ [rhatdan]\n\nApprovers can indicate their approval by writing `/approve` in a comment\nApprovers can cancel approval by writing `/approve cancel` in a comment\n</details>\n<!-- META={\"approvers\":[]} -->"
+        }
+    ],
+    "cross_references": []
+}

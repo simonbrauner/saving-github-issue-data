@@ -1,0 +1,87 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 28075,
+    "type": "issue",
+    "title": "--secret type=env,target= mapping lost after --restart=on-failure triggers",
+    "state": "closed",
+    "labels": [
+        "kind/bug",
+        "locked - please file new issue/PR",
+        "triaged"
+    ],
+    "user": "tluj",
+    "body": "### Issue Description\n\nWhen a container is created with `--secret name,type=env,target=MY_TARGET` and `--restart=on-failure`, the `target=` mapping is lost after Podman restarts the container due to a failure. The environment variable key reverts to the literal secret name instead of the specified target.\n\nOn initial creation, `podman inspect` correctly shows `MY_TARGET=***`. After a crash-triggered restart, it shows `test-secret=***` instead.\n\nThis silently breaks any application that relies on specific environment variable names (e.g., `POSTGRES_PASSWORD`, `JWT_SECRET`), causing authentication failures after otherwise-recoverable crashes.\n\n### Steps to reproduce the issue\n\n```bash\n# Create a test secret\necho -n \"secretvalue\" | podman secret create test-secret -\n\n# Run a container that will crash and be restarted by Podman\npodman run -d \\\n  --name restart-target-test \\\n  --restart=on-failure:5 \\\n  --secret test-secret,type=env,target=MY_TARGET \\\n  docker.io/alpine:latest \\\n  sh -c 'sleep 2 && exit 1'\n\n# Wait for at least one restart cycle\nsleep 15\n\n# Check the environment variable mapping\npodman inspect restart-target-test \\\n  --format '{{range .Config.Env}}{{println .}}{{end}}' | grep -iE 'target|secret'\n\n# Clean up\npodman rm -f restart-target-test\npodman secret rm test-secret\n```\n\n### Describe the results you received\n\nAfter a crash-triggered restart, `podman inspect` shows:\n\n```\ntest-secret=***\n```\n\nThe `target=` mapping is lost and the literal secret name becomes the environment variable key.\n\n### Describe the results you expected\n\nAfter restart, `podman inspect` should show:\n\n```\nMY_TARGET=***\n```\n\nThe `target=` mapping should be preserved across restarts, matching the behavior of the initial container creation.\n\n### podman info output\n\n```yaml\nhost:\n  arch: amd64\n  buildahVersion: 1.42.2\n  cgroupControllers:\n  - cpu\n  - io\n  - memory\n  - pids\n  cgroupManager: systemd\n  cgroupVersion: v2\n  conmon:\n    package: conmon-2.1.13-1.fc42.x86_64\n    path: /usr/bin/conmon\n    version: 'conmon version 2.1.13, commit: '\n  cpus: 8\n  databaseBackend: sqlite\n  distribution:\n    distribution: fedora\n    variant: kde\n    version: \"42\"\n  eventLogger: journald\n  hostname: fedora\n  kernel: 6.18.5-100.fc42.x86_64\n  linkmode: dynamic\n  logDriver: journald\n  memTotal: 33468936192\n  networkBackend: netavark\n  networkBackendInfo:\n    backend: netavark\n    dns:\n      package: aardvark-dns-1.17.0-1.fc42.x86_64\n      path: /usr/libexec/podman/aardvark-dns\n      version: aardvark-dns 1.17.0\n    package: netavark-1.17.1-1.fc42.x86_64\n    path: /usr/libexec/podman/netavark\n    version: netavark 1.17.1\n  ociRuntime:\n    name: crun\n    package: crun-1.26-1.fc42.x86_64\n    path: /usr/bin/crun\n    version: |-\n      crun version 1.26\n      commit: 3241e671f92c33b0c003cd7de319e4f32add6231\n      rundir: /run/user/1000/crun\n      spec: 1.0.0\n      +SYSTEMD +SELINUX +APPARMOR +CAP +SECCOMP +EBPF +CRIU +LIBKRUN +WASM:wasmedge +YAJL\n  os: linux\n  rootlessNetworkCmd: pasta\n  security:\n    apparmorEnabled: false\n    rootless: true\n    seccompEnabled: true\n    selinuxEnabled: true\n  serviceIsRemote: false\nstore:\n  configFile: /home/user/.config/containers/storage.conf\n  containerStore:\n    number: 24\n    running: 24\n  graphDriverName: overlay\n  graphRoot: /home/user/.local/share/containers/storage\n  graphStatus:\n    Backing Filesystem: btrfs\n    Native Overlay Diff: \"true\"\n    Supports d_type: \"true\"\n  imageStore:\n    number: 34\n  transientStore: false\nversion:\n  APIVersion: 5.7.1\n  Built: 1765324800\n  BuiltTime: Wed Dec 10 01:00:00 2025\n  GitCommit: f845d14e941889ba4c071f35233d09b29d363c75\n  GoVersion: go1.24.10\n  OsArch: linux/amd64\n  Version: 5.7.1\n```\n\n### Podman in a container\n\nNo\n\n### Privileged Or Rootless\n\nRootless\n\n### Upstream Latest Release\n\nYes (5.7.1 is the latest available in Fedora 42 and 43)\n\n### Additional environment details\n\nPhysical machine.\n\n### Additional information\n\n- A fresh `podman run` with the same `--secret` flags (without `--restart`) correctly applies `target=` every time. The issue only manifests when Podman itself restarts the container after a failure.\n- The issue also reproduces inside pods (tested with `podman pod create` + `podman run --pod`).\n- Real-world impact: services with multiple secrets mapped to specific env vars (e.g., `POSTGRES_PASSWORD`, `JWT_SECRET`, `DB_PASSWORD`) fail silently after a transient crash because the application can no longer find the expected variable names. The container appears \"running\" but the app inside is broken.\n- Workaround: replace `--secret name,type=env,target=VAR` with `-e VAR=value` at the cost of losing secret masking in `podman inspect`.",
+    "comments": [
+        {
+            "user": "amyssnippet",
+            "body": "@tluj i can see the issue, but i also state that while i was reproducing this, i can see that podman exec is returning the true and real env variables, the problem lies in the podman inspect,\n\n```zsh\namol@Amols-MBP ~ % podman run -d \\\n  --name bug-repro \\\n  --restart=on-failure:5 \\\n  --secret test-secret,type=env,target=REAL_ENV_NAME \\\n  alpine sh -c 'sleep 60 && exit 1'\na61681ac787dedf38e36f1b2aae6367c200cb83573fe2c278642d5c75e54c90a\namol@Amols-MBP ~ % podman exec bug-repro env | grep -iE 'REAL_ENV_NAME|test-secret'\nREAL_ENV_NAME=my-super-secret-value\n```"
+        },
+        {
+            "user": "tluj",
+            "body": "@amyssnippet Thanks for looking at this. However, I think your test checked the container before it crashed and was restarted. The target= mapping works correctly on the initial run. The issue is that it's lost after --restart=on-failure triggers a restart.\nTo reproduce fully, you need to wait for the container to exit and be restarted by Podman:\n```bash\npodman run -d \\\n  --name bug-repro \\\n  --restart=on-failure:5 \\\n  --secret test-secret,type=env,target=REAL_ENV_NAME \\\n  alpine sh -c 'sleep 2 && exit 1'\n\nsleep 15\n\npodman exec bug-repro env | grep -iE 'REAL_ENV_NAME|test-secret'\n```\nAfter the restart cycle, I expect podman exec will also show test-secret=... instead of REAL_ENV_NAME=..., since the application-level failures I'm seeing (database auth failures after crash recovery) confirm the actual env var name changes, not just the inspect output."
+        },
+        {
+            "user": "amyssnippet",
+            "body": "i see, but that just a workaround, i guess this maybe fixed in #28076 "
+        },
+        {
+            "user": "tluj",
+            "body": "@amyssnippet appreciate the fast PR. Just want to make sure we're on the same page though. The main problem isn't how inspect displays the variable. The actual env var inside the container changes after a restart. My apps break because something like POSTGRES_PASSWORD stops existing and gets replaced with the literal secret name. Your PR description mentions it's a display only fix that doesn't affect runtime behavior, so I think the restart logic bug still needs its own fix. Can this issue stay open after #28076 merges?"
+        },
+        {
+            "user": "amyssnippet",
+            "body": "@tluj after reading to the issue i think this is just a problem in the inspect subcommand, regarding how it is showing the env vars. and thats what i fixed there as a display only fix, so lemme repro this with my examples, and will get back on the pr and this issue soon.\n\n\nthis issue will be solved in the #28076 anyhow\n"
+        },
+        {
+            "user": "tluj",
+            "body": "@amyssnippet Sounds good, let me know what you find. When you repro, the key thing is to check podman exec after the container has crashed and been restarted by podman, not on the first run. Use sleep 2 && exit 1 so it cycles fast, wait about 15 seconds, then run podman exec bug-repro env | grep -iE 'REAL_ENV_NAME|test-secret'. If the actual env var inside the container still shows REAL_ENV_NAME after a restart then I'll happily stand corrected. But my services were failing with real database auth errors after crash recoveries, which points to more than just a display issue.\n"
+        },
+        {
+            "user": "amyssnippet",
+            "body": "@tluj ig now the pr will solve your issue. and by merging the pr will close this issue automatically"
+        },
+        {
+            "user": "amyssnippet",
+            "body": "@Honny1 i am solving it, can you assign me this"
+        },
+        {
+            "user": "amyssnippet",
+            "body": "@tluj this might work, just update your podman binary"
+        },
+        {
+            "user": "mheon",
+            "body": "If we do a 5.8.1 (still not sure if/when we will) the fix can be included. Otherwise, 6.0 in May will definitely have the fix."
+        },
+        {
+            "user": "amyssnippet",
+            "body": "@mheon he can clone the latest code and build himself right?? then it can work, just update the system path"
+        },
+        {
+            "user": "mheon",
+            "body": "Yes, building latest from source would be a way to test."
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 28076
+        },
+        {
+            "organization": "Roxabi",
+            "repository": "roxabi-factory",
+            "number": 1106
+        },
+        {
+            "organization": "Roxabi",
+            "repository": "roxabi-factory",
+            "number": 1108
+        },
+        {
+            "organization": "Roxabi",
+            "repository": "roxabi-factory",
+            "number": 1117
+        }
+    ]
+}

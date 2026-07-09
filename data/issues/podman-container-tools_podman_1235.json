@@ -1,0 +1,183 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 1235,
+    "type": "pull_request",
+    "title": "SHM locking for Libpod",
+    "state": "closed",
+    "labels": [
+        "size/XXL",
+        "lgtm",
+        "approved",
+        "locked - please file new issue/PR"
+    ],
+    "user": "mheon",
+    "body": "This is a locking implementation for Libpod containers and pods using POSIX semaphores stored in a POSIX shared memory segment. The actual container/pod part hasn't been wired up yet, but the package handling the locking is complete, and I figured I'd ask for review before I went any further and the patch got bigger.\n\nThe lock implementation is written in C (Go would really prefer you use its builtin IPC constructs, and not POSIX SHM and mmap), and my C is more than a little rusty, so I'd love review there.\n\nFor comment: how should we handle locks potentially returning errors, given that our existing locks should always succeed? We could drop the error returns from the Lock() and Unlock() methods and just assert that there were no errors (probably a safe assumption in most cases - the typical error modes are mostly around trying to lock invalid memory, which this design should prevent).",
+    "comments": [
+        {
+            "user": "mheon",
+            "body": "This is another big one for CRI-O integration work - our current locking implementation leaks a file descriptor each time we remove a container, and there's no easy way to change that with the existing lock structure. This should be faster than our c/storage file locks and remove the leaking FDs problem"
+        },
+        {
+            "user": "TomSweeneyRedHat",
+            "body": "@mrunalp PTAL"
+        },
+        {
+            "user": "rhatdan",
+            "body": "@giuseppe @mtrmac PTAL"
+        },
+        {
+            "user": "rhatdan",
+            "body": "Need to be made buildable on Darwin and Windows."
+        },
+        {
+            "user": "mheon",
+            "body": "Our teardown strategy is simple: never tear down :smile: \n\nWe just let the kernel unmap the memory when we exit. As long as the file handle in /dev/shm isn't deleted, the memory's still there for other podman processes to access."
+        },
+        {
+            "user": "mheon",
+            "body": "@mtrmac Correct, this does not affect BoltDB's locking. This is mostly about preventing concurrent operations on the same container/pod - ensuring we don't call stop until the container has finished starting, etc."
+        },
+        {
+            "user": "mtrmac",
+            "body": "> For comment: how should we handle locks potentially returning errors, given that our existing locks should always succeed? We could drop the error returns from the Lock() and Unlock() methods and just assert that there were no errors (probably a safe assumption in most cases - the typical error modes are mostly around trying to lock invalid memory, which this design should prevent).\n\nI’d prefer that; in C generally the preferred approach is to kill the entire process on an assertion failure because no-one can tell what other state has been corrupted. So `panic`ing the single goroutine seems even too mild and risky.\n\nOr is there any reasonable error recovery strategy the callers could attempt?"
+        },
+        {
+            "user": "mheon",
+            "body": "My only thought on error-recovery would be attempting to make sure that other locks that have been taken by the process are unlocked, so we do as little damage as possible to shared interprocess state before dying"
+        },
+        {
+            "user": "mtrmac",
+            "body": "… hum, that `pthread_mutex` reference lead to me to the table in `pthread_mutex_lock(3p)` and then `pthread_mutexattr_getrobust(3p)`.  Do we need to worry about, and can we reasonably handle, a lock owner dying without unlocking one or more locks?"
+        },
+        {
+            "user": "mheon",
+            "body": "Note to self for tomorrow: POSIX semaphores can probably be swapped for pthread mutexes (was not aware that they supported multithreaded operation, but `pthread_mutexattr_setpshared` should allow it). This will allow using the `pthread_mutexattr_setrobust` attribute that @mtrmac mentioned to ensure we clear locks if the process panics."
+        },
+        {
+            "user": "mtrmac",
+            "body": "The robust mode does not automatically clear the lock; it requires the new owner to make a conscious decision about cleaning up (and how — or not), which seems pretty non-trivial.\n\nOTOH if the goal is _only_ exclusion and not data consistency (maybe because BoltDB transactions ensure that anyway), the lock implementation can just always clean up without the callers needing to care."
+        },
+        {
+            "user": "mheon",
+            "body": "@mtrmac We're only trying for mutual exclusion - data integrity is handled by BoltDB's locking. So it's enough that we know that a lock's owner died while holding it, so we can safely assume the lock ourselves."
+        },
+        {
+            "user": "mheon",
+            "body": "Encountered significant difficulty when swapping to POSIX mutexes - they have a requirement that the unlocking thread be the same thread that locked a mutex, which Go naturally does not guarantee due to goroutine scheduling. Damn shame, given that robust mutexes are basically exactly what we want here."
+        },
+        {
+            "user": "mheon",
+            "body": "Pushed a new version. Swapped over to pthread mutexes with `runtime.LockOSThread()` to guarantee that we lock/unlock in the same thread. I don't really like this, but robust mutexes offer a lot of protection against accidentally leaving the state in a bad place."
+        },
+        {
+            "user": "giuseppe",
+            "body": "code looks much nicer than the version with semaphores.  The only issue I see if `deallocate_semaphore` wasn't called correctly and we start leaking mutexes. I don't see any way to solve it, beside do some housekeeping and sync the status of containers with the mutexes (and deallocate the unused ones)"
+        },
+        {
+            "user": "mheon",
+            "body": "I think we need a reallocate mutexes method anyways - the first time we run after upgrading from file locks to mutexes, we need to assign every container a new lock. If we start running into lock starvation issues, we can rerun that and reshuffle locks between containers."
+        },
+        {
+            "user": "mheon",
+            "body": "Finally got a chance to play with this again. Libpod is updated to replace container and pod file locks with in-memory locks. Let's see how the tests run.\n\nThings still to do: add a way to reallocate locks to handle allocation issues. Also, investigate a file lock manager, which uses a fixed number of c/storage file locks instead - that would be better for the tests, as we won't carry over any state. (It's also probably sufficient to rm the locks' SHM in /dev/shm between tests)."
+        },
+        {
+            "user": "mheon",
+            "body": "/approve"
+        },
+        {
+            "user": "openshift-ci-robot",
+            "body": "[APPROVALNOTIFIER] This PR is **APPROVED**\n\nThis pull-request has been approved by: *<a href=\"https://github.com/containers/libpod/pull/1235#issuecomment-424802157\" title=\"Approved\">mheon</a>*\n\nThe full list of commands accepted by this bot can be found [here](https://go.k8s.io/bot-commands).\n\nThe pull request process is described [here](https://git.k8s.io/community/contributors/guide/owners.md#the-code-review-process)\n\n<details >\nNeeds approval from an approver in each of these files:\n\n- ~~[OWNERS](https://github.com/containers/libpod/blob/master/OWNERS)~~ [mheon]\n\nApprovers can indicate their approval by writing `/approve` in a comment\nApprovers can cancel approval by writing `/approve cancel` in a comment\n</details>\n<!-- META={\"approvers\":[]} -->"
+        },
+        {
+            "user": "baude",
+            "body": "@mheon where do we stand with this PR?"
+        },
+        {
+            "user": "mheon",
+            "body": "This needs another two, three weeks of dedicated work to find the lingering race conditions it seems to have introduced and iron out the other things that need to be done. Not sure when I'll have the time, but this is still very much necessary in my eyes (just lower priority than other things)"
+        },
+        {
+            "user": "rh-atomic-bot",
+            "body": ":umbrella: The latest upstream changes (presumably #1756) made this pull request unmergeable. Please resolve the merge conflicts."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@mheon Needs a rebase."
+        },
+        {
+            "user": "openshift-bot",
+            "body": "@mheon: PR needs rebase.\n\n<details>\n\nInstructions for interacting with me using PR comments are available [here](https://git.k8s.io/community/contributors/guide/pull-requests.md).  If you have questions or suggestions related to my behavior, please file an issue against the [kubernetes/test-infra](https://github.com/kubernetes/test-infra/issues/new?title=Prow%20issue:) repository.\n</details>"
+        },
+        {
+            "user": "openshift-bot",
+            "body": "@mheon: PR needs rebase.\n\n<details>\n\nInstructions for interacting with me using PR comments are available [here](https://git.k8s.io/community/contributors/guide/pull-requests.md).  If you have questions or suggestions related to my behavior, please file an issue against the [kubernetes/test-infra](https://github.com/kubernetes/test-infra/issues/new?title=Prow%20issue:) repository.\n</details>"
+        },
+        {
+            "user": "rh-atomic-bot",
+            "body": ":umbrella: The latest upstream changes (presumably #2065) made this pull request unmergeable. Please resolve the merge conflicts."
+        },
+        {
+            "user": "mheon",
+            "body": "@cevich I think this PR has gotten long enough that build_each_commit is timing out...\n\nWe might want to increase that a bit... I don't think I can slice this up any smaller"
+        },
+        {
+            "user": "rh-atomic-bot",
+            "body": ":umbrella: The latest upstream changes (presumably #2045) made this pull request unmergeable. Please resolve the merge conflicts."
+        },
+        {
+            "user": "mheon",
+            "body": "Tests are actually succeeding, which is great.\n\nWe do have a persistent flake in the unit tests I added - looks like we get stuck in a look waiting to take a lock that should be free?"
+        },
+        {
+            "user": "mheon",
+            "body": "Removing WIP. I'll do a once-over to determine what, if anything, else this needs, then we can do another round of reviews and look towards merging."
+        },
+        {
+            "user": "cevich",
+            "body": "> Assigned #1235 to @cevich\n\nNO you dumb bot.  I dunno what I'm doing, don't put me in charge :confounded: "
+        },
+        {
+            "user": "mheon",
+            "body": "@rhatdan Well, good news, SHM locking is indeed going to be in the next release"
+        },
+        {
+            "user": "rhatdan",
+            "body": "Nice, lets get the updated pull/push speeds with a buildah vendor and then we need a new release."
+        },
+        {
+            "user": "mheon",
+            "body": "Alright, things this still needs to be release-ready:\n- A way of configuring locking from libpod.conf (swap lock implementations, set lock path)\n- A way of reallocating lock IDs so this isn't a breaking change (run something like `podman state refresh` and all the locks get reallocated and older Podmans work with this PR)\n\nThe first one "
+        },
+        {
+            "user": "cevich",
+            "body": "@cevich wanders off to [document seemingly little things that cause big trouble.](https://github.com/containers/libpod/pull/2084)"
+        },
+        {
+            "user": "wking",
+            "body": "Before this PR, `podman images` runs fine for me.  Bisecting blames a364b656ea for causing:\n\n```console\n$ sudo podman --log-level debug images\nERRO[0000] Could not get runtime: error initializing SHM locking: no such file or directory \n```\n\nand then a76256834a0 (from #2089) for turning that into:\n\n```console\n$ sudo podman --log-level debug images\nDEBU[0000] Initializing boltdb state at /var/lib/containers/storage/libpod/bolt_state.db \nDEBU[0000] Using graph driver overlay                   \nDEBU[0000] Using graph root /var/lib/containers/storage \nDEBU[0000] Using run root /var/run/containers/storage   \nDEBU[0000] Using static dir /var/lib/containers/storage/libpod \nDEBU[0000] Using tmp dir /var/run/libpod                \nDEBU[0000] Set libpod namespace to \"\"                   \nDEBU[0000] [graphdriver] trying provided driver \"overlay\" \nDEBU[0000] overlay test mount with multiple lowers succeeded \nDEBU[0000] backingFs=extfs, projectQuotaSupported=false, useNativeDiff=true \nINFO[0000] Found CNI network podman (type=bridge) at /etc/cni/net.d/87-podman-bridge.conflist \nERRO[0000] Could not get runtime: failed to open 2048 locks in /libpod_lock: no such file or directory \n```\n"
+        },
+        {
+            "user": "mheon",
+            "body": "We accidentally merged this prematurely, so we're missing some migration\nlogic right now. To manually force the locks to be created, ensure all\nPodman containers are stopped, and rm /var/run/libpod/alive (or the alive\nfile inside whatever tmp directory Podman is using for rootless -\nlog-level=debug will print it).\n\nOn Wed, Jan 9, 2019, 01:01 W. Trevor King <notifications@github.com wrote:\n\n> Before this PR, podman images runs fine for me. Bisecting blames a364b65\n> <https://github.com/containers/libpod/commit/a364b656eaef1be5329abfd02d3fcd2dbcd37d64>\n> for causing:\n>\n> $ sudo podman --log-level debug imagesERRO[0000] Could not get runtime: error initializing SHM locking: no such file or directory\n>\n> and then a762568\n> <https://github.com/containers/libpod/commit/a76256834a0a409dfb53943e04fd2458c7782361>\n> (from #2089 <https://github.com/containers/libpod/pull/2089>) for turning\n> that into:\n>\n> $ sudo podman --log-level debug imagesDEBU[0000] Initializing boltdb state at /var/lib/containers/storage/libpod/bolt_state.db DEBU[0000] Using graph driver overlay                   DEBU[0000] Using graph root /var/lib/containers/storage DEBU[0000] Using run root /var/run/containers/storage   DEBU[0000] Using static dir /var/lib/containers/storage/libpod DEBU[0000] Using tmp dir /var/run/libpod                DEBU[0000] Set libpod namespace to \"\"                   DEBU[0000] [graphdriver] trying provided driver \"overlay\" DEBU[0000] overlay test mount with multiple lowers succeeded DEBU[0000] backingFs=extfs, projectQuotaSupported=false, useNativeDiff=true INFO[0000] Found CNI network podman (type=bridge) at /etc/cni/net.d/87-podman-bridge.conflist ERRO[0000] Could not get runtime: failed to open 2048 locks in /libpod_lock: no such file or directory\n>\n> —\n> You are receiving this because you were mentioned.\n> Reply to this email directly, view it on GitHub\n> <https://github.com/containers/libpod/pull/1235#issuecomment-452582031>,\n> or mute the thread\n> <https://github.com/notifications/unsubscribe-auth/AHYHCMlxxv8Y9lTRGrbxaKASdnBGA82Dks5vBYWzgaJpZM4V0RDS>\n> .\n>\n"
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 148
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 2083
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 2085
+        }
+    ]
+}

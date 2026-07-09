@@ -1,0 +1,76 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 1980,
+    "type": "issue",
+    "title": "container create failed: container_linux.go:336: starting container process caused \"setup user: permission denied\"",
+    "state": "closed",
+    "labels": [
+        "locked - please file new issue/PR"
+    ],
+    "user": "EmilienM",
+    "body": "**Is this a BUG REPORT or FEATURE REQUEST?**:\n[//]: # **kind bug**\n\n**Description**\nSystemd fails to start containers with a permission error.\n\n**Steps to reproduce the issue:**\n\n1. Deploy podman 0.12.1.1 and configure a systemd service to start a container (example in this [blog post](http://my1.fr/blog/openstack-containerization-with-podman-part-2-operations/)).\n\n2. Start the container with ```podman start```, it works.\n\n3. Start the container with systemd, it fails with permission error.\n\n**Describe the results you received:**\n```\nDec 11 17:08:31 undercloud.localdomain systemd[1]: Started mysql container.\nDec 11 17:08:31 undercloud.localdomain podman[47695]: unable to start container 4327894445a18da8b0b319fa1cf47359b8323750677177906c3f980b226f03ad: container create failed: container_linux.go:336: starting container process caused \"setup user: permission denied\"\nDec 11 17:08:31 undercloud.localdomain podman[47695]: : internal libpod error\nDec 11 17:08:31 undercloud.localdomain systemd[1]: tripleo_mysql.service: main process exited, code=exited, status=125/n/a\nDec 11 17:08:31 undercloud.localdomain podman[47772]: 4327894445a18da8b0b319fa1cf47359b8323750677177906c3f980b226f03ad\n```\n\n**Describe the results you expected:**\nIn podman 0.11.1, the container start from systemd successfully.\n\n**Output of `podman version`:**\n\n```\n0.12.1.1\n```\n\n**Output of `podman info`:**\n\n```\nhost:\n  BuildahVersion: 1.6-dev\n  Conmon:\n    package: podman-0.11.1.1-3.git594495d.el7.centos.x86_64\n    path: /usr/libexec/podman/conmon\n    version: 'conmon version 1.12.0-dev, commit: d61f1d176b2b01a5e46efbf236427ece745b92f2-dirty'\n  Distribution:\n    distribution: '\"centos\"'\n    version: \"7\"\n  MemFree: 636874752\n  MemTotal: 8201080832\n  OCIRuntime:\n    package: runc-1.0.0-57.dev.git2abd837.el7.centos.x86_64\n    path: /usr/bin/runc\n    version: 'runc version spec: 1.0.0'\n  SwapFree: 2147471360\n  SwapTotal: 2147479552\n  arch: amd64\n  cpus: 4\n  hostname: undercloud.localdomain\n  kernel: 3.10.0-957.1.3.el7.x86_64\n  os: linux\n  rootless: false\n  uptime: 1h 11m 48.49s (Approximately 0.04 days)\ninsecure registries:\n  registries:\n  - 192.168.24.1:8787\n  - 192.168.24.3:8787\nregistries:\n  registries:\n  - registry.centos.org\n  - registry.access.redhat.com\n  - docker.io\n  - quay.io\nstore:\n  ContainerStore:\n    number: 26\n  GraphDriverName: overlay\n  GraphOptions: null\n  GraphRoot: /var/lib/containers/storage\n  GraphStatus:\n    Backing Filesystem: extfs\n    Native Overlay Diff: \"true\"\n    Supports d_type: \"true\"\n  ImageStore:\n    number: 25\n  RunRoot: /var/run/containers/storage\n```\n",
+    "comments": [
+        {
+            "user": "mheon",
+            "body": "Definitely looks like some sort of failure in `runc` - https://github.com/opencontainers/runc/blob/aa7917b7518ce48deed3a591dc415b006d478fd0/libcontainer/init_linux.go#L239-L240 is the function in question\n\nUnfortunately the amount of debugging in runc code paths like this is extremely small, so we can't tell exactly where the permission denied is coming from easily from the error message, which is sad"
+        },
+        {
+            "user": "EmilienM",
+            "body": "If you leave Enforced mode in SElinux it works fine. Let me see why I didn't see the alert."
+        },
+        {
+            "user": "EmilienM",
+            "body": "found 1 alerts in /var/log/audit/audit.log\n--------------------------------------------------------------------------------\n\nSELinux is preventing /usr/bin/runc from setattr access on the fifo_file .\n\n*****  Plugin catchall (100. confidence) suggests   **************************\n\nIf you believe that runc should be allowed setattr access on the  fifo_file by default.\nThen you should report this as a bug.\nYou can generate a local policy module to allow this access.\nDo\nallow this access for now by executing:\n# ausearch -c 'runc:[2:INIT]' --raw | audit2allow -M my-runc2INIT\n# semodule -i my-runc2INIT.pp\n\n\nAdditional Information:\nSource Context                system_u:system_r:container_runtime_t:s0\nTarget Context                system_u:system_r:unconfined_service_t:s0\nTarget Objects                 [ fifo_file ]\nSource                        runc:[2:INIT]\nSource Path                   /usr/bin/runc\nPort                          <Unknown>\nHost                          <Unknown>\nSource RPM Packages           runc-1.0.0-57.dev.git2abd837.el7.centos.x86_64\nTarget RPM Packages\nPolicy RPM                    selinux-policy-3.13.1-229.el7_6.6.noarch\nSelinux Enabled               True\nPolicy Type                   targeted\nEnforcing Mode                Permissive\nHost Name                     undercloud.localdomain\nPlatform                      Linux undercloud.localdomain\n                              3.10.0-957.1.3.el7.x86_64 #1 SMP Thu Nov 29\n                              14:49:43 UTC 2018 x86_64 x86_64\nAlert Count                   1\nFirst Seen                    2018-12-11 17:52:35 UTC\nLast Seen                     2018-12-11 17:52:35 UTC\nLocal ID                      2e738041-d01b-4a53-91b7-f99042bfb58f\n\nRaw Audit Messages\ntype=AVC msg=audit(1544550755.385:1130): avc:  denied  { setattr } for  pid=77923 comm=\"runc:[2:INIT]\" name=\"\" dev=\"pipefs\" ino=477416 scontext=system_u:system_r:container_runtime_t:s0 tcontext=system_u:system_r:unconfined_service_t:s0 tclass=fifo_file permissive=1\n\n\ntype=SYSCALL msg=audit(1544550755.385:1130): arch=x86_64 syscall=fchown success=yes exit=0 a0=2 a1=a5c2 a2=0 a3=0 items=0 ppid=77911 pid=77923 auid=4294967295 uid=0 gid=0 euid=0 suid=0 fsuid=0 egid=0 sgid=0 fsgid=0 tty=(none) ses=4294967295 comm=runc:[2:INIT] exe=/usr/bin/runc subj=system_u:system_r:container_runtime_t:s0 key=(null)\n\nHash: runc:[2:INIT],container_runtime_t,unconfined_service_t,fifo_file,setattr\n"
+        },
+        {
+            "user": "EmilienM",
+            "body": "ping @rhatdan ^"
+        },
+        {
+            "user": "EmilienM",
+            "body": "In container-selinux we already have ```allow container_runtime_t unconfined_t:fifo_file setattr;``` in an optional policy, I'm wondering if we need to run it by default with latest runc."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@EmilienM What service is running as unconfined_service_t?\n\nps -eZ | grep unconfined_service_t\n"
+        },
+        {
+            "user": "EmilienM",
+            "body": "@rhatdan \nsystem_u:system_r:unconfined_service_t:s0 7935 ? 00:00:04 registry\nsystem_u:system_r:unconfined_service_t:s0 102039 ? 00:00:00 conmon"
+        },
+        {
+            "user": "rhatdan",
+            "body": "conmon should not be running as a unconfined_t service, I think this means that you launched podman from a systemd unit file, and podman was not labeled correctly?\n ls -lZ /usr/bin/podman\n-rwxr-xr-x. 1 root root system_u:object_r:container_runtime_exec_t:s0 29932824 Dec  7 11:30 /usr/bin/podman\n"
+        },
+        {
+            "user": "EmilienM",
+            "body": "@rhatdan yes, this is exactly my bug: when running containers from systemd I have this AVC. See https://github.com/containers/container-selinux/pull/59"
+        },
+        {
+            "user": "rhatdan",
+            "body": "Is this only happening in the test suite, where it is running a mislabeled podman?\n\n"
+        },
+        {
+            "user": "EmilienM",
+            "body": "@rhatdan it's happening for us in OpenStack when we run SElinux in Enforced mode and control containers with Systemd. I've been adding this scenario in Podman testsuite too: https://github.com/containers/libpod/pull/1987 and https://github.com/containers/libpod/pull/2002 so we catch it earlier next time.\nLike I wrote in the bug description, it only happens with latest podman. With 0.11.x it works fine."
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "containers",
+            "repository": "container-selinux",
+            "number": 59
+        },
+        {
+            "organization": "scality",
+            "repository": "metalk8s",
+            "number": 574
+        },
+        {
+            "organization": "k0sproject",
+            "repository": "k0s",
+            "number": 717
+        }
+    ]
+}

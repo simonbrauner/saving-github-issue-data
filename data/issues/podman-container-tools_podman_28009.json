@@ -1,0 +1,77 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 28009,
+    "type": "issue",
+    "title": "Publishing a privileged port on specific IP address fails on Mac",
+    "state": "closed",
+    "labels": [
+        "Good First Issue",
+        "kind/bug",
+        "macos",
+        "volunteers-wanted",
+        "machine",
+        "triaged",
+        "Contribfest"
+    ],
+    "user": "sfleiter",
+    "body": "### Issue Description\n\nTrying to bind a privileged container port to a host IP address fails:\n```\n❯ > podman run --rm -p 127.0.0.1:879:80 alpine echo 1\nError: preparing container 610b74d61baaee4bdf2b06c8d0e679dd059786c5ebc5eaf796338ba1872a984f for attach: something went wrong with the request: \"listen tcp 127.0.0.1:879: bind: permission denied\\n\"\n```\n\nLeaving out the ip address ***or*** changing to an unprivileged port makes the command succeed:\n```\n❯ > podman run --rm -p 879:80 alpine echo 1\n1\n```\n\n```\n❯ > podman run --rm -p 127.0.0.1:1879:80 alpine echo 1\n1\n````\n\n### Steps to reproduce the issue\n\nSteps to reproduce the issue\n1. Install podman on Mac\n2. Run `podman run --rm -p 127.0.0.1:879:80 alpine echo 1`\n3.\n\n\n### Describe the results you received\n\n```\nError: preparing container 610b74d61baaee4bdf2b06c8d0e679dd059786c5ebc5eaf796338ba1872a984f for attach: something went wrong with the request: \"listen tcp 127.0.0.1:879: bind: permission denied\\n\"\n```\n\n### Describe the results you expected\n\nSuccessfully binding to the specified port and echoing `1`\n\n### podman info output\n\n```yaml\nClient:        Podman Engine\nVersion:       5.7.1\nAPI Version:   5.7.1\nGo Version:    go1.25.5\nGit Commit:    f845d14e941889ba4c071f35233d09b29d363c75\nBuilt:         Wed Dec 10 15:58:02 2025\nBuild Origin:  pkginstaller\nOS/Arch:       darwin/arm64\n\nServer:       Podman Engine\nVersion:      5.7.1\nAPI Version:  5.7.1\nGo Version:   go1.25.4 X:nodwarf5\nGit Commit:   f845d14e941889ba4c071f35233d09b29d363c75\nBuilt:        Tue Dec  9 01:00:00 2025\nOS/Arch:      linux/arm64\n```\n\n### Podman in a container\n\nNo\n\n### Privileged Or Rootless\n\nPrivileged\n\n### Upstream Latest Release\n\nYes\n\n### Additional environment details\n\nOS:\n```\nProductName:\t\tmacOS\nProductVersion:\t\t26.2\nBuildVersion:\t\t25C56\n```\n\nHardware:\n\n      Model Name: MacBook Pro\n      Model Identifier: MacBookPro17,1\n      Model Number: Z11B0000UD/A\n      Chip: Apple M1\n      Total Number of Cores: 8 (4 performance and 4 efficiency)\n      Memory: 16 GB\n      System Firmware Version: 13822.61.10\n      OS Loader Version: 13822.61.10\n\n\n### Additional information\n\n_No response_",
+    "comments": [
+        {
+            "user": "ninja-quokka",
+            "body": "This should work if your machine is setup as rootful.\n\nCan you provide the following output?\n\n```\n$ podman machine inspect --format \"{{.Rootful}}\"\n$ podman system connection ls\n```\n\nIf this returns that you are not using a rootful machine, try the following commands:\n\n```\n$ podman machine stop\n$ podman machine set --rootful\n$ podman machine start\n```"
+        },
+        {
+            "user": "sfleiter",
+            "body": "```\n❯ > podman machine inspect --format \"{{.Rootful}}\"\ntrue\n```\n\n```\n❯ > podman system connection ls\nName                         URI                                                         Identity                                                             Default     ReadWrite\npodman-machine-default       ssh://core@127.0.0.1:62629/run/user/501/podman/podman.sock  /Users/stefanfleiter/.local/share/containers/podman/machine/machine  false       true\npodman-machine-default-root  ssh://root@127.0.0.1:62629/run/podman/podman.sock           /Users/stefanfleiter/.local/share/containers/podman/machine/machine  true        true\n```"
+        },
+        {
+            "user": "ninja-quokka",
+            "body": "Interesting, the issue seems to be coming from gvproxy. I wonder if it's macos that's restricting binding on a restricted port and not the linux vm as your certainly running rootful!\n\n```\nfunc annotateGvproxyResponseError(r io.Reader) error {\n\tb, err := io.ReadAll(r)\n\tif err == nil && len(b) > 0 {\n\t\treturn fmt.Errorf(\"something went wrong with the request: %q\", string(b))\n\t}\n\treturn errors.New(\"something went wrong with the request, could not read response\")\n}\n```\n\nI'll try reproduce on my Mac tomorrow."
+        },
+        {
+            "user": "Luap99",
+            "body": "The rootful part only applies to inside the VM but gvproxy always run unprivileged on the host so it fails to bind such a port.\n\nFor some reason macos decided that binding 0.0.0.0 port < 1024 is allowed a normal user but when you use a specific ip then it is not allowed, see https://developer.apple.com/forums/thread/674179\nSo IMO this is a macos bug, I cannot see any reason why binding all is allowed if a specific ip is not.\n"
+        },
+        {
+            "user": "sfleiter",
+            "body": "Thanks for the research on this.\n\nI see 3 options on how to proceed:\n1. Do nothing as this is not a bug in podman\n1. Print a message to give the user some information on why this does not work and error out\n1. Ignore IP and bind globally \n\n- 1 will cause more users stumbling and report this\n- 2 will still cause silent failure in cases where tools like vind use checks like described in [this issue](https://github.com/loft-sh/vind/issues/5) to detect `rootful` mode\n- 3 is a potential security issue\n\nIMHO 2 still is the best option.\nIt could be enhanced by allowing to configure podman to ignore the IP, the \"I know what I am doing mode\" 😀"
+        },
+        {
+            "user": "ninja-quokka",
+            "body": "Great find @Luap99 ! For what it's worth I reproduced this today 😃 \n\n@sfleiter I like option 2, I think if this were already implemented you wouldn't have opened this bug so It's an improvement.\n\nAlso, it fits the pattern because we print a great error already when the podman machine doesn't support binding to a restricted port."
+        },
+        {
+            "user": "Luap99",
+            "body": "> Print a message to give the user some information on why this does not work and error out\n\nI mean that is what we to today, we error out and say why this won't work , error is EACCES.\n\nThe thing is we are not directly control over the actual error message, we get the error back via http string in the body so sure it means asking us to parse the message and if it contains `permission denied` and the port < 1024 then we could basically rewrite a different error which is possible but also kinda awkward.\n\nI mean at least we likely should mention gvproxy and that the bind fails on the host not inside the VM.\n\n>  It could be enhanced by allowing to configure podman to ignore the IP, the \"I know what I am doing mode\" 😀\n\nI don't think that makes sense, you already are in full control over what bind ip you pass to podman so adding yet another option to then ignore it again is bad and at worst a potential security pitfall.\n\n"
+        },
+        {
+            "user": "sfleiter",
+            "body": "> I mean at least we likely should mention gvproxy and that the bind fails on the host not inside the VM.\n\nExactly, and probably mention the Mac issue or this very issue\n\n> I don't think that makes sense, you already are in full control over what bind ip you pass to podman\n\nThat was not what caused this for me leading to my little investigation and creating this issue.\nIn a few days I stumbled on 2 occurrences where docker is called externally and this very issue broke things for me.\n- [vind](https://github.com/loft-sh/vind/issues/5)\n- [localstack](https://github.com/localstack/localstack/issues/12983)\n\nSo there are situations where podman is called by 3rd-party tools like these and more..."
+        },
+        {
+            "user": "Luap99",
+            "body": "> So there are situations where podman is called by 3rd-party tools like these and more...\n\nI acknowledge that, but ultimately the way to ask for the host ip is done by the one option, adding a second but no really I want X option is useless because A) there is no guarantee you can pass this option as a user then if you do not control the ports and B) your tool could just all well decide to override that hypothetical new option and then we are back to where we are started.\nI understand that such options seems appealing on individual basis but they would just make configuring podman more confusing, so they need more docs, more tests, etc... and all that just do enable exactly zero new functionality. We are at 150+ cli options for podman run already, we do not need more unnecessary options.\n"
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "pawojciechowski",
+            "body": "Up + `Print a message to give the user some information on why this does not work and error out` sounds like a great quick fix so no more users spend time on debugging this behavior. This was the first thing I stumbled on for a few hours while trying to use podman for the first time 🙈 "
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "loft-sh",
+            "repository": "vind",
+            "number": 5
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 28982
+        }
+    ]
+}

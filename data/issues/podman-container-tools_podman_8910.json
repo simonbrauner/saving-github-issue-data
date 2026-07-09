@@ -1,0 +1,96 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 8910,
+    "type": "pull_request",
+    "title": "Implement the rootless-cni-infra container imageless",
+    "state": "closed",
+    "labels": [
+        "approved",
+        "do-not-merge/work-in-progress",
+        "locked - please file new issue/PR"
+    ],
+    "user": "Luap99",
+    "body": "As proposed by Akihiro Suda make the rootless-cni-infra container use\nthe host rootfs instead of an image. This works by mounting the host\nrootfs in the user namespace to `$runroot/rootless-cni-infra`\nand use this as rootfs for the container.\n\nSecond, rewrite the rootless-cni-infra shell script in go to remove the\nextra cnitool dependency which is not packaged anywhere. With that we\nonly need the same dependencies as rootful podman which should be\nalready installed.\n\nAdvantages:\n- Works for all architectures podman supports.\n- Works without internet connection.\n- No extra maintainence of an extra image.\n\nDisadvantages:\n- Requires the dependencies to be available on the host (e.g. dnsname\nplugin). The user may not have control over those.\n\nProblems:\n- It doesn't unmount the rootfs if the the rootless-cni-infra container\nis stopped directly.\n\nAlso the image version did not respect the `--cni-config-dir` option\nproperly. It mounted the cni config dir only at container create time\nbut this option can be used on podman run commands which did not\nworked if the rootless-cni-infra container was already running.\nThis is only possible with the rootfs version.\n\nLive upgrading is possible. If the old infra container is still\nrunning podman talks via the old api to the script. Once the\nold infra container is deleted the new imageless infra container\nwill be created and podman can talk via the new api. A version\nlabel is added to the container to distinguish between old and new.\n\nFixes #8709 \n\nSigned-off-by: Paul Holzinger <paul.holzinger@web.de>\n\n<!--\nThanks for sending a pull request!\n\nPlease make sure you've read our contributing guidelines and how to submit a pull request (https://github.com/containers/podman/blob/master/CONTRIBUTING.md#submitting-pull-requests).\n\nIn case you're only changing docs, make sure to prefix the pull-request title with \"[CI:DOCS]\".  That will prevent functional tests from running and save time and energy.\n-->\n",
+    "comments": [
+        {
+            "user": "openshift-ci-robot",
+            "body": "[APPROVALNOTIFIER] This PR is **APPROVED**\n\nThis pull-request has been approved by: *<a href=\"https://github.com/containers/podman/pull/8910#\" title=\"Author self-approved\">Luap99</a>*\n\nThe full list of commands accepted by this bot can be found [here](https://go.k8s.io/bot-commands?repo=containers%2Fpodman).\n\nThe pull request process is described [here](https://git.k8s.io/community/contributors/guide/owners.md#the-code-review-process)\n\n<details >\nNeeds approval from an approver in each of these files:\n\n- ~~[OWNERS](https://github.com/containers/podman/blob/master/OWNERS)~~ [Luap99]\n\nApprovers can indicate their approval by writing `/approve` in a comment\nApprovers can cancel approval by writing `/approve cancel` in a comment\n</details>\n<!-- META={\"approvers\":[]} -->"
+        },
+        {
+            "user": "Luap99",
+            "body": "@rhatdan I need your selinux knowledge here. On fedora the rootless-cni-infra script is failing with the following error: \n```\nfailed to list chains: running [/usr/sbin/iptables -t nat -S --wait]: exit status 4: Fatal: can't open lock file /run/xtables.lock: Permission denied\n```\nThis access is blocked by selinux. I see this AVC:\n```\ntype=AVC msg=audit(1610099754.089:998): avc:  denied  { write } for  pid=6975 comm=\"iptables\" name=\"/\" dev=\"tmpfs\" ino=1 scontext=unconfined_u:system_r:iptables_t:s0 tcontext=system_u:object_r:container_file_t:s0:c664,c817 tclass=dir permissive=0\n```\nThe rooless-cni-infra container is created with selinux disabled so I don't understand why selinux is blocking access. `/run` is mounted as tmpfs into the container.\n\nOn the host the file has the following label:\n```\n$ sudo ls -lZ /run | grep xtables\n-rw-------.  1 root    root    system_u:object_r:iptables_var_run_t:s0          0  8. Jan 10:51 xtables.lock\n```\n\nInterestingly enough it works on my test VM which has the fedora server spin installed and not workstation.\nThey are shipped with different `iptables` versions. Fedora workstation has `iptables v1.8.5 (legacy)` and fedora server has `iptables v1.8.5 (nf_tables)` both are fedora 33.\n\n"
+        },
+        {
+            "user": "rhatdan",
+            "body": "The issue is the iptables command is attempting to create content inside of a directory labeled container_file_t.  Iptables command is confined, and not allowed to write container content."
+        },
+        {
+            "user": "rhatdan",
+            "body": "Is the /run within the container?  IE This is not the /run on the host?"
+        },
+        {
+            "user": "rhatdan",
+            "body": "Hopefully I will have time early next week to attempt this and figure out what is going on."
+        },
+        {
+            "user": "Luap99",
+            "body": "I reworked this to support live migration from a previous version. If the old infra container is still running podman talks via the old api to the script. Once the old infra container is deleted the new imageless infra container will be created and podman can talk via the new api. A version label is added to the container to distinguish between old and new."
+        },
+        {
+            "user": "Luap99",
+            "body": "@rhatdan Have you looked at the selinux issue?\n\nFor now `sudo alternatives --set iptables /usr/sbin/iptables-nft` would work for fedora but this is a breaking change for users."
+        },
+        {
+            "user": "Luap99",
+            "body": "@rhatdan \nI tried to look at the selinux issue and found the problem. Look at the following:\n```bash\n# selinux with container image\n$ podman run alpine cat /proc/self/attr/current \nsystem_u:system_r:container_t:s0:c280,c796\n$ podman run --security-opt label=disable alpine cat /proc/self/attr/current \nunconfined_u:system_r:spc_t:s0\n\n# selinux with rootfs\n$ mkdir -p ~/rootfs\n$ podman unshare mount --rbind -r / ~/rootfs/\n$ podman unshare mount -t tmpfs none ~/rootfs/run\n$ podman run --rootfs ~/rootfs cat /proc/self/attr/current \nsystem_u:system_r:container_t:s0:c22,c289\n$ podman run --security-opt label=disable --rootfs ~/rootfs cat /proc/self/attr/current \nunconfined_u:system_r:container_runtime_t:s0\n# why container_runtime_t and not spc_t?\n\n# set selinux labels manually\n# spc_t fails\n$ podman run --security-opt \"label=user:unconfined_u\" --security-opt \"label=role:system_r\" --security-opt \"label=type:spc_t\" --security-opt \"label=level:s0\" --rootfs ~/rootfs  cat /proc/self/attr/current \n{\"msg\":\"exec container process `/usr/bin/cat`: Permission denied\",\"level\":\"error\",\"time\":\"2021-02-14T16:08:22.000844579Z\"}\n# unconfined_t works\n$ podman run --security-opt \"label=user:unconfined_u\" --security-opt \"label=role:system_r\" --security-opt \"label=type:unconfined_t\" --security-opt \"label=level:s0\" --rootfs ~/rootfs  cat /proc/self/attr/current \nunconfined_u:system_r:unconfined_t:s0\n```\nI don't know if this is a bug or expected. Either way when I set unconfined_u:system_r:unconfined_t for the cni container it works."
+        },
+        {
+            "user": "rhatdan",
+            "body": "Do you have AVC Messages?"
+        },
+        {
+            "user": "rhatdan",
+            "body": "ls -lZd ~/rootfs/\n\nThere are several issues here.  I am thinking that we could grab the \"level\" label off of the rootfs and set that to run the container with so that we run as container_t, that might be the best solution for this.  Check to make sure that rootfs is labeled container_file_t:MCS and then use the MCS."
+        },
+        {
+            "user": "rhatdan",
+            "body": "The reason you are seeing the difference on spc_t versus container_runtime_t is based on the label of ~/rootfs.\n\nThe reason spc_t is failing, is that there is an entrypoint fule on spc_t, So only certain labels are allowed to \"transition\" to spc_t.\n\nThe label of the cat command is probably not allowed as an entrypoint to spc_t.\n\nSimilar we have transition rules that say when podman running as container_runtime_t runs certain executables it will `transition` to spc_t, The label of cat within the rootfs does not have a transition rule, so the transition does not happen, and the process continues to run as container_runtime_t. \n\n"
+        },
+        {
+            "user": "Luap99",
+            "body": "OK I don't think I can get this to work. There is a locking issue somewhere. While thinking about it I thought about not using a container at all and just create a netns in the podman user namespace. I have opened https://github.com/containers/podman/pull/9423 to implement this instead. I think this is better in the long run."
+        },
+        {
+            "user": "baude",
+            "body": "agree"
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 7842
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 8567
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 8585
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 9169
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 9086
+        }
+    ]
+}

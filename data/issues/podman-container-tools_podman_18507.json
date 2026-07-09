@@ -1,0 +1,120 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 18507,
+    "type": "pull_request",
+    "title": "Fix `podman rm -fa` with dependencies",
+    "state": "closed",
+    "labels": [
+        "lgtm",
+        "approved",
+        "release-note",
+        "kind/api-change",
+        "locked - please file new issue/PR"
+    ],
+    "user": "mheon",
+    "body": "This is a major consolidation of the logic for removing dependency containers.\n\nAs previous, the logic was contained in a separate function which ran prior to actually removing the container. This didn't work properly, and was honestly confusing in its flow - we had two completely separate paths for removing containers based on whether they had, or did not have, a dependency? This consolidates all removal logic into the existing container removal functions. As part of this, we needed to make some signature changes, as `removeContainer` can now remove 1 or more containers, and 0 or more pods, and we should probably let the user know what containers and pods were removed as part of this. Pod removal also needed to be changed to report what containers were removed through that (this was also plumbed through the remote API, but is not yet exposed via the `podman pod rm` CLI because I feel like it'd be a breaking change to do so).\n\nFixes #18180\n\n#### Does this PR introduce a user-facing change?\n\n<!--\nIf no, just write `None` in the release-note block below. If yes, a release note\nis required: Enter your extended release note in the block below. If the PR\nrequires additional action from users switching to the new release, include the\nstring \"action required\".\n\nFor more information on release notes, please follow the Kubernetes model:\nhttps://git.k8s.io/community/contributors/guide/release-notes.md\n-->\n\n```release-note\nFixed a bug where `podman rm -fa` could fail to remove dependency containers (such as pod infra containers).\n```\n",
+    "comments": [
+        {
+            "user": "openshift-ci[bot]",
+            "body": "[APPROVALNOTIFIER] This PR is **APPROVED**\n\nThis pull-request has been approved by: *<a href=\"https://github.com/containers/podman/pull/18507#\" title=\"Author self-approved\">mheon</a>*\n\nThe full list of commands accepted by this bot can be found [here](https://go.k8s.io/bot-commands?repo=containers%2Fpodman).\n\nThe pull request process is described [here](https://git.k8s.io/community/contributors/guide/owners.md#the-code-review-process)\n\n<details >\nNeeds approval from an approver in each of these files:\n\n- ~~[OWNERS](https://github.com/containers/podman/blob/main/OWNERS)~~ [mheon]\n\nApprovers can indicate their approval by writing `/approve` in a comment\nApprovers can cancel approval by writing `/approve cancel` in a comment\n</details>\n<!-- META={\"approvers\":[]} -->"
+        },
+        {
+            "user": "Luap99",
+            "body": "wow I didn't even expect the stderr check to fail but this is exactly why it is needed:\n```\n           # podman [options] rm -fa\n           time=\"2023-05-09T15:12:09Z\" level=error msg=\"container not running\"\n           697f78b2fd3388420ac0839c6f3f071ebf87bb1e62a1f8ab0ec3d86862aab638\n           7f5e8d5b95b63e2b41741d069db79b1038e198f734facafd6fa690b1cc446f5b\n```"
+        },
+        {
+            "user": "Luap99",
+            "body": "Because you have to repush anyway: During the demo I also saw https://github.com/containers/podman/pull/18163/commits/9bd833bcfd07bf2b3c258a617d88255327b91669, feel free revert that as well."
+        },
+        {
+            "user": "Luap99",
+            "body": "> wow I didn't even expect the stderr check to fail but this is exactly why it is needed:\n> \n> ```\n>            # podman [options] rm -fa\n>            time=\"2023-05-09T15:12:09Z\" level=error msg=\"container not running\"\n>            697f78b2fd3388420ac0839c6f3f071ebf87bb1e62a1f8ab0ec3d86862aab638\n>            7f5e8d5b95b63e2b41741d069db79b1038e198f734facafd6fa690b1cc446f5b\n> ```\n\nIn case this isn't clear `time=\"2023-05-09T15:12:09Z\" level=error msg=\"container not running\"` is logged by runc not podman. In the crun tests it is `open pidfd: No such process`\n\nWhich makes me think about https://github.com/containers/podman/issues/18452 except it is consistently in your PR so it is not a flake with your change. To me this sounds like we are trying to stop a container which is already stopped."
+        },
+        {
+            "user": "mheon",
+            "body": "Since both runtimes are doing it I can't complain too hard, but this definitely feels like unnecessary error logging that is just going to cause problems... There is no way I see to fully eliminate the TOCTOU with stopping containers, so the best thing for Podman to do is just to go ahead and kill the container, and then handle errors from the runtime as necessary (usually by just ignoring them - Podman here exits cleanly because it knows that nothing went wrong, the container's stopped, just not by us).\n\nAs to why I've made it 100% consistent... I have some ideas (parallel removal of both dependency and dependent container in two threads, with the container with dependencies trying to recurse to the dependent, introduces a lot of potentially interesting race conditions), but again, it shouldn't matter - Podman did the right thing and ate the error, the only issue is the OCI runtimes insisting on printing unnecessary warnings."
+        },
+        {
+            "user": "Luap99",
+            "body": "I agree there is always a race and we have little control over that. But as a user I really do not want to see an error reported. It just makes no sense. Problem 1 is that we pass the plain stdout/err streams down to the oci runtime which means we have zero control over the output they print.\nSecond, the part I do not fully understand here is where is the race in your test? You spawn two top containers. The process should not exit on its own. Unless there is a bug in both runtimes podman actually calls the oci runtime twice to kill the process, otherwise the runtime would not complain."
+        },
+        {
+            "user": "mheon",
+            "body": "My current thinking is as follows: To remove a container, we have to stop it, which unlocks the container to wait for it to successfully terminate. Given that there are two threads trying to remove the first container (the original thread, which presumably gets in first and successfully stops and removes it, and the second thread, which started removing the other container, tried to recurse to its dependency container, found it was locked, but was able to grab the lock when stop unlocked it), we probably have two stopContainer operations overlapping."
+        },
+        {
+            "user": "mheon",
+            "body": "Re-pushed with the extra commit reverted and changed removeContainer to accept a struct. I'll keep thinking about the OCI runtime thing. I'm leaning towards not printing runtime STDOUT/STDERR unless `--log-level=debug` or below is set, but that's a potentially significant change and I'd want signoff from the team on that."
+        },
+        {
+            "user": "edsantiago",
+            "body": "I think we might find that the runtime is responsible for some fatal errors where it's good to have users see the messages; like this, for a very quick example: https://github.com/containers/podman/blob/287a4193e70301a63908ca8529eb10c39265ee24/test/system/410-selinux.bats#L202-L213\n\nAlso, @mheon, tests are failing with a panic. Looks like an arg mismatch or deref of uninitialized pointer"
+        },
+        {
+            "user": "vrothberg",
+            "body": "> I agree there is always a race and we have little control over that. But as a user I really do not want to see an error reported. It just makes no sense. Problem 1 is that we pass the plain stdout/err streams down to the oci runtime which means we have zero control over the output they print.\n\nYes, we use `os.Stdout` and `os.Stderr` when exec'ing the runtimes.  We should probably use streams and debug-log them by default."
+        },
+        {
+            "user": "Luap99",
+            "body": "I don't know what kind of errors the runtimes report but there could be a lot of ones we actually want to see as @edsantiago shows. And hiding them on debug level will make flake catching/debugging much harder in CI.\n\n"
+        },
+        {
+            "user": "vrothberg",
+            "body": "> I don't know what kind of errors the runtimes report but there could be a lot of ones we actually want to see as @edsantiago shows. And hiding them on debug level will make flake catching/debugging much harder in CI.\n\nAbsolutely.  In case of an error, we need to think of a way to add the stdout and stderr logs to the error message.\n\nIn case there is no error but _some_ logs on stdout/stderr, then I think they should go into the debug log."
+        },
+        {
+            "user": "Luap99",
+            "body": "> > I don't know what kind of errors the runtimes report but there could be a lot of ones we actually want to see as @edsantiago shows. And hiding them on debug level will make flake catching/debugging much harder in CI.\n> \n> Absolutely. In case of an error, we need to think of a way to add the stdout and stderr logs to the error message.\n> \n> In case there is no error but _some_ logs on stdout/stderr, then I think they should go into the debug log.\n\nAgreed but this is not something this PR should do because it will hide the issue, this patch is currently broken. It tries to kill the same container twice which is not something we should do.\n\nIt is trivial to reproduce locally. The flake happens more than 50% of the tries:\n```\n$ bin/podman run --name t1 -d alpine top && bin/podman run --name t2 --network container:t1 -d alpine top && bin/podman rm -fa\n23cf575c1dcfcc865ac8332957eaf1e111acc475ff9f6a225636968aae8d1de1\n6b7a43da9f040230a53ede1b04dc1a907ebc0a3a7bf194fc6372b7229af035f6\nERRO[0000] Sending signal 15 to container 6b7a43da9f040230a53ede1b04dc1a907ebc0a3a7bf194fc6372b7229af035f6 \nERRO[0000] Sending signal 15 to container 6b7a43da9f040230a53ede1b04dc1a907ebc0a3a7bf194fc6372b7229af035f6 \n2023-05-10T08:40:02.420152Z: open pidfd: No such process\nERRO[0000] Sending signal 15 to container 23cf575c1dcfcc865ac8332957eaf1e111acc475ff9f6a225636968aae8d1de1 \n6b7a43da9f040230a53ede1b04dc1a907ebc0a3a7bf194fc6372b7229af035f6\n23cf575c1dcfcc865ac8332957eaf1e111acc475ff9f6a225636968aae8d1de1\n```\n\nNote I patched the logrus.Error in to prove podman is actually trying to kill it twice:\n```diff\ndiff --git a/libpod/oci_conmon_common.go b/libpod/oci_conmon_common.go\nindex d803276b1..99a6dccc5 100644\n--- a/libpod/oci_conmon_common.go\n+++ b/libpod/oci_conmon_common.go\n@@ -356,7 +356,7 @@ func generateResourceFile(res *spec.LinuxResources) (string, []string, error) {\n // If all is set, send to all PIDs in the container.\n // All is only supported if the container created cgroups.\n func (r *ConmonOCIRuntime) KillContainer(ctr *Container, signal uint, all bool) error {\n-       logrus.Debugf(\"Sending signal %d to container %s\", signal, ctr.ID())\n+       logrus.Errorf(\"Sending signal %d to container %s\", signal, ctr.ID())\n        runtimeDir, err := util.GetRuntimeDir()\n        if err != nil {\n                return err\n```"
+        },
+        {
+            "user": "mheon",
+            "body": "I fully expected this, and honestly I don’t see it as much of a problem\nmodulo the OCI runtime error - there are no real consequences for the\ndouble kill beyond a few wasted syscalls. If you want it fixed I will look\ninto it but it will be a substantial change.\n\nOn Wed, May 10, 2023 at 04:42 Paul Holzinger ***@***.***>\nwrote:\n\n> I don't know what kind of errors the runtimes report but there could be a\n> lot of ones we actually want to see as @edsantiago\n> <https://github.com/edsantiago> shows. And hiding them on debug level\n> will make flake catching/debugging much harder in CI.\n>\n> Absolutely. In case of an error, we need to think of a way to add the\n> stdout and stderr logs to the error message.\n>\n> In case there is no error but *some* logs on stdout/stderr, then I think\n> they should go into the debug log.\n>\n> Agreed but this is not something this PR should do because it will hide\n> the issue, this patch is currently broken. It tries to kill the same\n> container twice which is not something we should do.\n>\n> It is trivial to reproduce locally. The flake happens more than 50% of the\n> tries:\n>\n> $ bin/podman run --name t1 -d alpine top && bin/podman run --name t2 --network container:t1 -d alpine top && bin/podman rm -fa\n> 23cf575c1dcfcc865ac8332957eaf1e111acc475ff9f6a225636968aae8d1de1\n> 6b7a43da9f040230a53ede1b04dc1a907ebc0a3a7bf194fc6372b7229af035f6\n> ERRO[0000] Sending signal 15 to container 6b7a43da9f040230a53ede1b04dc1a907ebc0a3a7bf194fc6372b7229af035f6\n> ERRO[0000] Sending signal 15 to container 6b7a43da9f040230a53ede1b04dc1a907ebc0a3a7bf194fc6372b7229af035f6\n> 2023-05-10T08:40:02.420152Z: open pidfd: No such process\n> ERRO[0000] Sending signal 15 to container 23cf575c1dcfcc865ac8332957eaf1e111acc475ff9f6a225636968aae8d1de1\n> 6b7a43da9f040230a53ede1b04dc1a907ebc0a3a7bf194fc6372b7229af035f6\n> 23cf575c1dcfcc865ac8332957eaf1e111acc475ff9f6a225636968aae8d1de1\n>\n> Note I patched the logrus.Error in to prove the podman is actually trying\n> to kill it twice:\n>\n> diff --git a/libpod/oci_conmon_common.go b/libpod/oci_conmon_common.go\n> index d803276b1..99a6dccc5 100644--- a/libpod/oci_conmon_common.go+++ b/libpod/oci_conmon_common.go@@ -356,7 +356,7 @@ func generateResourceFile(res *spec.LinuxResources) (string, []string, error) {\n>  // If all is set, send to all PIDs in the container.\n>  // All is only supported if the container created cgroups.\n>  func (r *ConmonOCIRuntime) KillContainer(ctr *Container, signal uint, all bool) error {-       logrus.Debugf(\"Sending signal %d to container %s\", signal, ctr.ID())+       logrus.Errorf(\"Sending signal %d to container %s\", signal, ctr.ID())\n>         runtimeDir, err := util.GetRuntimeDir()\n>         if err != nil {\n>                 return err\n>\n> —\n> Reply to this email directly, view it on GitHub\n> <https://github.com/containers/podman/pull/18507#issuecomment-1541590472>,\n> or unsubscribe\n> <https://github.com/notifications/unsubscribe-auth/AB3AOCGVH72AA7XJBFCKCBLXFNIGJANCNFSM6AAAAAAX2IV6HE>\n> .\n> You are receiving this because you were mentioned.Message ID:\n> ***@***.***>\n>\n"
+        },
+        {
+            "user": "Luap99",
+            "body": "> I fully expected this, and honestly I don’t see it as much of a problem\nmodulo the OCI runtime error - there are no real consequences for the\ndouble kill beyond a few wasted syscalls. If you want it fixed I will look\ninto it but it will be a substantial change.\n\nMaybe I am missing something but to me this looks like our locking is just not correctly working. The problem here is clearly two threads trying to stop in parallel. So why do we allow two threads to change the container state at the same time? If locking would work as I expect it the second thread should be blocked and then when it gets the lock it must check for stopped/removed and not try to do the same again."
+        },
+        {
+            "user": "vrothberg",
+            "body": "Not sure whether that applies to this very symptom but we decided to allow for stopping a container even if it's in the `stopping` state since the stopping/killing process may have been killed itself."
+        },
+        {
+            "user": "mheon",
+            "body": "My current tracing supports what @vrothberg is saying. Stopping the container deliberately unlocks (to ensure `podman ps` and friends don't hang). This allows the second thread to get in and recursively start removing the container that is in the process of being stopped, which rapidly leads to the second thread also trying to stop the container. The race is whether the container has time to exit before the second thread sends a signal. It's actually a quite narrow race because we do ping container PID1 with Signal 0 beforehand, so I'm surprised it manages to be this consistent."
+        },
+        {
+            "user": "mheon",
+            "body": "Added the second, in-memory container lock we were talking about; let's see if the tests start deadlocking."
+        },
+        {
+            "user": "TomSweeneyRedHat",
+            "body": "No joy on the tests @mheon "
+        },
+        {
+            "user": "edsantiago",
+            "body": "@mheon FWIW your `handle recursive locking properly` commit continues to work just fine on #17831. I can't remember if it's four runs or five, but either way no unusual flakes."
+        },
+        {
+            "user": "mheon",
+            "body": "Tests passing, this is ready now. @Luap99 PTAL"
+        },
+        {
+            "user": "Luap99",
+            "body": "LGTM"
+        },
+        {
+            "user": "mheon",
+            "body": "@containers/podman-maintainers PTAL"
+        },
+        {
+            "user": "TomSweeneyRedHat",
+            "body": "LGTM\nbut definitely want another head nod given its size."
+        },
+        {
+            "user": "rhatdan",
+            "body": "/lgtm"
+        }
+    ],
+    "cross_references": []
+}

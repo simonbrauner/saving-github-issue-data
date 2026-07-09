@@ -1,0 +1,34 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 28365,
+    "type": "pull_request",
+    "title": "libpod: fix data race on deferredErr in attachExecHTTP",
+    "state": "closed",
+    "labels": [
+        "No New Tests"
+    ],
+    "user": "crawfordxx",
+    "body": "## Description\n\n`ExecContainerHTTP` returns `attachChan` to its caller *before* `attachExecHTTP` has finished. The caller holds a deferred `close(holdConnOpen)` that fires when the calling function returns — which can happen while `attachExecHTTP` is still running through its own deferred cleanup functions.\n\nThis creates a data race: the goroutine inside `attachExecHTTP` reads the named return `deferredErr` after `<-holdConnOpen` unblocks, but `attachExecHTTP` may still be assigning `deferredErr` (directly or via deferred functions) at that moment. Concurrent access to an interface value without synchronization is unsound per the Go memory model and can produce torn reads (non-nil type with nil data pointer), leading to the nil-pointer panic observed in CI:\n\n```\npanic: runtime error: invalid memory address or nil pointer dereference\nnet.(*OpError).Unwrap(0x2c31560?)\nerrors.is({0x1f6eee0?, 0x0?}, ...)   ← interface type set, data nil\ngithub.com/containers/podman/v6/libpod.hijackWriteError(...)\ngithub.com/containers/podman/v6/libpod.attachExecHTTP.func3()\n```\n\n## Fix\n\nAdd a `done` channel that is closed by the first-registered (last-to-run) deferred function in `attachExecHTTP`, i.e. after every other cleanup defer has completed. The goroutine now waits for both `<-holdConnOpen` and `<-done` before reading `deferredErr`. This establishes a proper happens-before relationship between the final write to `deferredErr` and the goroutine's read.\n\nFixes #28277\n\n## Testing\n\nThe race is intermittent and only reproducible under CI load. The fix is provably correct by Go memory model analysis: `close(done)` happens-after the last write to `deferredErr`, and `<-done` happens-before the goroutine's read.",
+    "comments": [
+        {
+            "user": "Honny1",
+            "body": "Thanks for the contribution! The fix looks correct to me. But I have a question: Did you consider using a `sync.Mutex` to protect `deferredErr` instead of a channel? Could you explain why you went with the channel approach?\n\n> Adding `No New Test` Label."
+        },
+        {
+            "user": "crawfordxx",
+            "body": "The channel approach fits the problem more naturally here.  is written by multiple deferred functions in  (directly, and through ) — protecting those with a  would mean adding lock/unlock around every assignment site scattered across the deferred stack, which is fragile.\n\nMore importantly, what we actually need is not mutual exclusion but *completion signaling*: the goroutine should not read  until all cleanup code in  has finished running. A channel closed by the first-registered (last-to-run) defer precisely expresses that: `close(done)` happens-after every other deferred write, and `<-done` happens-before the read. This directly maps to the Go memory model's happens-before guarantee we need.\n\nA `sync.WaitGroup` would also work, but it is more verbose for a single-event signal. A `sync.Mutex` would work too, but it would require touching every write site and doesn't convey the intent as clearly."
+        },
+        {
+            "user": "Honny1",
+            "body": "LGTM! Once you fix the DCO and squash commits, we can merge."
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 28475
+        }
+    ]
+}

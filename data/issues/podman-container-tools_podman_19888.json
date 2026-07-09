@@ -1,0 +1,94 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 19888,
+    "type": "pull_request",
+    "title": "fix pod cgroup lifecycle",
+    "state": "closed",
+    "labels": [
+        "lgtm",
+        "approved",
+        "release-note",
+        "locked - please file new issue/PR"
+    ],
+    "user": "giuseppe",
+    "body": "while investigating 19175, I've found a bunch of issues with the way we handle the pod cgroup:\n\n- The pod cgroup was not honoring the cgroup limits after a reboot\n- The cgroup once created was leaked, even if the pod is stopped\n- --infra=false was not creating any pod cgroup, and all the limits were ignored.\n\nMore details in the individual commits.  There is some space for improvements, e.g. not trying to guess the systemd path but we would need to fix it in c/common first, we can do this incrementally later.\n\nCloses: https://github.com/containers/podman/issues/19175\n\n<!--\nThanks for sending a pull request!\n\nPlease make sure you've read our contributing guidelines and how to submit a pull request (https://github.com/containers/podman/blob/main/CONTRIBUTING.md#submitting-pull-requests).\n\nIn case you're only changing docs, make sure to prefix the pull-request title with \"[CI:DOCS]\". That will prevent functional tests from running and save time and energy.\n\nFinally, be sure to sign commits with your real name. Since by opening\na PR you already have commits, you can add signatures if needed with\nsomething like `git commit -s --amend`.\n-->\n\n#### Does this PR introduce a user-facing change?\n\n<!--\nIf no, just write `None` in the release-note block below. If yes, a release note\nis required: Enter your extended release note in the block below. If the PR\nrequires additional action from users switching to the new release, include the\nstring \"action required\".\n\nFor more information on release notes, please follow the Kubernetes model:\nhttps://git.k8s.io/community/contributors/guide/release-notes.md\n-->\n\n```release-note\nNow pod cgroup limits are honored after a reboot\n```\n",
+    "comments": [
+        {
+            "user": "openshift-ci[bot]",
+            "body": "[APPROVALNOTIFIER] This PR is **APPROVED**\n\nThis pull-request has been approved by: *<a href=\"https://github.com/containers/podman/pull/19888#\" title=\"Author self-approved\">giuseppe</a>*\n\nThe full list of commands accepted by this bot can be found [here](https://go.k8s.io/bot-commands?repo=containers%2Fpodman).\n\nThe pull request process is described [here](https://git.k8s.io/community/contributors/guide/owners.md#the-code-review-process)\n\n<details >\nNeeds approval from an approver in each of these files:\n\n- ~~[OWNERS](https://github.com/containers/podman/blob/main/OWNERS)~~ [giuseppe]\n\nApprovers can indicate their approval by writing `/approve` in a comment\nApprovers can cancel approval by writing `/approve cancel` in a comment\n</details>\n<!-- META={\"approvers\":[]} -->"
+        },
+        {
+            "user": "mheon",
+            "body": "Changes LGTM"
+        },
+        {
+            "user": "TomSweeneyRedHat",
+            "body": "Code changes LGTM, however, the tests are very red."
+        },
+        {
+            "user": "martinpitt",
+            "body": "This [regresses cockpit-podman](https://artifacts.dev.testing-farm.io/d3bdd14e-55b4-4ec7-a899-52b83d75bdc6/). The pod [does not show mounted volumes any more](https://artifacts.dev.testing-farm.io/d3bdd14e-55b4-4ec7-a899-52b83d75bdc6/work-podman-miscb4slsr_0/plans/cockpit-podman/podman-misc/execute/data/guest/default-0/test/browser/other-1/data/TestApplication-testPods-fedora-39-127.0.0.1-22-FAIL.png) . This is the first time these failed in podman, so we now need to learn how to work together to efficiently debug them.\n\nBut let's first see what the other tests say (many are still running) -- if they fail as well, then these are probably easier to debug for you."
+        },
+        {
+            "user": "giuseppe",
+            "body": "> This [regresses cockpit-podman](https://artifacts.dev.testing-farm.io/d3bdd14e-55b4-4ec7-a899-52b83d75bdc6/). The pod [does not show mounted volumes any more](https://artifacts.dev.testing-farm.io/d3bdd14e-55b4-4ec7-a899-52b83d75bdc6/work-podman-miscb4slsr_0/plans/cockpit-podman/podman-misc/execute/data/guest/default-0/test/browser/other-1/data/TestApplication-testPods-fedora-39-127.0.0.1-22-FAIL.png) . This is the first time these failed in podman, so we now need to learn how to work together to efficiently debug them.\n\nI can take a look right now.  Is there a way to replicate the issue from the podman CLI?"
+        },
+        {
+            "user": "giuseppe",
+            "body": "I am trying locally with cockpit now.  Do you have a screenshot with the expected output?  Or how was the pod created so I can test with a working podman version?"
+        },
+        {
+            "user": "martinpitt",
+            "body": "A CLI reproducer does not automatically pop out, as c-podman uses the REST API. I (and the whole cockpit team) are travelling back from a sprint right now, and I don't currently have enough internet to investigate with the built COPR here, but I'll do that first thing on Monday.\n\nBut that shouldn't actually be that hard: High level, it creates a pod, and queries the `Mounts` property from the infrastructure.\n\n```sh\nsystemctl --user start podman.socket\npodman pod create -v /tmp:/hosttmp p1\ncurl --unix $XDG_RUNTIME_DIR/podman/podman.sock http://none/v1.12/libpod/pods/p1/json\n```\nfrom that, look at the `mounts` property, it should have one entry like\n\n```json\n\"mounts\":[{\"Type\":\"bind\",\"Source\":\"/tmp\",\"Destination\":\"/hosttmp\",\"Driver\":\"\",\"Mode\":\"\",\"Options\":[\"nosuid\",\"nodev\",\"rbind\"],\"RW\":true,\"Propagation\":\"rprivate\"}]\n```\n\nThat's not actually what cockpit-podman looks at for this test, though, but it 's a good first spot-check. For the \"real\" thing, get the infra container name from `podman ps -a`, and introspect that:\n\n```\ncurl --unix $XDG_RUNTIME_DIR/podman/podman.sock http://none/v1.12/libpod/containers/2892d5ae6ccf-infra/json\n```\n\nreplace 2892d5ae6ccf-infra with the actual name, of course. On current podman, this looks like\n```json\n\"Mounts\":[{\"Type\":\"bind\",\"Source\":\"/tmp\",\"Destination\":\"/hosttmp\",\"Driver\":\"\",\"Mode\":\"\",\"Options\":[\"nosuid\",\"nodev\",\"rbind\"],\"RW\":true,\"Propagation\":\"rprivate\"}]\n```\nand it looks like with this PR it becomes emtpy.\n\nAre you able to quickly test that with your version? If that succeeds, I'll need to be at a workplace that's better than a moving train :grin: \n\nThanks!"
+        },
+        {
+            "user": "martinpitt",
+            "body": "With the simple \"p1\" example that I put above, it's supposed to look like that (you need to click on the disk icon to get the popup):\n\n![image](https://github.com/containers/podman/assets/200109/e645072e-fe45-4aed-af55-66d02acee86a)\n\nWith the integration test case, it should look like this, that pod also has a port mapping (which does work with this PR):\n\n![image](https://github.com/containers/podman/assets/200109/d89d75cb-ff85-4955-bafd-91c0a5158196)\n"
+        },
+        {
+            "user": "martinpitt",
+            "body": "I tried the above in a F38 VM with the build here, and running commands as root. I. e. system podman, not user (that's also what that test uses):\n```\ndnf install https://download.copr.fedorainfracloud.org/results/packit/containers-podman-19888/fedora-38-x86_64/06386739-podman/podman-4.7.0~dev-1.20230908110915905267.pr19888.1707.de31714b6.fc38.x86_64.rpm\npodman pod create -v /tmp:/hosttmp p1\nsystemctl start podman.socket\ncurl --unix /run/podman/podman.sock http://none/v1.12/libpod/pods/p1/json\n```\nAnd that has *no* `mounts` property any more:\n```json\n\"Id\":\"af07236b92f6fcc9427fd39ac1420fbbfc9b8f5d0f7ae20d1a19a7717587c1c8\",\"Name\":\"p1\",\"Created\":\"2023-09-08T12:50:19.293219092Z\",\"CreateCommand\":[\"podman\",\"pod\",\"create\",\"-v\",\"/tmp:/hosttmp\",\"p1\"],\"ExitPolicy\":\"continue\",\"State\":\"Created\",\"Hostname\":\"\",\"CreateCgroup\":true,\"CgroupParent\":\"machine.slice\",\"CgroupPath\":\"machine.slice/machine-libpod_pod_af07236b92f6fcc9427fd39ac1420fbbfc9b8f5d0f7ae20d1a19a7717587c1c8.slice\",\"CreateInfra\":true,\"InfraContainerID\":\"9b365ca8c8ee0b7a0620c4d30f7095e2156b10925ba10625640cf3c420a0b4e1\",\"InfraConfig\":{\"PortBindings\":{},\"HostNetwork\":false,\"StaticIP\":\"\",\"StaticMAC\":\"\",\"NoManageResolvConf\":false,\"DNSServer\":null,\"DNSSearch\":null,\"DNSOption\":null,\"NoManageHosts\":false,\"HostAdd\":null,\"Networks\":[\"podman\"],\"NetworkOptions\":null,\"pid_ns\":\"private\",\"userns\":\"host\",\"uts_ns\":\"private\"},\"SharedNamespaces\":[\"ipc\",\"net\",\"uts\"],\"NumContainers\":1,\"Containers\":[{\"Id\":\"9b365ca8c8ee0b7a0620c4d30f7095e2156b10925ba10625640cf3c420a0b4e1\",\"Name\":\"af07236b92f6-infra\",\"State\":\"created\"}],\"LockNumber\":0}\n```\n\nand introspecting the infra container:\n```\ncurl --unix /run/podman/podman.sock http://none/v1.12/libpod/containers/af07236b92f6-infra/json\n```\n\nhas `\"Mounts\":[]`\n\nSo that's a nice CLI reproducer, and should also be not too hard for your own tests?\n\nCheers! (I'm really happy that this works as intended!)"
+        },
+        {
+            "user": "giuseppe",
+            "body": "I think the culprit is the following patch:\n\n```\ncommit 3aae72966549338cc0fc9658f0c65cd087df50f9\nAuthor: Giuseppe Scrivano <gscrivan@redhat.com>\nDate:   Thu Sep 7 23:21:51 2023 +0200\n\n    pod: do not inherit mounts for infra\n    \n    do not inherit the mounts from containers.conf for the infra\n    container.\n    \n    Signed-off-by: Giuseppe Scrivano <gscrivan@redhat.com>\n\ndiff --git a/pkg/specgen/generate/pod_create.go b/pkg/specgen/generate/pod_create.go\nindex d8759a931..d387d6b0f 100644\n--- a/pkg/specgen/generate/pod_create.go\n+++ b/pkg/specgen/generate/pod_create.go\n@@ -42,6 +42,7 @@ func MakePod(p *entities.PodSpec, rt *libpod.Runtime) (_ *libpod.Pod, finalErr e\n                }\n                p.PodSpecGen.InfraImage = imageName\n                p.PodSpecGen.InfraContainerSpec.RawImageName = imageName\n+               p.PodSpecGen.InfraContainerSpec.Mounts = []specs.Mount{}\n        }\n \n        if !p.PodSpecGen.NoInfra && p.PodSpecGen.InfraContainerSpec != nil {\n```\n\nI'll drop it from the current series"
+        },
+        {
+            "user": "giuseppe",
+            "body": "I've opened a different PR for that issue: https://github.com/containers/podman/pull/19902"
+        },
+        {
+            "user": "giuseppe",
+            "body": "cockpit is happy again."
+        },
+        {
+            "user": "rhatdan",
+            "body": "/lgtm"
+        },
+        {
+            "user": "martinpitt",
+            "body": "This was very smooth, thanks @giuseppe ! That's exactly how I wanted these to work :tada: "
+        },
+        {
+            "user": "mheon",
+            "body": "/hold\nCI is stuck (total success is red)"
+        },
+        {
+            "user": "rhatdan",
+            "body": "/hold cancel"
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 19175
+        },
+        {
+            "organization": "packit",
+            "repository": "packit-service",
+            "number": 1911
+        }
+    ]
+}

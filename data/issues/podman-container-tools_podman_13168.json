@@ -1,0 +1,122 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 13168,
+    "type": "issue",
+    "title": "Leak the HTTP*PROXY environment variables into the VM when doing a podman machine start.",
+    "state": "closed",
+    "labels": [
+        "Good First Issue",
+        "kind/feature",
+        "locked - please file new issue/PR"
+    ],
+    "user": "rhatdan",
+    "body": "Leak the following environment variables\n```\nvar ProxyEnv = []string{\n\t\"http_proxy\",\n\t\"https_proxy\",\n\t\"ftp_proxy\",\n\t\"no_proxy\",\n\t\"HTTP_PROXY\",\n\t\"HTTPS_PROXY\",\n\t\"FTP_PROXY\",\n\t\"NO_PROXY\",\n}\n```\nInto the VM at start time.\n\n<@cyberpear> systemd will set them if you pass on the kernel CMDLINE `systemd.setenv=VARIABLE=VALUE` at boot\n",
+    "comments": [
+        {
+            "user": "rhatdan",
+            "body": "The goal here is if you are sitting on a MAC and have these settings set, you want your Podman within the VM to follow them also."
+        },
+        {
+            "user": "esendjer",
+            "body": "Hey @rhatdan\nMay I take this?"
+        },
+        {
+            "user": "rhatdan",
+            "body": "Go for it."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@baude thinks this could be done via qemu."
+        },
+        {
+            "user": "esendjer",
+            "body": "> @baude thinks this could be done via qemu.\n\nSGTM. Unfortunately, I have no ideas how this could be done with qemu. I would thankful if @baude or somebody else share their thoughts or any useful links to clarify this.\nThank you"
+        },
+        {
+            "user": "flouthoc",
+            "body": "@rhatdan @esendjer I think this is already handled here: https://github.com/containers/podman/pull/12748"
+        },
+        {
+            "user": "flouthoc",
+            "body": "Please use the latest `podman-remote` and `podman-server` all proxy variables must be already set.\n\nEdit: `podman-server` on mac must be updated so this works."
+        },
+        {
+            "user": "flouthoc",
+            "body": "I see we would also need them to be in `/etc/systemd/system.conf.d/proxy.conf` so that entire system can use it. @esendjer you can use the above PR to extend variable to `/etc/systemd/system.conf.d/proxy.conf` via ignition in the similar manner."
+        },
+        {
+            "user": "esendjer",
+            "body": "> I see we would also need them to be in `/etc/systemd/system.conf.d/proxy.conf` so that entire system can use it. @esendjer you can use the above PR to extend variable to `/etc/systemd/system.conf.d/proxy.conf` via ignition in the similar manner.\n\nGot it. Thanks! Will do it"
+        },
+        {
+            "user": "flouthoc",
+            "body": "@esendjer Something similar on the lines of following diff should be enough.\n\n```diff\ndiff --git a/pkg/machine/ignition.go b/pkg/machine/ignition.go\nindex 206c9144f..89c5f515a 100644\n--- a/pkg/machine/ignition.go\n+++ b/pkg/machine/ignition.go\n@@ -363,7 +363,7 @@ Delegate=memory pids cpu io\n \t\t},\n \t})\n \n-\tsetProxyOpts := getProxyVariables()\n+\tsetProxyOpts := getProxyVariables(false)\n \tif setProxyOpts != \"\" {\n \t\tfiles = append(files, File{\n \t\t\tNode: Node{\n@@ -381,9 +381,26 @@ Delegate=memory pids cpu io\n \t\t})\n \t}\n \n+\tsetProxyOpts = getProxyVariables(true)\n+\tif setProxyOpts != \"\" {\n+\t\tfiles = append(files, File{\n+\t\t\tNode: Node{\n+\t\t\t\tGroup: getNodeGrp(\"root\"),\n+\t\t\t\tPath:  \"/etc/systemd/system/system.conf.d/http-proxy.conf\",\n+\t\t\t\tUser:  getNodeUsr(\"root\"),\n+\t\t\t},\n+\t\t\tFileEmbedded1: FileEmbedded1{\n+\t\t\t\tAppend: nil,\n+\t\t\t\tContents: Resource{\n+\t\t\t\t\tSource: encodeDataURLPtr(setProxyOpts),\n+\t\t\t\t},\n+\t\t\t\tMode: intToPtr(0644),\n+\t\t\t},\n+\t\t})\n+\t}\n+\n \tsetDockerHost := `export DOCKER_HOST=\"unix://$(podman info -f \"{{.Host.RemoteSocket.Path}}\")\"\n `\n-\n \tfiles = append(files, File{\n \t\tNode: Node{\n \t\t\tGroup: getNodeGrp(\"root\"),\n@@ -506,11 +523,18 @@ func prepareCertFile(path string, name string) (File, error) {\n \treturn file, nil\n }\n \n-func getProxyVariables() string {\n+func getProxyVariables(systemd bool) string {\n \tproxyOpts := \"\"\n+\tif systemd {\n+\t\tproxyOpts = \"[Service]\\n\"\n+\t}\n \tfor _, variable := range config.ProxyEnv {\n \t\tif value, ok := os.LookupEnv(variable); ok {\n-\t\t\tproxyOpts += fmt.Sprintf(\"\\n export %s=%s\", variable, value)\n+\t\t\tif !systemd {\n+\t\t\t\tproxyOpts += fmt.Sprintf(\"\\n export %s=%s\", variable, value)\n+\t\t\t} else {\n+\t\t\t\tproxyOpts += fmt.Sprintf(\"Environment=\\\"%s=%s\\\"\\n\", variable, value)\n+\t\t\t}\n \t\t}\n \t}\n \treturn proxyOpts\n```"
+        },
+        {
+            "user": "esendjer",
+            "body": "Hey folks!\nThank you for your advice and don't worry, I'm researching the question about how these env vars could be provided into VM in the best way and spread for the whole system.\nFor instance: what is better usage `/etc/environment` or `/etc/profile.d/proxy-opts.sh`, or another instance: is it a good way to use the ignition with providing a `.conf` file for systemd or to use passed options to the kernel via cmdline..."
+        },
+        {
+            "user": "esendjer",
+            "body": "The research has been done. Smal outcomes are below.\n- [environment.d](https://www.freedesktop.org/software/systemd/man/environment.d.html) and its files _contain lists of environment variable assignments for services started by the systemd user instance._ So, if I understand this right it doesn't set envs for the whole system services.\n- qemu and [cmdline](https://www.qemu.org/docs/master/system/linuxboot.html) couldn't be applied here because qemu allows adding or overriding kernel options only when an external kernel is used.\n- In my point of view, a better way is using [system and session service manager configuration files](https://www.freedesktop.org/software/systemd/man/systemd-system.conf.html) such as `/etc/systemd/system.conf.d/*.conf` file,  like @flouthoc mentioned before.\n\nSo it will be done with the last option\n\nUPD\npodman is run under the core user in VM under systems user manager, for this reason, it gets envs from `environment.d` files. Because of that, adding envs to a `/etc/environment.d/*.conf` file in a VM was added in the related PR "
+        },
+        {
+            "user": "rhatdan",
+            "body": "If this is done in ignition, then it will only happen once correct, not every time the machine is started?"
+        },
+        {
+            "user": "esendjer",
+            "body": "Unfortunately, it's true for now, but at the same time, the current state doesn't allow propagating anything on a start too, because there are no mechanisms for this here now.\n\nLet me dive deeper into the question about how it might be done on a start.\n\nAlso, I would ask you about embedding bash/python code in ignition is ok? I'm not sure that this way will be used, but it's important to me to know this before."
+        },
+        {
+            "user": "rhatdan",
+            "body": "I have no idea, best idea is to try it out and see if it works.\n"
+        },
+        {
+            "user": "flouthoc",
+            "body": "@rhatdan @esendjer I think it will happen everytime when we do `machine start` cause it did persist config in filesystem. We don't need to anything special @esendjer have you tried `machine init` and then `machine start` followed by a `machine stop` and then `machine start` again. It should still persist variables.\n\nThe only drawback is that it will keep the environment variable exactly as it was on `host` when user did `machine init`.  "
+        },
+        {
+            "user": "esendjer",
+            "body": "@flouthoc as far as I see the main goal of this issue and @rhatdan's question is in providing **actual** envs from a host into guests system avoiding a need of recreating the last one, for instance, when somebody overrides/update their envs to new, a VM has to be recreated to have a fresh envs."
+        },
+        {
+            "user": "rhatdan",
+            "body": "Correct, I am fine with this improvement but this is not really fixed if I do\n\npodman macine init\npodman machine start\npodman machine start\nexport HTTP_PROXY=1.2.3.4\npodman machine start\n\nWill not work."
+        },
+        {
+            "user": "esendjer",
+            "body": "I hope, in the last commit I found a good way to provide and propagate environment variables related to proxy settings on a start"
+        },
+        {
+            "user": "esendjer",
+            "body": "Sorry, but unfortunately, it's still is not good enough\nit needs to do start twice for applying new settings\n\nWIP"
+        },
+        {
+            "user": "baude",
+            "body": "This would be an excellent candidate for a cabal, where all the community experts can contribute.  What say you?"
+        },
+        {
+            "user": "esendjer",
+            "body": "> This would be an excellent candidate for a cabal, where all the community experts can contribute. What say you?\n\n@baude sorry, I don't understand what **for a cabal** means. Is it an offer to attract the attention of the community experts and ask them for help and advice?\n\nSo, maybe it is so. But I've managed to deal with the issue, just take a look at the latest commit. In that commit, all settings are propagated on a start successfully without a need to re-init and restart VM twice."
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 13209
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 18759
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 18772
+        }
+    ]
+}

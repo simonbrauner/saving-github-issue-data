@@ -1,0 +1,128 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 4592,
+    "type": "pull_request",
+    "title": "rootless: use RootlessKit port forwarder",
+    "state": "closed",
+    "labels": [
+        "size/XXL",
+        "lgtm",
+        "approved",
+        "locked - please file new issue/PR"
+    ],
+    "user": "AkihiroSuda",
+    "body": "RootlessKit port forwarder has a lot of advantages over the slirp4netns port forwarder:\n\n* Very high throughput.\n  Benchmark result on Travis: socat: 5.2 Gbps, slirp4netns: 8.3 Gbps, RootlessKit: 27.3 Gbps\n  (https://travis-ci.org/rootless-containers/rootlesskit/builds/597056377)\n\n* Connections from the host are treated as 127.0.0.1 rather than 10.0.2.2 in the namespace.\n  No UDP issue (#4586)\n\n* No tcp_rmem issue (#4537)\n\n* Probably works with IPv6. Even if not, it is trivial to support IPv6.  (#4311)\n\n* Easily extensible for future support of SCTP\n\n* Easily extensible for future support of `lxc-user-nic` SUID network\n\n* Human-readable error messages (https://github.com/containers/libpod/issues/4804)\n\nRootlessKit port forwarder has been already adopted as the default port forwarder by Rootless Docker/Moby, and no issue has been reported AFAIK w.r.t. TCP forwarding.\n\nAs the port forwarder is imported as a Go package, no `rootlesskit` binary is required for Podman.\n\n\nFix #4586\nMay-fix #4559\nFix #4537\nMay-fix #4311\nFix #4804\n\nSee https://github.com/rootless-containers/rootlesskit/tree/v0.7.1/pkg/port/builtin\n\nSigned-off-by: Akihiro Suda <akihiro.suda.cz@hco.ntt.co.jp>",
+    "comments": [
+        {
+            "user": "AkihiroSuda",
+            "body": "Is CI failure related?\n"
+        },
+        {
+            "user": "mheon",
+            "body": "Search tests? Probably a registry flake, I'll restart"
+        },
+        {
+            "user": "AkihiroSuda",
+            "body": "Reverted to WIP due to an UDP issue: https://github.com/rootless-containers/rootlesskit/issues/86"
+        },
+        {
+            "user": "giuseppe",
+            "body": "I am impressed by the results, good work!\n\nIs RootlessKit copying the connection from the listen socket on the host to the socket in the network namespace?\n\nIs that something `slirp4netns` should also handle so that every slirp4netns user can benefit from?"
+        },
+        {
+            "user": "AkihiroSuda",
+            "body": "> Is RootlessKit copying the connection from the listen socket on the host to the socket in the network namespace?\n\nOnly the FD of `accept`-ed socket in the parent is transferred across the namespaces.\nInside the child namespace, bidirectional `io.Copy` occurs for copying data across the FD and the actual port in the namespace.\n\n> Is that something slirp4netns should also handle so that every slirp4netns user can benefit from?\n\nNot easy"
+        },
+        {
+            "user": "TomSweeneyRedHat",
+            "body": "I just restarted the failing test in hopes that it's a flake...."
+        },
+        {
+            "user": "AkihiroSuda",
+            "body": "UDP issue (https://github.com/rootless-containers/rootlesskit/issues/86) was resolved in RootlessKit v0.7.1 (https://github.com/rootless-containers/rootlesskit/pull/87).\n\nUpdated PR."
+        },
+        {
+            "user": "AkihiroSuda",
+            "body": "Is CI passing or not?\n"
+        },
+        {
+            "user": "mheon",
+            "body": "Seems green to me"
+        },
+        {
+            "user": "mheon",
+            "body": "Hm. SPECIAL_TESTING_ROOTLESS failed, according to Cirrus"
+        },
+        {
+            "user": "AkihiroSuda",
+            "body": "Where is the failure log?"
+        },
+        {
+            "user": "mheon",
+            "body": "It should show up in Github automatically. I re-triggered the tests to hopefully fix things. If that doesn't work you might want to make a trivial change and force-push to retrigger CI"
+        },
+        {
+            "user": "rh-atomic-bot",
+            "body": ":umbrella: The latest upstream changes (presumably #4730) made this pull request unmergeable. Please resolve the merge conflicts."
+        },
+        {
+            "user": "AkihiroSuda",
+            "body": "rebased"
+        },
+        {
+            "user": "AkihiroSuda",
+            "body": "reexec stuff doesn't seem working with `podman run -d` and hence CI is failing.\nAnyone can help me? \n"
+        },
+        {
+            "user": "rhatdan",
+            "body": "@mheon @giuseppe PTAL"
+        },
+        {
+            "user": "giuseppe",
+            "body": "one thing to do is to inject the `childQuit` pipe into conmon, so that the process is not killed when podman exits:\n\n```\ndiff --git a/libpod/container.go b/libpod/container.go\nindex 4f7fc067..d65fe4d1 100644\n--- a/libpod/container.go\n+++ b/libpod/container.go\n@@ -133,6 +133,7 @@ type Container struct {\n \n        rootlessSlirpSyncR *os.File\n        rootlessSlirpSyncW *os.File\n+       injectFDs []*os.File\n \n        // A restored container should have the same IP address as before\n        // being checkpointed. If requestedIP is set it will be used instead\ndiff --git a/libpod/networking_linux.go b/libpod/networking_linux.go\nindex df554d9b..83ba2f7b 100644\n--- a/libpod/networking_linux.go\n+++ b/libpod/networking_linux.go\n@@ -342,9 +342,6 @@ func (r *Runtime) setupRootlessPortMapping(ctr *Container, netnsPath string) (er\n        if err != nil {\n                return err\n        }\n-       r.rootlessTeardown = append(r.rootlessTeardown, func() error {\n-               return childQuitW.Close()\n-       })\n        // reexec the child process in the child netns\n        cmd := exec.Command(fmt.Sprintf(\"/proc/%d/exe\", os.Getpid()))\n        cmd.Args = []string{reexecKeyRootlessPortChild}\n@@ -362,6 +359,7 @@ func (r *Runtime) setupRootlessPortMapping(ctr *Container, netnsPath string) (er\n        }); err != nil {\n                return err\n        }\n        logrus.Debugf(\"rootless port: waiting for initComplete\")\n        // wait for the child to connect to the parent\n        select {\n@@ -374,6 +372,7 @@ func (r *Runtime) setupRootlessPortMapping(ctr *Container, netnsPath string) (er\n                quit <- struct{}{}\n                return nil\n        })\n+       ctr.injectFDs = append(ctr.injectFDs, childQuitW)\n        // add ports\n        ctx := context.TODO()\n        for _, i := range ctr.config.PortMappings {\ndiff --git a/libpod/oci_conmon_linux.go b/libpod/oci_conmon_linux.go\nindex 026b1312..2a5dc65f 100644\n--- a/libpod/oci_conmon_linux.go\n+++ b/libpod/oci_conmon_linux.go\n@@ -51,6 +51,7 @@ type ConmonOCIRuntime struct {\n        supportsJSON      bool\n        supportsNoCgroups bool\n        sdNotify          bool\n+       injectFiles       []*os.File\n }\n \n // Make a new Conmon-based OCI runtime with the given options.\n@@ -949,6 +950,7 @@ func (r *ConmonOCIRuntime) createOCIContainer(ctr *Container, restoreOptions *Co\n        cmd.Env = append(cmd.Env, conmonEnv...)\n        cmd.ExtraFiles = append(cmd.ExtraFiles, childSyncPipe, childStartPipe)\n        cmd.ExtraFiles = append(cmd.ExtraFiles, envFiles...)\n+       cmd.ExtraFiles = append(cmd.ExtraFiles, ctr.injectFDs...)\n \n        if r.reservePorts && !ctr.config.NetMode.IsSlirp4netns() {\n                ports, err := bindPorts(ctr.config.PortMappings)\n```\n\nthat is not enough though, as the `RunParentDriver` won't be running.\n\n@AkihiroSuda could we move the `RunParentDriver` inside the new process?  Something like passing down the open fd and let the new process do the handling?"
+        },
+        {
+            "user": "AkihiroSuda",
+            "body": "thanks, I'll look into that.\n\n> so that the process is not killed when podman exits:\n\nHow is this implemented to keep the process alive?\nCouldn't find corresponding code in `conmon.c` .\n"
+        },
+        {
+            "user": "giuseppe",
+            "body": "> How is this implemented to keep the process alive?\n> Couldn't find corresponding code in `conmon.c` .\n\nthe patch I've provided above does that.  It passes a FD to conmon that will be kept open until conmon runs.  When it exits, the FD passed down to conmon will be closed as well:\n\nhttps://github.com/containers/conmon/blob/master/src/conmon.c#L1763-L1780"
+        },
+        {
+            "user": "AkihiroSuda",
+            "body": "Thanks, now it works with `podman run -d`\n"
+        },
+        {
+            "user": "openshift-ci-robot",
+            "body": "[APPROVALNOTIFIER] This PR is **APPROVED**\n\nThis pull-request has been approved by: *<a href=\"https://github.com/containers/libpod/pull/4592#\" title=\"Author self-approved\">AkihiroSuda</a>*, *<a href=\"https://github.com/containers/libpod/pull/4592#pullrequestreview-339805813\" title=\"Approved\">giuseppe</a>*\n\nThe full list of commands accepted by this bot can be found [here](https://go.k8s.io/bot-commands?repo=containers%2Flibpod).\n\nThe pull request process is described [here](https://git.k8s.io/community/contributors/guide/owners.md#the-code-review-process)\n\n<details >\nNeeds approval from an approver in each of these files:\n\n- ~~[OWNERS](https://github.com/containers/libpod/blob/master/OWNERS)~~ [giuseppe]\n\nApprovers can indicate their approval by writing `/approve` in a comment\nApprovers can cancel approval by writing `/approve cancel` in a comment\n</details>\n<!-- META={\"approvers\":[]} -->"
+        },
+        {
+            "user": "vrothberg",
+            "body": "@baude @mheon do we need to do a manual merge?"
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 4559
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 4804
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 4698
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 3457
+        }
+    ]
+}

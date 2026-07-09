@@ -1,0 +1,102 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 26727,
+    "type": "pull_request",
+    "title": "feat(exec): Add --no-session flag for improved performance",
+    "state": "closed",
+    "labels": [
+        "lgtm",
+        "approved",
+        "locked - please file new issue/PR"
+    ],
+    "user": "ryanmccann1024",
+    "body": "Fixes: #26588\n\nFor use cases like HPC, where `podman exec` is called in rapid succession, the standard exec process can become a bottleneck due to container locking and database I/O for session tracking.\n\nThis commit introduces a new `--no-session` flag to `podman exec`. When used, this flag invokes a new, lightweight backend implementation (`ExecNoSession`) that:\n\n- Skips container locking, reducing lock contention.\n- Bypasses the creation, tracking, and removal of exec sessions in the database.\n- Executes the command directly and retrieves the exit code without persisting session state.\n\n#### Does this PR introduce a user-facing change?\n\n```release-note\nAdded a new `--no-session` flag to `podman exec` to provide a performance-optimized execution path that bypasses container locking and database session tracking. This is ideal for high-concurrency environments like HPC where exec session tracking is not required.",
+    "comments": [
+        {
+            "user": "openshift-ci[bot]",
+            "body": "Adding the \"do-not-merge/release-note-label-needed\" label because no release-note block was detected, please follow our [release note process](https://git.k8s.io/community/contributors/guide/release-notes.md) to remove it.\n\n<details>\n\nInstructions for interacting with me using PR comments are available [here](https://git.k8s.io/community/contributors/guide/pull-requests.md).  If you have questions or suggestions related to my behavior, please file an issue against the [kubernetes-sigs/prow](https://github.com/kubernetes-sigs/prow/issues/new?title=Prow%20issue:) repository.\n</details>"
+        },
+        {
+            "user": "packit-as-a-service[bot]",
+            "body": "[NON-BLOCKING] Packit jobs failed. @containers/packit-build please check. Everyone else, feel free to ignore."
+        },
+        {
+            "user": "ryanmccann1024",
+            "body": "Hello @mheon,\n\nI'm not really sure why some of the pipelines fail, I'm stuck."
+        },
+        {
+            "user": "mheon",
+            "body": "Integration tests, you need a SkipIfRemote in your tests. System tests are both flakes."
+        },
+        {
+            "user": "mheon",
+            "body": "LGTM"
+        },
+        {
+            "user": "ryanmccann1024",
+            "body": "I think there's still a pending review @mheon \n\nOr I'm not sure if I should do something else before that."
+        },
+        {
+            "user": "mheon",
+            "body": "@containers/podman-maintainers PTAL"
+        },
+        {
+            "user": "giuseppe",
+            "body": "Do we have any numbers on what's the improvement is?\n\nCan you run it under hyperfine and check what's the difference with a regular exec?"
+        },
+        {
+            "user": "giuseppe",
+            "body": "> Do we have any numbers on what's the improvement is?\n> \n> Can you run it under hyperfine and check what's the difference with a regular exec?\n\nI did the test on my machine and the results are very good:\n\n```\n➜ hyperfine 'bin/podman exec foo true' 'bin/podman exec --no-session foo true'\nBenchmark 1: bin/podman exec foo true\n  Time (mean ± σ):      80.2 ms ±   2.9 ms    [User: 22.6 ms, System: 14.6 ms]\n  Range (min … max):    74.9 ms …  86.5 ms    34 runs\n\nBenchmark 2: bin/podman exec --no-session foo true\n  Time (mean ± σ):      29.9 ms ±   6.8 ms    [User: 20.1 ms, System: 11.9 ms]\n  Range (min … max):    22.3 ms …  54.1 ms    97 runs\n\nSummary\n  bin/podman exec --no-session foo true ran\n    2.68 ± 0.62 times faster than bin/podman exec foo true\n```"
+        },
+        {
+            "user": "ryanmccann1024",
+            "body": "Update: Going to make these changes this week.\n\nSorry for the delay!"
+        },
+        {
+            "user": "Luap99",
+            "body": "Looking at this again there is another problem with this, right now conmon always spawns the podman container cleanup command which should remove the session but since there is no session in the db that command will always fail.\nWell technically it doesn't fail because we ignore the no session error as this is a common race\n\n```\ndiff --git a/pkg/domain/infra/abi/containers.go b/pkg/domain/infra/abi/containers.go\nindex 1ac01c3842..9393b4eedc 100644\n--- a/pkg/domain/infra/abi/containers.go\n+++ b/pkg/domain/infra/abi/containers.go\n@@ -1328,7 +1328,7 @@ func (ic *ContainerEngine) ContainerCleanup(ctx context.Context, namesOrIds []st\n                                err = ctr.ExecCleanup(options.Exec)\n                        }\n                        // If ErrNoSuchExecSession then the exec session was already removed so do not report an error.\n-                       if err != nil && !errors.Is(err, define.ErrNoSuchExecSession) {\n+                       if err != nil /*&& !errors.Is(err, define.ErrNoSuchExecSession) */ {\n                                return nil, err\n                        }\n                        return []*entities.ContainerCleanupReport{}, nil\n``` \n\nWith this and using the `hack/podman_cleanup_tracer.bt` you see the commands failing.\nAnyway my point here is that we should never register the cleanup command to begin with, it will always fail so this should really not specify the command for conmon. This should make this patch even more effective as we do not spawn a cleanup process.\n\nEither that or we keep the cleanup process so it can clean up the tmpfiles we created for this exec, but then we need a way to communicate the location to the cleanup process instead of it looking it up in the db.\nAnd also one thing exec doesn't seem to do is to handle the signal's sure, i.e. if we get SIGINT/TERM we should be able to cleanup the tmpfiles before exiting to ensure we do not leak them."
+        },
+        {
+            "user": "ryanmccann1024",
+            "body": "Got it!\n\nI think I'm all set to keep working on this although I'm not fully clear on the last suggestion made by @Luap99 (I'm a newbie). "
+        },
+        {
+            "user": "Luap99",
+            "body": "> Got it!\n> \n> I think I'm all set to keep working on this although I'm not fully clear on the last suggestion made by @Luap99 (I'm a newbie).\n\nThere is this in makeExecConfig() which sets a exit command on conmon which we don't want.\n```\n\t// TODO: Add some ability to toggle syslog\n\texitCommandArgs, err := specgenutil.CreateExitCommandArgs(storageConfig, runtimeConfig, logrus.IsLevelEnabled(logrus.DebugLevel), false, false, true)\n\tif err != nil {\n\t\treturn nil, fmt.Errorf(\"constructing exit command for exec session: %w\", err)\n\t}\n\texecConfig.ExitCommand = exitCommandArgs\n\n```\n\nSo in theory all you need to do is to make sure the command is nil for you exec config then it should work I think. "
+        },
+        {
+            "user": "ryanmccann1024",
+            "body": "Any suggestions on how to fix the failure on that pipeline due to the merge?\n\nI think there's also a linting error from upstream?"
+        },
+        {
+            "user": "Honny1",
+            "body": "Linting error fix: https://github.com/containers/podman/pull/27234"
+        },
+        {
+            "user": "Honny1",
+            "body": "@ryanmccann1024 Could you please rebase on main?"
+        },
+        {
+            "user": "openshift-ci[bot]",
+            "body": "[APPROVALNOTIFIER] This PR is **APPROVED**\n\nThis pull-request has been approved by: *<a href=\"https://github.com/containers/podman/pull/26727#pullrequestreview-3097815513\" title=\"Approved\">Honny1</a>*, *<a href=\"https://github.com/containers/podman/pull/26727#\" title=\"Author self-approved\">ryanmccann1024</a>*\n\nThe full list of commands accepted by this bot can be found [here](https://go.k8s.io/bot-commands?repo=containers%2Fpodman).\n\nThe pull request process is described [here](https://git.k8s.io/community/contributors/guide/owners.md#the-code-review-process)\n\n<details >\nNeeds approval from an approver in each of these files:\n\n- ~~[OWNERS](https://github.com/containers/podman/blob/main/OWNERS)~~ [Honny1]\n\nApprovers can indicate their approval by writing `/approve` in a comment\nApprovers can cancel approval by writing `/approve cancel` in a comment\n</details>\n<!-- META={\"approvers\":[]} -->"
+        },
+        {
+            "user": "ryanmccann1024",
+            "body": "Hello,\n\nShould I do anything else for this PR?"
+        },
+        {
+            "user": "mheon",
+            "body": "Restarted 3 flakes"
+        },
+        {
+            "user": "mheon",
+            "body": "/lgtm"
+        },
+        {
+            "user": "mheon",
+            "body": "I don't know why it's not picking up the release note. Removed the label."
+        }
+    ],
+    "cross_references": []
+}

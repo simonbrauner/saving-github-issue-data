@@ -1,0 +1,67 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 15365,
+    "type": "pull_request",
+    "title": "podman kube generate - add actual tests",
+    "state": "closed",
+    "labels": [
+        "lgtm",
+        "approved",
+        "release-note",
+        "locked - please file new issue/PR"
+    ],
+    "user": "edsantiago",
+    "body": "\nThis exposed a nasty bug in our system-test setup: Ubuntu (runc)\nwas writing a scratch containers.conf file, and setting CONTAINERS_CONF\nto point to it. This was well-intentionedly introduced in #10199 as\npart of our long sad history of not testing runc. What I did not\nunderstand at that time is that CONTAINERS_CONF is **dangerous**:\nit does not mean \"I will read standard containers.conf and then\noverride\", it means \"I will **IGNORE** standard containers.conf\nand use only the settings in this file\"! So on Ubuntu we were\nlosing all the default settings: capabilities, sysctls, all.\n \nYes, this is documented in containers.conf(5) but it is such\na huge violation of POLA that I need to repeat it.\n \nIn #14972, as yet another attempt to fix our runc crisis, I\nintroduced a new runc-override mechanism: create a custom\n/etc/containers/containers.conf when OCI_RUNTIME=runc.\nUnlike the CONTAINERS_CONF envariable, the /etc file\nactually means what you think it means: \"read the default\nfile first, then override with the /etc file contents\".\nI.e., we get the desired defaults. But I didn't remember\nthis helpers.bash workaround, so our runc testing has\nactually been flawed: we have not been testing with\nthe system containers.conf. This commit removes the\nno-longer-needed and never-actually-wanted workaround,\nand by virtue of testing the cap-drops in kube generate,\nwe add a regression test to make sure this never happens\nagain.\n \nIt's a little scary that we haven't been testing capabilities.\n \nAlso scary: this PR requires python, for converting yaml to json.\nI think that should be safe: python3 'import yaml' and 'json'\nworks fine on a RHEL8.7 VM from 1minutetip.\n\nSigned-off-by: Ed Santiago <santiago@redhat.com>\n```release-note\nSystem tests for podman kube generate\n```",
+    "comments": [
+        {
+            "user": "mheon",
+            "body": "LGTM. The fact that we'll have to update this every time we change `generate kube` scares me a bit, but CI will ensure the two stay in sync"
+        },
+        {
+            "user": "edsantiago",
+            "body": ">have to update this every time we change generate kube\n\nI was thinking of that as a feature...? `kube generate` doesn't seem like the sort of thing that should change often, so I was thinking value(detecting accidental changes) > annoyance(having to duplicate). But I really don't know enough here."
+        },
+        {
+            "user": "rhatdan",
+            "body": "LGTM\nAs soon as you get tests to pass."
+        },
+        {
+            "user": "edsantiago",
+            "body": "What - I have to get tests to pass, too?? \n\nOK srsly this has taken me into all sorts of ratholes.  Filed #15367 and am finding more instances of it to report.\n\nThen, sigh, looks like the container order in `podman kube generate` is nondeterministic. And, on Ubuntu, of course, `capabilities` are nil. I'll need to figure out how/if to deal with all those.\n\nBut this one has me stumped: the `org.opencontainers.image.base.name/XXX: localhost/interim-image:latest` string shows up _only sometimes_?? Some f36 passes, some fails? I'm gonna need help here."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@umohnani8 PTAL"
+        },
+        {
+            "user": "edsantiago",
+            "body": "Okay, can someone tell me why ubuntu local (root, rootless) has no `capabilities` section, but ubuntu **remote** does?\n```\n[+0873s] # #|     FAIL: .spec.containers[0].securityContext.capabilities\n[+0873s] # #| expected: = '{}'\n[+0873s] # #|   actual:   '{\"drop\":[\"CAP_MKNOD\",\"CAP_NET_RAW\",\"CAP_AUDIT_WRITE\"]}'\n```\nThat is: on all f36, I get the `drop`. On Ubuntu remote, same. On Ubuntu local, nothing.\n\n(It's very very easy for me to just remove that test completely, but I hate doing so without an explanation)"
+        },
+        {
+            "user": "mheon",
+            "body": "Any chance there's a `containers.conf` floating around in the ubuntu VM from another test with dropped caps?"
+        },
+        {
+            "user": "edsantiago",
+            "body": "Ohhh.... interesting. I think that's it: https://github.com/containers/podman/blob/5de215e1447af96ec2b199794cd425b75a2da08a/test/system/helpers.bash#L39-L51"
+        },
+        {
+            "user": "edsantiago",
+            "body": "Interesting. If I recreate the capabilities section of containers.conf, ubuntu can't ping:\n```\n # podman run --rm --pod mypod quay.io/libpod/testimage:20220615 ping -c1 127.0.0.1\n PING 127.0.0.1 (127.0.0.1): 56 data bytes\n ping: permission denied (are you root?)\n [ rc=1 (** EXPECTED 0 **) ]\n```\n[root](https://api.cirrus-ci.com/v1/artifact/task/4839358049026048/html/sys-podman-ubuntu-2204-root-host.log.html) nor [rootless](https://api.cirrus-ci.com/v1/artifact/task/6387470420934656/html/sys-podman-ubuntu-2204-rootless-host.log.html) ... but it works perfectly fine with [remote](https://api.cirrus-ci.com/v1/artifact/task/6528207909289984/html/sys-remote-ubuntu-2204-root-host.log.html#t--00262)??"
+        },
+        {
+            "user": "edsantiago",
+            "body": "@containers/podman-debbuild-maintainers PTAL. This has been drastically changed since my first attempt. I've updated the commit message and github description accordingly. My first iteration did a line-by-line comparison of the YAML: this is impossible for two reasons:\n1. `generate kube` seems to output containers in unpredictable order. \n2. On some systems the image has an `org.opencontainers.image.base.name` annotation, on some it doesn't.\n\nSo the new approach converts yaml to json (using python), then uses `jq` to validate the results. I really hate this but can't think of a better way.\n\nRemoving the workaround from `helpers.bash` seems to be safe.\n\nThanks @mheon for the CONTAINERS_CONF insight. That was the key."
+        },
+        {
+            "user": "mheon",
+            "body": "LGTM. YAML->JSON sounds horrifying but it doesn't look at that bad in the test itself"
+        },
+        {
+            "user": "openshift-ci[bot]",
+            "body": "[APPROVALNOTIFIER] This PR is **APPROVED**\n\nThis pull-request has been approved by: *<a href=\"https://github.com/containers/podman/pull/15365#\" title=\"Author self-approved\">edsantiago</a>*, *<a href=\"https://github.com/containers/podman/pull/15365#pullrequestreview-1077980069\" title=\"LGTM\">giuseppe</a>*\n\nThe full list of commands accepted by this bot can be found [here](https://go.k8s.io/bot-commands?repo=containers%2Fpodman).\n\nThe pull request process is described [here](https://git.k8s.io/community/contributors/guide/owners.md#the-code-review-process)\n\n<details >\nNeeds approval from an approver in each of these files:\n\n- ~~[OWNERS](https://github.com/containers/podman/blob/main/OWNERS)~~ [edsantiago,giuseppe]\n\nApprovers can indicate their approval by writing `/approve` in a comment\nApprovers can cancel approval by writing `/approve cancel` in a comment\n</details>\n<!-- META={\"approvers\":[]} -->"
+        }
+    ],
+    "cross_references": []
+}

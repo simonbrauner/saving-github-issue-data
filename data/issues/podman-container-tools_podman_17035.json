@@ -1,0 +1,48 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 17035,
+    "type": "issue",
+    "title": "[Feature]: Podman commit use environment variable to override the image's manifest type",
+    "state": "open",
+    "labels": [
+        "kind/feature"
+    ],
+    "user": "kumadee",
+    "body": "### Feature request description\n\nWe recently stated using packer along with podman (earlier docker) to build our container images. We noticed that the value of manifest type was updated to `application/vnd.oci.image.manifest.v1+json` from `application/vnd.docker.distribution.manifest.v2+json`.\n\nPacker does not use the `packer build` command. Instead, it runs a container using podman, runs whatever provisioner you like to update the container and then uses `packer commit` to create a new container image.\nThere is no way we could provide the `--format` option as there is no podman specific plugin for packer. We currently use `packer-plugin-docker` which then runs podman through the docker wrapper binary (provided from package `podman-docker` on RHEL 8 or Fedora). It would be nice to specify it via an env var.\n\nThis is not an issue for our deployments as we deploy on OCP 4.11 with cri-o. However, some devs use a bit old version of docker and it complains when pulling the image. Due to some reason, they cannot update the docker on their machine. I have checked that the docker version 20.10.22 is able to pull and run the images with manifest type `application/vnd.oci.image.manifest.v1+json`.\n\n### Suggest potential solution\n\nIt would be much easier to specify the value of the `--format` option for `podman commit` via an environment variable, just the way it is supported for `podman build`.\n\n```bash\n$ podman build --help | grep format\n\n      --format format                                format of the built image's manifest and metadata. Use BUILDAH_FORMAT environment variable to override. (default \"oci\")\n```\n\n### Have you considered any alternatives?\n\nMaybe write a packer plugin for podman which is similar to https://github.com/hashicorp/packer-plugin-docker. However, this may take a long time to get it ready and publish.\n\n### Additional context\n\n```bash\n[kumadee@fedora ~]$ podman commit --help | grep '\\-\\-format'\n\n  -f, --format Format        Format of the image manifest and metadata (default \"oci\")\n\n[kumadee@fedora ~]$ podman build --help | grep '\\-\\-format'\n\n      --format format                                format of the built image's manifest and metadata. Use BUILDAH_FORMAT environment variable to override. (default \"oci\")\n\n[kumadee@fedora ~]$ podman push --help | grep '\\-\\-format'\n\n  -f, --format string                       Manifest type (oci, v2s2, or v2s1) to use in the destination (default is manifest type of source, with fallbacks)\n```",
+    "comments": [
+        {
+            "user": "rhatdan",
+            "body": " $ BUILDAH_FORMAT=docker podman build --help |grep -- --format\n      --format format                                format of the built image's manifest and metadata. Use BUILDAH_FORMAT environment variable to override. (default \"docker\")\n\nIs this what you want?\n\n"
+        },
+        {
+            "user": "rhatdan",
+            "body": "Would having this in containers.conf make sense, ImageDefaultFormat?\n\nOr do you need the flexibility to change on the fly?\n\nShould podman commit respect the BUILDAH_FORMAT environment variable?\n"
+        },
+        {
+            "user": "rhatdan",
+            "body": "@vrothberg @Luap99 @mtrmac WDYT?"
+        },
+        {
+            "user": "mtrmac",
+            "body": "IMHO there are two alternative consistent ways to think about the image format,\n\n- Docker compatibility requires us to default to schema2 when invoked as `/usr/bin/docker`, so that Podman is a drop-in replacement with no end-user visible impact. In that case we certainly don’t need an option in a config file nor an environment variable.\n- The format difference between schema2 and OCI is almost always transparent, and we don’t need to prominently expose user controls to control the image format. In that case we don’t need the config file nor environment variable either.\n\nThe two are mutually exclusive but arrive at the same conclusion.\n\nThe original RFE feels to me like a fairly obscure corner case: Usage of the older format is important enough to worry about and ask for an option, but still not important enough to argue that the older format should be the default behavior.\n\n---\n\nI do get that legacy software can’t always be quickly replaced, and that interoperability with legacy software matters in practice. Still, if this is a situation that will eventually resolve itself by upgrading (or, well, replacing) Docker, committing to a long-term maintenance overhead of an extra option seems unnecessary.\n\nThat extra Podman option is _all the more_ dubious to me when the motivation is another caller that does not expose this option. Surely if were is important enough for Podman to add a long-term-maintained option, it would also be important enough for Packer to add a long-term-maintained option?\n\nAs an alternative, it should be possible to wrap Podman in a shell script that recognizes the relevant Podman subcommands, and adds `--format v2s2` to them; and then have Packer invoke this shell script instead of Podman directly. That would be pretty ugly as a long-term design, but as a shorter-term legacy-interoperability thunk it might just be good enough."
+        },
+        {
+            "user": "kumadee",
+            "body": "> IMHO there are two alternative consistent ways to think about the image format,\n> \n> * Docker compatibility requires us to default to schema2 when invoked as `/usr/bin/docker`, so that Podman is a drop-in replacement with no end-user visible impact. In that case we certainly don’t need an option in a config file nor an environment variable.\n\nI think above is the best option for the end-user. If this is implemented, then we certainly don't need any extra mechanism to set the image format.\n\n> * The format difference between schema2 and OCI is almost always transparent, and we don’t need to prominently expose user controls to control the image format. In that case we don’t need the config file nor environment variable either.\n> \n> The two are mutually exclusive but arrive at the same conclusion.\n> \n> The original RFE feels to me like a fairly obscure corner case: Usage of the older format is important enough to worry about and ask for an option, but still not important enough to argue that the older format should be the default behavior.\n> \n> I do get that legacy software can’t always be quickly replaced, and that interoperability with legacy software matters in practice. Still, if this is a situation that will eventually resolve itself by upgrading (or, well, replacing) Docker, committing to a long-term maintenance overhead of an extra option seems unnecessary.\n> \n\nIn some environments we don't have the option of updating to docker or new version of podman. This is due to usage of RHEL 7 and old gen hardware, blocking adoption of RHEL 8/9. Plus, it is very difficult for me to convince every team to switch to podman in their environments.\n\n> That extra Podman option is _all the more_ dubious to me when the motivation is another caller that does not expose this option. Surely if were is important enough for Podman to add a long-term-maintained option, it would also be important enough for Packer to add a long-term-maintained option?\n> \n\nAs I mentioned, packer interacts with the packer-docker-plugin. The plugin is originally supposed to be used with docker. Since, the commit command in docker does not have the `--format` option, the plugin also don't support it. Additionally, I don't have the capacity to create the packer-podman-plugin. It will take too long for it to be prod ready.\n\n> As an alternative, it should be possible to wrap Podman in a shell script that recognizes the relevant Podman subcommands, and adds `--format v2s2` to them; and then have Packer invoke this shell script instead of Podman directly. That would be pretty ugly as a long-term design, but as a shorter-term legacy-interoperability thunk it might just be good enough.\n\nFor shorter-term I can try this, but I don't like it.\n\nPlease note that I only asked for environment variable as an option, because this was the recommended solution in one of the RHEL tickets. However, later I checked that it is only supported for `build` command and not `commit` command. I thought the support for `BUILDAH_FORMAT` env var was missed in `commit` command.\n\nAlso, `push` command have `v2s2 or v2s1` as the values instead of just `docker` like other commands. This is a bit confusing for me.\n**Is the value `docker` for the `--format` option in `build`/`commit` commands equivalent to `v2s2`?**"
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@vrothberg @mtrmac @Luap99 WDYT\nShould we change the docker compat API for build to default to docker Images, rather then OCI Images as we do now. To match Dockers defaults?"
+        },
+        {
+            "user": "vrothberg",
+            "body": "@rhatdan SGTM.  We should probably investigate other endpoints as well (e.g., for image save)."
+        }
+    ],
+    "cross_references": []
+}

@@ -1,0 +1,96 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 11003,
+    "type": "pull_request",
+    "title": "stats: add a interval parameter to cli and api stats streaming",
+    "state": "closed",
+    "labels": [
+        "lgtm",
+        "approved",
+        "locked - please file new issue/PR"
+    ],
+    "user": "towe75",
+    "body": "podman stats cli and api polls reports by default in a 1 sec period.\n\nThis can put some load on a machine if you run many containers.\n\nA simple test is to run e.g. a range of pause containers like so:\n\n``` seq 35 |xargs -rn1 podman run -d --rm gcr.io/google_containers/pause```\n\nNext, run \"podman stats\" (or the API request), and monitor e.g. \"Top\" to see the load. \nI found that the compat api endpoint polls by default in a 5 sec period which is not so aggressive.\n\nMaking it configurable seemed to be a good solution, hence this PR. You can now easily align the poll period and e.g. your metrics collector interval. \nThere was also a unused 5 sec const in the libpod endpoint, i removed it.\n\nYou can now change this interval with a optional --interval cli flag.\nThe api request got a interval query parameter for the same purpose.\nDefault behavior is not changed.\n\nI could not find a unit or e2e test for the stats streaming mode, so i was unsure how to provide/enhance a test.\nCLI Manual and REST API doc should be covered in the PR.\n\n<!--\nThanks for sending a pull request!\n\nPlease make sure you've read our contributing guidelines and how to submit a pull request (https://github.com/containers/podman/blob/master/CONTRIBUTING.md#submitting-pull-requests).\n\nIn case you're only changing docs, make sure to prefix the pull-request title with \"[CI:DOCS]\".  That will prevent functional tests from running and save time and energy.\n-->\n",
+    "comments": [
+        {
+            "user": "edsantiago",
+            "body": "Possible test, e.g. `460-stats.bats`\n```bash\n#!/usr/bin/env bats   -*- bats -*-\n#\n# tests for podman stats\n#\n\nload helpers\n\n@test \"podman stats --interval\" {\n    # Simple boring process\n    run_podman run -d --name foo $IMAGE sleep 30\n\n    # Run stats for 15 seconds. This blocks.\n    PODMAN_TIMEOUT=15 run_podman 124 stats --interval 10\n\n    # Confirm that we see some headers, on first and third lines\n    is \"${lines[0]}\" \"ID.*NAME.*CPU.*MEM USAGE.*CPU TIME\" \"stat headers seen\"\n    is \"${lines[2]}\" \"ID.*NAME.*CPU.*MEM USAGE.*CPU TIME\" \\\n       \"stat headers seen (second iteration)\"\n\n    # Last line should be a timeout\n    is \"${lines[4]}\" \"timeout: sending signal TERM.*\" \"timeout received\"\n\n    # Confirm that --interval worked (remember that we have a timeout line)\n    is \"${#lines[*]}\" \"5\" \"number of stat lines in 15 seconds\"\n\n    run_podman stop --time=0 foo\n    run_podman rm -f foo\n}\n\n# vim: filetype=sh\n```\nI really hate this kind of test, because it adds wall-clock time to our already-much-too-long CI. I'm commenting simply to offer the option, but I hope that others decide it is not worth the CI bloat."
+        },
+        {
+            "user": "rhatdan",
+            "body": "I am fine with not testing this."
+        },
+        {
+            "user": "mheon",
+            "body": "Can we add a test that invalid times are rejected (e.g. `--interval 0` or `--interval -1`)?\n\nOtherwise LGTM\n/approve"
+        },
+        {
+            "user": "rhatdan",
+            "body": "LGTM, after you add invalid --interval check."
+        },
+        {
+            "user": "towe75",
+            "body": "@mheon before i write the test: do you expect that the code actively rejects (fails) when called with zero value or negative interval? Currently it makes a graceful fallback to 1 second. Failing would make a cli and api test simpler, of course."
+        },
+        {
+            "user": "rhatdan",
+            "body": "Yes the code should fail, on invalid values being passed in."
+        },
+        {
+            "user": "Luap99",
+            "body": "Sry I forgot you also have to add this for podman-remote as well\n```diff\ndiff --git a/pkg/domain/infra/tunnel/containers.go b/pkg/domain/infra/tunnel/containers.go\nindex c17d7b54f..1df79c373 100644\n--- a/pkg/domain/infra/tunnel/containers.go\n+++ b/pkg/domain/infra/tunnel/containers.go\n@@ -871,7 +871,7 @@ func (ic *ContainerEngine) ContainerStats(ctx context.Context, namesOrIds []stri\n        if options.Latest {\n                return nil, errors.New(\"latest is not supported for the remote client\")\n        }\n-       return containers.Stats(ic.ClientCtx, namesOrIds, new(containers.StatsOptions).WithStream(options.Stream))\n+       return containers.Stats(ic.ClientCtx, namesOrIds, new(containers.StatsOptions).WithStream(options.Stream).WithInterval(options.Interval))\n }\n \n // ShouldRestart reports back whether the container will restart\n```"
+        },
+        {
+            "user": "mheon",
+            "body": "Concur with @rhatdan - we should actively error on bad values"
+        },
+        {
+            "user": "towe75",
+            "body": "@Luap99 : is addressed in latest commit\n@rhatdan, @mheon : function call fails now with appropriate message, i will add a test, soon.\n@TomSweeneyRedHat : maybe it can go into a separate issue/PR if there is a demand for it?"
+        },
+        {
+            "user": "towe75",
+            "body": "I tried to get into your e2e tests in order to extend the existing stats_test.go. \nI burned some time because i was not able to run the tests. Gingko seemed to ignore this file when invoked with\n\n```\nTESTFLAGS='--dryRun --focus=\"stats\"' make localintegration\n```\n\nAfter an hour or so i found the \"// +build\" line at the top of the file and removed it. It's the only test with exactly this annotation. Is it intentional behavior or a copy/paste bug?\n\nAlso i would recommend to change the spec descriptions in pod_stats_test.go to differ from stats_test.go. Eg. \"podman pod stats ...\" vs \"podman stats ...\". Should i include it in this PR?\n\n"
+        },
+        {
+            "user": "Luap99",
+            "body": "> I tried to get into your e2e tests in order to extend the existing stats_test.go.\n> I burned some time because i was not able to run the tests. Gingko seemed to ignore this file when invoked with\n> \n> ```\n> TESTFLAGS='--dryRun --focus=\"stats\"' make localintegration\n> ```\n> \n> After an hour or so i found the \"// +build\" line at the top of the file and removed it. It's the only test with exactly this annotation. Is it intentional behavior or a copy/paste bug?\n\nThat's definitely a real bug, please remove the `// +build`\n\n> Also i would recommend to change the spec descriptions in pod_stats_test.go to differ from stats_test.go. Eg. \"podman pod stats ...\" vs \"podman stats ...\". Should i include it in this PR?\n\nYes"
+        },
+        {
+            "user": "towe75",
+            "body": "Ok, seems like i found a rabbit hole here. Re-enabled the stats tests, found broken test, found that podman stats exits with 0 if a invalid format string is given.\n\nFind my tests for the interval flag for negative, zero and positive value. Hope everything is fine now. "
+        },
+        {
+            "user": "edsantiago",
+            "body": "@towe75 the failing check is (correctly) noting that your commit message summary (the first line) is too long."
+        },
+        {
+            "user": "towe75",
+            "body": "@edsantiago : sorry, fixed\n\nSomething is still wrong with the tests. My added tests are fine when running \"localintegration\". I can see that your CI tests invoke tests using podman remote and errors/exit-code is not propagated automatically/correctly. \n\n```\n  Running: podman-remote [options] stats -a --no-reset --no-stream --interval=-1\n```\n\nDid i miss some plumbing?\n\n"
+        },
+        {
+            "user": "Luap99",
+            "body": "@towe75 Sorry for the silence, I lost track of this PR. You did nothing wrong the stats binding ignored server errors. This diff should make it work:\n```diff\ndiff --git a/pkg/bindings/containers/containers.go b/pkg/bindings/containers/containers.go\nindex 86304f392..bc7b0c8c9 100644\n--- a/pkg/bindings/containers/containers.go\n+++ b/pkg/bindings/containers/containers.go\n@@ -223,6 +223,9 @@ func Stats(ctx context.Context, containers []string, options *StatsOptions) (cha\n        if err != nil {\n                return nil, err\n        }\n+       if !response.IsSuccess() {\n+               return nil, response.Process(nil)\n+       }\n \n        statsChan := make(chan entities.ContainerStatsReport)\n```"
+        },
+        {
+            "user": "towe75",
+            "body": "@Luap99 i think it's ok now?"
+        },
+        {
+            "user": "openshift-ci[bot]",
+            "body": "[APPROVALNOTIFIER] This PR is **APPROVED**\n\nThis pull-request has been approved by: *<a href=\"https://github.com/containers/podman/pull/11003#pullrequestreview-722037923\" title=\"Approved\">Luap99</a>*, *<a href=\"https://github.com/containers/podman/pull/11003#issuecomment-884434629\" title=\"Approved\">mheon</a>*, *<a href=\"https://github.com/containers/podman/pull/11003#\" title=\"Author self-approved\">towe75</a>*\n\nThe full list of commands accepted by this bot can be found [here](https://go.k8s.io/bot-commands?repo=containers%2Fpodman).\n\nThe pull request process is described [here](https://git.k8s.io/community/contributors/guide/owners.md#the-code-review-process)\n\n<details >\nNeeds approval from an approver in each of these files:\n\n- ~~[OWNERS](https://github.com/containers/podman/blob/main/OWNERS)~~ [Luap99,mheon]\n\nApprovers can indicate their approval by writing `/approve` in a comment\nApprovers can cancel approval by writing `/approve cancel` in a comment\n</details>\n<!-- META={\"approvers\":[]} -->"
+        },
+        {
+            "user": "rhatdan",
+            "body": "/lgtm"
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 10829
+        }
+    ]
+}

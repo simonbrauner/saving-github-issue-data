@@ -1,0 +1,58 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 3937,
+    "type": "issue",
+    "title": "rawhide (crun): rootless(?): podman exec broken: OCI runtime error",
+    "state": "closed",
+    "labels": [
+        "locked - please file new issue/PR"
+    ],
+    "user": "edsantiago",
+    "body": "On current rawhide with crun:\n```\n$ podman run -d --name foo alpine sleep 60\n8c0855798e92d718be496e428c66a4e702ec4921575f006a5848fe53e41d50b8\n$ podman exec foo true\nError: non zero exit code: 1: OCI runtime error\n$ echo $?\n1\n```\nI can't check root because podman-root is 100% broken ([rhbz1748214](https://bugzilla.redhat.com/show_bug.cgi?id=1748214)).\n\nWith --log-level=debug:\n```\n...\nDEBU[0000] Successfully started exec session 3985743e00dad6f2710b08790fb2ea75f96572b520aa2c16dc296cfb927e2856 in container c5875947634e0bf1f5804b19f361e7123b253f523cf43e0494ad04450d508419\n[conmon:d]: exec with attach is waiting for start message from parent\n[conmon:d]: exec with attach got start message from parent\nERRO[0000] non zero exit code: 1: OCI runtime error\n\n```\npodman-1.5.2-0.46.dev.git1d8a940.fc32.x86_64\ncrun-0.7-2.fc31.x86_64\npackage runc is not installed\n",
+    "comments": [
+        {
+            "user": "giuseppe",
+            "body": "it should work well with crun 0.8.  The new version has different fixes for interacting with Podman and reporting the correct exit code."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@edsantiago can you test it out, reopen if this does not fix the issue."
+        },
+        {
+            "user": "edsantiago",
+            "body": "Problem persists with crun-0.8-1.fc32.x86_64 although the error is different:\n```\n$ podman exec foo true\nError: writing file '/sys/fs/cgroup//user.slice/user-1000.slice/user@1000.service/user.slice/libpod-61c0251e87cd6312ce7e6176f2ad66f3260b675a079efa5d71ad79ed22e06671.scope/cgroup.procs': Permission denied: OCI runtime permission denied error\n```"
+        },
+        {
+            "user": "rhatdan",
+            "body": "Progress..."
+        },
+        {
+            "user": "giuseppe",
+            "body": "it seems to fail moving a process from cgroup A to a cgroup B, where A is the current cgroup (owned by root) and B is the destination cgroup in the container.\n\nCan you confirm the current cgroup is owned by root with `ls -l /sys/fs/cgroup/$(sed -e 's|0::||' /proc/self/cgroup)?\n\nDoes it work if you use something like `systemd-run --user --scope podman exec foo echo hello` ?\n\nNot sure what would be the best way to handle it, we'd need to enforce somehow to run in a cgroup that is owned by the rootless user.\n"
+        },
+        {
+            "user": "giuseppe",
+            "body": "opened a PR to automatically create the scope: https://github.com/containers/libpod/pull/3959"
+        },
+        {
+            "user": "edsantiago",
+            "body": "Sorry for the late response. In case it's still helpful:\n>Can you confirm the current cgroup is owned by root with `ls -l /sys/fs/cgroup/$(sed -e 's|0::||' /proc/self/cgroup)?\n```\n$ (I took the liberty of adding `-d` to the command above)\ndrwxr-xr-x. 2 root root 0 Sep  9 15:15 /sys/fs/cgroup//user.slice/user-0.slice/session-18.scope\n(ls -l, no -d, shows everything owned by root)\n```\n>Does it work if you use something like systemd-run --user --scope podman exec foo echo hello ?\n```\n$ systemd-run --user --scope podman exec foo echo hello\nFailed to create bus connection: No such file or directory\n$ XDG_RUNTIME_DIR=/run/user/1000 !!\nRunning scope as unit: run-r51595d4cfd9a41db8c2d73c407893090.scope\nhello\n```\n"
+        },
+        {
+            "user": "juhp",
+            "body": "I hit this too now while trying to test toolbox in Rawhide."
+        },
+        {
+            "user": "popsUlfr",
+            "body": "I think I encountered this problem on podman 1.9.0 in rootless mode :\n\nWhen I try to exec : \n\n```\n$ podman --log-level debug exec -ti d3bfcb240aed bash\n```\n\n```\nDEBU[0000] Attaching to container d3bfcb240aed2e55863dbff58af373b80a284777dbc93eadab336a58a120f7a6 exec session 53430ac13aad60bfe302e5b1b6d583ed5c1276538cdbd605ba9f4c2d3dbac03d \nDEBU[0000] connecting to socket /run/user/974/libpod/tmp/socket/53430ac13aad60bfe302e5b1b6d583ed5c1276538cdbd605ba9f4c2d3dbac03d/attach \n[conmon:d]: failed to write to /proc/self/oom_score_adj: Permission denied\n\n                                                                          DEBU[0000] Received: 0                                  \nDEBU[0000] Received: -1                                 \nERRO[0000] [conmon:d]: exec with attach is waiting for start message from parent\n[conmon:d]: exec with attach got start message from parent\nwriting file `/sys/fs/cgroup//user.slice/user-974.slice/user@974.service/user.slice/libpod-d3bfcb240aed2e55863dbff58af373b80a284777dbc93eadab336a58a120f7a6.scope/cgroup.procs`: Permission denied: OCI runtime permission denied error\n```\n\nBut if I prefix with `systemd-run` : \n\n```\n$ systemd-run --user --scope podman exec -ti d3bfcb240aed bash\n```\n\nIt works.\n\nNot sure if it is related but I have a dedicated `podmanuser` user on the system, so I SSH to my ssh user and then I `sudo machinectl shell podmanuser@` to become the other user and get a systemd user session.\n\nHere's my `podman info` :\n\n```\nhost:\n  arch: arm64\n  buildahVersion: 1.14.8\n  cgroupVersion: v2\n  conmon:\n    package: Unknown\n    path: /usr/bin/conmon\n    version: 'conmon version 2.0.15, commit: 1bddbf7051a973f4a4fecf06faa0c48e82f1e9e1'\n  cpus: 4\n  distribution:\n    distribution: archarm\n    version: unknown\n  eventLogger: journald\n  hostname: rock64\n  idMappings:\n    gidmap:\n    - container_id: 0\n      host_id: 974\n      size: 1\n    - container_id: 1\n      host_id: 200000\n      size: 1001\n    uidmap:\n    - container_id: 0\n      host_id: 974\n      size: 1\n    - container_id: 1\n      host_id: 200000\n      size: 1001\n  kernel: 5.6.7-1-ARCH\n  memFree: 3494100992\n  memTotal: 4097687552\n  ociRuntime:\n    name: crun\n    package: Unknown\n    path: /usr/bin/crun\n    version: |-\n      crun version 0.13\n      commit: e79e4de4ac16da0ce48777afb72c6241de870525\n      spec: 1.0.0\n      +SYSTEMD +SELINUX +APPARMOR +CAP +SECCOMP +EBPF +YAJL\n  os: linux\n  rootless: true\n  slirp4netns:\n    executable: /usr/bin/slirp4netns\n    package: Unknown\n    version: |-\n      slirp4netns version 1.0.1\n      commit: 6a7b16babc95b6a3056b33fb45b74a6f62262dd4\n      libslirp: 4.3.0\n  swapFree: 0\n  swapTotal: 0\n  uptime: 58m 41.45s\nregistries:\n  search:\n  - docker.io\n  - registry.fedoraproject.org\n  - quay.io\n  - registry.access.redhat.com\n  - registry.centos.org\nstore:\n  configFile: /var/lib/podmanuser/.config/containers/storage.conf\n  containerStore:\n    number: 1\n    paused: 0\n    running: 1\n    stopped: 0\n  graphDriverName: overlay\n  graphOptions:\n    overlay.mount_program:\n      Executable: /usr/bin/fuse-overlayfs\n      Package: Unknown\n      Version: |-\n        fusermount3 version: 3.9.1\n        fuse-overlayfs: version 1.0.0\n        FUSE library version 3.9.1\n        using FUSE kernel interface version 7.31\n  graphRoot: /var/lib/podmanuser/.local/share/containers/storage\n  graphStatus:\n    Backing Filesystem: btrfs\n    Native Overlay Diff: \"false\"\n    Supports d_type: \"true\"\n    Using metacopy: \"false\"\n  imageStore:\n    number: 1\n  runRoot: /run/user/974/containers\n  volumePath: /var/lib/podmanuser/.local/share/containers/storage/volumes\n```"
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 3959
+        }
+    ]
+}

@@ -1,0 +1,187 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 2575,
+    "type": "pull_request",
+    "title": "Default to SELinux private label for play kube mounts ",
+    "state": "closed",
+    "labels": [
+        "lgtm",
+        "approved",
+        "locked - please file new issue/PR"
+    ],
+    "user": "haircommander",
+    "body": "Before, there were SELinux denials when a volume was mounted podman play kube. Fix this by hardcoding a shared label into the Volume.\n",
+    "comments": [
+        {
+            "user": "haircommander",
+            "body": "@ikke-t you can check this out if you want to test, but my logs now spit out some sql server output."
+        },
+        {
+            "user": "haircommander",
+            "body": "Forgot to remove WIP. This is good to go. PTAL\n\n(edit: upon further inspection I have deemed that to be a lie)"
+        },
+        {
+            "user": "rhatdan",
+            "body": "@haircommander Are you going to update this one?"
+        },
+        {
+            "user": "haircommander",
+            "body": "@rhatdan so, it turns out I don't think DirectoryOrCreate something we should support right now. We don't have a containers mount label until the container is created, so we'd have to go through all of the volumes a second time and relabel. I think we should do more thinking on the way that DirectoryOrCreate would work, if someone is looking for support for it."
+        },
+        {
+            "user": "rhatdan",
+            "body": "If a named volume is created then it should be labeled with the shared label.  This is what happens when you execute\n```\npodman volume create foobar\n```\n\nSo if podman play creates a volume it should create it the same way."
+        },
+        {
+            "user": "cevich",
+            "body": "(Last test failures were due to known certificate problem, rebase against latest master and they should run better)"
+        },
+        {
+            "user": "haircommander",
+            "body": "Okay @rhatdan: Per a conversation with @mheon on irc, we have decided this is the correct solution. We can't call label.Relabel, as we don't have the container's mount label until after its created, and it would complicate the code to do it after. PTAL"
+        },
+        {
+            "user": "mheon",
+            "body": "It sounds like we can't use named volumes here, because Kube allows you to specify a path from the host. As such, our best bet is just to unconditionally `:z` the mount, since we can't easily tell if we can get away without doing it."
+        },
+        {
+            "user": "rhatdan",
+            "body": "You don't need the containers label.  You can do what podman volume does.\n\nIn libpod/runtime_volume_linux.go \n```\n\t_, mountLabel, err := label.InitLabels([]string{})\n\tif err != nil {\n\t\treturn nil, errors.Wrapf(err, \"error getting default mountlabels\")\n\t}\n\tif err := label.ReleaseLabel(mountLabel); err != nil {\n\t\treturn nil, errors.Wrapf(err, \"error releasing label %q\", mountLabel)\n\t}\n\tif err := label.Relabel(fullVolPath, mountLabel, true); err != nil {\n\t\treturn nil, errors.Wrapf(err, \"error setting selinux label to %q\", fullVolPath)\n\t}\n```"
+        },
+        {
+            "user": "rhatdan",
+            "body": "If it is a bind mount from the host, then we are in a difficult place.  Since we don't know if it should be relabeled.  I am fearful of doing anything in that case.  If there is not indication inside of the kube then we should do nothing."
+        },
+        {
+            "user": "mheon",
+            "body": "Maybe a `--relabel-volumes` flag on `podman play kube` to allow people to explicitly specify volume relabelling is requested?"
+        },
+        {
+            "user": "rhatdan",
+            "body": "That would be ok, although I would make it three ways\n\n-volume-relabel=none, private, shared\n\nOf course this only works if there is only one volume in the play. Multiple volumes with different settings, could cause issues.\n\nNow if Kubernetes would just understand SELinux..."
+        },
+        {
+            "user": "haircommander",
+            "body": "Okay I can do that, but which should the default be? And if we support DirectoryOrCreate, should we ignore a --volume-relabel=none or have a different default, as the created directory won't have a label at all @mheon @rhatdan "
+        },
+        {
+            "user": "mheon",
+            "body": "I think if we're creating, it's safe to throw an unconditional relabel on there"
+        },
+        {
+            "user": "haircommander",
+            "body": "I'm thinking default to private for both, if user specifies none then override with private for Create. WDYT"
+        },
+        {
+            "user": "haircommander",
+            "body": "Or maybe throw error if it's create and user specified none? As in: They should create and label it themselves, and have the yaml be Directory instead"
+        },
+        {
+            "user": "mheon",
+            "body": "@haircommander This one is complicated, I don't ever want to not relabel created volumes, but at the same time we need the flag to switch between `private` and `shared`. I also don't want to default to `private` for existing directories, I'd want that to be `none`... Are we looking at two flags here? One for created, one for existing?"
+        },
+        {
+            "user": "haircommander",
+            "body": "@mheon I don't love different flags for each option. how about `private`, `shared`, `none` and `default` where default are the two options you said, and document the heck out of it?\n\nI just feel like as this volume support grows in play kube (which i intend on doing once your PR lands), as well as when play kube functionality outside of volumes grows, there will just be an excessive number of flags to properly translate, and having two for such a small feature seems excessive."
+        },
+        {
+            "user": "mheon",
+            "body": "Agree. This one is going to be a bloody pain no matter how we do it, because we really want two defaults here, but two flags does seem excessive."
+        },
+        {
+            "user": "rhatdan",
+            "body": "Built in volumes should always be shared and labeled on creation. The question is on bind mount volumes.  We could do a NONE if directory exists and private if it does not.\n"
+        },
+        {
+            "user": "haircommander",
+            "body": "@rhatdan these are effectively bind mount volumes, no? In every case we're binding an existing host dir to the container dir, whereas built-in volumes only have support for specifying container dir. Or am I misunderstanding"
+        },
+        {
+            "user": "mheon",
+            "body": "@rhatdan These are all bind mount volumes. However, Kube makes a distinction between bind-mounting a directory on the host that already exists, and one that might or might not exist (if it doesn't it gets created)"
+        },
+        {
+            "user": "rhatdan",
+            "body": "A builtin volume is private to libpod/podman and the only reason to create one is to be shared.  Otherwise create a directory and bind mount it in.\n"
+        },
+        {
+            "user": "haircommander",
+            "body": "given that I think we should just not have the options for now. If the directory is created, mount private unconditionally, if it already exists, let the user determine whether its shared or not, and do nothing in play kube\n\nI will need help documenting how to relabel it outside of podman @rhatdan  :)"
+        },
+        {
+            "user": "haircommander",
+            "body": "@mheon @rhatdan PTAL"
+        },
+        {
+            "user": "ikke-t",
+            "body": "I record here my latest failure with the mounts:\n\nawxweb container can't acces it's exported share. Are the mounts done right by podman?\n\n```\n[root@ohuska exported_volumes]# podman top awxweb user huser pid label args\nUSER   HUSER   PID   LABEL                                         COMMAND\n1000   1000    1     system_u:system_r:container_t:s0:c719,c893   /tini -- /bin/sh -c /usr/bin/launch_awx.sh \n1000   1000    8     system_u:system_r:container_t:s0:c719,c893   bash /usr/bin/launch_awx.sh \n1000   1000    123   system_u:system_r:container_t:s0:c719,c893   /usr/bin/python2 /usr/bin/supervisord -c /supervisor.conf \n1000   1000    126   system_u:system_r:container_t:s0:c719,c893   python /usr/bin/config-watcher \n1000   1000    127   system_u:system_r:container_t:s0:c719,c893   /var/lib/awx/venv/awx/bin/python3 /var/lib/awx/venv/awx/bin/daphne -b 127.0.0.1 -p 8051 awx.asgi:channel_layer \n1000   1000    128   system_u:system_r:container_t:s0:c719,c893   nginx: master process nginx -g daemon off; \n1000   1000    129   system_u:system_r:container_t:s0:c719,c893   /var/lib/awx/venv/awx/bin/uwsgi --socket 127.0.0.1:8050 --module=awx.wsgi:application --vacuum --processes=5 --harakiri=120 --no-orphans --master --max-requests=1000 --master-fifo=/var/lib/awx/awxfifo --lazy-apps -b 32768 \n1000   1000    130   system_u:system_r:container_t:s0:c719,c893   nginx: worker process \n1000   1000    131   system_u:system_r:container_t:s0:c719,c893   /var/lib/awx/venv/awx/bin/uwsgi --socket 127.0.0.1:8050 --module=awx.wsgi:application --vacuum --processes=5 --harakiri=120 --no-orphans --master --max-requests=1000 --master-fifo=/var/lib/awx/awxfifo --lazy-apps -b 32768 \n1000   1000    132   system_u:system_r:container_t:s0:c719,c893   /var/lib/awx/venv/awx/bin/uwsgi --socket 127.0.0.1:8050 --module=awx.wsgi:application --vacuum --processes=5 --harakiri=120 --no-orphans --master --max-requests=1000 --master-fifo=/var/lib/awx/awxfifo --lazy-apps -b 32768 \n1000   1000    133   system_u:system_r:container_t:s0:c719,c893   /var/lib/awx/venv/awx/bin/uwsgi --socket 127.0.0.1:8050 --module=awx.wsgi:application --vacuum --processes=5 --harakiri=120 --no-orphans --master --max-requests=1000 --master-fifo=/var/lib/awx/awxfifo --lazy-apps -b 32768 \n1000   1000    134   system_u:system_r:container_t:s0:c719,c893   /var/lib/awx/venv/awx/bin/uwsgi --socket 127.0.0.1:8050 --module=awx.wsgi:application --vacuum --processes=5 --harakiri=120 --no-orphans --master --max-requests=1000 --master-fifo=/var/lib/awx/awxfifo --lazy-apps -b 32768 \n1000   1000    135   system_u:system_r:container_t:s0:c719,c893   /var/lib/awx/venv/awx/bin/uwsgi --socket 127.0.0.1:8050 --module=awx.wsgi:application --vacuum --processes=5 --harakiri=120 --no-orphans --master --max-requests=1000 --master-fifo=/var/lib/awx/awxfifo --lazy-apps -b 32768 \n```\n\nhere you can see the mount points from host side, it's the awx-data what is prevented from acces:\n\n```\n[root@ohuska exported_volumes]# ls -laZ\ntotal 88\ndrwxr-xr-x. 19               33 root  unconfined_u:object_r:container_var_lib_t:s0     4096 Mar 24 00:20 .\ndrwx------.  5 root             root  unconfined_u:object_r:container_var_lib_t:s0     4096 Feb  6 19:19 ..\ndrwxr-xr-x.  2             1000 root  unconfined_u:object_r:container_var_lib_t:s0     4096 Mar 24 00:20 awx-data\ndrwx------. 19 systemd-coredump root  system_u:object_r:container_file_t:s0            4096 Mar 24 00:21 awx-pg\ndrwxr-xr-x.  2 root             root  unconfined_u:object_r:container_var_lib_t:s0     4096 Mar 18 07:00 backup\ndrwxr-xr-x.  3              472 root  system_u:object_r:container_file_t:s0:c468,c880  4096 Sep  6  2018 grafana-etc\ndrwxr-xr-x.  5              472 root  system_u:object_r:container_file_t:s0:c468,c880  4096 Mar 24 00:26 grafana-lib\ndrwxrwxrwx. 15               33 ikke  system_u:object_r:container_file_t:s0:c15,c770   4096 Mar  3 13:19 nextcloud_www\n```\n\nNote how the nextcloud and others have more selinux numbers there, where as the one for awx does not have the same as processes inside containers do have.\n\nThe yml file for this is here:\nhttps://github.com/containers/libpod/issues/2752\n\nwhere you can see how mounts are done. Seems like podman won't create correct labels now for existing dirs. Data was moved from docker backup, that's why they are not empty dirs. \n"
+        },
+        {
+            "user": "ikke-t",
+            "body": "Please ignore my previous comment. I found the **user** error with directory permissions."
+        },
+        {
+            "user": "mheon",
+            "body": "/approve"
+        },
+        {
+            "user": "openshift-ci-robot",
+            "body": "[APPROVALNOTIFIER] This PR is **APPROVED**\n\nThis pull-request has been approved by: *<a href=\"https://github.com/containers/libpod/pull/2575#\" title=\"Author self-approved\">haircommander</a>*, *<a href=\"https://github.com/containers/libpod/pull/2575#issuecomment-477313318\" title=\"Approved\">mheon</a>*\n\nThe full list of commands accepted by this bot can be found [here](https://go.k8s.io/bot-commands?repo=containers%2Flibpod).\n\nThe pull request process is described [here](https://git.k8s.io/community/contributors/guide/owners.md#the-code-review-process)\n\n<details >\nNeeds approval from an approver in each of these files:\n\n- ~~[OWNERS](https://github.com/containers/libpod/blob/master/OWNERS)~~ [mheon]\n\nApprovers can indicate their approval by writing `/approve` in a comment\nApprovers can cancel approval by writing `/approve cancel` in a comment\n</details>\n<!-- META={\"approvers\":[]} -->"
+        },
+        {
+            "user": "mheon",
+            "body": "Code LGTM on my side\n@rhatdan PTAL"
+        },
+        {
+            "user": "rhatdan",
+            "body": "Remove the shared param, and then it LGTM"
+        },
+        {
+            "user": "haircommander",
+            "body": "I opted to actually use it instead. PTAL"
+        },
+        {
+            "user": "rhatdan",
+            "body": "LGTM"
+        },
+        {
+            "user": "TomSweeneyRedHat",
+            "body": "One suggestion for consideration, tests aren't hip atm.  Code LGTM otherwise."
+        },
+        {
+            "user": "mheon",
+            "body": "Tests both seem like flakes, restarting"
+        },
+        {
+            "user": "mheon",
+            "body": "bot, retest this please\n/lgtm"
+        },
+        {
+            "user": "rhatdan",
+            "body": "bot, retest this please"
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 2536
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 2303
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 2730
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 13840
+        }
+    ]
+}

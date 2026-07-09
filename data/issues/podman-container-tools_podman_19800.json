@@ -1,0 +1,36 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 19800,
+    "type": "issue",
+    "title": "UIDs and GID are handled in base 8 (incorrectly)",
+    "state": "closed",
+    "labels": [
+        "kind/bug",
+        "locked - please file new issue/PR"
+    ],
+    "user": "antifuchs",
+    "body": "### Issue Description\n\nWhen using `--hostuser=testuser` with a `testuser` account that has a UID above 7, podman either: a) translates the UID wrong or b) fails to parse the UID, because it attempts to [parse the UID in octal](https://github.com/containers/podman/blob/29f4572f9fe5d2f4c60821c34f867e99447d9102/libpod/container_internal_common.go#L824). \n\nThat's incorrect on at least the linux systems that I'm using: There, /etc/passwd ID entries are all in decimal.\n\n### Steps to reproduce the issue\n\nTo reproduce the \"does not start\" aspect of the issue:\n1. Find or create a user that has a UID containing digits invalid in base 8 (I have created a `testuser` with UID 987).\n2. run `podman run   --rm -u testuser --passwd --hostuser=testuser ubuntu:latest grep testuser /etc/passwd`\n3. Observe that podman complains `Error: strconv.ParseUint: parsing \"987\": invalid syntax`\n\nTo reproduce the \"starts but is completely incorrect\" aspect:\n1. Find or create a user that has a UID that's valid base-8 but is >7 (I have created my own user with UID 1000).\n2. run `podman run   --rm -u $(whoami) --passwd --hostuser=$(whoami) ubuntu:latest grep $(whoami) /etc/passwd` - prints UIDs & GIDs `1000`, which is correct (I guess that they are written in base-8 also?)\n3. run `podman run   --rm -u $(whoami) --passwd --hostuser=$(whoami) ubuntu:latest id`\n4. Observe that this prints `uid=512 gid=512 groups=512`\n\n\n### Describe the results you received\n\n(see the repro steps for an explanation of the results)\n\n### Describe the results you expected\n\nI would expect all host UIDs and GIDs to work, regardless of whether they are valid in octal, and that the *concrete* UID and GID in the container is the same as on the host (so, a UID of 1000 in the host should be 1000 in the container).\n\n### podman info output\n\n```yaml\nfreeLocks: 2046\n  hostname: gloria\n  idMappings:\n    gidmap:\n    - container_id: 0\n      host_id: 1000\n      size: 1\n    - container_id: 1\n      host_id: 100000\n      size: 65536\n    uidmap:\n    - container_id: 0\n      host_id: 1000\n      size: 1\n    - container_id: 1\n      host_id: 100000\n      size: 65536\n  kernel: 6.1.45\n  linkmode: dynamic\n  logDriver: journald\n  memFree: 157977083904\n  memTotal: 404340367360\n  networkBackend: netavark\n  networkBackendInfo:\n    backend: netavark\n    dns:\n      package: Unknown\n      path: /nix/store/jh447x1vs6wgmh9x2dy4fkbc55r13cm6-podman-4.6.0-patched-for-19169/libexec/podman/aardvark-dns\n      version: aardvark-dns 1.6.0\n    package: Unknown\n    path: /nix/store/jh447x1vs6wgmh9x2dy4fkbc55r13cm6-podman-4.6.0-patched-for-19169/libexec/podman/netavark\n    version: netavark 1.6.0\n  ociRuntime:\n    name: crun\n    package: Unknown\n    path: /nix/store/xal8jc595rdckj94s5v3rn5i93dggh66-crun-1.8.4/bin/crun\n    version: |-\n      crun version 1.8.4\n      commit: 1.8.4\n      rundir: /run/user/1000/crun\n      spec: 1.0.0\n      +SYSTEMD +SELINUX +APPARMOR +CAP +SECCOMP +EBPF +CRIU +YAJL\n  os: linux\n  pasta:\n    executable: \"\"\n    package: \"\"\n    version: \"\"\n  remoteSocket:\n    exists: true\n    path: /run/user/1000/podman/podman.sock\n\nplugins:\n  authorization: null\n  log:\n  - k8s-file\n  - none\n  - passthrough\n  - journald\n  network:\n  - bridge\n  - macvlan\n  - ipvlan\n  volume:\n  - local\nregistries:\n  search:\n  - docker.io\n  - quay.io\nstore:\n  configFile: /home/asf/.config/containers/storage.conf\n  containerStore:\n    number: 2\n    paused: 0\n    running: 0\n    stopped: 2\n  graphDriverName: overlay\n  graphOptions: {}\n  graphRoot: /home/asf/.local/share/containers/storage\n  graphRootAllocated: 214669852672\n  graphRootUsed: 10315104256\n  graphStatus:\n    Backing Filesystem: zfs\n    Native Overlay Diff: \"false\"\n    Supports d_type: \"true\"\n    Using metacopy: \"false\"\n  imageCopyTmpDir: /var/tmp\n  imageStore:\n    number: 51\n  runRoot: /run/user/1000/containers\n  transientStore: false\n  volumePath: /home/asf/.local/share/containers/storage/volumes\nversion:\n  APIVersion: 4.6.0\n  Built: 315532800\n  BuiltTime: Mon Dec 31 19:00:00 1979\n  GitCommit: \"\"\n  GoVersion: go1.20.7\n  Os: linux\n  OsArch: linux/amd64\n  Version: 4.6.0\n```\n\n\n### Podman in a container\n\nNo\n\n### Privileged Or Rootless\n\nRootless\n\n### Upstream Latest Release\n\nNo\n\n### Additional environment details\n\nI'm running in nixos, but believe this applies to all systems.\n\n### Additional information\n\nThis issue only happens with `--hostuser` for me so far, but it's consistent there. I do have to use `--hostuser` because the user I need to translate over comes with dynamic-enough UID/GIDs that it must be referred to by name /:",
+    "comments": [
+        {
+            "user": "giuseppe",
+            "body": "I think the following patch solves the issue:\n\n```diff\ndiff --git a/libpod/container_internal_common.go b/libpod/container_internal_common.go\nindex f7a51f5a3..a8747f849 100644\n--- a/libpod/container_internal_common.go\n+++ b/libpod/container_internal_common.go\n@@ -821,12 +821,12 @@ func lookupHostUser(name string) (*runcuser.ExecUser, error) {\n        if err != nil {\n                return &execUser, err\n        }\n-       uid, err := strconv.ParseUint(u.Uid, 8, 32)\n+       uid, err := strconv.ParseUint(u.Uid, 10, 32)\n        if err != nil {\n                return &execUser, err\n        }\n \n-       gid, err := strconv.ParseUint(u.Gid, 8, 32)\n+       gid, err := strconv.ParseUint(u.Gid, 10, 32)\n        if err != nil {\n                return &execUser, err\n        }\n```\n\nI'll play with it and open a PR"
+        },
+        {
+            "user": "giuseppe",
+            "body": "PR here: https://github.com/containers/podman/pull/19816"
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "boinkor-net",
+            "repository": "tsnsrv",
+            "number": 35
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 19816
+        }
+    ]
+}

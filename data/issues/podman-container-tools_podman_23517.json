@@ -1,0 +1,75 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 23517,
+    "type": "issue",
+    "title": "pasta regression: tcp_splice no longer working correctly",
+    "state": "closed",
+    "labels": [
+        "kind/bug",
+        "pasta",
+        "locked - please file new issue/PR"
+    ],
+    "user": "Luap99",
+    "body": "\nWhile updating our CI images we have two new failed tests. Both try to pull some encrypted image from a local registry container started with podman however the pull never completes and seems to just hang. I am not sure what is special about the encrypted pull code path all other pull tests seem fine.\n\nReproducer with pasta 2024-07-26.\n `make localintegration FOCUS=\"podman run and decrypt from local registry\"`, I have not yet tried to create a reproducer outside of the suite. Let me know if you need one.\nIf you want to test a custom pasta build start it with\n`CONTAINERS_HELPER_BINARY_DIR=/dir/to/passt make localintegration FOCUS=\"podman run and decrypt from local registry\"`\nso podman uses the pasta binary in this directory path.\n\n And to speed to speed the test up in the failing case you can apply\n```diff\ndiff --git a/Makefile b/Makefile\nindex 076318d93..00925f6c4 100644\n--- a/Makefile\n+++ b/Makefile\n@@ -140,7 +140,7 @@ GINKGO ?= ./test/tools/build/ginkgo\n GINKGO_JSON ?= $(if $(CI),--json-report ginkgo-e2e.json,)\n \n # Allow control over some Ginkgo parameters\n-GINKGO_FLAKE_ATTEMPTS ?= 3\n+GINKGO_FLAKE_ATTEMPTS ?= 1\n GINKGO_NO_COLOR ?= y\n \n # Conditional required to produce empty-output if binary not built yet.\ndiff --git a/test/e2e/run_test.go b/test/e2e/run_test.go\nindex cfb81aa2d..07980862b 100644\n--- a/test/e2e/run_test.go\n+++ b/test/e2e/run_test.go\n@@ -2185,7 +2185,7 @@ WORKDIR /madethis`, BB)\n \n                // Must fail without --decryption-key\n                session = podmanTest.Podman([]string{\"run\", \"--tls-verify=false\", imgPath})\n-               session.WaitWithDefaultTimeout()\n+               session.Wait(30)\n                Expect(session).Should(ExitWithError(125, \"Trying to pull \"+imgPath))\n                Expect(session.ErrorToString()).To(ContainSubstring(\"invalid tar header\"))\n \n```\n\nSwitching the test registry container to use slirp4netns makes it work, using pasta 2024-06-24 also works.\n\n---\n\nWith git bisect on the passt repo and the reproducer above I got `66a02c9f7c tcp_splice: Use parameterised macros for per-side event/flag bits` as first bad commit which sounds related. Full bisect log for reference: \n```\ngit bisect start\n# status: waiting for both good and bad commits\n# bad: [0149d11cc5043d618cf4a6e6e8201d5718836dd2] pasta: modify hostname when detaching new namespace\ngit bisect bad 0149d11cc5043d618cf4a6e6e8201d5718836dd2\n# status: waiting for good commit(s), bad commit known\n# good: [1ee2ecade3f41e2a3e51c1e580b08cba977a7c8d] udp: Reduce scope of rport in udp_invert_portmap()\ngit bisect good 1ee2ecade3f41e2a3e51c1e580b08cba977a7c8d\n# bad: [6d76278c21ce2aae7f68ba6807de570cc88f5499] icmp: Obtain destination addresses from the flowsides\ngit bisect bad 6d76278c21ce2aae7f68ba6807de570cc88f5499\n# good: [4e1f850f61caaff0c65ce9d5fc4322a4aea807dc] udp, tcp: Tweak handling of no_udp and no_tcp flags\ngit bisect good 4e1f850f61caaff0c65ce9d5fc4322a4aea807dc\n# bad: [4e2d36e83fb1ff86c2e7f6d0832827d59f829934] flow: Common address information for target side\ngit bisect bad 4e2d36e83fb1ff86c2e7f6d0832827d59f829934\n# good: [5235c47c791919333aec8707ff2839d50bdf727a] flow: Introduce flow_foreach_sidei() macro\ngit bisect good 5235c47c791919333aec8707ff2839d50bdf727a\n# bad: [01e5611ec3912f02fb683305db8913f8eca15fee] doc: Test behaviour of closing duplicate UDP sockets\ngit bisect bad 01e5611ec3912f02fb683305db8913f8eca15fee\n# bad: [66a02c9f7cd5c7a643d9ac5dad5a7209a6e1c467] tcp_splice: Use parameterised macros for per-side event/flag bits\ngit bisect bad 66a02c9f7cd5c7a643d9ac5dad5a7209a6e1c467\n# first bad commit: [66a02c9f7cd5c7a643d9ac5dad5a7209a6e1c467] tcp_splice: Use parameterised macros for per-side event/flag bits\n```\n\ncc @sbrivio-rh @dgibson ",
+    "comments": [
+        {
+            "user": "sbrivio-rh",
+            "body": "Gosh. Thanks for bisecting! I just found an issue in the commit, this would be the fix:\n\n```\ndiff --git a/tcp_splice.c b/tcp_splice.c\nindex 473562b..483e45d 100644\n--- a/tcp_splice.c\n+++ b/tcp_splice.c\n@@ -577,7 +577,7 @@ eintr:\n                        if (conn->read[fromsidei] == conn->written[fromsidei])\n                                break;\n \n-                       conn_event(c, conn, OUT_WAIT(fromsidei));\n+                       conn_event(c, conn, OUT_WAIT(!fromsidei));\n                        break;\n                }\n \n```"
+        },
+        {
+            "user": "Luap99",
+            "body": "> Gosh. Thanks for bisecting! I just found an issue in the commit, this would be the fix:\n> \n> ```\n> diff --git a/tcp_splice.c b/tcp_splice.c\n> index 473562b..483e45d 100644\n> --- a/tcp_splice.c\n> +++ b/tcp_splice.c\n> @@ -577,7 +577,7 @@ eintr:\n>                         if (conn->read[fromsidei] == conn->written[fromsidei])\n>                                 break;\n>  \n> -                       conn_event(c, conn, OUT_WAIT(fromsidei));\n> +                       conn_event(c, conn, OUT_WAIT(!fromsidei));\n>                         break;\n>                 }\n>  \n> ```\n\nI can confirm this seems to fix the issue."
+        },
+        {
+            "user": "sbrivio-rh",
+            "body": "> I can confirm this seems to fix the issue.\n\nThanks, I'll start preparing a new release right away, and try to reproduce it meanwhile, but the issue is quite obvious. From that commit:\n\n```\n@@ -644,8 +647,7 @@ eintr:\n                        if (conn->read[fromsidei] == conn->written[fromsidei])\n                                break;\n \n-                       conn_event(c, conn,\n-                                  fromsidei == 0 ? OUT_WAIT_1 : OUT_WAIT_0);\n+                       conn_event(c, conn, OUT_WAIT(fromsidei));\n                        break;\n                }\n \n```\n\nbut no, if the \"from\" side is 0, and we're waiting for the output (\"to\") side to be ready for writing, we need to wait on side 1, not 0. :("
+        },
+        {
+            "user": "sbrivio-rh",
+            "body": "Fixed in this Fedora 41 [update](https://bodhi.fedoraproject.org/updates/FEDORA-2024-9c77aaa0a3)."
+        },
+        {
+            "user": "sbrivio-rh",
+            "body": "And in this Fedora 40 [update](https://bodhi.fedoraproject.org/updates/FEDORA-2024-d127500a41)."
+        },
+        {
+            "user": "sbrivio-rh",
+            "body": "As well as in [0.0~git20240806.ee36266-1](https://tracker.debian.org/news/1552475/accepted-passt-00git20240806ee36266-1-source-into-unstable/) for Debian unstable."
+        },
+        {
+            "user": "Luap99",
+            "body": "thanks, for now I just used slirp4netns for the failing tests so no urgency on our side, https://github.com/containers/podman/pull/23518/commits/1912dd4bf68a567648aee96d10784fb49eacacd0\n\nWe can revert that with the next update cycle."
+        },
+        {
+            "user": "sbrivio-rh",
+            "body": "@Luap99, should I close this meanwhile, or do you prefer to keep it open to track image updates or suchlike?"
+        },
+        {
+            "user": "Luap99",
+            "body": "I keep it open for now so we remember to revert the work around on the next update"
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 23508
+        },
+        {
+            "organization": "containers",
+            "repository": "automation_images",
+            "number": 373
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 23706
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 24219
+        }
+    ]
+}

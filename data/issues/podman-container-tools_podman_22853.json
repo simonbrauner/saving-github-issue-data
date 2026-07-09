@@ -1,0 +1,66 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 22853,
+    "type": "issue",
+    "title": "Podman Kube Play with --userns=auto - How to chown volumes?",
+    "state": "open",
+    "labels": [],
+    "user": "giuseppe",
+    "body": "### Discussed in https://github.com/containers/podman/discussions/22848\n\n<div type='discussions-op-text'>\n\n<sup>Originally posted by **MadSpindel** May 30, 2024</sup>\nI'm trying to understand how I can use rootfull containers with --userns=auto. I have a Kubernetes YAML spec generated with podman kube generate. The problem is, with the hostUsers set to false, the HUSER could change UID and then it will not be possible for the pod to change files in the volume mount. How can I update the Kubernetes YAML spec to tell Podman to chown (change owner) of the volume to new UID created with hostUsers: false?\n\nMy current Kubernetes YAML spec:\n\n```yaml\napiVersion: v1\nkind: Pod\nmetadata:\n  creationTimestamp: \"2024-05-15T07:29:14Z\"\n  labels:\n    app: dns-server-pod\n  name: dns-server-pod\nspec:\n  hostUsers: false\n  containers:\n  - args:\n    - /etc/dns\n    env:\n    - name: DNS_SERVER_DOMAIN\n      value: dns-server\n    image: docker.io/technitium/dns-server:latest\n    name: dns-server\n    ports:\n    - containerPort: 53\n      hostPort: 53\n    - containerPort: 5380\n      hostPort: 5380\n    - containerPort: 53\n      hostPort: 53\n      protocol: UDP\n    volumeMounts:\n    - mountPath: /etc/dns\n      name: technitium_config-pvc\n  volumes:\n  - name: technitium_config-pvc\n    persistentVolumeClaim:\n      claimName: technitium_config\n\n```</div>",
+    "comments": [
+        {
+            "user": "giuseppe",
+            "body": "to follow what Kubernetes does upstream, then we need to enforce `idmap` on each volume when `hostUsers: false` is used"
+        },
+        {
+            "user": "Luap99",
+            "body": "But idmap only works as root with the right filesystem's? So what should podman do if idmap is not available? "
+        },
+        {
+            "user": "giuseppe",
+            "body": "yes idmap works only with root.\n\nNot sure how this should be handled.  Is it better to not follow what Kubernetes does in this case?\n\nMaybe we could expect `idmap` to be an explicit option for the volume"
+        },
+        {
+            "user": "Luap99",
+            "body": "Not sure but it would be confusing to have different behaviour depending on system and root vs rootless.\n\nSetting mount options explicitly should already work AFAIK although not sure how the syntax looks today. Also for my understanding is `hostUsers: false` mapped to --userns=auto?"
+        },
+        {
+            "user": "MadSpindel",
+            "body": "From my perspective, as a simple user, I think it probably should work like Kubernetes if the right conditions are met. The criterias should be defined in the documentation. Then it's clear for everyone. I don't think it need to support all the different edge cases."
+        },
+        {
+            "user": "darrellenns",
+            "body": "I have also run into this issue. According to [this Kubernetes documentation](https://github.com/kubernetes/enhancements/tree/master/keps/sig-node/127-user-namespaces#handling-of-volumes), they are solving it by using [ID-mapped mounts](https://lwn.net/Articles/896255/) rather than chown. Perhaps podman could do something similar?"
+        },
+        {
+            "user": "rhatdan",
+            "body": "Podman has support for this in rootful containers, the issue is rootless containers are not allowed access by the linux kernel.  We would do it, if we were allowed."
+        },
+        {
+            "user": "MadSpindel",
+            "body": "> Podman has support for this in rootful containers, the issue is rootless containers are not allowed access by the linux kernel. We would do it, if we were allowed.\n\nNow it was some time ago I tried this, but I'm quite sure I was using this with rootful containers, as described in the first post of this issue. If I recall correctly, I was running podman-kube@.service with the root user. I think it worked the first time but after reboot, the UID could change and then it didn't have access to the volumes anymore."
+        },
+        {
+            "user": "darrellenns",
+            "body": "I'm running into this with rootful containers as well.\n\nI was testing yesterday with containers lauched as root with systemd and podman-kube@.service and hostUsers:false. The first time a pod is started, it assigns the lowest available available UID block and used that for both the container and the volume. On subsequent runs, if a different UID block was the lowest available then the containers would run as the different UID but the volume would not be chown'ed or otherwise id mapped. This resulted in broken file permissions in the container.\n\nPerhaps there is some storage config or yaml option needed to enable this id mapping? Maybe it's only supported on certain storage backends (not the default local storage)? I haven't been able to find any documentation on this yet - but maybe I'm just missing it?  I'm testing on Debian trixie with the distribution-provided packages (podman 5.3.1). I've made no changes to the default storage config, and I'm using a BTRFS filesystem.\n\nI'm not 100% sure at this point if this is expected behavior (not implemented feature), a bug, or just me missing something.\n\n@rhatdan Is there some documentation or config/yaml settings example you can direct me to for idmap volume mounts with rootful containers?"
+        },
+        {
+            "user": "MadSpindel",
+            "body": "@darrellenns Which podman version did you try it with? I tried now again with podman version 4.9.3 on an Ubuntu 24.04.2 LTS virtual machine. It looks like it might work without the issues I experienced before.\n\nEdit: Nvm, Podman 5.3.1 on Debian Trixie.\n\nDid you also do this:\n\n> The --userns=auto flag requires that the user name containers be specified in the /etc/subuid and /etc/subgid files, with an unused range of subordinate user IDs that Podman containers are allowed to allocate. See subuid(5).\n> \n> Example: containers:2147483647:2147483648."
+        },
+        {
+            "user": "MadSpindel",
+            "body": "Maybe it worked for me because I was only testing with one pod. Now when I added some more it stopped working."
+        },
+        {
+            "user": "darrellenns",
+            "body": "@MadSpindel It grabs the lowest possible chunk of the available UID range. If you only ever have 1 pod, then you won't run into the issue. If you have multiple pods and use persistent volumes, then depending on the order they are started the volume ownership gets broken."
+        },
+        {
+            "user": "Daskan",
+            "body": "Something i currently have problems with too when running multiple pods.\n\nOn my host the volume files may be `root:root` but in the container i'd like to have them as `root:somethingelse` without setting `UserNS=auto:gidmapping=25:somethingelse`.\nMy current (not beautiful) fix for that is to set the files to \n'root:(grep '^containers:' /etc/subgid | cut -d: -f2 + whatEverINeed)' and \n `UserNS=auto:gidmapping=25:(grep '^containers:' /etc/subgid | cut -d: -f2 + whatEverINeed)`\nIt works but is neither intuitive nor beautiful."
+        }
+    ],
+    "cross_references": []
+}

@@ -1,0 +1,115 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 25983,
+    "type": "pull_request",
+    "title": "Fix: inheritlabels=true if query param absent",
+    "state": "closed",
+    "labels": [
+        "lgtm",
+        "approved",
+        "release-note-none",
+        "kind/api-change",
+        "locked - please file new issue/PR",
+        "5.5"
+    ],
+    "user": "matejvasek",
+    "body": "The `inheritlabels` param must default to true if query param is absent.\n\nFixes:  #25981\n\n#### Does this PR introduce a user-facing change?\nNone\n",
+    "comments": [
+        {
+            "user": "matejvasek",
+            "body": "Maybe simpler would be to define `InheritLabels` as `*bool` and write simple conversion function `*bool` => `types.OptionalBool`.\n\nSomething like:\n```patch\ndiff --git a/pkg/api/handlers/compat/images_build.go b/pkg/api/handlers/compat/images_build.go\nindex 16b03d4340..9b9b153a3a 100644\n--- a/pkg/api/handlers/compat/images_build.go\n+++ b/pkg/api/handlers/compat/images_build.go\n@@ -130,7 +130,7 @@ func BuildImage(w http.ResponseWriter, r *http.Request) {\n \t\tIDMappingOptions        string   `schema:\"idmappingoptions\"`\n \t\tIdentityLabel           bool     `schema:\"identitylabel\"`\n \t\tIgnore                  bool     `schema:\"ignore\"`\n-\t\tInheritLabels           bool     `schema:\"inheritlabels\"`\n+\t\tInheritLabels           *bool    `schema:\"inheritlabels\"`\n \t\tIsolation               string   `schema:\"isolation\"`\n \t\tJobs                    int      `schema:\"jobs\"`\n \t\tLabelOpts               string   `schema:\"labelopts\"`\n@@ -745,7 +745,7 @@ func BuildImage(w http.ResponseWriter, r *http.Request) {\n \t\tIDMappingOptions:               &idMappingOptions,\n \t\tIgnoreUnrecognizedInstructions: query.Ignore,\n \t\tIgnoreFile:                     ignoreFile,\n-\t\tInheritLabels:                  types.NewOptionalBool(query.InheritLabels),\n+\t\tInheritLabels:                  boolPtrToOptionalBool(query.InheritLabels),\n \t\tIsolation:                      isolation,\n \t\tJobs:                           &jobs,\n \t\tLabels:                         labels,\n@@ -953,3 +953,14 @@ func extractTarFile(anchorDir string, r *http.Request) (string, error) {\n \terr = archive.Untar(r.Body, buildDir, nil)\n \treturn buildDir, err\n }\n+\n+func boolPtrToOptionalBool(ptr *bool) types.OptionalBool {\n+\tswitch {\n+\tcase ptr == nil:\n+\t\treturn types.OptionalBoolUndefined\n+\tcase *ptr:\n+\t\treturn types.OptionalBoolTrue\n+\tdefault:\n+\t\treturn types.OptionalBoolFalse\n+\t}\n+}\n\n```"
+        },
+        {
+            "user": "matejvasek",
+            "body": "I am opened to suggestions."
+        },
+        {
+            "user": "matejvasek",
+            "body": "/cc @Luap99 @TomSweeneyRedHat "
+        },
+        {
+            "user": "matejvasek",
+            "body": "/cc @flouthoc "
+        },
+        {
+            "user": "flouthoc",
+            "body": "PR looks good a test in https://github.com/containers/podman/tree/main/test/apiv2 can be added for this. Let me write a test."
+        },
+        {
+            "user": "flouthoc",
+            "body": "@Luap99 @matejvasek I don't have permission to push on this PR so I am pasting a patch for test here.\n\nI have created a new file so in future we can keep `build` tests seperate from `image` tests in `apiv2`.\n\n```diff\n---\n test/apiv2/90-build.at | 27 +++++++++++++++++++++++++++\n 1 file changed, 27 insertions(+)\n create mode 100644 test/apiv2/90-build.at\n\ndiff --git a/test/apiv2/90-build.at b/test/apiv2/90-build.at\nnew file mode 100644\nindex 000000000..226ef5572\n--- /dev/null\n+++ b/test/apiv2/90-build.at\n@@ -0,0 +1,27 @@\n+# -*- sh -*-\n+#\n+# Tests for build-related endpoints\n+#\n+\n+# test if default compat build contains labels from base image\n+TMPD=$(mktemp -d podman-apiv2-test.build.XXXXXXXX)\n+function cleanBuildTest() {\n+    podman rmi -a -f\n+    rm -rf \"${TMPD}\" &> /dev/null\n+}\n+CONTAINERFILE_TAR=\"${TMPD}/containerfile.tar\"\n+cat > $TMPD/containerfile << EOF\n+FROM registry.fedoraproject.org/fedora-minimal\n+RUN echo hello\n+EOF\n+tar --format=posix -C $TMPD -cvf ${CONTAINERFILE_TAR} containerfile &> /dev/null\n+\n+t POST \"/build?dockerfile=containerfile&t=labeltest\" $CONTAINERFILE_TAR 200 \\\n+  '.aux|select(has(\"ID\")).ID~^sha256:[0-9a-f]\\{64\\}$'\n+\n+t GET images/labeltest/json 200 \\\n+  .Config.Labels.license=\"MIT\" \\\n+  .Config.Labels.name=\"fedora-minimal\"\n+cleanBuildTest\n+\n+# vim: filetype=sh\n-- \n2.48.1\n```"
+        },
+        {
+            "user": "matejvasek",
+            "body": "I'll apply patch!"
+        },
+        {
+            "user": "Luap99",
+            "body": "please don't use `registry.fedoraproject.org/fedora-minimal` use $IMAGE which is `quay.io/libpod/testimage:20241011` adn adapt the labels accordingly, to avoid flakes and for test speed it is best to keep using the same image constituently "
+        },
+        {
+            "user": "flouthoc",
+            "body": "@matejvasek Applying this again on top of my previous patch, should consider @Luap99 's feedback\n\n```diff\ndiff --git a/test/apiv2/90-build.at b/test/apiv2/90-build.at\nindex 226ef5572..8c667f8db 100644\n--- a/test/apiv2/90-build.at\n+++ b/test/apiv2/90-build.at\n@@ -11,7 +11,7 @@ function cleanBuildTest() {\n }\n CONTAINERFILE_TAR=\"${TMPD}/containerfile.tar\"\n cat > $TMPD/containerfile << EOF\n-FROM registry.fedoraproject.org/fedora-minimal\n+FROM $IMAGE\n RUN echo hello\n EOF\n tar --format=posix -C $TMPD -cvf ${CONTAINERFILE_TAR} containerfile &> /dev/null\n@@ -20,8 +20,7 @@ t POST \"/build?dockerfile=containerfile&t=labeltest\" $CONTAINERFILE_TAR 200 \\\n   '.aux|select(has(\"ID\")).ID~^sha256:[0-9a-f]\\{64\\}$'\n \n t GET images/labeltest/json 200 \\\n-  .Config.Labels.license=\"MIT\" \\\n-  .Config.Labels.name=\"fedora-minimal\"\n+  .Config.Labels.created_by=\"test/system/build-testimage\"\n cleanBuildTest\n \n # vim: filetype=sh\n```"
+        },
+        {
+            "user": "matejvasek",
+            "body": "Why would `bud podman fedora-42 root host sqlite` be failing?"
+        },
+        {
+            "user": "flouthoc",
+            "body": "> Why would `bud podman fedora-42 root host sqlite` be failing?\n\nSomeone just restarted it, lets wait for the output."
+        },
+        {
+            "user": "flouthoc",
+            "body": "@matejvasek PR passes "
+        },
+        {
+            "user": "flouthoc",
+            "body": "@Luap99 PTAL"
+        },
+        {
+            "user": "openshift-ci[bot]",
+            "body": "[APPROVALNOTIFIER] This PR is **APPROVED**\n\nThis pull-request has been approved by: *<a href=\"https://github.com/containers/podman/pull/25983#pullrequestreview-2799573035\" title=\"Approved\">flouthoc</a>*, *<a href=\"https://github.com/containers/podman/pull/25983#pullrequestreview-2799028544\" title=\"Approved\">Luap99</a>*, *<a href=\"https://github.com/containers/podman/pull/25983#\" title=\"Author self-approved\">matejvasek</a>*\n\nThe full list of commands accepted by this bot can be found [here](https://go.k8s.io/bot-commands?repo=containers%2Fpodman).\n\nThe pull request process is described [here](https://git.k8s.io/community/contributors/guide/owners.md#the-code-review-process)\n\n<details >\nNeeds approval from an approver in each of these files:\n\n- ~~[OWNERS](https://github.com/containers/podman/blob/main/OWNERS)~~ [Luap99]\n\nApprovers can indicate their approval by writing `/approve` in a comment\nApprovers can cancel approval by writing `/approve cancel` in a comment\n</details>\n<!-- META={\"approvers\":[]} -->"
+        },
+        {
+            "user": "Honny1",
+            "body": "I think these changes deserve a release note. Please write one and post it at ` ``` ``` `. Otherwise, the bot will complain. Also, check your commit signatures. I think GitHub doesn't know your last public key for the last commit.  "
+        },
+        {
+            "user": "flouthoc",
+            "body": "> I think these changes deserve a release note. Please write one and post it at `` ``` ``` ``. Otherwise, the bot will complain. Also, check your commit signatures. I think GitHub doesn't know your last public key for the last commit.\n\nThe feature was added in buildah this is a fix for compat API before the release, I think `podman` inherits build release notes from buildah so should be fine I think. But yeah small note cannot harm."
+        },
+        {
+            "user": "Luap99",
+            "body": "We only have final release notes, this fixes a regression in 5.5.0-rc1 and we of course want to backport it for final. that means noting this in the release notes is kinda pointless as it was never broken for users using a normal release but @mheon can clarify if he sees things differently\n\n/lgtm\n"
+        },
+        {
+            "user": "matejvasek",
+            "body": "@Honny1 wrt gpg signatures, I committed  something on behalf of @flouthoc. So at best I could sign it for myself but the commit would be still only partially verified for that reason."
+        },
+        {
+            "user": "matejvasek",
+            "body": "wrt release notes: I would agree that this was not probably in any release. We found this only because in our project we run integration tests against nightly build each day.\n\nThe action https://github.com/knative/func/actions/workflows/test-podman-next.yaml started failing 5 days ago."
+        },
+        {
+            "user": "Luap99",
+            "body": "> We found this only because in our project we run integration tests against nightly build each day.\n\nThanks for testing (and patching!), especially nightly ones so we have a chance to find and fix things before we make releases.\n\nand before I forget:\n\n/cherry-pick v5.5\n\n\n"
+        },
+        {
+            "user": "openshift-cherrypick-robot",
+            "body": "@Luap99: new pull request created: #26003\n\n<details>\n\nIn response to [this](https://github.com/containers/podman/pull/25983#issuecomment-2835998461):\n\n>> We found this only because in our project we run integration tests against nightly build each day.\n>\n>Thanks for testing (and patching!), especially nightly ones so we have a chance to find and fix things before we make releases.\n>\n>and before I forget:\n>\n>/cherry-pick v5.5\n>\n>\n>\n\n\nInstructions for interacting with me using PR comments are available [here](https://git.k8s.io/community/contributors/guide/pull-requests.md).  If you have questions or suggestions related to my behavior, please file an issue against the [kubernetes-sigs/prow](https://github.com/kubernetes-sigs/prow/issues/new?title=Prow%20issue:) repository.\n</details>"
+        },
+        {
+            "user": "matejvasek",
+            "body": "Today the daily test passed https://github.com/knative/func/actions/workflows/test-podman-next.yaml"
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 26003
+        }
+    ]
+}

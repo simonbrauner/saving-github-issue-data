@@ -1,0 +1,202 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 11958,
+    "type": "pull_request",
+    "title": "Podman Image SCP rootful to rootless transfer",
+    "state": "closed",
+    "labels": [
+        "lgtm",
+        "approved",
+        "locked - please file new issue/PR"
+    ],
+    "user": "cdoern",
+    "body": "Added functionality for users to transfer images from root storage to rootless storage without using sshd. This is\ndone through rootful podman by running `sudo podman image scp root@localhost::image user@localhost:: the user is needed\nin order to find and use their uid/gid to exec a new process.\n\nadded necessary tests, and functions for this implementation. Created new image function `Transfer` so that\nthe underlying code is majorly removed from CLI.\n\nSigned-off-by: cdoern <cdoern@redhat.com>\n",
+    "comments": [
+        {
+            "user": "TomSweeneyRedHat",
+            "body": "overall, nice work as usual @cdoern TYVM!"
+        },
+        {
+            "user": "cdoern",
+            "body": "@Luap99 I think all of your concerns and breakages stem from the environmental variables. I feel like I am probably missing some modifications to these. Generally, this works and is more fluid than `sudo podman image pull/save | podman image load` which often fails due to formatting errors. If we can get this to the point where it uses all of the correct files and paths so Chowning isn't necessary, should be better off. Howver, I do chown the files (for the ones that aren't eventually removed like the temp tarball) back to their original uid and gid @mheon @rhatdan can you PTAL so we can all get a sense of what is trying to be accomplished here?\n\nThis is the main process we wanted to add to `image scp` and I think it is a valuable one. but @Luap99 if the goal of the flags is to load into rootless storage why would the user never have used rootless podman before? I feel like that is a generally safe assumption to make most of the time, and if not it is a relatively quick fix that I can add to the man pages."
+        },
+        {
+            "user": "rhatdan",
+            "body": "Why aren't you using the localhost syntax?\npodman image scp root@localhost:alpine .\npodman image scp alpine root@localhost\n\nNone of these fancy flags.\n\nIt should be the same syntax, we just need to look for the key word localhost and attempt to shortcut it."
+        },
+        {
+            "user": "cdoern",
+            "body": "@rhatdan I can convert to that syntax with the inclusion of a `user@localhost` to send the image to since we have to execute the process as `sudo podman image scp user@localhost` I was having trouble starting the process rootless and sending the image to root. I will continue to modify it, I'm going to convert this to a draft and see what I can change."
+        },
+        {
+            "user": "cdoern",
+            "body": "@Luap99 I think I began to address some of your concerns with environmental variables, I changed it so that we actually retrieve the users  environmental vars and check for their run directory, using that for the other variables as necessary. @rhatdan I switched the syntax to `sudo podman image scp root@localhost::image user@localhost::` since we need to exec the original podman command through sudo. \n\nHonestly I would like to remove the necessity of calling this command using sudo but I do not think it is possible to start a rootful process (the save from root) out of a rootless one."
+        },
+        {
+            "user": "cdoern",
+            "body": "@Luap99 would adding some sort of `podman setup` command to set up the rootless DB make sense here? I feel like having something we can run internally at times to make sure everything is set up would be a good fail safe. \n\nedit: after some investigation and messing around I think I can make a function (internal for now) that initializes the rootless podman db, we can investigate whether or not we want to expose this to the user. "
+        },
+        {
+            "user": "cdoern",
+            "body": "@rhatdan @mheon PTAL at what I did here, Paul made a good point that if the rootless DB is not initialized, this will fail. Made a new setup function that creates a basic rootless DB and I also think this could be made into a `podman system setup` command to close the loop on other commands like reset, migrate, etc. I might've jumped to a few conclusions in terms of file names so let me know if there are any glaring issues. "
+        },
+        {
+            "user": "cdoern",
+            "body": "@containers/podman-maintainers PTAL, this feature is inherently hacky so the `podman setup` code might need some tweaks. However, I think ensuring the rootless DB is initialized is a key part of checking for edge cases. "
+        },
+        {
+            "user": "Luap99",
+            "body": "Generally speaking there are a lot of assumptions here which could easily break something. It uses default locations but users could have changed it in containers.conf. We tell people to not use su or sudo because this will cause many troubles but this PR will more or less do this.\n\nAlso the use of the user namespace makes me uncomfortable. IMO we should use setuid to properly drop privileges. "
+        },
+        {
+            "user": "rhatdan",
+            "body": "There is no chance of us adding a setuid file, this has to rely on sudo.  I have not had time to review the PR.  But I am not sure why we need to rely on configuration of the user account.  Temp content should be stored in a tmpfile in /var/tmp, and then it should be the equivalent of \npodman save foobar > /var/tmp/foobar | sudo podman load /var/load/foobar"
+        },
+        {
+            "user": "Luap99",
+            "body": "> There is no chance of us adding a setuid file, this has to rely on sudo.\n\nI am talking about the setuid syscall not a binary. Right now this PR uses a custom user namespace which can/will cause many unexpected behaviours. \n\n"
+        },
+        {
+            "user": "cdoern",
+            "body": "> > There is no chance of us adding a setuid file, this has to rely on sudo.\n> \n> I am talking about the setuid syscall not a binary. Right now this PR uses a custom user namespace which can/will cause many unexpected behaviours. \n> \n> \n\nsyscall.setuid does not work here. I tried that first before switching to the new user NS. Switching the uid inside of the parent process causes issues with the rest of the process after executing the rootless load. I would appreciate it if we could try to work inside of this new user NS approach and alter ModifyEnv() and Setup() as necessary to make it so that there are no corrupted paths."
+        },
+        {
+            "user": "cdoern",
+            "body": "@vrothberg made most of your changes and added a unit test. i haven't done much with those yet so I think I will need some help with that but I just put something preliminary together!"
+        },
+        {
+            "user": "giuseppe",
+            "body": "I think we should not create a user namespace manually as it is done in this PR.  One big limitation is that it doesn't account for additional IDs, so we are not able to use additional IDs assigned to the user.  You may want to just set `Uid: 0, Gid: 0` to the rootless user instead of creating a user namespace.  In this case, wouldn't `podman load` automatically create the user namespace when running rootless?"
+        },
+        {
+            "user": "cdoern",
+            "body": "> I think we should not create a user namespace manually as it is done in this PR. One big limitation is that it doesn't account for additional IDs, so we are not able to use additional IDs assigned to the user. You may want to just set `Uid: 0, Gid: 0` to the rootless user instead of creating a user namespace. In this case, wouldn't `podman load` automatically create the user namespace when running rootless?\n\nrunning the command rootless does not work either as execing a command using sudo opens a huge can of worms with file permissions. This would cause me to need to do the save as root and the load as rootless so I would have to use `exec.command(\"sudo\", \"podman\"....)` When I try to run something like this I get the error:\n\n```\nsudo: /etc/sudo.conf is owned by uid 65534, should be 0\nsudo: /etc/sudo.conf is owned by uid 65534, should be 0\nsudo: error in /etc/sudo.conf, line 0 while loading plugin \"sudoers_policy\"\nsudo: /usr/libexec/sudo/sudoers.so must be owned by uid 0\nsudo: fatal error, unable to load plugins\nError: exit status 1\n```\n\n@giuseppe currently this approach only work when running as sudo, so I am unsure of how to `setuid` properly so that the new process executes as a user. Would i change the uid in my process before executing? or would I somehow change it in the credentials of the syscall a I am doing? ~~Every approach I tried without the new User NS failed due to improper credentials, or it just hung forever with no result.~~ \n\nany advice on how to change this part of the code would be really appreciated\n\n**EDIT: Removed the manual creation of new User Namespaces**"
+        },
+        {
+            "user": "cdoern",
+            "body": "Removed the need for a new user NS and made it so that the `podman setup` function uses the default store values, removing all assumed directories. I also added a quick unit test for `ModifyEnv` and tightened up some other code. I think this looks pretty good and isn't as dangerous as the original attempt. @vrothberg @Luap99 @rhatdan PTAL"
+        },
+        {
+            "user": "cevich",
+            "body": "@cdoern I just re-ran all the failed tests.  I see a lot of common flakes scattered about, along with some other definitely strange failures.  Let's see what shakes out in the re-run.  I am in agreement with your theory though, this PR seems to be changing timings enough that it's exposing a bunch of unrelated code/test problems.  Unfortunately I don't think there's any quick fix, since these issues are there to start with.  But I'll stay with it and help you through."
+        },
+        {
+            "user": "cdoern",
+            "body": "Thanks @cevich I really appreciate your help, looks like the ubuntu test made it through and the two remote fedora tests got stuck this time around. Seems to just be luck of the draw what fails and what does not"
+        },
+        {
+            "user": "cevich",
+            "body": "> Seems to just be luck of the draw what fails and what does not\n\nKind of, more like we have a lot of tests, a big matrix, and so there are bugs/race-conditions.  So I think the changes here perturbed things enough for us to notice we've got problems that need fixing.  If it wasn't your PR, it would have been somebody else's.\n\nLooking at the Ubuntu failures now...\n\nEdit: I mean Fedora."
+        },
+        {
+            "user": "cevich",
+            "body": "...oof! Looks like more examples of https://github.com/containers/podman/issues/12155 but in Fedora this time.  I noted down log-links in the issue, so I'll just re-run those tasks again."
+        },
+        {
+            "user": "cdoern",
+            "body": "@rhatdan @Luap99 @mheon PTAL. The flaking issue is not resolved @cevich but the tests have passed which coivnces me I didn't do anything wrong other than expose some testing suite unsolvable problems! This is relatively finished, I removed the need for a new user NS. and most chowning of files that should not be chowned. I would like to get this in as the image scp blog discusses it heavily."
+        },
+        {
+            "user": "cevich",
+            "body": "> I didn't do anything wrong other than expose some testing suite unsolvable problems\n\nI agree with this sentiment...so much so, maybe I can use it as an excuse for not paying my taxes? :grin: "
+        },
+        {
+            "user": "mheon",
+            "body": "LGTM"
+        },
+        {
+            "user": "cdoern",
+            "body": "wait, machinectl is causing some issues with downloading the image now. Need to investigate after class today."
+        },
+        {
+            "user": "cdoern",
+            "body": "nevermind @Luap99 the issue was with my laptop, tested it on my other machine and works perfectly with machinectl. I think this is good now after solving that. "
+        },
+        {
+            "user": "openshift-ci[bot]",
+            "body": "[APPROVALNOTIFIER] This PR is **APPROVED**\n\nThis pull-request has been approved by: *<a href=\"https://github.com/containers/podman/pull/11958#\" title=\"Author self-approved\">cdoern</a>*, *<a href=\"https://github.com/containers/podman/pull/11958#pullrequestreview-800256130\" title=\"Approved\">Luap99</a>*\n\nThe full list of commands accepted by this bot can be found [here](https://go.k8s.io/bot-commands?repo=containers%2Fpodman).\n\nThe pull request process is described [here](https://git.k8s.io/community/contributors/guide/owners.md#the-code-review-process)\n\n<details >\nNeeds approval from an approver in each of these files:\n\n- ~~[OWNERS](https://github.com/containers/podman/blob/main/OWNERS)~~ [Luap99]\n\nApprovers can indicate their approval by writing `/approve` in a comment\nApprovers can cancel approval by writing `/approve cancel` in a comment\n</details>\n<!-- META={\"approvers\":[]} -->"
+        },
+        {
+            "user": "Luap99",
+            "body": "/lgtm"
+        },
+        {
+            "user": "rhatdan",
+            "body": "@cdoern Not sure what I am doing wrong, but this is definitely broken.\n\n```\n $ ./bin/podman image scp myimage root@localhost:\npanic: runtime error: index out of range [1] with length 1\n\ngoroutine 1 [running]:\ngithub.com/containers/podman/v3/cmd/podman/images.parseArgs(0xc0003bd9a0, 0x2, 0x2, 0xc0000e4000, 0x1f471b0, 0xc000010718, 0x0)\n\t/home/dwalsh/podman/cmd/podman/images/scp.go:291 +0x1465\ngithub.com/containers/podman/v3/cmd/podman/images.scp(0x2983040, 0xc0003bd9a0, 0x2, 0x2, 0x0, 0x0)\n\t/home/dwalsh/podman/cmd/podman/images/scp.go:91 +0x236\ngithub.com/spf13/cobra.(*Command).execute(0x2983040, 0xc000138030, 0x2, 0x2, 0x2983040, 0xc000138030)\n\t/home/dwalsh/podman/vendor/github.com/spf13/cobra/command.go:856 +0x472\ngithub.com/spf13/cobra.(*Command).ExecuteC(0x2992cc0, 0xc000130030, 0x19ef400, 0x2a55f10)\n\t/home/dwalsh/podman/vendor/github.com/spf13/cobra/command.go:974 +0x375\ngithub.com/spf13/cobra.(*Command).Execute(...)\n\t/home/dwalsh/podman/vendor/github.com/spf13/cobra/command.go:902\ngithub.com/spf13/cobra.(*Command).ExecuteContext(...)\n\t/home/dwalsh/podman/vendor/github.com/spf13/cobra/command.go:895\nmain.Execute()\n\t/home/dwalsh/podman/cmd/podman/root.go:91 +0xe7\nmain.main()\n\t/home/dwalsh/podman/cmd/podman/main.go:39 +0x92\n```"
+        },
+        {
+            "user": "cdoern",
+            "body": "> @cdoern Not sure what I am doing wrong, but this is definitely broken.\n> \n> ```\n>  $ ./bin/podman image scp myimage root@localhost:\n> panic: runtime error: index out of range [1] with length 1\n> \n> goroutine 1 [running]:\n> github.com/containers/podman/v3/cmd/podman/images.parseArgs(0xc0003bd9a0, 0x2, 0x2, 0xc0000e4000, 0x1f471b0, 0xc000010718, 0x0)\n> \t/home/dwalsh/podman/cmd/podman/images/scp.go:291 +0x1465\n> github.com/containers/podman/v3/cmd/podman/images.scp(0x2983040, 0xc0003bd9a0, 0x2, 0x2, 0x0, 0x0)\n> \t/home/dwalsh/podman/cmd/podman/images/scp.go:91 +0x236\n> github.com/spf13/cobra.(*Command).execute(0x2983040, 0xc000138030, 0x2, 0x2, 0x2983040, 0xc000138030)\n> \t/home/dwalsh/podman/vendor/github.com/spf13/cobra/command.go:856 +0x472\n> github.com/spf13/cobra.(*Command).ExecuteC(0x2992cc0, 0xc000130030, 0x19ef400, 0x2a55f10)\n> \t/home/dwalsh/podman/vendor/github.com/spf13/cobra/command.go:974 +0x375\n> github.com/spf13/cobra.(*Command).Execute(...)\n> \t/home/dwalsh/podman/vendor/github.com/spf13/cobra/command.go:902\n> github.com/spf13/cobra.(*Command).ExecuteContext(...)\n> \t/home/dwalsh/podman/vendor/github.com/spf13/cobra/command.go:895\n> main.Execute()\n> \t/home/dwalsh/podman/cmd/podman/root.go:91 +0xe7\n> main.main()\n> \t/home/dwalsh/podman/cmd/podman/main.go:39 +0x92\n> ```\n\n@rhatdan you need to specify a user. I will submit a patch to not allow for just one argument with root. the syntax is `sudo podman image scp root@localhost::image user@localhost::` this is necessary to chown the image file to a specific user. I guess i could set it up so if no user is specified it defaults to 1000:1000\n\nalso this is transferring from root storage so the default sytax (if we choose to add) would be `sudo podman image scp root@localhost::image` `image root@localhost::` signifies tranferring to root"
+        },
+        {
+            "user": "rhatdan",
+            "body": "User should be assumed to be me, if I don't specify.\n\npodman image scp myimage root@localhost::\npodman image scp root@localhost::foo bar\n\nShould be ok syntax.\n"
+        },
+        {
+            "user": "cdoern",
+            "body": "ok @rhatdan I will make a quick PR to patch the syntax up. Sticking with the current image scp syntax `podman image scp root@localhost::image` is the only supported format since I am still working on transferring from root. "
+        },
+        {
+            "user": "cdoern",
+            "body": "@rhatdan the issue with assuming to be \"me\" is that this command (root to rootless) needs to be run using sudo. Is there a way to get default user or should i just assume 1000:1000. "
+        },
+        {
+            "user": "Luap99",
+            "body": "@cdoern You can use `SUDO_USER` and `SUDO_UID` env vars when the command is run with `sudo`. Otherwise I would just error and say that you need to specify the user."
+        },
+        {
+            "user": "cdoern",
+            "body": "> @cdoern You can use `SUDO_USER` and `SUDO_UID` env vars when the command is run with `sudo`. Otherwise I would just error and say that you need to specify the user.\n\n@Luap99 yep, I just submitted a PR using SUDO_USER"
+        },
+        {
+            "user": "rhatdan",
+            "body": "Again, I do not want to run as sudo, I want magic to happen.  If I am running with sudo, then fine.  Looking at SUDO_USER would be fine.\n\nMy question why can't \npodman image scp myimage root@localhost::\nWork?  I would figure this would just do\n\npodman image save $XDG_RUNTIME_DIR:/myimage; sudo podman load $XDG_RUNTIME_DIR:/myimage\nUnder the covers.\n\nsudo podman image scp root@localhost::foobar .\n\nWould do\nsudo podman image save $XDG_RUNTIME_DIR:/foobar; podman load $XDG_RUNTIME_DIR:/foobar\n"
+        },
+        {
+            "user": "Luap99",
+            "body": "> Again, I do not want to run as sudo, I want magic to happen. If I am running with sudo, then fine. Looking at SUDO_USER would be fine.\n> \n> My question why can't podman image scp myimage root@localhost:: Work? I would figure this would just do\n> \n> podman image save $XDG_RUNTIME_DIR:/myimage; sudo podman load $XDG_RUNTIME_DIR:/myimage Under the covers.\n> \n> sudo podman image scp root@localhost::foobar .\n> \n> Would do sudo podman image save $XDG_RUNTIME_DIR:/foobar; podman load $XDG_RUNTIME_DIR:/foobar\n\nThis does not work because you cannot run sudo inside the podman user namespace."
+        },
+        {
+            "user": "cdoern",
+            "body": "see [comment on new PR](https://github.com/containers/podman/pull/12224#issuecomment-963512749) it seems to be impossible to invoke sudo inside of a rootless podman user NS"
+        },
+        {
+            "user": "rhatdan",
+            "body": "Sure, correct the command to not enter the user namespace until it has to.\n@giuseppe Isn't that possible.\n\n"
+        },
+        {
+            "user": "rhatdan",
+            "body": "Seems to me that we should be able to break into a couple of different threads, one that enters the user namespace to do its thing and one to do the sudo command and exec itself."
+        },
+        {
+            "user": "cdoern",
+            "body": "correct which command? the original `podman image scp` or the exec'd `load`? If this is to be done rootless, the save command must also be an exec.Command reaching into root storage. "
+        },
+        {
+            "user": "giuseppe",
+            "body": "> Seems to me that we should be able to break into a couple of different threads, one that enters the user namespace to do its thing and one to do the sudo command and exec itself.\n\na thread cannot enter a user namespace.  The entire process must do it (when it is single threaded).\n\n"
+        },
+        {
+            "user": "rhatdan",
+            "body": "This all be done with two execs, One into the user namespace and one with sudo?\npodman image scp alpine root@localhost\n---> exec podman image save alpine XDG_RUNTIME_DIR/alpine\n---> exec sudo podman image load XDG_RUNTIME_DIR/alpine\n"
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 12076
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 12155
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 12169
+        }
+    ]
+}

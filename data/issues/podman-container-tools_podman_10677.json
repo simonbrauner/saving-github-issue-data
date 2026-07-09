@@ -1,0 +1,87 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 10677,
+    "type": "issue",
+    "title": "[systemd] launching podman in systemd from root in another instance makes trouble",
+    "state": "closed",
+    "labels": [
+        "stale-issue",
+        "locked - please file new issue/PR"
+    ],
+    "user": "tobwen",
+    "body": "## category\nThat's neither a bug nor a feature. Maybe something for https://github.com/containers/podman/blob/master/troubleshooting.md\n\n## summary\nWhen trying to launch a _podman_/_conmon_  from _systemd_ service in another User/Group **from root**, neither `Type=forking` nor `Type=notify` works because of _systemd_'s safety precautions.\n\n## `Type=notify`\n``` ini\n[Service]\nUser=podman\nGroup=podman\nRestart=on-failure\nTimeoutStopSec=70\nExecStart=/usr/bin/podmanrun --sdnotify=conmon --cgroups=no-conmon --rm --replace --name foo foo\nType=notify\nNotifyAccess=all\n```\nFails with the error message like:\n```\nGot notification message from PID 6946, but reception only permitted for main PID 496\n```\n\n## `Type=forking`\n``` ini\n[Service]\nUser=podman\nGroup=podman\nRestart=on-failure\nExecStartPre=/usr/bin/rm -f /tmp/foo-pid /tmp/foo-cid\nExecStart=/usr/bin/podman run --conmon-pidfile /tmp/foo-pid --cidfile /tmp/foo-cid -d busybox:latest top\nExecStop=/usr/bin/sh -c \"/usr/bin/podman rm -f `cat /tmp/foo-cid`\"\nKillMode=none\nType=forking\nPIDFile=/tmp/foo-pid\n```\nFails with the error message like:\n```\nNew main PID 7756 does not belong to service, and PID file is not owned by root. Refusing.\n```\n\n## `Type=simple`\nWorks so far... but the communication with _conmon_ is lost, of course. Maybe other disadvantages.\n\n## analysis\nThe observations of `Type=forking` nor `Type=notify` are based on CVEs. Non-privileged users shouldn't be able to manipulate processes or PID-files started by root. Since _podman_ gets started under non-root and since _conmon_ writes the PID-file as another user, this doesn't work. Also, since we've got a _systemd_-instance for user-lingering (_cgroupsv2_ seems to need this), this might interfere with the notification stuff.\n\n## conclusion\n- start _podman_ with under `--user` of_ systemd_ (harder to control from root, since `systemctl --user -M` will be available from https://github.com/systemd/systemd/releases/tag/v248)\n- use `Type=simple` with possible disadvantages.",
+    "comments": [
+        {
+            "user": "mheon",
+            "body": "I know we talked to the systemd team, specifically about the `Type=forking` bit here - it seems like it would make sense that, since `User=podman` is specified, the PID file being owned by `podman` would be ok, but they did not agree. Their recommendation was to use `systemd --user` for the user in question instead.\n\nCan't speak to the Notify bit, but it may well be similar reasoning."
+        },
+        {
+            "user": "tobwen",
+            "body": "The problem I'm having with that is: it's ugly to control from root:\n```\nsudo -u podman XDG_RUNTIME_DIR=/run/user/$(id -u podman)/ systemctl --user stop foo\n```\n\n_systemd v248_ will be nicer, at least _Debian Bullseye_ comes with _v247_ only:\n```\nsystemctl --user -M podman@.host stop foo\n```\n\nAliasing might help here, of course.\n\nEdit: This also works and is a little more _systemd_-ish\n```\nmachinectl shell velix@.host /usr/bin/systemctl --user stop foo\n```"
+        },
+        {
+            "user": "rhatdan",
+            "body": "Interested in opening a PR for troubleshooting.md\n@vrothberg WDYT?"
+        },
+        {
+            "user": "vrothberg",
+            "body": "SGTM"
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "jmpolom",
+            "body": "@rhatdan and @mheon: I have a similar experience as @tobwen when attempting to run a podman container as a systemd service and setting `Type=notify` and using the `--sdnotify=conmon` option on the run command. However, the complaint from systemd when attempting to start the service unit is a little different. Also tried `--cgroups=split` just in case there was some issue there but the results were identical.\n\npodman-dwspectrum.service:\n```\n[Unit]\nDescription=Podman for Digital Watchdog Spectrum\nWants=network.target\nAfter=network-online.target\n\n[Service]\nWorkingDirectory=/tank/enc/dwspectrum\nUser=dwspectrum\nGroup=dwspectrum\nExecStartPre=/usr/bin/rm -f %T/%N.cid\nExecStartPre=/usr/bin/podman rm --ignore -f dwspectrum\nExecStart=/usr/bin/podman run --cidfile %T/%N.cid  --cgroups=no-conmon \\\n  --sdnotify=conmon \\\n  --detach \\\n  --pull=always \\\n  --log-driver=journald \\\n  --log-opt tag=dwspectrum \\\n  --name=dwspectrum \\\n  --env TZ=Americas/Detroit \\\n  --hostname=watchdog \\\n  --dns-search=subly.me \\\n  --publish 7001:7001 \\\n  --volume /tank/enc/dwspectrum/config:/config \\\n  --volume /tank/enc/dwspectrum/media:/media \\\n  --volume /tank/enc/dwspectrum/archive:/archive \\\n  docker.io/ptr727/dwspectrum-lsio:4.2.0.32660\nExecStop=/usr/bin/podman stop --ignore dwspectrum -t 10\nExecStopPost=/usr/bin/podman rm --ignore -f dwspectrum\nExecStopPost=/usr/bin/rm -f %T/%N.cid\nTimeoutStopSec=3m\nType=notify\nNotifyAccess=all\n\n[Install]\nWantedBy=multi-user.target default.target\n```\n\nsystemd output when starting unit fails:\n```\njon@arc:/etc/systemd/system$ sudo systemctl start podman-dwspectrum\nJob for podman-dwspectrum.service failed because the service did not take the steps required by its unit configuration.\nSee \"systemctl status podman-dwspectrum.service\" and \"journalctl -xe\" for details.\n```\n\njournal excerpt from systemd status:\n```\nAug 07 23:01:59 arc systemd[1]: Starting Podman for Digital Watchdog Spectrum...\nAug 07 23:02:04 arc systemd[1]: podman-dwspectrum.service: Failed with result 'protocol'.\nAug 07 23:02:04 arc systemd[1]: Failed to start Podman for Digital Watchdog Spectrum.\n```\n\nWhen doing `pgrep -au dwspectrum` after starting the service as `Type=notify` it's very clear that the container isn't starting properly. I don't see any conmon process or others that show up if I run the container as a `Type=exec` or `Type=simple` service unit. And, I suppose I should clarify that this container service works just fine as a simple or exec type unit. I'm just attempting to try the systemd notify integration that podman purportedly has. \n\nI am unclear if I'm either misusing the `--sdnotify=conmon` option or if it simply isn't doing what the documentation suggests it should (conmon sending systemd a \"ready\" notification). This is on podman 3.0.1 on Debian testing."
+        },
+        {
+            "user": "vrothberg",
+            "body": "@jmpolom, this should work with Podman v3.2+.  `type=notify` is now the default."
+        },
+        {
+            "user": "jmpolom",
+            "body": "I experienced inconsistencies trying to get notify units working with podman 3.2.3 and conmon 2.0.29 on Fedora 34. The container image `docker.io/ptr727/dwspectrum-lsio` did not seem to work. The unit remained in the \"activating\" phase until a timeout was reached. However, the following unit worked:\n\n```\n[Unit]\nDescription=Podman test.service\nWants=network.target\nAfter=network-online.target\n\n[Service]\nEnvironment=PODMAN_SYSTEMD_UNIT=%N\nEnvironment=XDG_RUNTIME_DIR=/run/user/1500\nUser=testuser\nGroup=testuser\nRestart=never\nExecStartPre=-/usr/bin/podman rm --ignore -f test\nExecStart=/usr/bin/podman run --log-level=debug --sdnotify=conmon \\\n      --name test \\\n      docker.io/ubuntu:18.04 \\\n      sh -c \"while true; do $(echo date); sleep 1; done\"\nExecStop=/usr/bin/podman stop -t 10 test\nExecStopPost=-/usr/bin/podman rm --ignore -f test\n\nType=notify\nKillMode=none\nNotifyAccess=all\n\n[Install]\nWantedBy=multi-user.target\n```\n\nAny ideas why this admittedly trivial test unit works and the other does not? Are there some limitations to `--sdnotify=conmon` that aren't documented? Does function have some dependency on how the container is built or runs internally?"
+        },
+        {
+            "user": "vrothberg",
+            "body": "@jmpolom, my apologies.  Podman 3.3.x (not 3.2.x) changed to use `type=notify`."
+        },
+        {
+            "user": "tobwen",
+            "body": "I'm lost now... need to try it for myself. I'm feeling so sad for all the _podman_ users, who are on v3.0.1 now with the release of Debian 11 :("
+        },
+        {
+            "user": "jmpolom",
+            "body": "Looks like podman 3.3.x is still in rc status. Any package repos for Fedora that provide rc builds? Don't really feel like building myself to test this.\n\n@vrothberg were there other changes from 3.2.x to 3.3.x that would affect the discrepancies I noted above with the two different service units? I still don't understand why one works and the other times out. I definitely will test again with 3.3.x if I decide to try the rc or wait for a stable release however some context for what I experienced would be helpful."
+        },
+        {
+            "user": "rhatdan",
+            "body": "https://bodhi.fedoraproject.org/updates/FEDORA-2021-94cbb4fa81"
+        },
+        {
+            "user": "vrothberg",
+            "body": "> I'm lost now... need to try it for myself. I'm feeling so sad for all the _podman_ users, who are on v3.0.1 now with the release of Debian 11 :(\n\n@tobwen, I am extremely happy about Podman being part of a stable Debian release.  It has been over two years of work.  If some users desire more recent versions (of any software) they can use Debian testing or experimental; or Fedora :^)\n\n> @vrothberg were there other changes from 3.2.x to 3.3.x that would affect the discrepancies I noted above with the two different service units? I still don't understand why one works and the other times out. I definitely will test again with 3.3.x if I decide to try the rc or wait for a stable release however some context for what I experienced would be helpful.\n\nNot to my knowledge.  The most notable change was to move the units over to `type=notify` and enforce `--sdnotify=conmon` by default.\n"
+        },
+        {
+            "user": "tobwen",
+            "body": "> I am extremely happy about Podman being part of a stable Debian release. It has been over two years of work. If some users desire more recent versions (of any software) they can use Debian testing or experimental; or Fedora :^)\n\nhttps://github.com/vrothberg Meh, of course... I just mean all the awesome new features and bug fixes will only make it into the LTS version to a limited extent. Some users may not even know how fast and well _podman_ is constantly evolving.\n"
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "rhatdan",
+            "body": "I don't believe this is still an issue, closing.  Reopen if I am mistaken."
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 8719
+        }
+    ]
+}

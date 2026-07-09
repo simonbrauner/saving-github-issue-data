@@ -1,0 +1,118 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 16205,
+    "type": "issue",
+    "title": "Two copies of the image references parser included",
+    "state": "closed",
+    "labels": [
+        "stale-issue",
+        "locked - please file new issue/PR"
+    ],
+    "user": "alexlarsson",
+    "body": "Podman vendors the `github.com/containers/image/v5/docker/reference`, with the README.md saying:\n\n> This is a copy of github.com/docker/distribution/reference as of commit 3226863cbcba6dbc2f6c83a37b28126c934af3f8,\nexcept that ParseAnyReferenceWithSet has been removed to drop the dependency on github.com/docker/distribution/digestset.\n\nHowever, it also vendors the above mentioned `github.com/docker/distribution/reference`, including the \"digestset\" dependency that was apparently problematic.\n\nThis is not great, because both of these libraries are very heavy during initialization. Running podman with `GODEBUG=inittrace=1` produces this:\n```\ninit github.com/containers/image/v5/docker/reference @1.1 ms, 1.8 ms clock, 1341880 bytes, 11453 allocs\ninit github.com/docker/distribution/reference @5.1 ms, 1.8 ms clock, 1341816 bytes, 11452 allocs\n```\nI.e. each instance creates 1.3 MB of compiled regexps.\n",
+    "comments": [
+        {
+            "user": "mtrmac",
+            "body": "@alexlarsson I guess eventually we should catch up with (unreleased) [https://github.com/distribution/distribution/commit/1c89ce5fc1cec85e0726f598bccc12b873d04de3 .](https://github.com/distribution/distribution/pull/3566) .\n\nSo far I’ve been preferring to keep c/image/v5/docker/reference as similar to the other one as possible, but we _can_ diverge with a good reason. (I’m not inclined to think that < 1.8ms is a good reason, but I’m open to changing my mind on that one. Is it really noticeable in the total?)"
+        },
+        {
+            "user": "alexlarsson",
+            "body": "2msec is not a huge problem in general, but the use of 1.3 meg of ram completely unnecessary seems not great.\n\nAlso, I should note that the actual code is pretty slow. Loading the shortname alias file is very slow, and the majority of that time is spent in reference.Parse(). So, rewriting this to use a hand-written parser instead of some humongous regexps might be a good idea in general."
+        },
+        {
+            "user": "mtrmac",
+            "body": "- Isn’t it 1.3 MB allocated, not necessarily used at the same time? Quite a bit of that is `regexp.MustCompile(…).String()`, where the regexp is temporary.\n- The various complied regexps are a part of the public API, which we don’t want to break.\n- It’s not really just `reference.Parse`; a lot of the individual API points use a regexp for validation. I guess that would make for a bigger win?\n- A hand-written parser can certainly be written but it’s a quite a nightmare to debug and maintain. I guess we can live with that for this relatively unchanging subpackage. \n\nFor a POC, https://github.com/mtrmac/image/tree/parse-manual :\n```\ngoos: darwin\ngoarch: amd64\npkg: github.com/containers/image/v5/docker/reference\ncpu: Intel(R) Core(TM) i7-9750H CPU @ 2.60GHz\nBenchmarkParseRegexp-12    \t  638163\t      1820 ns/op\t     473 B/op\t       6 allocs/op\nBenchmarkParseManual-12    \t 4587074\t       245.7 ns/op\t     240 B/op\t       2 allocs/op\nPASS\n```\n\nwhich is _relatively_ a huge improvement — OTOH 2 µs should still be dwarfed by network latency in most actual uses, and it took _so many_ iterations to make at least the test pass, and I have very little confidence in correctness.\n\nI guess that’s … a week of work to add tests and make this actually reliable?"
+        },
+        {
+            "user": "alexlarsson",
+            "body": "Yeah, i guess not all the 1.3 MB are kept, but still, lots of churn.\n\nFor the `reference.Parse()` part, I'm just going of what I was seeing in profiles. The thing is that on rhel/centos, the `/etc/containers/registries.conf.d/001-rhel-shornames.conf` file is 300KB, and contains 3200 aliases, and for each we call reference.Parse() which is taking a lot of time during startup."
+        },
+        {
+            "user": "alexlarsson",
+            "body": "By lot of time, i was seeing 63msec, although 20msec of those was in the toml parser, but the rest was mainly in the reference parser."
+        },
+        {
+            "user": "alexlarsson",
+            "body": "For the API issue, maybe one could use something like https://github.com/charlievieth/reonce to lazily initialize the regexps?"
+        },
+        {
+            "user": "alexlarsson",
+            "body": "Also, It seems a bit weird to do the regexp construction at runtime, using those helper functions. I understand that it makes things easier to write/maintain, but could maybe have that code as is and run at buildtime to just generate the final regexp strings."
+        },
+        {
+            "user": "vrothberg",
+            "body": "Just taking over the note from another issue that parsing short names is only an issue when using short names.  No cycles are wasted parsing aliases when using a FQN.  A week worth of work _may_ very well be more effective tackling issues that pop up when using FQNs; at least in the automotive context.  Yet, I am all in favor of optimizing the reference package."
+        },
+        {
+            "user": "mtrmac",
+            "body": "> For the API issue, maybe one could use something like https://github.com/charlievieth/reonce to lazily initialize the regexps?\n\nAFAICS that would still be an API break."
+        },
+        {
+            "user": "mtrmac",
+            "body": "> Also, It seems a bit weird to do the regexp construction at runtime, using those helper functions. I understand that it makes things easier to write/maintain, but could maybe have that code as is and run at buildtime to just generate the final regexp strings.\n\nThat linked upstream commit doesn’t quite do that, but at least it only concatenates strings. Sure, that could be improved further to move to build time.\n\n---\n\nIdeally, I’d like to see a generator that turns the regexes into parsers similar to the test branch above. That parser really is a rat nest of bug opportunities.\n\n(Or, well — alternatively, I’d just like the regex engine to be fast. It’s understandable that processing a regexp representation can be slower than hand-crafted code (although not _strictly obvious_, e.g. character class testing can be done with bitmaps that programmers aren’t going to prepare manually), but 7 times does seem quite excessive.)"
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@alexlarsson @mtrmac @vrothberg What should we do with this one?"
+        },
+        {
+            "user": "mtrmac",
+            "body": "Keep the docker one as is, unless someone wants to sign up to forking the repo and _maintaining the fork_ over time.\n\nWRT the c/image one, I can imagine updating it to the current distribution/distribution implementation which uses fewer regexes, or replacing the parsers entirely, but I’m not going to work on either short-term."
+        },
+        {
+            "user": "alexlarsson",
+            "body": "I'm not sure what the best thing to do is here, because I understand not wanting to spend time on essentially useless things like this. \n\nHowever, we're currently looking at the performance of `podman run`, and as can be see with `GODEBUG=inittrace=1` the initialization of the two reference libs is taking around 5 msec where to total initialization time is 24msec. That is almost 20% of the time. Using a single copy would at least make it half that.\n"
+        },
+        {
+            "user": "mtrmac",
+            "body": "I’m not at all saying this work is useless, just that I have to prioritize and spending a lot of time on this is _currently_, short-term, not high enough vs. data corruption and business-requested features. Others might have more time.\n\nhttps://github.com/containers/image/pull/1730 is working on reducing the overhead of one of the copies.\n\nWRT the other one … either way we are forking _something_ (docker/distribution/reference the implementation or docker/docker the caller).  Using a `replace` directive in Podman’s `go.mod` would be a possible way to make a fork without actually having a separate repo… but I don’t think that allows saying ”for docker/distribution/reference, use c/image/docker/reference from the version that is being used for other purposes”."
+        },
+        {
+            "user": "vrothberg",
+            "body": "@mtrmac, I can carve out some time next week.  @alexlarsson brought up the idea of c/image directly using the docker/reference regex where possible.  I didn't explore it further but found the idea pragmatic and efficient. WDYT?\n\nUpdate: That means c/image/docker/reference using the docker/reference regex."
+        },
+        {
+            "user": "mtrmac",
+            "body": "> @mtrmac, I can carve out some time next week\n\nThanks!\n\n> c/image directly using the docker/reference regex where possible\n\nIn general, that is somewhat worrisome; the reference parser is a critical dependency of signing, and with the Go vendoring model, a completely unrelated dependency of a larger project can trigger an update of the docker/distribution subpackage that changes behavior in unanticipated ways.\n\nAnd in particular, https://github.com/containers/image/pull/1730#discussion_r1028486859 is an immediate example of this concern. We can’t just switch to those regexes without a detailed investigation of the impact, and possible changes to other code. (I.e. no matter what we do about this issue, it’s not a small dependency change; it’s at least one of a non-trivial implementation effort or a non-trivial investigation effort.)"
+        },
+        {
+            "user": "vrothberg",
+            "body": "I opened https://github.com/containers/image/pull/1733 as an alternative."
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "alexlarsson",
+            "body": "I think https://github.com/containers/image/pull/1733 is as good as we're likely to get without major work. Lets close this."
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 16207
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 16237
+        },
+        {
+            "organization": "containers",
+            "repository": "image",
+            "number": 1730
+        },
+        {
+            "organization": "containers",
+            "repository": "toolbox",
+            "number": 1209
+        }
+    ]
+}

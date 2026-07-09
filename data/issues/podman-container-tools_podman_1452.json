@@ -1,0 +1,66 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 1452,
+    "type": "issue",
+    "title": "Silverblue toolbox script broke because rootless 'podman create' insists on having a command specified",
+    "state": "closed",
+    "labels": [
+        "rootless",
+        "locked - please file new issue/PR"
+    ],
+    "user": "debarshiray",
+    "body": "/kind bug\n\n**Description**\n\n[Here](https://github.com/debarshiray/fedora-toolbox) is the toolbox script that we have been working on for Fedora Silverblue. \n\nIf you follow the `README.md` until the `fedora-toolbox create` step, then you'll see that the `podman create ...` command fails:\n```\n$ ./fedora-toolbox --verbose create\n...\n...\nNo command specified on command line or as CMD or ENTRYPOINT in this image\n./fedora-toolbox: failed to create container fedora-toolbox-rishi:28\n```\n\nThis started happening somewhere between `podman-0.8.5` and `podman-0.9.1`.\n\nChanging the script like this solves the problem:\n```\nFrom 79ac919f63f90b4cf2b425d2e3221d86c44ccb7c Mon Sep 17 00:00:00 2001\nFrom: Debarshi Ray <rishi@fedoraproject.org>\nDate: Wed, 12 Sep 2018 14:57:38 +0200\nSubject: [PATCH] Make it work with newer podman\n\n'podman create ...' now requires a command.\n---\n fedora-toolbox | 3 ++-\n 1 file changed, 2 insertions(+), 1 deletion(-)\n\ndiff --git a/fedora-toolbox b/fedora-toolbox\nindex a918ed484cdc..5861c615d70e 100755\n--- a/fedora-toolbox\n+++ b/fedora-toolbox\n@@ -97,7 +97,8 @@ create()\n                  --tty \\\n                  --volume $HOME:$HOME \\\n                  --volume $XDG_RUNTIME_DIR:$XDG_RUNTIME_DIR \\\n-                 $toolbox_image >/dev/null 2>&42; then\n+                 $toolbox_image \\\n+                 /bin/sh --l >/dev/null 2>&42; then\n         echo \"$0: failed to create container $toolbox_container\"\n         exit 1\n     fi\n-- \n2.17.1\n```\n\nIs this a podman regression? Or is this a bug in the toolbox script that was somehow getting papered over in previous podman versions, and should be fixed in the script?\n\n**Output of `podman version`:**\n\n```\nVersion:       0.9.1\nGo Version:    go1.10.4\nOS/Arch:       linux/amd64\n```\n\n**Output of `podman info`:**\n\n```\nhost:\n  Conmon:\n    package: podman-0.9.1-3.gitaba58d1.fc28.x86_64\n    path: /usr/libexec/podman/conmon\n    version: 'conmon version 1.12.0-dev, commit: 1d75f1d54e9e123a97e7f505e38df7ab7192cfa7-dirty'\n  MemFree: 10339491840\n  MemTotal: 16696360960\n  OCIRuntime:\n    package: runc-1.0.0-51.dev.gitfdd8055.fc28.x86_64\n    path: /usr/bin/runc\n    version: 'runc version spec: 1.0.0'\n  SwapFree: 4208979968\n  SwapTotal: 4208979968\n  arch: amd64\n  cpus: 4\n  hostname: bollard\n  kernel: 4.17.19-200.fc28.x86_64\n  os: linux\n  uptime: 10m 51.89s\ninsecure registries:\n  registries: []\nregistries:\n  registries:\n  - docker.io\n  - registry.fedoraproject.org\n  - quay.io\n  - registry.access.redhat.com\n  - registry.centos.org\nstore:\n  ContainerStore:\n    number: 0\n  GraphDriverName: vfs\n  GraphOptions: []\n  GraphRoot: /var/home/rishi/.local/share/containers/storage\n  GraphStatus: {}\n  ImageStore:\n    number: 3\n  RunRoot: /run/user/1000/run\n```\n\n**Additional environment details (AWS, VirtualBox, physical, etc.):**\n\nThis is a physical laptop running Fedora 28 Silverblue 28.20180908.0",
+    "comments": [
+        {
+            "user": "mheon",
+            "body": "@giuseppe PTAL"
+        },
+        {
+            "user": "mheon",
+            "body": "I think I know what's going on here - `create` is presently wired to not create a user namespace, which I think means it can't use the c/storage store to fetch the image and determine the command/entrypoint"
+        },
+        {
+            "user": "giuseppe",
+            "body": "yes, we should avoid the command/entrypoint before podman is re-executed.  I think this patch could fix it:\n```\ndiff --git a/cmd/podman/create.go b/cmd/podman/create.go\nindex bc010d04..5a1b7425 100644\n--- a/cmd/podman/create.go\n+++ b/cmd/podman/create.go\n@@ -629,7 +629,7 @@ func parseCreateOpts(ctx context.Context, c *cli.Context, runtime *libpod.Runtim\n                command = append(command, data.ContainerConfig.Cmd...)\n        }\n \n-       if len(command) == 0 {\n+       if data != nil && len(command) == 0 {\n                return nil, errors.Errorf(\"No command specified on command line or as CMD or ENTRYPOINT in this image\")\n        }\n \n@@ -681,7 +681,7 @@ func parseCreateOpts(ctx context.Context, c *cli.Context, runtime *libpod.Runtim\n        }\n \n        var systemd bool\n-       if c.BoolT(\"systemd\") && ((filepath.Base(command[0]) == \"init\") || (filepath.Base(command[0]) == \"systemd\")) {\n+       if command != nil && c.BoolT(\"systemd\") && ((filepath.Base(command[0]) == \"init\") || (filepath.Base(command[0]) == \"systemd\")) {\n                systemd = true\n                if signalString == \"\" {\n                        stopSignal, err = signal.ParseSignal(\"RTMIN+3\")\n```\n\n@debarshiray do you have any chance to test it out?  I'll prepare a proper PR and test it better if can confirm it solves the issue for you"
+        },
+        {
+            "user": "rhatdan",
+            "body": "@giuseppe Could you open a PR?"
+        },
+        {
+            "user": "pkubatrh",
+            "body": "Running into this as well via rootless `podman run ...`"
+        },
+        {
+            "user": "giuseppe",
+            "body": "PR opened here: https://github.com/containers/libpod/pull/1472\n\n"
+        },
+        {
+            "user": "debarshiray",
+            "body": "Yes, #1472 works for me! Thanks."
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 1472
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 1522
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 1526
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 1535
+        }
+    ]
+}

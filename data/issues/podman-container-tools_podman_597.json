@@ -1,0 +1,143 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 597,
+    "type": "pull_request",
+    "title": "[WIP] Begin wiring in USERNS Support into podman",
+    "state": "closed",
+    "labels": [
+        "locked - please file new issue/PR"
+    ],
+    "user": "rhatdan",
+    "body": "Signed-off-by: Daniel J Walsh <dwalsh@redhat.com>",
+    "comments": [
+        {
+            "user": "mheon",
+            "body": "Will exec need any work, or does runc handle the userns part of it?"
+        },
+        {
+            "user": "rhatdan",
+            "body": "No idea.  Probably.  going through and fixing issus as I realize them"
+        },
+        {
+            "user": "giuseppe",
+            "body": "we need to ensure the directories created by podman are owned by root in the userNS.  In addition to https://github.com/containers/storage/pull/171, it should be enough to get userNS working"
+        },
+        {
+            "user": "mheon",
+            "body": "That's a good point. All the bind mounts libpod adds (secrets, /etc/resolv.conf, etc) and the SHM mount will need permissions adjusted."
+        },
+        {
+            "user": "rhatdan",
+            "body": "The patch currently fixes everything except secrets, and I am working on that."
+        },
+        {
+            "user": "giuseppe",
+            "body": "> The patch currently fixes everything except secrets, and I am working on that.\n\nI had the same issue as https://github.com/containers/storage/pull/171, the `Chown` is not enough. it also needs that the parent directories are accessible"
+        },
+        {
+            "user": "rh-atomic-bot",
+            "body": ":umbrella: The latest upstream changes (presumably 6f51a5b) made this pull request unmergeable. Please resolve the merge conflicts."
+        },
+        {
+            "user": "rhatdan",
+            "body": "I added some of @giuseppe patches to loosen the permissions on the parent directories and now userns partially works.\n```\n./bin/podman run --security-opt label=disable --net none --rm --uidmap 0:20000:60000 --gidmap 0:20000:60000 alpine cat /proc/self/uid_map\n         0      20000      60000\n```\n\nWe have discuss the permission changes on the parent directories, to see if we can do something better then this.\nAlso not sure why this is not working with SELinux."
+        },
+        {
+            "user": "rh-atomic-bot",
+            "body": ":umbrella: The latest upstream changes (presumably 9aafc25) made this pull request unmergeable. Please resolve the merge conflicts."
+        },
+        {
+            "user": "rh-atomic-bot",
+            "body": ":umbrella: The latest upstream changes (presumably fa8442e) made this pull request unmergeable. Please resolve the merge conflicts."
+        },
+        {
+            "user": "mheon",
+            "body": "@rhatdan Can we get a way to specify mappings via file, instead of via multiple flags? Might be easier than adding a bunch of flags to every `podman run` call"
+        },
+        {
+            "user": "rhatdan",
+            "body": "@mheon Not sure that a file would make this easier.  With the current implementation you should be able to do a single --uidmap or --subuidname and it will run in a usernamespace with matching uid/gid content.  I guess putting a complicated mapping into a file would help, but that would also complicate the documentation."
+        },
+        {
+            "user": "giuseppe",
+            "body": "with this patch we can drop the fixPerm hack (it should go into https://github.com/containers/storage/pull/172):\n\n```\ndiff --git a/cmd/podman/spec.go b/cmd/podman/spec.go\nindex 0e392e8..664a6d5 100644\n--- a/cmd/podman/spec.go\n+++ b/cmd/podman/spec.go\n@@ -68,7 +68,7 @@ func addPidNS(config *createConfig, g *generate.Generator) error {\n \n func addUserNS(config *createConfig, g *generate.Generator) error {\n \tif (len(config.IDMappings.UIDMap) > 0 || len(config.IDMappings.GIDMap) > 0) && !config.UsernsMode.IsHost() {\n-\t\tg.AddOrReplaceLinuxNamespace(\"user\", \"\")\n+\t\tg.AddOrReplaceLinuxNamespace(spec.UserNamespace, \"\")\n \t}\n \treturn nil\n }\ndiff --git a/libpod/container_internal.go b/libpod/container_internal.go\nindex 6c98d78..37fa3de 100644\n--- a/libpod/container_internal.go\n+++ b/libpod/container_internal.go\n@@ -593,9 +593,6 @@ func (c *Container) mountStorage() (err error) {\n \t\tif err := os.Chown(c.config.ShmDir, c.RootUID(), c.RootGID()); err != nil {\n \t\t\treturn err\n \t\t}\n-\t\tif err := fixPermDir(c.config.ShmDir, c.RootGID()); err != nil {\n-\t\t\treturn err\n-\t\t}\n \t}\n \n \tmountPoint, err := c.runtime.storageService.MountContainerImage(c.ID())\n@@ -701,24 +698,6 @@ func (c *Container) cleanup() error {\n \treturn lastError\n }\n \n-/*\n-[FIXME]  We need a way of doing UserNS without having to change the permissions\n-all the way up the stack.\n-*/\n-func fixPermDir(dir string, rootUID int) error {\n-\tif rootUID != 0 {\n-\t\tparent := filepath.Dir(dir)\n-\t\tfor parent != \"/\" {\n-\t\t\terr := os.Chmod(parent, 0711)\n-\t\t\tif err != nil {\n-\t\t\t\treturn err\n-\t\t\t}\n-\t\t\tparent = filepath.Dir(parent)\n-\t\t}\n-\t}\n-\treturn nil\n-}\n-\n // Make standard bind mounts to include in the container\n func (c *Container) makeBindMounts() error {\n \tif c.state.BindMounts == nil {\n@@ -809,9 +788,6 @@ func (c *Container) writeStringToRundir(destFile, output string) (string, error)\n \tif err := f.Chown(c.RootUID(), c.RootGID()); err != nil {\n \t\treturn \"\", err\n \t}\n-\tif err := fixPermDir(destFileName, c.RootUID()); err != nil {\n-\t\treturn \"\", err\n-\t}\n \n \tif _, err := f.WriteString(output); err != nil {\n \t\treturn \"\", errors.Wrapf(err, \"unable to write %s\", destFileName)\ndiff --git a/vendor/github.com/containers/storage/drivers/overlay/overlay.go b/vendor/github.com/containers/storage/drivers/overlay/overlay.go\nindex 463e015..e0d8d30 100644\n--- a/vendor/github.com/containers/storage/drivers/overlay/overlay.go\n+++ b/vendor/github.com/containers/storage/drivers/overlay/overlay.go\n@@ -879,17 +879,22 @@ func (d *Driver) UpdateLayerIDMap(id string, toContainer, toHost *idtools.IDMapp\n \t}\n \n \t// Re-create the directory that we're going to use as the upper layer.\n-\tif err := idtools.MkdirAs(diffDir, 0700, rootUID, rootGID); err != nil {\n+\tif err := idtools.MkdirAs(diffDir, 0755, rootUID, rootGID); err != nil {\n \t\treturn err\n \t}\n \n+\t// Make sure that host root is the only user that can search through\n+\t// the container storage directory.\n+\tif err = os.Chmod(dir, 0700); err != nil {\n+\t\treturn errors.Wrapf(err, \"cannot chmod '%s'\", dir)\n+\t}\n+\n \tif rootUID != 0 {\n+\t\t// If using userns make sure the container dir is owned by\n+\t\t// root of the container.\n \t\tif err = os.Chown(dir, rootUID, rootGID); err != nil {\n \t\t\treturn errors.Wrapf(err, \"cannot chown '%s'\", dir)\n \t\t}\n-\t\tif err = os.Chmod(dir, 0700); err != nil {\n-\t\t\treturn errors.Wrapf(err, \"cannot chmod '%s'\", dir)\n-\t\t}\n \t}\n \treturn nil\n }\ndiff --git a/vendor/github.com/containers/storage/store.go b/vendor/github.com/containers/storage/store.go\nindex 68e3fed..686725a 100644\n--- a/vendor/github.com/containers/storage/store.go\n+++ b/vendor/github.com/containers/storage/store.go\n@@ -540,14 +540,14 @@ func GetStore(options StoreOptions) (Store, error) {\n \t\treturn nil, ErrIncompleteOptions\n \t}\n \n-\tif err := os.MkdirAll(options.RunRoot, 0700); err != nil && !os.IsExist(err) {\n+\tif err := os.MkdirAll(options.RunRoot, 0711); err != nil && !os.IsExist(err) {\n \t\treturn nil, err\n \t}\n \tif err := os.MkdirAll(filepath.Join(options.GraphRoot, options.GraphDriverName), 0711); err != nil && !os.IsExist(err) {\n \t\treturn nil, err\n \t}\n \tfor _, subdir := range []string{\"mounts\", \"tmp\", options.GraphDriverName} {\n-\t\tif err := os.MkdirAll(filepath.Join(options.GraphRoot, subdir), 0700); err != nil && !os.IsExist(err) {\n+\t\tif err := os.MkdirAll(filepath.Join(options.GraphRoot, subdir), 0711); err != nil && !os.IsExist(err) {\n \t\t\treturn nil, err\n \t\t}\n \t}\n@@ -629,7 +629,7 @@ func (s *store) load() error {\n \t}\n \n \tgipath := filepath.Join(s.graphRoot, driverPrefix+\"images\")\n-\tif err := os.MkdirAll(gipath, 0700); err != nil {\n+\tif err := os.MkdirAll(gipath, 0711); err != nil {\n \t\treturn err\n \t}\n \tris, err := newImageStore(gipath)\n@@ -642,7 +642,7 @@ func (s *store) load() error {\n \t}\n \n \tgcpath := filepath.Join(s.graphRoot, driverPrefix+\"containers\")\n-\tif err := os.MkdirAll(gcpath, 0700); err != nil {\n+\tif err := os.MkdirAll(gcpath, 0711); err != nil {\n \t\treturn err\n \t}\n \trcs, err := newContainerStore(gcpath)\n@@ -650,7 +650,7 @@ func (s *store) load() error {\n \t\treturn err\n \t}\n \trcpath := filepath.Join(s.runRoot, driverPrefix+\"containers\")\n-\tif err := os.MkdirAll(rcpath, 0700); err != nil {\n+\tif err := os.MkdirAll(rcpath, 0711); err != nil {\n \t\treturn err\n \t}\n \ts.containerStore = rcs\n@@ -2394,11 +2394,22 @@ func (s *store) ContainerDirectory(id string) (string, error) {\n \t\treturn \"\", err\n \t}\n \n+\trootUID, rootGID, err := idtools.GetRootUIDGID(s.uidMap, s.gidMap)\n+\tif err != nil {\n+\t\treturn \"\", err\n+\t}\n+\n \tmiddleDir := s.graphDriverName + \"-containers\"\n-\tgcpath := filepath.Join(s.GraphRoot(), middleDir, id, \"userdata\")\n-\tif err := os.MkdirAll(gcpath, 0700); err != nil {\n+\tstateDir := filepath.Join(s.GraphRoot(), middleDir)\n+\tif err := os.MkdirAll(stateDir, 0711); err != nil {\n \t\treturn \"\", err\n \t}\n+\n+\tgcpath := filepath.Join(stateDir, id, \"userdata\")\n+\tif err := idtools.MkdirAllAs(gcpath, 0700, rootUID, rootGID); err != nil {\n+\t\treturn \"\", err\n+\t}\n+\n \treturn gcpath, nil\n }\n \n@@ -2419,9 +2430,19 @@ func (s *store) ContainerRunDirectory(id string) (string, error) {\n \t\treturn \"\", err\n \t}\n \n+\trootUID, rootGID, err := idtools.GetRootUIDGID(s.uidMap, s.gidMap)\n+\tif err != nil {\n+\t\treturn \"\", err\n+\t}\n+\n \tmiddleDir := s.graphDriverName + \"-containers\"\n-\trcpath := filepath.Join(s.RunRoot(), middleDir, id, \"userdata\")\n-\tif err := os.MkdirAll(rcpath, 0700); err != nil {\n+\trunDir := filepath.Join(s.RunRoot(), middleDir)\n+\tif err := os.MkdirAll(runDir, 0711); err != nil {\n+\t\treturn \"\", err\n+\t}\n+\n+\trcpath := filepath.Join(runDir, id, \"userdata\")\n+\tif err := idtools.MkdirAllAs(rcpath, 0700, rootUID, rootGID); err != nil {\n \t\treturn \"\", err\n \t}\n \treturn rcpath, nil\n```"
+        },
+        {
+            "user": "rhatdan",
+            "body": "I talked to @nalind Yesterday about a potential solution where the tools \n\nbind mount /var/lib/container/storage/overlay* on to /run/containers/storage/ID/*\nWhich would be setup world searchable and then these paths would be passed to runc.  If this works we would not need to lower the protection on the system directories.  \n\n@giuseppe could you take a stab at trying something like that out.  Not sure if @nalind got a chance.  I am in meetings and on PTO next two days (Son's Wedding)."
+        },
+        {
+            "user": "giuseppe",
+            "body": "enjoy that!\n\nYes, sure I can try this solution and I think it will work, but we will introduce a completely different handling for non root users and we will need to worry to clean these mounts as well.\n\nDo we know what are the risks for making `/var/lib/containers/storage/overlay2` accessible?  If `/var/lib/containers/storage/overlay2/ID` is still owned by the root in the container and has mode 700, no other users can get access to it."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@giuseppe There is other content under /var/lib/containers/storage that could lead to information leak, additional world writeable file etc.  I agree you have secured the overlay directory (We don't have overaly2 dir in containers/storage.)\n"
+        },
+        {
+            "user": "rh-atomic-bot",
+            "body": ":umbrella: The latest upstream changes (presumably 313e5e8) made this pull request unmergeable. Please resolve the merge conflicts."
+        },
+        {
+            "user": "giuseppe",
+            "body": "`/run/containers/storage` has another level `$DRIVER-containers`, should I use that?\n\n/cc @nalind "
+        },
+        {
+            "user": "nalind",
+            "body": "That's the parent of the `ContainerRunDirectory()`, which I think gets used as the BundlePath in CRI-O.  A new directory next to `$driver-containers`, and relaxing the permissions of `/var/run/containers` and its `storage` subdirectory, might work."
+        },
+        {
+            "user": "giuseppe",
+            "body": "PR opened here: https://github.com/containers/storage/pull/173"
+        },
+        {
+            "user": "rh-atomic-bot",
+            "body": ":umbrella: The latest upstream changes (presumably 27107fd) made this pull request unmergeable. Please resolve the merge conflicts."
+        },
+        {
+            "user": "giuseppe",
+            "body": "@rhatdan could you cherry-pick `\"networking, userNS: configure the network namespace after create\"` from https://github.com/giuseppe/libpod/tree/userns ?\n\nIt solves the issue with the network namespace that is created by runc but configured later, so it was created in the correct userNS:\n\n```\n# ./bin/podman run --security-opt=\"label=disable\"  --rm --uidmap 0:1:60000 --gidmap 0:20000:60000 alpine ping -c 1 redhat.com\nPING redhat.com (10.4.204.55): 56 data bytes\n64 bytes from 10.4.204.55: seq=0 ttl=246 time=168.030 ms\n\n--- redhat.com ping statistics ---\n1 packets transmitted, 1 packets received, 0% packet loss\nround-trip min/avg/max = 168.030/168.030/168.030 ms\n```\n\nThe `--security-opt=\"label=disable\"` is not needed with the last runc."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@giuseppe Pulled in your patch and updated to latest code."
+        },
+        {
+            "user": "rh-atomic-bot",
+            "body": ":umbrella: The latest upstream changes (presumably #647) made this pull request unmergeable. Please resolve the merge conflicts."
+        },
+        {
+            "user": "giuseppe",
+            "body": "I've added a patch to my branch that implements an intermediate mount namespace so we won't need any change in containers/storage.  I've also changed your patch to not bring in any change to vendor.  If you could please reset to my branch and we can work from there\n"
+        },
+        {
+            "user": "rh-atomic-bot",
+            "body": ":umbrella: The latest upstream changes (presumably 6ac8a24) made this pull request unmergeable. Please resolve the merge conflicts."
+        },
+        {
+            "user": "rh-atomic-bot",
+            "body": ":umbrella: The latest upstream changes (presumably 39a7a77) made this pull request unmergeable. Please resolve the merge conflicts."
+        },
+        {
+            "user": "rh-atomic-bot",
+            "body": ":umbrella: The latest upstream changes (presumably 51a5cdc) made this pull request unmergeable. Please resolve the merge conflicts."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@giuseppe is taking this over in \nhttps://github.com/projectatomic/libpod/pull/690 \n"
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "containers",
+            "repository": "storage",
+            "number": 171
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 609
+        }
+    ]
+}

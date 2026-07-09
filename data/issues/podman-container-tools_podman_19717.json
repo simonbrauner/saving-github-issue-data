@@ -1,0 +1,108 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 19717,
+    "type": "issue",
+    "title": "Fail hard instead of pulling non-native image architecture",
+    "state": "open",
+    "labels": [
+        "kind/feature",
+        "breaking-change"
+    ],
+    "user": "praiskup",
+    "body": "### Feature request description\n\nConsider we are on ppc64le host, and pulling `docker://quay.io/centos/centos:7` -> that image doesn't provide multi-arch manifest, and `x86_64` image is silently pulled.  Is there an option that will avoid even pulling such an image?  I haven't found this in `skopeo copy` either. \n\n### Suggest potential solution\n\n_No response_\n\n### Have you considered any alternatives?\n\n_No response_\n\n### Additional context\n\nThis has caused tricky issues with Mock for epel-7-ppc64le chroots builds when we started using --use-bootstrap-image (doing podman pull on background).",
+    "comments": [
+        {
+            "user": "flouthoc",
+            "body": "Afaik using specific `--platform` with `pull` will fail if required platform is not present on remote registry.\n\nFor example try\n```\npodman pull --platform linux/riscv64 alpine\n```\n\nIt fails with \n```console\nTrying to pull docker.io/library/alpine:latest...\nError: choosing an image from manifest list docker://alpine:latest: no image found in manifest list for architecture riscv64, variant \"\", OS linux\n```"
+        },
+        {
+            "user": "vrothberg",
+            "body": "@flouthoc, it only errors out when hitting manifest list or OCI index.  It does not when hitting an ordinary single image manifest as `centos:7` is:\n```\n~ $ podman pull --platform linux/riscv64  docker://quay.io/centos/centos:7\nTrying to pull quay.io/centos/centos:7...\nGetting image source signatures\nCopying blob 2d473b07cdd5 done   | \nCopying config 8652b9f0cb done   | \nWriting manifest to image destination\nWARNING: image platform (linux/amd64) does not match the expected platform (linux/riscv64)\n8652b9f0cb4c0599575e5a003f5906876e10c1ceb2ab9fe1786712dac14a50cf\n```\n\nPodman emits a warning about though when the image does not match.  Docker pulls it without error or warning.\n\nIn general, multi-arch images are a complex use case.  In an ideal world, container engines could just check and error out if the image does not match the specified architecture.  But there are too many issues to count that proved the opposite.  Some manifest lists were wrong, some image configs were wrong, there were bugs in Docker causing issues, there were bugs in Podman causing issues, there were bugs in Kaniko, buildkit ... you name it.  So, for the sake of portability, most engines do a best-effort platform matching.\n\nFor users who are willing to compromise on portability, it may be worth to think about enabling a strict platform matching.\n\n@mtrmac WDYT?"
+        },
+        {
+            "user": "flouthoc",
+            "body": "ah i tried with docker index I guess, I think it must fail if user has specified a specific `--platform` and should WARN when no `--platform` is selected but pulled arch does not matches host arch."
+        },
+        {
+            "user": "vrothberg",
+            "body": "> I think it must fail if user has specified a specific `--platform`\n\nWe need to look at the long history of issues preceding this one.  So far, pretty much every change to this behavior has caused regressions so we need to be extra careful and cautious.  One immediate showstopper of \"must fail with --platform\" is that many configs are incorrect for the above mentioned reasons.  So the image is correct but the config claims to be something different.\n\nHence I believe that a new flag down the lines of `--enforce-platform` may be the safest option.\n"
+        },
+        {
+            "user": "flouthoc",
+            "body": "Sounds fair to me. I like `--enforce-platform` and it is a safer option."
+        },
+        {
+            "user": "mtrmac",
+            "body": "Yes, historically the platform in the config (which would be used for checking non-multi-arch images) has been incorrect several times (because nothing relied on it).\n\nHypothetically, it _might_ make sense to try just enforcing that again, maybe we just hit a few rare (but prominent) cases that just have been fixed. That would avoid having to maintain an option forever.\n\nOTOH adding an option now, and having the users who need that opt in, would be a way to collect some real-world feedback without hurting most of the user base :)"
+        },
+        {
+            "user": "rhatdan",
+            "body": "Why not just put an option in containers.conf and not provide a runtime option?  Then we can run an experiment in Rawhide to change default to strict mode.\n\nWe might be approaching the state with the advent of multi-arch becoming more prominent that the cruft from years ago is being cleaned up.\n\nAnd by not enforcing strict, we are breaking more users than used to be hit by bad images."
+        },
+        {
+            "user": "praiskup",
+            "body": "Do we have a reasonably easy work-around for this?  Something that would work with RHEL 8+?  Edit: The task is to \"fail\" our logic in Mock;  so if we can not \"stop\" pulling in advance, it would be probably good enough to \"detect\" the pulled image is non-native."
+        },
+        {
+            "user": "vrothberg",
+            "body": "@praiskup, you could look for a \"WARNING\" such as emitted in the example I mentioned above in https://github.com/containers/podman/issues/19717#issuecomment-1691191192.\n\nEdit: But that is behavior that may change at any time.  Alternatively, you do implement a post-pull check.  For instance, you can inspect the image after pull via `podman image inspect --format \"{{.Os}}/{{.Architecture}}\" $IMAGE`"
+        },
+        {
+            "user": "praiskup",
+            "body": "Thank you for the `podman image inspect` tip, I wanted to do something like that but I haven't found a way to \"assert\" easily if **that** it is a \"native\" architecture.  In Mock we have `x86_64`, `ppc64le`, `aarch64`, ... architecture names, and we would have to have some ugly `mock -> podman` mapping.  Is there a way to query what Podman thinks is _the native architecture_?"
+        },
+        {
+            "user": "vrothberg",
+            "body": "@praiskup, you can run `podman version --format \"{{.OsArch}}\"`"
+        },
+        {
+            "user": "praiskup",
+            "body": "@vrothberg thanks again.\n\nJFTR, there will be a [reusable method](https://github.com/rpm-software-management/mock/pull/1199) in Mock 5.1 to perform this assertion, if anyone else needs it."
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "rhatdan",
+            "body": "I think this should be a breaking change for podman 5.0 to start enforcing proper arches.  Most of the problems with mixed arches are years ago, (pause container for k8s).  I think with 5.0 we should move to strict enforcement and fix users accidentally getting the wrong image."
+        },
+        {
+            "user": "vrothberg",
+            "body": "I wholeheartedly disagree.  We tried almost every year to change _something_ on the arch checks and failed immediately.\n\nAs outlined above, I am convinced we need to make this optional (at the very least) and I'd still vote for no enforcement by default.  There is no gain when workloads break."
+        },
+        {
+            "user": "rhatdan",
+            "body": "Should we at least warn, if we notice that the ARCH is different then the native arch, and the user did not specify it. Warning, could be disabled via containers.conf."
+        },
+        {
+            "user": "vrothberg",
+            "body": "Yes, we do warn already when the pulled image does not match the requested platform: https://github.com/containers/common/blob/main/libimage/pull.go#L173-L181"
+        },
+        {
+            "user": "mheon",
+            "body": "This will not make 5.0. Retagging 6.0 for further discussion in that release"
+        },
+        {
+            "user": "mheon",
+            "body": "Only applies to images, not manifests. Also could break emulation."
+        },
+        {
+            "user": "mheon",
+            "body": "If we do this as a containers.conf option, opt-in, we can do this in 6.1. Untagging 6.0"
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "fedora-copr",
+            "repository": "copr",
+            "number": 2875
+        },
+        {
+            "organization": "rpm-software-management",
+            "repository": "mock",
+            "number": 1199
+        }
+    ]
+}

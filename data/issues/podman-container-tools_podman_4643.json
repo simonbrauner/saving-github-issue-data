@@ -1,0 +1,80 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 4643,
+    "type": "pull_request",
+    "title": "Correctly export the root file-system changes",
+    "state": "closed",
+    "labels": [
+        "lgtm",
+        "approved",
+        "locked - please file new issue/PR"
+    ],
+    "user": "adrianreber",
+    "body": "When doing a checkpoint with `--export` the root file-system diff was not working as expected. Instead of getting the changes from the running container to the highest storage layer it got the changes from the highest layer to that parent's layer. For a one layer container this could mean that the complete root file-system is part of the checkpoint.\n\nWith this commit this changes to use the same functionality as `podman diff`. This actually enables to correctly diff the root file-system including tracking deleted files.\n\nThis also removes the non-working helper functions from `libpod/diff.go`.\n\nFixes: #4606",
+    "comments": [
+        {
+            "user": "baude",
+            "body": "/approve"
+        },
+        {
+            "user": "rhatdan",
+            "body": "LGTM\n@mheon @TomSweeneyRedHat @giuseppe @vrothberg @baude @QiWang19 @jwhonce PTAL"
+        },
+        {
+            "user": "rst0git",
+            "body": "@adrianreber when a folder inside the container is removed it looks like the complete root file-system becomes part of the checkpoint\n```\npodman run --name test -dit alpine\npodman exec -l sh -c 'rm -rf srv'\npodman container checkpoint -l -e podman.tar\ntar tvf podman.tar\n...\n-rw-r--r-- root/root   5816320 2019-12-06 18:03 rootfs-diff.tar\n```"
+        },
+        {
+            "user": "adrianreber",
+            "body": "> @adrianreber when a folder inside the container is removed it looks like the complete root file-system becomes part of the checkpoint\n> \n> ```\n> podman run --name test -dit alpine\n> podman exec -l sh -c 'rm -rf srv'\n> podman container checkpoint -l -e podman.tar\n> tar tvf podman.tar\n> ...\n> -rw-r--r-- root/root   5816320 2019-12-06 18:03 rootfs-diff.tar\n> ```\n\nI cannot reproduce that:\n```\n#  podman diff -l ; podman container checkpoint -l -e podman.tar.gz -R\nA /SOME_FILE\nD /root\nb564fe891c82fdc019ac167bb7b729128191057e84d546df90e7b7e14ec3012a\n#  tar xf podman.tar\n# ls -la\ndrwxr-xr-x.  4 root root   176 Dec  6 18:44 .\ndr-xr-x---. 10 root root  4096 Dec  6 14:09 ..\ndrwxr-xr-x.  2 root root     6 Dec  6 18:34 artifacts\ndrw-r-xr-x.  2 root root  4096 Dec  6 18:44 checkpoint\n-rw-r--r--.  1 root root 50215 Dec  6 18:44 config.dump\n-rw-------.  1 root root     0 Dec  6 18:34 ctr.log\n-rw-------.  1 root root    16 Dec  6 18:44 deleted.files\n-rw-r--r--.  1 root root   791 Dec  6 18:44 network.status\n-rw-------.  1 root root 48841 Dec  6 18:44 podman.tar\n-rw-r--r--.  1 root root  4096 Dec  6 18:44 rootfs-diff.tar\n-rw-r--r--.  1 root root 45766 Dec  6 18:44 spec.dump\n#️  tar tf rootfs-diff.tar \nSOME_FILE\n```\nLooks like your Podman binary has not the changes from this pull request. Can you double check?"
+        },
+        {
+            "user": "rst0git",
+            "body": "> Looks like your Podman binary has not the changes from this pull request. Can you double check?\n\nYes, I updated the Podman binary with the changes from this pull request.\nIt occurs only when `rootfsIncludeFiles = []`. The following fix seems to work:\n\n```diff\ndiff --git a/libpod/container_internal_linux.go b/libpod/container_internal_linux.go\nindex 25688db5..709e3655 100644\n--- a/libpod/container_internal_linux.go\n+++ b/libpod/container_internal_linux.go\n@@ -622,26 +622,27 @@ func (c *Container) exportCheckpoint(dest string, ignoreRootfs bool) (err error)\n \t\t\t}\n \t\t}\n \n-\t\trootfsTar, err := archive.TarWithOptions(c.state.Mountpoint, &archive.TarOptions{\n-\t\t\tCompression:      archive.Uncompressed,\n-\t\t\tIncludeSourceDir: true,\n-\t\t\tIncludeFiles:     rootfsIncludeFiles,\n-\t\t})\n-\t\tif err != nil {\n-\t\t\treturn errors.Wrapf(err, \"error exporting root file-system diff to %q\", rootfsDiffPath)\n-\t\t}\n-\t\trootfsDiffFile, err := os.Create(rootfsDiffPath)\n-\t\tif err != nil {\n-\t\t\treturn errors.Wrapf(err, \"error creating root file-system diff file %q\", rootfsDiffPath)\n-\t\t}\n-\t\tdefer rootfsDiffFile.Close()\n-\t\t_, err = io.Copy(rootfsDiffFile, rootfsTar)\n-\t\tif err != nil {\n-\t\t\treturn err\n+\t\tif len(rootfsIncludeFiles) > 0 {\n+\t\t\trootfsTar, err := archive.TarWithOptions(c.state.Mountpoint, &archive.TarOptions{\n+\t\t\t\tCompression:      archive.Uncompressed,\n+\t\t\t\tIncludeSourceDir: true,\n+\t\t\t\tIncludeFiles:     rootfsIncludeFiles,\n+\t\t\t})\n+\t\t\tif err != nil {\n+\t\t\t\treturn errors.Wrapf(err, \"error exporting root file-system diff to %q\", rootfsDiffPath)\n+\t\t\t}\n+\t\t\trootfsDiffFile, err := os.Create(rootfsDiffPath)\n+\t\t\tif err != nil {\n+\t\t\t\treturn errors.Wrapf(err, \"error creating root file-system diff file %q\", rootfsDiffPath)\n+\t\t\t}\n+\t\t\tdefer rootfsDiffFile.Close()\n+\t\t\t_, err = io.Copy(rootfsDiffFile, rootfsTar)\n+\t\t\tif err != nil {\n+\t\t\t\treturn err\n+\t\t\t}\n+\t\t\tincludeFiles = append(includeFiles, \"rootfs-diff.tar\")\n \t\t}\n \n-\t\tincludeFiles = append(includeFiles, \"rootfs-diff.tar\")\n-\n \t\tif len(deletedFiles) > 0 {\n \t\t\tformatJSON, err := json.MarshalIndent(deletedFiles, \"\", \"     \")\n \t\t\tif err != nil {\n```\n"
+        },
+        {
+            "user": "adrianreber",
+            "body": "@rst0git Right. Only deleting files is not working. Thanks. Will fix it."
+        },
+        {
+            "user": "openshift-ci-robot",
+            "body": "[APPROVALNOTIFIER] This PR is **APPROVED**\n\nThis pull-request has been approved by: *<a href=\"https://github.com/containers/libpod/pull/4643#\" title=\"Author self-approved\">adrianreber</a>*, *<a href=\"https://github.com/containers/libpod/pull/4643#issuecomment-562167538\" title=\"Approved\">baude</a>*, *<a href=\"https://github.com/containers/libpod/pull/4643#pullrequestreview-328723456\" title=\"Approved\">rst0git</a>*\n\nThe full list of commands accepted by this bot can be found [here](https://go.k8s.io/bot-commands?repo=containers%2Flibpod).\n\nThe pull request process is described [here](https://git.k8s.io/community/contributors/guide/owners.md#the-code-review-process)\n\n<details >\nNeeds approval from an approver in each of these files:\n\n- ~~[OWNERS](https://github.com/containers/libpod/blob/master/OWNERS)~~ [baude]\n\nApprovers can indicate their approval by writing `/approve` in a comment\nApprovers can cancel approval by writing `/approve cancel` in a comment\n</details>\n<!-- META={\"approvers\":[]} -->"
+        },
+        {
+            "user": "adrianreber",
+            "body": "Can this be merged?"
+        },
+        {
+            "user": "rhatdan",
+            "body": "/lgtm"
+        },
+        {
+            "user": "stevekuznetsov",
+            "body": "/hold\n\n>  \"PR is unmergable. Do the Tide merge requirements match the GitHub settings for the repo? At least 1 approving review is required by reviewers with write access.\"   \n\nI suggest you remove that requirement... it's duplicated from `/approve`"
+        },
+        {
+            "user": "rhatdan",
+            "body": "/lgtm"
+        },
+        {
+            "user": "mheon",
+            "body": "Github appears to have stopped complaining, I have a manual merge option now. I'm going to remove the hold and see if branch protection kicks in.\n\n/hold cancel"
+        },
+        {
+            "user": "mheon",
+            "body": "Still seems stuck.\n\nI'm going to merge manually."
+        },
+        {
+            "user": "mheon",
+            "body": "Oh, nevermind, it went."
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "checkpoint-restore",
+            "repository": "criu",
+            "number": 975
+        }
+    ]
+}

@@ -1,0 +1,42 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 119,
+    "type": "issue",
+    "title": "kpod fails to find the runtime and is not obvious about it",
+    "state": "closed",
+    "labels": [
+        "locked - please file new issue/PR"
+    ],
+    "user": "anarcat",
+    "body": "So in my first attempt of bootstrapping a docker-like dev environment, I stumbled upon a weird issue that I couldn't start containers with `kpod run`. The symptom was as follows:\n\n```\n# kpod run -i --tty projectatomic/atomicapp  /bin/sh\nERRO[0000] Error removing container 4dd00aed2a714682abba1967cc4225878671ebc881f24726ae3bca55c5beacca from runc after creation failed \nerror reading container (probably exited) json message: EOF\n```\n\nNow I must say first: not very helpful. It's a confusing error message: we are led to believe the problem is \"removing container\" when we're just trying to *start* one... (Obviously, it's a cleanup routine gone wrong, but still.) The real error message is actually buried inside `conmon`, and shows up in `journalctl -f`:\n\n```\ndéc 11 14:04:58 curie conmon[21323]: conmon <ninfo>: addr{sun_family=AF_UNIX, sun_path=/tmp/conmon-term.3VLNAZ} \ndéc 11 14:04:58 curie conmon[21323]: conmon <ninfo>: about to waitpid: 21324 \ndéc 11 14:04:58 curie conmon[21323]: conmon <error>: Failed to create container: exit status 127 \n```\n\nAnd well... that's still not very helpful. A few straces later, I found out that I *could* start containers by hand by firing up the `runc` command myself, so the problem wasn't there. I also tried running `conmon` by hand, and noticed it would return with an exit status of zero (0) even though the `runc` command fails, which also seems wrong.\n\nOld UNIX geeks may have already figured out the issue at this point, thanks to the famous \"[exit status 127](https://www.tldp.org/LDP/abs/html/exitcodes.html)\" which is the shell telling us it can't find the binary. And indeed, `kpod` hardcodes the runtime path in `config.go`:\n\nhttps://github.com/projectatomic/libpod/blob/92818fdfb79a142566abb2876c67b23b8944b836/libkpod/config.go#L279\n\nIn https://github.com/projectatomic/buildah/issues/355 I filed an issue about how `buildah` doesn't correctly install `runc` (while building it). Since the build system installs everything in `/usr/local`, i fixed the Ubuntu/Debian install instructions to install runc there as well (in https://github.com/projectatomic/buildah/pull/354) which means that `runc` is in `/usr/local/bin/runc`. I would also argue that `/usr/sbin/runc` would be a better default for that command which is (currently) obviously designed to be ran as root.\n\nBut the exact path to the runtime shouldn't matter: conmon should look into the PATH and not rely on an absolute path to find the runtime. I  have tried passing the runtime to `kpod` with `--runtime=/usr/local/bin/runc` and that works!\n\n```\n# kpod --runtime=/usr/local/bin/runc run  -i --tty projectatomic/atomicapp /bin/sh\nsh-4.2# \n```\n\nSo, summary, I would suggest the following:\n\n- [ ] better diagnostics when failing to start runtime (from conmon? kpod? both?)\n- [ ] proper failure code from conmon if runc fails to start\n- [ ] search for `runc` binary instead of absolute path (in `config.go`)\n- [ ] proper `$PATH` resolution for the `runc` binary (in conmon?)\n\nI think that covers it - thanks!",
+    "comments": [
+        {
+            "user": "baude",
+            "body": "@anarcat with --log-level=debug do you get better error messages by chance?"
+        },
+        {
+            "user": "anarcat",
+            "body": "nope. here's the build log with debug:\n\n[paste_1000268.txt](https://github.com/projectatomic/libpod/files/1549229/paste_1000268.txt)\n"
+        },
+        {
+            "user": "anarcat",
+            "body": "i filed #1215 on conmon's side to fix the last step in the task list."
+        },
+        {
+            "user": "rhatdan",
+            "body": "I opened a PR against conmon in cri-o project, where we copied this from.  We should fix it there for now.\nhttps://github.com/kubernetes-incubator/cri-o/pull/1216"
+        },
+        {
+            "user": "baude",
+            "body": "#278 should fix this... reopen if needed"
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "cri-o",
+            "repository": "cri-o",
+            "number": 1215
+        }
+    ]
+}

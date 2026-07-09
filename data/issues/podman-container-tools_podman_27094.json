@@ -1,0 +1,42 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 27094,
+    "type": "issue",
+    "title": "Make it possible for non root user to restrict / filter the network communications of podman containers following custom rules",
+    "state": "closed",
+    "labels": [
+        "kind/feature",
+        "network",
+        "triaged"
+    ],
+    "user": "jerabaul29",
+    "body": "### Feature request description\n\nI am running as a non-admin of my host machine a podman container that contains secrets that I need to protect.\n\nThis podman container never needs to accept any ingress, and only needs to have egress with a specific IP address that I fully trust. Therefore, I would like podman to filter the traffic in and out of my container, blocking all incoming traffic, and allowing outgoing traffic only to the trusted IP while blocking all other outgoing traffic. This is more restrictive than the firewall rules of the host machine. This way, even in the unlikely event where the container is compromised / someone pushes a malicious base image, the container cannot for example exfiltrate the secrets.\n\nIt looks like I could achieve this if I was root on the host machine, by setting up a virtual network, configuring iptable or similar rules for it that match my needs, and use this virtual network as the network for my container. However, I am not admin on the host, so I cannot configure iptable rules at the host level.\n\nAny way podman itself could somehow filter network traffic in and out of the container, at the \"boundary\" of the container and in a way I can as a non root configure, independently (and in addition) of the host firewall that I cannot configure?\n\n### Suggest potential solution\n\nI would like podman to filter traffic in and out of my container, at the \"boundary\" of the container or its virtual network in a way I can configure as a non admin user, independently of host level iptables and similar which I cannot myself configure.\n\n### Have you considered any alternatives?\n\nIf I had been admin on the host, I could set up iptable or similar rules on a custom virtual network and use this as the container network. However, I am no admin on the host.\n",
+    "comments": [
+        {
+            "user": "Luap99",
+            "body": "To do that you would need to join the network namespace and add the firewall rules inside container basically. That is however only safe as long as the container doesn't get CAP_NET_ADMIN.\n\nI would consider such request outside of the scope of podman. There is just to much complexity in creating custom firewall rules and how they get exposed to users.\n\nYou can already do this yourself by using oci-hooks that trigger on before the start of the container to add the rules automatically or write your own netavark plugin that manages the network creating fully https://github.com/containers/netavark/blob/main/plugin-API.md\n"
+        },
+        {
+            "user": "jerabaul29",
+            "body": "Thank you! I need to read a bit more to fully understand your answer :) . A few questions meanwhile:\n\n> To do that you would need to join the network namespace and add the firewall rules inside container basically.\n\nBut then would this rules live inside the container (I would prefer to avoid this), or outside of the container and somehow inside the virtual network?\n\n>  That is however only safe as long as the container doesn't get CAP_NET_ADMIN.\n\nThis is the default, right? :)\n\n> You can already do this yourself by using oci-hooks that trigger on before the start of the container to add the rules automatically\n\nBut that will be injected inside the container, right? Or can these rules apply to the virtual network \"outside\" the container, to which the container connects? Do you have pointers to examples related to the network filtering / firewalling I am looking for? I search but could not find.\n\n> or write your own netavark plugin that manages the network creating fully https://github.com/containers/netavark/blob/main/plugin-API.md\n\nI could not find documentation about if / how one can filter traffic according to a user spec by configuring netavark; do you have pointers to examples?"
+        },
+        {
+            "user": "jerabaul29",
+            "body": "I was looking into the netavark firewall code; do I understand correctly that this under the hood does call to iptables through the iptables crate? Then I suppose that I will there too have the problem that I wont be able to set up the rules I want without being root?"
+        },
+        {
+            "user": "Luap99",
+            "body": "> Thank you! I need to read a bit more to fully understand your answer :) . A few questions meanwhile:\n> \n> > To do that you would need to join the network namespace and add the firewall rules inside container basically.\n> \n> But then would this rules live inside the container (I would prefer to avoid this), or outside of the container and somehow inside the virtual network?\n\nFor the default case (--network pasta) there is only the container netns and the host netns, pasta doesn't have any sort of firewall so the only way (if you cannot add them on the host) is to add them into the container.\n\n> \n> > That is however only safe as long as the container doesn't get CAP_NET_ADMIN.\n> \n> This is the default, right? :)\n> \n\nYes unless you use --privileged or --cap-add CAP_NET_ADMIN to add them explicitly the container should not have it.\n\n> > You can already do this yourself by using oci-hooks that trigger on before the start of the container to add the rules automatically\n> \n> But that will be injected inside the container, right? Or can these rules apply to the virtual network \"outside\" the container, to which the container connects? Do you have pointers to examples related to the network filtering / firewalling I am looking for? I search but could not find.\n> \n\nThe outside is the host using normal layer4 tcp/udp sockets, there is no virtual network outside of the container really.\n\nNow there is a special case for named (custom) networks (alas stuff setup with netavark) which uses an intermediate namespace called \"rootles-netns\", see https://github.com/containers/podman/discussions/22943#discussioncomment-9795883\nso if you use these networks you could put the firewall rules into that namespace using `podman unshare --rootless-netns` but keep in mind the namespace only lives as long as there are active users of it. So once all containers using it exit it will be removed by podman and on the next start created again. You would need to inject the firewall rules each time it is created and there are no hooks to do that.\n\nThe best thing would be to podman unshare --rootless-netns add the rulese there and then sleep inf to keep the podman process alive forever which then keeps the namespace around\n\n\n> > or write your own netavark plugin that manages the network creating fully https://github.com/containers/netavark/blob/main/plugin-API.md\n> \n> I could not find documentation about if / how one can filter traffic according to a user spec by configuring netavark; do you have pointers to examples?\n\nYou need to implement the full network management yourself there, see the bridge driver with its firewall interfaces in the netavark repo."
+        },
+        {
+            "user": "Luap99",
+            "body": "> I was looking into the netavark firewall code; do I understand correctly that this under the hood does call to iptables through the iptables crate? Then I suppose that I will there too have the problem that I wont be able to set up the rules I want without being root?\n\nNo you have full privs over the rootless network namespace since we run in a usernamespace. (compare `unshare -rn` as user, you can create any firewall rules you want there)"
+        },
+        {
+            "user": "jerabaul29",
+            "body": "Thank you so much for your explanations, this is very interesting though way above my level of competence, I will read more and try to digest this / play around more :) .\n\nShould this be moved into a discussion? :) I feel like we may exchange back and forth a bit in this thread and there may be information useful to other readers :) ."
+        }
+    ],
+    "cross_references": []
+}

@@ -1,0 +1,75 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 14666,
+    "type": "pull_request",
+    "title": "Make `podman machine stop` wait for qemu to exit",
+    "state": "closed",
+    "labels": [
+        "lgtm",
+        "approved",
+        "release-note",
+        "locked - please file new issue/PR"
+    ],
+    "user": "shanesmith",
+    "body": "After `podman machine stop` successfully exits the `qemu` process may still be running, which can cause issues, especially if an attempt is made to start the machine again.\n\nIn my trials I found the `qemu` process normally takes about 1s to exit after `podman machine stop`, which means `podman machine stop && podman machine start` can create problems, for example. I've also found that the `qemu` process could hang from time to time after an attempted stop. I'm able to reproduce this most reliably by stopping the machine while a container is running, it then takes about 90s for the `qemu` process to exit. This last example should be an issue on its own, but all this to say `podman machine stop` should only exit after `qemu` does.\n\nIn this PR we use the `-pidfile` flag when running `qemu` and store its path in the MachineVM config. The `podman machine stop` command now waits for the `qemu` command to exit before itself exiting. Two commits are included for a bit of separation.\n\nA couple notes:\n\n- The MachineVM update requires a migration. I've simply followed what was already done, but do wonder if there might be a better way.\n\n- The `podman machine stop` does not have a timeout, it'll wait for `qemu` to exit indefinitely. Perhaps it should?\n\n- The user could interrupt (ie: CTRL-C) a `podman machine stop` that's taking a while, but the `qemu` process will still be alive.\n\n- We could potentially send a `kill` signal to the `qemu` process after a timeout and/or a user interrupt.\n\n- The pidfile can be used elsewhere in the future. For example, it could inform the state of a VM, or at least prevent a `podman machine start`.\n\nFixes #14148\n\n#### Does this PR introduce a user-facing change?\n\n<!--\nIf no, just write `None` in the release-note block below. If yes, a release note\nis required: Enter your extended release note in the block below. If the PR\nrequires additional action from users switching to the new release, include the\nstring \"action required\".\n\nFor more information on release notes, please follow the Kubernetes model:\nhttps://git.k8s.io/community/contributors/guide/release-notes.md\n-->\n\n```release-note\nThe `podman machine stop` command on macOS now waits for the machine to be completely stopped.\n```\n",
+    "comments": [
+        {
+            "user": "Luap99",
+            "body": "I don't think you should use migration for that. Migration is used when the json unmarshal would break due breaking changes to the VM format. I don't think this is necessary here. Why not just add the new field to the existing structure?"
+        },
+        {
+            "user": "shanesmith",
+            "body": "Are you suggesting leaving the proxy pidfile path in `PidFilePath` and just creating a new `VMPidFilePath`? Definitely possible and would indeed avoid migration, but I thought the naming would be a little confusing in the future."
+        },
+        {
+            "user": "Luap99",
+            "body": "> Are you suggesting leaving the proxy pidfile path in `PidFilePath` and just creating a new `VMPidFilePath`? Definitely possible and would indeed avoid migration, but I thought the naming would be a little confusing in the future.\n\nYes something like this, the naming might be confusing but this can be explained in the comment.\nThe complex format migration logic is hard to review/test making maintenance much harder in the long run."
+        },
+        {
+            "user": "shanesmith",
+            "body": "Sure, that makes sense. =)\n\nOne last possibility, just to throw it out there, would be to keep `PidFiles` (or at least a new name for the proxy one), but not do the migration and essentially use `proxyPidFile = vm.PidFiles.Proxy || vm.PidFilePath`. That way we get better naming for the future while still supporting older VM configurations."
+        },
+        {
+            "user": "benoitf",
+            "body": "I'm also facing this issue as well (trying to start the machine and it says it's still running while stop command says 'stops successfully'"
+        },
+        {
+            "user": "shanesmith",
+            "body": "@Luap99 Updated the PR to remove the need for migrating the config. Notes from the new commit:\n\n- A new MachineVM struct is not needed since the `PidFiles` field is no\n  longer used, instead `PidFilePath` is kept for the proxy and a new\n  `VMPidFilePath` is added for the VM\n\n- Migration is no longer needed since we're reusing the existing\n  MachineVM struct\n\n- Machines created before this PR won't have the VM PID file configured,\n  stopping these VMs will revert back to waiting on the state to change\n  away from `Running`, plus an added 2s sleep to give time for the VM to\n  exit and to avoid potential issues\n\n- Machines created after this PR will have a VM PID file configured and\n  stopping the machine will wait indefinitely for the VM to exit"
+        },
+        {
+            "user": "vrothberg",
+            "body": "@ashley-cui @baude PTAL"
+        },
+        {
+            "user": "baude",
+            "body": "LGTM"
+        },
+        {
+            "user": "baude",
+            "body": "/approve"
+        },
+        {
+            "user": "openshift-ci[bot]",
+            "body": "[APPROVALNOTIFIER] This PR is **APPROVED**\n\nThis pull-request has been approved by: *<a href=\"https://github.com/containers/podman/pull/14666#issuecomment-1167673717\" title=\"Approved\">baude</a>*, *<a href=\"https://github.com/containers/podman/pull/14666#\" title=\"Author self-approved\">shanesmith</a>*\n\nThe full list of commands accepted by this bot can be found [here](https://go.k8s.io/bot-commands?repo=containers%2Fpodman).\n\nThe pull request process is described [here](https://git.k8s.io/community/contributors/guide/owners.md#the-code-review-process)\n\n<details >\nNeeds approval from an approver in each of these files:\n\n- ~~[OWNERS](https://github.com/containers/podman/blob/main/OWNERS)~~ [baude]\n\nApprovers can indicate their approval by writing `/approve` in a comment\nApprovers can cancel approval by writing `/approve cancel` in a comment\n</details>\n<!-- META={\"approvers\":[]} -->"
+        },
+        {
+            "user": "shanesmith",
+            "body": "> Could you squash your commits? Other than that, LGTM, thanks @shanesmith !\n\nSquashed! =)"
+        },
+        {
+            "user": "ssbarnea",
+            "body": "I wonder if this patch also fixed the bug described on https://github.com/containers/podman/issues/12815 - basically I am still trying to find a way to prevent gtar from failing after I stop the machine:\n\n> /usr/local/bin/gtar: ../../../.local/share/containers/podman/machine/qemu/podman-machine-default_fedora-coreos-36.20220618.2.0-qemu.x86_64.qcow2: file changed as we read it\n"
+        },
+        {
+            "user": "rhatdan",
+            "body": "/lgtm\n/hold\nThanks @shanesmith "
+        },
+        {
+            "user": "shanesmith",
+            "body": "> I wonder if this patch also fixed the bug described on https://github.com/containers/podman/issues/12815\n\n@ssbarnea I would assume it should =)"
+        }
+    ],
+    "cross_references": []
+}

@@ -1,0 +1,253 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 27927,
+    "type": "pull_request",
+    "title": "fix: use localhost for host.containers.internal in host network mode ",
+    "state": "closed",
+    "labels": [
+        "machine",
+        "kind/api-change",
+        "locked - please file new issue/PR"
+    ],
+    "user": "kairosci",
+    "body": "#### Checklist\n\n- [x] Certify you wrote the patch or otherwise have the right to pass it on as an open-source patch by signing all commits. (`git commit -s`).\n- [x] Referenced issues using `Fixes: #00000` in commit message (if applicable)\n- [x] [Tests](https://github.com/containers/podman/tree/main/test#readme) have been added/updated (or no tests are needed)\n- [ ] [Documentation](https://github.com/containers/podman/blob/main/docs/README.md) has been updated (or no documentation changes are needed)\n- [ ] All commits pass `make validatepr` (format/lint checks)\n- [x] [Release note](https://github.com/kubernetes/community/blob/master/contributors/guide/release-notes.md) entered in the section below (or `None` if no user-facing changes)\n\n#### Does this PR introduce a user-facing change?\n\n```release-note\nWith `--network=host`, `host.containers.internal` now resolves to `127.0.0.1` (localhost) instead of an external IP address that may change or not exist.\n```\n\n---\n\n### Description\n\nWhen using `--network=host`, the container shares the host's network namespace, so localhost (127.0.0.1) is always reachable. This change uses `127.0.0.1` for `host.containers.internal` instead of trying to find an external IP address.\n\nThis fixes issues where:\n- The host IP address changes (e.g., DHCP lease renewal, roaming to a different network)\n- The host has no non-loopback IP addresses configured\n\n### How was it tested?\n\n```bash\n$ sudo ./bin/podman run --rm --network=host alpine cat /etc/hosts\n127.0.0.1       localhost localhost.localdomain localhost4 localhost4.localdomain4\n::1     localhost localhost.localdomain localhost6 localhost6.localdomain6\n127.0.0.1       host.containers.internal host.docker.internal\n```\n\nAdded a system test in `test/system/500-networking.bats` to verify the behavior.\n\nFixes #27823",
+    "comments": [
+        {
+            "user": "packit-as-a-service[bot]",
+            "body": "[NON-BLOCKING] Packit jobs failed. @containers/packit-build please check. Everyone else, feel free to ignore."
+        },
+        {
+            "user": "packit-as-a-service[bot]",
+            "body": "[NON-BLOCKING] Packit jobs failed. @containers/packit-build please check. Everyone else, feel free to ignore."
+        },
+        {
+            "user": "martinetd",
+            "body": "Thank you!\n\nYou've pretty much done exactly as I would have, this looks good to me.\n(I checked rootless/rootfull and non-host in my environment just to make sure)\n\nShould buildah ( https://github.com/containers/buildah/blob/main/run_common.go#L171 - vendor/github.com/containers/buildah/run_common.go in the podman repo) get a similar update?\nI don't think contacting the host is as common from buildah but it'd probably be more consistent to, although it's probably fine if the two are not in sync so I wouldn't block for it."
+        },
+        {
+            "user": "kairosci",
+            "body": "The only one failed seems to me a race condition, as it has nothing to do with the changes I made. \n\nIn case, I try to commit a trigger to see if the second passes. \n\nAs for buildah, I don't really know, if it has the same problem then it would be a solution to try to implement the same mechanism, I can't confirm as I don't use it. "
+        },
+        {
+            "user": "martinetd",
+            "body": "I don't think buildah containers have much business starting early boot before network is configured (or be long lived and suffer through e.g. wifi roaming and IP change), so in my opinion it's much less important, but it's possible to run a container with `buildah from --network host docker.io/alpine` if one really wants to and have similar behavior (use `buildah run $container command` to check and `buildah rm $container` to cleanup)\n(... actually as root it looks like buildah used my host's default interface ip address for host.containers.internal even in default bridged mode, so it's a bit weird... but can definitely be marked off as another problem, and I also don't use buildah so won't be annoying anyone with this)\n\nAnyway, leaving this decision up to rhatdan or others, I just wanted to point out the other etchosts.New() caller in the code base -- thank you again :)"
+        },
+        {
+            "user": "jankaluza",
+            "body": "Do we care about ipv6 here?\n\nOtherwise LGTM, given Matt kind of agreed with a way how to fix this in the github issue."
+        },
+        {
+            "user": "kairosci",
+            "body": "My theory was correct, there was a race condition. "
+        },
+        {
+            "user": "martinetd",
+            "body": "> Practically speaking the argument the host address can chagne applies to all network modes so it is in no way special to host networking\n\nThe bridge address cannot change in practice (I guess it could if an admin goes out of their way to change it, but is that realistic?)\n\nThe problem that was reported to us in particular isn't so much network roaming and IP changing, but for a container starting up early at boot -- this is especially easy to hit with a LTE connection that can take up to a minute to bring up, while the container is started early; in that case `host.containers.internal` isn't set at all (as reported in the issue) unless passed with `--add-host` (which I did suggest as a first workaround in the issue)\nIn this case the name just isn't set, so using it never works even after an IP has been set.\n\n> why no default to locahost/127.0.0.1 to begin with instead of relying on this custom name?\n\nI more or less asked the same thing and the argument I was given was that they have multiple containers that are using or not using host networking, and don't want to change the software inside depending on the mode.\nFor our documentation (we provide an embedded platform with a web server reachable from containers), it's also helpful to have a stable name that'll allow reaching the host regardless of network mode, so I kind of agree with them here -- I'd very much like to support some kind of stable domain that \"always works\".\n\n> So far the expectation of host.containers.internal has been it resolves to any non localhost host ip address so I don't really think special casing host here makes sense.\n\nThat's the first time I've read about this expectation, is that documented somewhere? For me, the expectation is that host.containers.internal allow reaching \"the host\", so e.g. if you have a web server on the host you can `curl host.containers.internal` and it'll just work.\nI guess it's a change that could break users who run servers that listen to a specific interface and not to localhost, but in my experience that's fairly rare (the only kind of service I'm aware of that does this are dns servers, where you sometimes need to run a different server for local resolutions than for external ones)\n\nIf you feel strongly about the default behavior, perhaps a special value for `host_containers_internal_ip` could be set in containers.conf that'd allow using localhost if network=host but the current logic for bridged network?"
+        },
+        {
+            "user": "Luap99",
+            "body": "> > Practically speaking the argument the host address can chagne applies to all network modes so it is in no way special to host networking\n> \n> The bridge address cannot change in practice (I guess it could if an admin goes out of their way to change it, but is that realistic?)\n> \n\nBridge networking does indeed have a rather stable address by using the bridge address on the host. But that is just one of many different network modes, you can use macvlan, ipvaln where we cannot make any guarantees that the host namespace is reachable at all. As rootless we cannot use the bridge either as that is inside the custom netns not on the host so we need special logic there with pasta as well or like we used to on with slirp4netns just pick the first address so really it never was stable across a ton of different behaviours.\n\n> The problem that was reported to us in particular isn't so much network roaming and IP changing, but for a container starting up early at boot -- this is especially easy to hit with a LTE connection that can take up to a minute to bring up, while the container is started early; in that case `host.containers.internal` isn't set at all (as reported in the issue) unless passed with `--add-host` (which I did suggest as a first workaround in the issue) In this case the name just isn't set, so using it never works even after an IP has been set.\n> \n> > why no default to locahost/127.0.0.1 to begin with instead of relying on this custom name?\n> \n> I more or less asked the same thing and the argument I was given was that they have multiple containers that are using or not using host networking, and don't want to change the software inside depending on the mode. For our documentation (we provide an embedded platform with a web server reachable from containers), it's also helpful to have a stable name that'll allow reaching the host regardless of network mode, so I kind of agree with them here -- I'd very much like to support some kind of stable domain that \"always works\".\n> \n\nAs written above we cannot offer something that \"always works\" today but I acknowledge that is not a argument to keep it worse if we can improve things.\n\n> > So far the expectation of host.containers.internal has been it resolves to any non localhost host ip address so I don't really think special casing host here makes sense.\n> \n> That's the first time I've read about this expectation, is that documented somewhere? For me, the expectation is that host.containers.internal allow reaching \"the host\", so e.g. if you have a web server on the host you can `curl host.containers.internal` and it'll just work. I guess it's a change that could break users who run servers that listen to a specific interface and not to localhost, but in my experience that's fairly rare (the only kind of service I'm aware of that does this are dns servers, where you sometimes need to run a different server for local resolutions than for external ones)\n> \n\nBecause allowing a container to reach the host netns localhost services breaks the expected isolation. Of course that argument is void for network=host as that is what was allowed anyway but still it means we then special case that to localhost where we would not previously.\n\n> If you feel strongly about the default behavior, perhaps a special value for `host_containers_internal_ip` could be set in containers.conf that'd allow using localhost if network=host but the current logic for bridged network?\n\nI rather not deal with more config options for something like this.\nI guess if other maintainers such as @mheon agree with using 127.0.0.1 I am fine to accept this as well.\n\nThat said if we do move forward then the logic should be moved into GetHostContainersInternalIP() by passing a new `HostNamespace: bool` argument to that function and then we can pass that arg from podman and buildah like you mentioned already. All the logic to decide what ip to use should live in the same place.\n\n"
+        },
+        {
+            "user": "kairosci",
+            "body": "@mheon could you take a look at it? "
+        },
+        {
+            "user": "mheon",
+            "body": "@Luap99 So the concern here is that `host.containers.internal` normally does not point to localhost, so we get different behavior after this change for host network vs non-host network?\n\nI see the concern, but I'm honestly not that worried... Host networking is already significantly different from bridge networking. I don't think a further change in `host.containers.internal` will be that noticeable?\n\n(That aside, I definitely agree with the refactoring suggestion, let's keep this in the existing function to generate the alias)"
+        },
+        {
+            "user": "Luap99",
+            "body": "@mheon yes but yeah you are right the behavior is already different. I guess this will not break anyone so I am ok moving forward then with a patch on the container-libs repo to add the option there."
+        },
+        {
+            "user": "kairosci",
+            "body": "I added the changes to common. \n\nI hadn't noticed that the repository had been migrated. To avoid inconsistencies, I would recommend (if I may and if possible) archiving it.\n\nIn any case, I updated the lib to add the optional field, which should further strengthen the logic. "
+        },
+        {
+            "user": "baude",
+            "body": "> I hadn't noticed that the repository had been migrated. To avoid inconsistencies, I would recommend (if I may and if possible) archiving it.\n\nthanks for pointing that out.  I have brought this up with the team."
+        },
+        {
+            "user": "kairosci",
+            "body": "@Luap99 PTAL"
+        },
+        {
+            "user": "Luap99",
+            "body": "please run\n`go get go.podman.io/storage@main && go get go.podman.io/image/v5@main &&  go get go.podman.io/common@main && make vendor` and commit the result to update the vendored versions from cotnainer-libs.\nThen update your code to use your new option instead. So commit 1 should be the vendor update and commit 2 your changes here with using the new option."
+        },
+        {
+            "user": "packit-as-a-service[bot]",
+            "body": "Cockpit tests failed for commit 5112e97fb85780489cfe85bb86c19e98d32daa83. @martinpitt, @jelly, @mvollmer please check."
+        },
+        {
+            "user": "packit-as-a-service[bot]",
+            "body": "[NON-BLOCKING] Packit jobs failed. @containers/packit-build please check. Everyone else, feel free to ignore."
+        },
+        {
+            "user": "packit-as-a-service[bot]",
+            "body": "[NON-BLOCKING] Packit jobs failed. @containers/packit-build please check. Everyone else, feel free to ignore."
+        },
+        {
+            "user": "packit-as-a-service[bot]",
+            "body": "Cockpit tests failed for commit e4f03d77d145894a814448d9ff17372d2776f08f. @martinpitt, @jelly, @mvollmer please check."
+        },
+        {
+            "user": "packit-as-a-service[bot]",
+            "body": "[NON-BLOCKING] Packit jobs failed. @containers/packit-build please check. Everyone else, feel free to ignore."
+        },
+        {
+            "user": "packit-as-a-service[bot]",
+            "body": "Cockpit tests failed for commit 06769f2cfaa8f9a4038a75e3cab0b769b7597061. @martinpitt, @jelly, @mvollmer please check."
+        },
+        {
+            "user": "packit-as-a-service[bot]",
+            "body": "Cockpit tests failed for commit bb1d549ef77888b60152d1c56c1b2dbd1027b099. @martinpitt, @jelly, @mvollmer please check."
+        },
+        {
+            "user": "Luap99",
+            "body": "Looks like there are some unrelated errors in that vendor update, don't worry about it we will work it out. I let you know once it works again."
+        },
+        {
+            "user": "packit-as-a-service[bot]",
+            "body": "[NON-BLOCKING] Packit jobs failed. @containers/packit-build please check. Everyone else, feel free to ignore."
+        },
+        {
+            "user": "packit-as-a-service[bot]",
+            "body": "Cockpit tests failed for commit 17f4438c607fe13c9378d7215cb561defb9553a9. @martinpitt, @jelly, @mvollmer please check."
+        },
+        {
+            "user": "packit-as-a-service[bot]",
+            "body": "Cockpit tests failed for commit e401e7e546821f82a094a63ffb2f7ae236a5b151. @martinpitt, @jelly, @mvollmer please check."
+        },
+        {
+            "user": "packit-as-a-service[bot]",
+            "body": "Cockpit tests failed for commit 595f4d978325fb79254e99b7c1a3e8f016c4ac01. @martinpitt, @jelly, @mvollmer please check."
+        },
+        {
+            "user": "packit-as-a-service[bot]",
+            "body": "Cockpit tests failed for commit 7d86afe90aee875b8347367477bb4a664e70f465. @martinpitt, @jelly, @mvollmer please check."
+        },
+        {
+            "user": "packit-as-a-service[bot]",
+            "body": "[NON-BLOCKING] Packit jobs failed. @containers/packit-build please check. Everyone else, feel free to ignore."
+        },
+        {
+            "user": "packit-as-a-service[bot]",
+            "body": "Cockpit tests failed for commit 7d86afe90aee875b8347367477bb4a664e70f465. @martinpitt, @jelly, @mvollmer please check."
+        },
+        {
+            "user": "packit-as-a-service[bot]",
+            "body": "[NON-BLOCKING] Packit jobs failed. @containers/packit-build please check. Everyone else, feel free to ignore."
+        },
+        {
+            "user": "packit-as-a-service[bot]",
+            "body": "Cockpit tests failed for commit c153774ae08cd07158984c00505642c9a0f0657d. @martinpitt, @jelly, @mvollmer please check."
+        },
+        {
+            "user": "packit-as-a-service[bot]",
+            "body": "Cockpit tests failed for commit bb087934f6f7c3b132a379231de4534e136ab909. @martinpitt, @jelly, @mvollmer please check."
+        },
+        {
+            "user": "packit-as-a-service[bot]",
+            "body": "Cockpit tests failed for commit 7c6d95f14facd84fffba5e0d89e9a9db96aaa366. @martinpitt, @jelly, @mvollmer please check."
+        },
+        {
+            "user": "packit-as-a-service[bot]",
+            "body": "Cockpit tests failed for commit 8cc0d146fa3bbad5cf2529ce059097157db1458d. @martinpitt, @jelly, @mvollmer please check."
+        },
+        {
+            "user": "packit-as-a-service[bot]",
+            "body": "Cockpit tests failed for commit 815ff0f2e4adbebee2e4f323151a05c617b14bfb. @martinpitt, @jelly, @mvollmer please check."
+        },
+        {
+            "user": "martinpitt",
+            "body": "I know CI is still very red here, but as the Cockpit team keeps getting pinged: The [cockpit test](https://artifacts.dev.testing-farm.io/6e5fd530-2e33-4730-9569-c821ce651dac/work-podman-systemengvz976/plans/cockpit-podman/podman-system/execute/data/guest/default-0/test/browser/system-1/output.txt) failed because of `podman build` barfing with\n\n> Error: building at STEP \"RUN ls\": encoding configuration for \"buildah-oci-runtime\": json: unsupported type: func(*url.URL) (*url.URL, error)\n\nI suppose we'll look again here when your own CI has cleared up and c-podman's still fail? cockpit-podman's tests don't explicitly use `host.containers.internal`. Cockpit itself does, but that's not part of the reverse dependency checks here.\n\nThanks!"
+        },
+        {
+            "user": "Luap99",
+            "body": "@kairosci No like I said we are already working on the vendoring issues, the buildah side is already fixed via https://github.com/containers/buildah/pull/6650\n\nI suggest you stop pushing (random?) changes here that have nothing to do with your actual change. You should not do any of such CI system changes here, if you found bugs please report them (and once we confirm them) you can fix them in other PRs but otherwise please do not blindly change this stuff, doing runtime installs of packages are simply not acceptable in our CI systems.\nFor now a PR like this is just not reviewable anymore."
+        },
+        {
+            "user": "kairosci",
+            "body": "I then deleted all commits related to the ci "
+        },
+        {
+            "user": "packit-as-a-service[bot]",
+            "body": "Cockpit tests failed for commit 595f4d978325fb79254e99b7c1a3e8f016c4ac01. @martinpitt, @jelly, @mvollmer please check."
+        },
+        {
+            "user": "kairosci",
+            "body": "> You should not do any of such CI system changes here, if you found bugs please report them (and once we confirm them) you can fix them in other PRs but otherwise please do not blindly change this stuff, doing runtime installs of packages are simply not acceptable in our CI systems. For now a PR like this is just not reviewable anymore.\n\nI have noticed a few things that could contribute to race conditions. I will open issues about them, as suggested.\n\n"
+        },
+        {
+            "user": "kairosci",
+            "body": "I have restored this PR to its original state. \n"
+        },
+        {
+            "user": "packit-as-a-service[bot]",
+            "body": "Cockpit tests failed for commit 9e46215b632ebcc0219d33cd72ca318690718e0e. @martinpitt, @jelly, @mvollmer please check."
+        },
+        {
+            "user": "kairosci",
+            "body": "@Luap99 I restored the PR to its original state, without entering the possible changes to prevent race conditions.\n\nI have verified on Fedora (local) that it compiles and installs correctly, so I can confirm that the problem is not in the code if it fails there."
+        },
+        {
+            "user": "kairosci",
+            "body": "Since, as I understand it, the issues are not my responsibility, I am marking the PR as ready for review.\n\nThe previous vendor issue that existed on Linux probably also exists on Darwin."
+        },
+        {
+            "user": "packit-as-a-service[bot]",
+            "body": "Cockpit tests failed for commit 943205c491e5be15dfd5b0d34b7643eea06c7acf. @martinpitt, @jelly, @mvollmer please check."
+        },
+        {
+            "user": "kairosci",
+            "body": "@mheon @Luap99 "
+        },
+        {
+            "user": "mheon",
+            "body": "Looks like you picked up some merge conflicts?"
+        },
+        {
+            "user": "Luap99",
+            "body": "The container-libs vendor is currently still blocked on someone vendoring buildah@main and implementation the new cli options here, I think @danishprakash mention on podman-dev he might work on it?"
+        },
+        {
+            "user": "kairosci",
+            "body": "I have resolved conflicts.\n"
+        },
+        {
+            "user": "kairosci",
+            "body": "@mheon @Luap99 PTAL, thanks!"
+        },
+        {
+            "user": "kairosci",
+            "body": "Addressed requests! "
+        },
+        {
+            "user": "mheon",
+            "body": "LGTM"
+        },
+        {
+            "user": "kairosci",
+            "body": "Okay, I corrected the squash message, which referred to the previous second commit.\n\nNow it should be okay, @Luap99  PTAL."
+        },
+        {
+            "user": "Luap99",
+            "body": "technically `Fixes #27823` is still missing from the commit message but that is not a blocker so no need to push again, I enable auto merge, thanks"
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "containers",
+            "repository": "common",
+            "number": 2539
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "container-libs",
+            "number": 600
+        }
+    ]
+}

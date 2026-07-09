@@ -1,0 +1,102 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 17286,
+    "type": "issue",
+    "title": "podman logs --follow, k8s-file, misses a log",
+    "state": "closed",
+    "labels": [
+        "flakes",
+        "kind/bug",
+        "locked - please file new issue/PR"
+    ],
+    "user": "edsantiago",
+    "body": "```\nnot ok 108 podman logs - --until --follow k8s-file\n...\n# podman-remote --url unix:/tmp/podman_tmp_hJUP run --log-driver=k8s-file --name dT1IxYdteS -d quay.io/libpod/testimage:20221018 sh -c while :; do echo RnePKS3YFW && sleep 2; done\n26960512e2ef4dda5ac8219d66f7d678d1a30e8fea8f8a6714188468610c6cf9\n# podman-remote --url unix:/tmp/podman_tmp_hJUP logs --until 3s -f dT1IxYdteS\nRnePKS3YFW\n#/vvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv\n#|     FAIL: logs --until -f on running container works\n#| expected: 'RnePKS3YFW\nRnePKS3YFW'\n#|   actual: 'RnePKS3YFW'\n#\\^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n```\nI'm suspecting a test bug (because of the `sleep`), not an actual podman bug, but will figure it out later.\n\n* fedora-36 : sys remote fedora-36 root host [remote]\n  * PR #17255\n    * [01-27 16:08](https://api.cirrus-ci.com/v1/artifact/task/5526908000010240/html/sys-remote-fedora-36-root-host.log.html#t--00108)\n* fedora-37 : sys remote fedora-37 rootless host [remote]\n  * PR #17165\n    * [01-19 07:39](https://api.cirrus-ci.com/v1/artifact/task/6331858288377856/html/sys-remote-fedora-37-rootless-host.log.html#t--00108)\n  * PR #17068\n    * [01-12 04:28](https://api.cirrus-ci.com/v1/artifact/task/5553891903799296/html/sys-remote-fedora-37-rootless-host.log.html#t--00107)\n",
+    "comments": [
+        {
+            "user": "vrothberg",
+            "body": "@Luap99 mind taking a look?  You turned out to be the \"Trüffelschwein\" of finding subtle bugs in the log code."
+        },
+        {
+            "user": "edsantiago",
+            "body": "Twice in one day, both `f36 remote root`: [here](https://api.cirrus-ci.com/v1/artifact/task/6449683166396416/html/sys-remote-fedora-36-root-host.log.html#t--00109) and [here](https://api.cirrus-ci.com/v1/artifact/task/6731478722150400/html/sys-remote-fedora-36-root-host.log.html#t--00109)"
+        },
+        {
+            "user": "Luap99",
+            "body": "I suspect it is a timing issue in CI, logs in general gives no guarantees about timing when they are written."
+        },
+        {
+            "user": "edsantiago",
+            "body": "I can reproduce locally, and in the process discovered that the flake is correlated with this server output:\n```\ntime=\"2023-02-20T07:22:27-06:00\" level=error msg=\"Stopping logger: hangup by client\"\n```\nI'm reworking the test logic anyway, making it (sigh) sloppier in hopes of eliminating the flake, but I think this is an interesting clue."
+        },
+        {
+            "user": "edsantiago",
+            "body": "Seen just now, in a PR based on a recent main. [root debian](https://api.cirrus-ci.com/v1/artifact/task/5700246320185344/html/sys-podman-debian-12-root-host-boltdb.log.html#t--00106). Reopening."
+        },
+        {
+            "user": "edsantiago",
+            "body": "Removing the `remote` tag and title, because this new failure is local."
+        },
+        {
+            "user": "edsantiago",
+            "body": "Thinking out loud after a long day (usually not a good idea). But:  #15321 was reporting \"missing log lines\" as _one_ of its symptoms; the \"channel 123 found\" error was drowning out any useful info. But \"channel 123\", in podman-remote, appears to mean \"container not found\". Is it possible that a container gets removed right in the middle of another process running `logs` on it? I'll look into it next week."
+        },
+        {
+            "user": "edsantiago",
+            "body": "Is this the same bug? [f37 rootless](https://api.cirrus-ci.com/v1/artifact/task/5421554306121728/html/sys-podman-fedora-37-rootless-host-boltdb.log.html#t--00113) and `journald`, not `k8s-file`:\n```\nnot ok 113 podman logs - --since --follow journald\n...\n$ podman run --log-driver=journald --name jMXWgW9IhP -d quay.io/libpod/testimage:20221018 sh -c sleep 1; while :; do echo mRs8hYocrw && sleep 5; done\n7ceddbedbc4b1937a21de5e927e780a59091377557bfde5cd4716116e71add71\n$ podman logs --since 0.1s -f jMXWgW9IhP\ntimeout: sending signal TERM to command ?/var/tmp/go/src/github.com/containers/podman/bin/podman?\n[ rc=124 (expected) ]\n#/vvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv\n#|     FAIL: logs --since -f on running container works\n#| expected: =~ \\^mRs8hYocrw\n#|         >    timeout: sending signal TERM to command.\\*\n#|   actual:    timeout: sending signal TERM to command ?/var/tmp/go/src/github.com/containers/podman/bin/podman?\n```"
+        },
+        {
+            "user": "Luap99",
+            "body": "I guess these are just timing issues in the test, can we make run_podman print the timing when the commands are executed, i.e. `date +\"%T.%N\"`?. I need to see the milliseconds to judge that.\nIf it takes more than 1.1 seconds between the podman run -d and podman logs it will likely fail."
+        },
+        {
+            "user": "edsantiago",
+            "body": "That would really clutter up the logs ... but maybe I can use logformatter to help. I'll look into it."
+        },
+        {
+            "user": "Luap99",
+            "body": "I was think just adding the timestamp here: https://github.com/containers/podman/blob/e2d1ad1fb2f59d7fe9685485bb69f6ff7987d74f/test/system/helpers.bash#L200\nWould that there really clutter logs?"
+        },
+        {
+            "user": "edsantiago",
+            "body": "Sample from my proof-of-concept:\n```\n$ bats --filter can remove infra test/system/010-images.bats\n010-images.bats\n ✗ podman images - rmi -f can remove infra images\n   (in test file test/system/010-images.bats, line 294)\n     `false' failed\n   [05:32:07.011163228] $ /home/esm/src/atomic/2018-02.podman/libpod/bin/podman rm -t 0 --all --force --ignore\n   [05:32:07.069125287] $ /home/esm/src/atomic/2018-02.podman/libpod/bin/podman ps --all --external --format {{.ID}} {{.Names}}\n   [05:32:07.118253136] $ /home/esm/src/atomic/2018-02.podman/libpod/bin/podman images --all --format {{.Repository}}:{{.Tag}} {{.ID}}\n   [05:32:07.159672429] quay.io/libpod/testimage:20221018 f5a99120db64\n   [05:32:07.171796125] $ /home/esm/src/atomic/2018-02.podman/libpod/bin/podman create --pod new:VHrI9sMfcZ quay.io/libpod/testimage:20221018\n   [05:32:07.474894186] 7d2ae91e515a9d5dfbe2fa81f60afd62d0864b252647d23e6b030e4071cb4e04\n   [05:32:07.513549847] $ /home/esm/src/atomic/2018-02.podman/libpod/bin/podman inspect --format {{.ID}} localhost/podman-pause:4.6.0-dev-1684169501\n   [05:32:07.565370054] 97b7962e651c6892bb6eae55c64d3a17d0a8f7429f0575a52ecd1d204226d058\n   [05:32:07.572005456] $ /home/esm/src/atomic/2018-02.podman/libpod/bin/podman rmi localhost/podman-pause:4.6.0-dev-1684169501\n   [05:32:07.620290272] Error: image used by 8a7a8c93e6cbe2b08e42374649a99924fdf0a4575d9e52ac3b258a90b82d6e21: image is in use by a container: consider listing external containers and force-removing image\n   [05:32:07.623198044] [ rc=2 (expected) ]\n   [05:32:07.633569688] $ /home/esm/src/atomic/2018-02.podman/libpod/bin/podman rmi -f localhost/podman-pause:4.6.0-dev-1684169501\n   [05:32:07.737421482] Untagged: localhost/podman-pause:4.6.0-dev-1684169501\n   Deleted: 97b7962e651c6892bb6eae55c64d3a17d0a8f7429f0575a52ecd1d204226d058\n   [05:32:07.744243796] $ /home/esm/src/atomic/2018-02.podman/libpod/bin/podman ps --all --noheading\n   [05:32:07.791298656] $ /home/esm/src/atomic/2018-02.podman/libpod/bin/podman pod ps --noheading\n   [05:32:07.843681019] $ /home/esm/src/atomic/2018-02.podman/libpod/bin/podman image exists quay.io/libpod/testimage:20221018\n   # [teardown]\n   [05:32:07.897184675] $ /home/esm/src/atomic/2018-02.podman/libpod/bin/podman pod rm -t 0 --all --force --ignore\n   [05:32:07.940598430] $ /home/esm/src/atomic/2018-02.podman/libpod/bin/podman rm -t 0 --all --force --ignore\n   [05:32:07.983983166] $ /home/esm/src/atomic/2018-02.podman/libpod/bin/podman network prune --force\n   [05:32:08.025695704] $ /home/esm/src/atomic/2018-02.podman/libpod/bin/podman volume rm -a -f\n```"
+        },
+        {
+            "user": "edsantiago",
+            "body": ">If it takes more than 1.1 seconds between the podman run -d and podman logs it will likely fail.\n\nThat is consistent with the most recent failure:\n```\n[+0292s] not ok 109 podman logs - until k8s-file\n...\n<+1.04s> # # podman run --log-driver=k8s-file -d --name test quay.io/libpod/testimage:20221018 sh -c echo before_4XqvkEr72m_k8s-file; trap 'echo after_z1aX2YuaDu_k8s-file; exit' SIGTERM; while :; do sleep 1; done\n<+329ms> # ed7a2e17b1415544c833a39939d4f282626c3029950f827ecc366cabd1584a7f\n<+1.01s> # # podman stop test\n<+1.17s> # test\n<+009ms> # # podman wait test\n<+055ms> # 0\n<+011ms> # # podman logs test\n<+056ms> # before_4XqvkEr72m_k8s-file\n         # after_z1aX2YuaDu_k8s-file\n<+018ms> # # podman logs --until 2023-05-26T07:40:31-05:00 test\n<+067ms> # # podman logs --until 2023-05-26T07:40:35-05:00 test\n<+057ms> # before_4XqvkEr72m_k8s-file\n         # #/vvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv\n         # #|     FAIL: podman logs --until after\n         # #| expected: 'before_4XqvkEr72m_k8s-file\n         # after_z1aX2YuaDu_k8s-file'\n         # #|   actual: 'before_4XqvkEr72m_k8s-file'\n         # #\\^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n```\nSubmitted #18752 as possible fix"
+        },
+        {
+            "user": "Luap99",
+            "body": "I don't think #18752 fixes the flake. Testing how `date --date='+1 second'` works shows the issue\n```\n$ date +\"%T.%N\" && date --date='+1 second' --iso-8601=seconds\n14:00:39.849253983\n2023-05-31T14:00:40+02:00\n```\nObviously 1 second is only rounded up to one second which means if we make the date call at 0.9 second then there is only a 0.1 second window for podman to output the logs because --until means we exit at that given time and stop reading more. I think this is racy because I coded it in two different go routines (one that writes logs and one that waits for until then stops the log reader). I think I can fix that in the actual code but it may not be trivial. Maybe change the test to do: `+2 second` in the meantime."
+        },
+        {
+            "user": "Luap99",
+            "body": "Also note that this applies for the one specific test, the `podman logs - until ...` and NOT for the one with --follow."
+        },
+        {
+            "user": "edsantiago",
+            "body": "Would this help?\n```diff\n ..._log_test_until()\n...\n-    after=$(date --date='+1 second' --iso-8601=seconds)\n+    after=$(date --date='+1 second' --iso-8601=ns)\n```\nSeems to work, although I can't tell if it does the right thing internally."
+        },
+        {
+            "user": "Luap99",
+            "body": "I think this is fine."
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 17603
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 17616
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 18752
+        }
+    ]
+}

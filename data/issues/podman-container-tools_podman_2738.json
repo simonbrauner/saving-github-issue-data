@@ -1,0 +1,101 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 2738,
+    "type": "issue",
+    "title": "[rootless] unable to delete files in another namespace (with --rm)",
+    "state": "closed",
+    "labels": [
+        "kind/bug",
+        "locked - please file new issue/PR"
+    ],
+    "user": "tobwen",
+    "body": "**Is this a BUG REPORT or FEATURE REQUEST? (leave only one on its own line)**\n\n/kind bug\n\n**Description**\n\nWhen creating files in a rootless container and chowning these files to another user, it's impossible to remove them from the host without help of the root user.\n\n**Steps to reproduce the issue:**\n\n1. `podman run -ti --rm -v /home/podman/we:/we alpine`\n2. `adduser tobwen`\n3. `cd /we && touch 1 && chown tobwen 1`\n4. [leave container]\n5. `rm /home/podman/we/1`\n\n**Describe the results you received:**\nFile cannot be removed, since it belongs to a non-existing user:\n```\n$ ls -al\ntotal 8\ndrwxr-xr-x  2 podman podman 4096 Mar 21 21:41 .\ndrwxr-xr-x 12 podman podman 4096 Mar 21 21:45 ..\n-rw-r--r--  1 166535 166535    0 Mar 21 21:41 1\n```\nSure, this is connected to https://github.com/containers/libpod/issues/1386 but since the original container has been removed, there's no way to figure out the namespace it was created in.",
+    "comments": [
+        {
+            "user": "mheon",
+            "body": "The UID mappings should always be the same (assuming you did not modify `/etc/subuid` or `/etc/subgid`) so we should still be good to delete these files"
+        },
+        {
+            "user": "mheon",
+            "body": "(The modified subuid/subgid case is sort of concerning, but you need root to do that, so I'm somewhat OK with saying you need root to fix it)"
+        },
+        {
+            "user": "neVERberleRfellerER",
+            "body": "There is also\nhttps://podman.io/blogs/2018/10/03/podman-remove-content-homedir.html\nThe buildah method works."
+        },
+        {
+            "user": "tobwen",
+            "body": "@mheon They look like this:\n```\n$ cat /etc/subuid\ntobwen:100000:65536\npodman:165536:65536\n\n$ cat  /etc/subgid\ntobwen:100000:65536\npodman:165536:65536\n```\n\n@neVERberleRfellerER Thanks let me try this solution (as mentioned in #1386, but would be great to have this working in podman the native way)."
+        },
+        {
+            "user": "mheon",
+            "body": "@tobwen The `buildah unshare` method ought to still work, since we join namespaces with the same UID/GID maps always, then.\n\nThough it's not good that we can't do this natively with Podman. We shouldn't need an external tool that might not be available in order to clean up after ourselves."
+        },
+        {
+            "user": "tobwen",
+            "body": "@mheon Can't I do this with normale `unshare` from _util-linux_, too? Or is this a complete different approach?"
+        },
+        {
+            "user": "mheon",
+            "body": "Not 100% sure here - they are conceptually very similar, but the semantics might be different enough to make it impossible (I'd mostly be concerned with how `unshare` gets its user mappings configured)."
+        },
+        {
+            "user": "tobwen",
+            "body": "Update: Got building _buildah_ working! https://github.com/containers/buildah/issues/1432\n\n@mheon Interesting. usernames go amok inside the namespace. Sometimes it's `systemd-timesync`, sometimes it's another username :D\n\n**Breaking news**\n`unshare -r` from _util-linux_ just pushes me into _root_ and I can remove the files, too."
+        },
+        {
+            "user": "tobwen",
+            "body": "A small work-around (where 165635:165617):\n\n```\naddgroup --gid 165617 conuser\nadduser --gecos \"\" --disabled-login --uid 165635 --gid 165617 conuser\n```"
+        },
+        {
+            "user": "rhatdan",
+            "body": "@tobwen There is a hope that someone will implement podman unshare, but no one has had it prop to the top of the priority list yet."
+        },
+        {
+            "user": "rhatdan",
+            "body": "unshare sadly does not use /etc/subuid and /etc/subgid, it only unshare a single uid."
+        },
+        {
+            "user": "tobwen",
+            "body": "@rhatdan But it helps to delete the files. But is it normal that _buldah_ greps existing users? `165635` gets `systemd-timesync` here."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@tobwen buildah/podman are using newuidmap and newgidmap commands provided by the shadow-utils package.  These programs search for the username in the /etc/subuild and /etc/subgid files respectively.  When the find an entry for the user they set the usernamespace in the kernel with the range of UID's specified. "
+        },
+        {
+            "user": "tobwen",
+            "body": "@rh-atomic-bot But my `/etc/subuild` only has 2 entries. Seems like there's an overlap? I've never modified these files.\n\n```\n$ cat /etc/subuid\ntobwen:100000:65536\npodman:165536:65536\n```"
+        },
+        {
+            "user": "rhatdan",
+            "body": "No overlay. \ntobwen gets UIDs 100000-165535\npowman gets the next 65536 starting at 165536"
+        },
+        {
+            "user": "tobwen",
+            "body": "Yes, but the first user created inside the container gets `165635` and when accessing the namespace with _buildah_, this user gets `systemd-timesync`, which is `100` on the host.\n\n```\n$ ls -al /home/podman/shared/ \ntotal 10\ndrwxr-xr-x  8 podman podman 4096 Mar 22 21:48 .\ndrwxr-xr-x 18 podman podman 4096 Mar 24 03:25 ..\ndrwxr-xr-x  2 165635 165617 4096 Mar 21 23:25 cgi-bin\ndrwxr-xr-x  5 165635 165617 4096 Mar 22 01:44 config\ndrwxr-xr-x  2 165635 165617 4096 Mar 21 23:25 html\ndrwxr-xr-x  2 165635 165617 4096 Mar 21 23:25 internal\ndrwxr-xr-x  2 165635 165617 4096 Mar 21 23:25 log\n[...]\n```\n\n```\n$ cd /home/podman/shared/ && buildah unshare\n\n$ ls -al\ntotal 10\ndrwxr-xr-x  8 root             root 4096 Mar 22 21:48 .\ndrwxr-xr-x 18 root             root 4096 Mar 24 03:25 ..\ndrwxr-xr-x  2 systemd-timesync   82 4096 Mar 21 23:25 cgi-bin\ndrwxr-xr-x  5 systemd-timesync   82 4096 Mar 22 01:44 config\ndrwxr-xr-x  2 systemd-timesync   82 4096 Mar 21 23:25 html\ndrwxr-xr-x  2 systemd-timesync   82 4096 Mar 21 23:25 internal\ndrwxr-xr-x  2 systemd-timesync   82 4096 Mar 21 23:25 logs\n[...]\n\n$ id -u systemd-timesync\n100\nexit\n\n$ id -u systemd-timesync\n100\n```"
+        },
+        {
+            "user": "rhatdan",
+            "body": "Please explain exactly what you mean by the first user inside of the container\ncat /proc/self/uid_map while in the container,  you should see the mapping."
+        },
+        {
+            "user": "tobwen",
+            "body": "@rhatdan It's in the initial post: I've created a new user inside the container, the first new one after root. My initial problem was that I cannot remove files, but this works using _unshare_ or _buildah_. I'm just curious, why _buildah_ presets me `systemd-timesync` as a user, while _unshare_ maps it to `nobody`\n\nSince the container doesn't exist anymore, I cannot rejoin it. So I cannot run `cat /proc/self/uid_map` in there, but the mapping is right in there, of course."
+        },
+        {
+            "user": "rhatdan",
+            "body": "Any UID not mapped into the User Namespace will be referred to as nobody."
+        },
+        {
+            "user": "tobwen",
+            "body": "@rhatdan So Buildah unluckely maps the namespaces UID into an area, where a system UID exists?"
+        },
+        {
+            "user": "rhatdan",
+            "body": "The only UIDs Buildah is going to map are defined in /etc/subuid and the UID running buildah if not root."
+        }
+    ],
+    "cross_references": []
+}

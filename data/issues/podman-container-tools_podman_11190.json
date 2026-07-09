@@ -1,0 +1,80 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 11190,
+    "type": "pull_request",
+    "title": "[CI:DOCS] Fix multi-arch image docs",
+    "state": "closed",
+    "labels": [
+        "lgtm",
+        "approved",
+        "locked - please file new issue/PR"
+    ],
+    "user": "cevich",
+    "body": "The automation workflow was altered in recent history to build images\ndaily, even if the podman version didn't change.  This was is necessary\nso that any updates/security vulnerabilities in ancillary packages are\nincorporated quickly.  However, documentation was never updated to\nreflect this change.  This commit puts the two in sync.",
+    "comments": [
+        {
+            "user": "rhatdan",
+            "body": "If we change the dnf -y update  to add --security, perhaps the images will change less often?  Or do we build from scratch each day?"
+        },
+        {
+            "user": "cevich",
+            "body": "> we build from scratch each day\n\nFrom scratch each day :cry: \n\nThere are two problems here:\n\n1. Github Actions :cursing_face:\n2. Automated image build complexity\n\nI don't see any hope for the first one, perhaps minor improvements but the overall design is broken in so many ways.  Worse, anything we change must be manually duplicated over to Skopeo and Buildah.  I can't think of a good way to even slow down the daily-build for stable w/o literally duplicating the entire YAML file and changing the cron-schedule line :angry: \n\nI did a POC for tracking just packaging changes using a hash stored in the image metadata.  Looking that up in addition to the version number (of existing image) and only updating on package changes.  Unf. this adds a *TON* of complexity where the end-result is we just update the image nearly daily anyway (given rapid pace of Fedora).\n\nThe only other idea I have is to introduce an additional version-tag for the updated images (have cake and eat it).  In other words, when we find a version-tagged image already exists, use that as the base-image and add a package-update layer.  Tag the new image with something like `<version>-upd` and push that daily.  This shouldn't add too much complexity, and will also keep the 'it must never change' crowd happy (they can just use the unchanging version-tagged images)."
+        },
+        {
+            "user": "cevich",
+            "body": "Update: I found a [woo-woo-thingamadoo](https://github.com/andymckay/cancel-action) I can add that will cancel the workflow.  I could add a conditional to cancel the `stable` build workflow to update an existing image, say, on every day of the week except Wednesday.\n\nShould I try that maybe?\n"
+        },
+        {
+            "user": "rhatdan",
+            "body": "Sure, if you could build on contigency.  \n\nSomething like\n```\n#  podman run --pull=always quay.io/buildah/stable dnf -y update --security | grep \"Nothing to do.\"\n```\nIf this fails then update, otherwise exit.\n"
+        },
+        {
+            "user": "cevich",
+            "body": "> Sure, if you could build on contingency.\n\nIt's a bit more complex than that but maybe this could work?  We always build images daily, since we need to extract the version number and because conditionally building for some flavors, would necessitate more YAML duplication (Have I mentioned that I'm not very fond of Github Actions design?)\n\nBut let me make sure I understand your idea.  After building, we get the version number, and use skopeo to check if a version-tagged image already exists.  If it does, pull it down and see if there are any security updates.  If there are, build again w/ the old image that as a base, only doing a dnf -y update --security on it.  Then overwrite the version-tagged image with the new one.\n\nThis would be attractive from the POV we'd get a new layer added in for each set of security updates.  This would help people who already have older parts of the image cached.\n\nThe only major down-sides I see here would be increasing complexity, and the overall runtime (damn near 2-hours already). We'd be running the actual 'dnf -y update --security' for each (emulated) architecture.  Speaking of which, if we only check x86_64, we will automatically miss any non-x86 arch-specific security updates (assuming those are a thing).  But maybe we can just ignore this detail :grin: \n\n> If this fails then update, otherwise exit.\n\nThat could also fail if the repositories are unavailable or network is broken or ...  oof!\n\n---\n\nOkay, let me work up your idea as a proof-of-concept, and see if I can get it running inside of a PR temporarily (otherwise it only runs from the master branch...after merging :confounded: )"
+        },
+        {
+            "user": "cevich",
+            "body": "@edsantiago PTAL at Dan's idea (above).  This multi-arch build automation is complicated, so I'd appreciate your semi-outsider perspective on the whole thing."
+        },
+        {
+            "user": "rhatdan",
+            "body": "I don't see how this would take longer, since aren't you doing complete builds now, this would replace complete builds with only dnf -y update checks, in best case scenario (Most common) this would speed things up.  In worse case scenario it would slow things down.\nYou could further enhance to just do\n\n```\n# podman run -t update --pull=always quay.io/buildah/stable:VERSION dnf -y update --security | grep \"Nothing to do.\"\n# if $? == 0 {\n          podman rm update\n          exit\n}\n# podman commit update quay.io/buildah/stable:VERSION\n# podman push quay.io/buildah/stable:VERSION\n# podman rm update\n```\n"
+        },
+        {
+            "user": "cevich",
+            "body": "> I don't see how this would take longer, since aren't you doing complete builds now\n\nIt's probably a minor issue.  We always do a full build, so doing the update check on an existing image is simply an extra step - requiring updating the damn repo. cache (again).\n\nAnyway...let me see about getting this put together in a separate PR to update the github action workflow..."
+        },
+        {
+            "user": "cevich",
+            "body": "...and after working for a half-day to update the workflow to do this, I realized this :cursing_face: thing as-is, already represents a **massive** headache for human reviewers and maintainers.  Worse, I've got to jump through some really ugly hoops just to get the thing running in a PR instead of the master branch.  Then remember to un-do those before we merge (and it still might fail).  Lastly, hope and prayer is required that future changes won't be needed (yeah right).\n\nI'm taking a step back here and looking at the big-picture:\n\n* We \"own\" all the pieces, build logic, Containerfile's, and documentation.\n* This logic needs to be replicated over to both Buildah and Skopeo.\n* The whole thing needs to eventually be long-term maintainable by non-experts.\n* It would be really (REALLY) helpful if changes could run inside a PR *and* by cron on the main branches.\n* I've already started working on a more Cirrus-centric set of scripts to migrate toward (with unit and integration tests!)\n\nI propose we stick to docs-only updates for now, and then I'll incorporate the update-logic into the set of simple bash scripts I've already started working on."
+        },
+        {
+            "user": "rhatdan",
+            "body": "We could get smarter about updating the cache and use overlay links, so we only need to do it once and then share it amongst all of the containers."
+        },
+        {
+            "user": "cevich",
+            "body": "> We could get smarter\n\nYes, I was thinking that just now.  It's possible to pre-populate the dnf cache with multi-arch packages, and overlay-mount that in during build.  I remember trying this before by hand and getting it to work pretty easily."
+        },
+        {
+            "user": "edsantiago",
+            "body": "LGTM"
+        },
+        {
+            "user": "rhatdan",
+            "body": "/approve\n/lgtm"
+        },
+        {
+            "user": "openshift-ci[bot]",
+            "body": "[APPROVALNOTIFIER] This PR is **APPROVED**\n\nThis pull-request has been approved by: *<a href=\"https://github.com/containers/podman/pull/11190#\" title=\"Author self-approved\">cevich</a>*, *<a href=\"https://github.com/containers/podman/pull/11190#issuecomment-897154112\" title=\"LGTM\">rhatdan</a>*\n\nThe full list of commands accepted by this bot can be found [here](https://go.k8s.io/bot-commands?repo=containers%2Fpodman).\n\nThe pull request process is described [here](https://git.k8s.io/community/contributors/guide/owners.md#the-code-review-process)\n\n<details >\nNeeds approval from an approver in each of these files:\n\n- ~~[OWNERS](https://github.com/containers/podman/blob/main/OWNERS)~~ [rhatdan]\n\nApprovers can indicate their approval by writing `/approve` in a comment\nApprovers can cancel approval by writing `/approve cancel` in a comment\n</details>\n<!-- META={\"approvers\":[]} -->"
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 11162
+        }
+    ]
+}

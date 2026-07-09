@@ -1,0 +1,49 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 3814,
+    "type": "issue",
+    "title": "Networking Issue on System Reboot",
+    "state": "closed",
+    "labels": [
+        "kind/bug",
+        "locked - please file new issue/PR"
+    ],
+    "user": "mattdombrowski21",
+    "body": "**Is this a BUG REPORT or FEATURE REQUEST? (leave only one on its own line)**\n\n/kind bug\n\n**Description**\nI seem to have found an interesting bug dealing with how the container networking is setup on system reboots. The container I am trying to run is created and launched by systemd and is enabled on restart. \nHere is the service file for my container:\n```\n[Unit]\nDescription = Squid Proxy Container Service\nWants       = network.target\n\n[Service]\nRestart = always\nType = simple\nRemainAfterExit = yes\nExecStart = /usr/bin/podman run -dt -v /etc/squid/squid.conf:/etc/squid/squid.conf:Z -p 3128:3128 --name squid-cont squid-img\nExecStop = /usr/bin/podman stop -t 2 squid-cont\nExecStop = /usr/bin/podman rm squid-cont\n\n[Install]\nWantedBy = multi-user.target\n```\n\nWhen the system is running, starting and stopping the service works as expected. However, on reboots, the container is created, but I am unable to reach it externally via port 3128. I have made sure it's not a firewall issue and have even tried using a different port and disabling the firewall to help debug the issue. \n\n**Steps to reproduce the issue:**\n\n1. Create the service file and place it in /usr/lib/systemd/system/\n\n2. Enable the service\n\n3. Reboot\n\n**Describe the results you received:**\nI am unable to reach the container via port 3128. Sending a ping to 1.1.1.1 from within the container (using podman exec) results in the following when doing a tcpdump on the host system (note that this is listening on all interfaces):\n```\n[Interface:veth10d87c76:]    10:02:56.349301 IP 10.88.1.201 > 1.1.1.1: ICMP echo request, id 54, seq 1, length 64\n[Interface:cni0:]    10:02:56.349301 IP 10.88.1.201 > 1.1.1.1: ICMP echo request, id 54, seq 1, length 64\n[Interface:ens192:]    10:02:57.373370 IP 10.88.1.201 > 1.1.1.1: ICMP echo request, id 54, seq 1, length 64\n```\n\nThe ip address of my container is 10.88.1.201 and the host machine's ip is 10.11.4.34. As you can see, there must be some sort of NAT issue between the cni0 interface and the ens192 interface where the ip is not translated over. \n\n**Describe the results you expected:**\n\nThe expected output from tcpdump if things were working properly would be like this:\n```\n[Interface:veth10d87c76:]    10:02:56.349301 IP 10.88.1.201 > 1.1.1.1: ICMP echo request, id 54, seq 1, length 64\n[Interface:cni0:]    10:02:56.349301 IP 10.88.1.201 > 1.1.1.1: ICMP echo request, id 54, seq 1, length 64\n[Interface:ens192:]    10:02:57.373370 IP 10.11.4.34 > 1.1.1.1: ICMP echo request, id 54, seq 1, length 64\n```\n\n\n**Additional information you deem important (e.g. issue happens only occasionally):**\nTo further complicate things, restarting the service will resolve the problem and the ip translation between the interfaces works as expected. Additionally, bringing up another container will resolve the issue and I am able to reach the original container as expected. Turning off the second container will bring the issue back though. \n\nThe only time I am seeing this problem is when the container is launched as a service on startup after rebooting the system.\n\n**Output of `podman version`:**\n\n```\nVersion:       1.0.3\nGo Version:    go1.11.5\nOS/Arch:       linux/amd64\n```\n\n**Output of `podman info --debug`:**\n\n```\ndebug:\n  compiler: gc\n  git commit: \"\"\n  go version: go1.11.5\n  podman version: 1.0.3\nhost:\n  BuildahVersion: 1.6-dev\n  Conmon:\n    package: podman-1.0.3-1.git9d78c0c.module+el8.0.0.z+3717+fdd07b7c.x86_64\n    path: /usr/libexec/podman/conmon\n    version: 'conmon version 1.14.0-dev, commit: 41dd7cbcb7ac477dd3553d1eeee82923a7ac221d-dirty'\n  Distribution:\n    distribution: '\"rhel\"'\n    version: \"8.0\"\n  MemFree: 2453577728\n  MemTotal: 3964936192\n  OCIRuntime:\n    package: runc-1.0.0-55.rc5.dev.git2abd837.module+el8.0.0+3049+59fd2bba.x86_64\n    path: /usr/bin/runc\n    version: 'runc version spec: 1.0.0'\n  SwapFree: 2147479552\n  SwapTotal: 2147479552\n  arch: amd64\n  cpus: 2\n  hostname: crio.lan\n  kernel: 4.18.0-80.4.2.el8_0.x86_64\n  os: linux\n  rootless: false\n  uptime: 1h 42m 22.84s (Approximately 0.04 days)\ninsecure registries:\n  registries: []\nregistries:\n  registries:\n  - registry.redhat.io\n  - quay.io\n  - docker.io\nstore:\n  ConfigFile: /etc/containers/storage.conf\n  ContainerStore:\n    number: 5\n  GraphDriverName: overlay\n  GraphOptions: null\n  GraphRoot: /var/lib/containers/storage\n  GraphStatus:\n    Backing Filesystem: xfs\n    Native Overlay Diff: \"true\"\n    Supports d_type: \"true\"\n    Using metacopy: \"false\"\n  ImageStore:\n    number: 19\n  RunRoot: /var/run/containers/storage\n```\n\n**Additional environment details (AWS, VirtualBox, physical, etc.):**\nThis is being done in a virtual machine using ESXi\n",
+    "comments": [
+        {
+            "user": "mheon",
+            "body": "I suspect that part of the problem here is tracking the Podman executable, and not Conmon (though I suspect that `--conmon-pidfile` didn't land in Cent/RHEL 8.0 so that may not be possible until 8.1). The container is probably not being removed by the `ExecStop` line on system shutdown - so you're working with an older copy after the system restarted.\n\n(Could be entirely wrong here, this is just a first impression, will look further later)"
+        },
+        {
+            "user": "mattdombrowski21",
+            "body": "A less than ideal workaround for this problem that I found was that having it wait for 30 seconds before  creating the container fixes the issue. I just added \"ExecStartPre = /bin/sleep 30\" and it worked. Of course this is not a great solution and I am wondering if there is some other service that I do not realize needs to be started first."
+        },
+        {
+            "user": "mheon",
+            "body": "Alright, looks like I'm wrong then.\n\nI suppose it's possible that the system isn't ready to process iptables requests when we start up... `network.target` would seem to indicate we're ready to start, though. Maybe `network-online.target`, to ensure communications are ready?"
+        },
+        {
+            "user": "mattdombrowski21",
+            "body": "Just tried adding network-online.target and it still won't work "
+        },
+        {
+            "user": "vrothberg",
+            "body": "Can reproduce on Fedora 30. Will look further into where it's coming from."
+        },
+        {
+            "user": "vrothberg",
+            "body": "The solution is to add `After=network-online.target` to the unit file. A `Wants=` is not sufficient as we need to explicitly order it."
+        },
+        {
+            "user": "rhatdan",
+            "body": "Does `podman systemd generate` default to this?"
+        },
+        {
+            "user": "vrothberg",
+            "body": "> Does `podman systemd generate` default to this?\n\nNo, that's something we should add. Good catch, @rhatdan! I'll open an issue for it."
+        }
+    ],
+    "cross_references": []
+}

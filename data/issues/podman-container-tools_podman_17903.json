@@ -1,0 +1,159 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 17903,
+    "type": "issue",
+    "title": "pod stats: unknown FS magic on \"/run/user/4902/netns/netns-etc-etc\"",
+    "state": "closed",
+    "labels": [
+        "flakes",
+        "kind/bug",
+        "locked - please file new issue/PR"
+    ],
+    "user": "edsantiago",
+    "body": "Seen in CI, [f37 rootless sqlite](https://api.cirrus-ci.com/v1/artifact/task/6319652947623936/html/int-podman-fedora-37-rootless-host-sqlite.log.html#t--podman-pod-stats-on-a-specific-running-pod--1):\n```\npodman pod stats on a specific running pod\n...\n$ podman [options] run --http-proxy=false --pod cec7af2e2f8e0479a91d94bff88cf8482c2907f7644eb7c90a9ea01b2f13ff22 -d quay.io/libpod/alpine:latest top\need6053f6f0e8a2f883464f994bb30d09304274e1b1e1cdb2eb52a0f49ae3985\n$ podman [options] pod stats --no-stream cec7af2e2f8e0479a91d94bff88cf8482c2907f7644eb7c90a9ea01b2f13ff22\nError: unknown FS magic on \"/run/user/4902/netns/netns-a2804d97-802b-9e57-2e40-11c1206c102c\": 1021994\n[AfterEach] Podman pod stats\n  /var/tmp/go/src/github.com[/containers/podman/test/e2e/pod_stats_test.go:33](https://github.com/containers/podman/blob/956677a741cdcce627dda4336f85c8fc0be83a5c/test/e2e/pod_stats_test.go#L33)\n$ podman [options] pod rm -fa -t 0\ntime=\"2023-03-23T15:11:45-05:00\" level=error msg=\"Unable to clean up network for container 652344ca5642edd24b93f810fcb9ebbb1c0969195a67454bc05b8a67e7ed3185: \\\"unmounting network namespace for container 652344ca5642edd24b93f810fcb9ebbb1c0969195a67454bc05b8a67e7ed3185: failed to unmount NS: at /run/user/4902/netns/netns-a2804d97-802b-9e57-2e40-11c1206c102c: invalid argument\\\"\"\n         cec7af2e2f8e0479a91d94bff88cf8482c2907f7644eb7c90a9ea01b2f13ff22\n```",
+    "comments": [
+        {
+            "user": "Luap99",
+            "body": "The only way I can see this happening is if `/run/user/4902/netns/netns-a2804d97-802b-9e57-2e40-11c1206c102c` was unmounted after the pod was started. The question would be why?\nMy best guess would be that we somehow used the same netns for two different containers, reading\nhttps://github.com/containers/common/blob/main/pkg/netns/netns_linux.go#L103-L104 I see zero duplicate detection, so if the RNG returns the same name it will cause issues. Very unlikely but in theory could cause this one."
+        },
+        {
+            "user": "Luap99",
+            "body": "I think https://github.com/containers/common/pull/1381should prevent this but I cannot be sure what the cause here was."
+        },
+        {
+            "user": "edsantiago",
+            "body": "Could [this](https://api.cirrus-ci.com/v1/artifact/task/5731587032088576/html/int-podman-fedora-37-rootless-host-sqlite.log.html#t--podman-run-container-with-systemd-PID1--1) be related, or should I file a new issue?\n```\n  podman run container with systemd PID1\n...\n$ podman [options] rm -fa -t 0\ntime=\"2023-03-27T20:34:09-05:00\" level=error msg=\"Unable to clean up network \n    for container b717c2ad753aa77f65e18a8bd64de0e62f336d954411f361c0a427187bb80155: \n    \\\"unmounting network namespace for container b717c2ad753aa77f65e18a8bd64de0e62f336d954411f361c0a427187bb80155:\n     failed to unmount NS: at /run/user/6098/netns/netns-5db6ed3c-beda-ab7d-9006-4442e676aa85: invalid argument\\\"\""
+        },
+        {
+            "user": "Luap99",
+            "body": "It is the same error so yes it should be the same problem, however if we see it more often then I no longer think my fix is enough.\n\nIt still can be that we try to unmount the netns twice in podman and at least this is the first time you report this bug and both logs say sqlite so it can be very well a new sqlite bug."
+        },
+        {
+            "user": "edsantiago",
+            "body": ">both logs say sqlite so it can be very well a new sqlite bug.\n\nBig grain of salt: all of these are being found in #17831 which, yes, is hammering on sqlite, but the big big big deal in that PR is disabling the ginkgo triple-flake-retry. It is possible, even likely, that these are all bugs that have always been there but we never see because of the ginkgo triple-retry."
+        },
+        {
+            "user": "edsantiago",
+            "body": "Oooh, here's an [interesting one](https://api.cirrus-ci.com/v1/artifact/task/5240317465591808/html/int-podman-fedora-37-rootless-host-boltdb.log.html#t--podman-stats-on-a-running-container--1), f37 rootless **boltdb**, showing two failures very close together in time, suggesting that it's a concurrency issue, that something needs to be locked to prevent these tests from running at the same time.\n```\n  podman stats on a running container\n...\nError: unknown FS magic on \"/run/user/2657/netns/netns-a70ab2b5-2ef4-2369-5a47-29b423e10a55\": 1021994\n\n...\n  podman stats on all containers\n...\nError: unknown FS magic on \"/run/user/2657/netns/netns-0c7f9246-ecb5-754a-dd54-3b2723c4609f\": 1021994\n```"
+        },
+        {
+            "user": "edsantiago",
+            "body": "Here's an interesting new variation on the theme. In **system** tests (the usual FS-magic flake is in `int`), [debian rootless boltdb](https://api.cirrus-ci.com/v1/artifact/task/5257473041367040/html/sys-podman-debian-12-rootless-host-boltdb.log.html#t--00421):\n```\n[+1170s] not ok 421 podman network create\n...\n$ podman network create --subnet 172.23.105.0/24 testnet-8cBnbGlZxb\ntestnet-8cBnbGlZxb\n...\n$ podman run --rm --network testnet-8cBnbGlZxb quay.io/libpod/testimage:20221018 ip a\nError: creating rootless network namespace: open /run/user/3152/netns/rootless-netns-c24c98c9183e681a4c80: file exists\n```\nFrom that point on, pretty much all the rest of the tests fail. The word \"magic\" does not appear anywhere in the test log, but I still think this is related. If it isn't, lmk and I'll file a separate issue."
+        },
+        {
+            "user": "Luap99",
+            "body": "This is definitely caused by my change, `file exists` was not a problem before.\nI thought the rootless netns namespace is locked properly but apparently there is a race somewhere."
+        },
+        {
+            "user": "Luap99",
+            "body": "Mhh, I am not really sure where it went wrong.\nLooking at the code it is definitely locked:\nhttps://github.com/containers/podman/blob/5190ab1d02c995e4a10b01c7fdbbe51e7b6075a8/libpod/networking_linux.go#L335-L379\n\nSomehow `ns.GetNS(path)` is failing but `netns.NewNSWithName(netnsName)` is complaining about file exists.\nThe only way this can happen is when the file exists but there is no netns bind mounted on it. In this case `ns.GetNS(path)` will fail with `unknown FS magic on... ` so it looks very relevant to this issue.\n\nIt is not quite clear what is going on but I think something must be unmounting the netns bind mounts.\nOr maybe a podman process got killed between the unmount() and remove() call: https://github.com/containers/common/blob/e572bd0cf69426db7e94aaf2afa44742f3c118be/pkg/netns/netns_linux.go#L191-L197"
+        },
+        {
+            "user": "edsantiago",
+            "body": ">Or maybe a podman process got killed\n\nThese are system tests. That's not impossible (there are a few explicit background podman jobs), but it seems unlikely."
+        },
+        {
+            "user": "Luap99",
+            "body": "> > Or maybe a podman process got killed\n> \n> These are system tests. That's not impossible (there are a few explicit background podman jobs), but it seems unlikely.\n\nYes I agree very unlikely but I consider something unmounts the netns also in the category very unlikely."
+        },
+        {
+            "user": "Luap99",
+            "body": "@edsantiago Could you confirm that this only happens rootless?\n\nI think I understand now what may trigger this. In order for the netns to be valid it must be a child of the podman user namespace. This namespace is kept alive by the `podman pause` process.\n\nI can reproduce this the following way:\n```\n$ podman unshare --rootless-netns ip a\n$ pkill \"podman pause\"\n$ podman unshare --rootless-netns ip a\nError: creating rootless network namespace: open /run/user/1000/netns/rootless-netns-294b745a758a274d54d9: file exists\n```\n\nand if I patch it to show the error from `ns.GetNS()` we see that this is the same issue:\n `Error: getting rootless network namespace: unknown FS magic on \"/run/user/1000/netns/rootless-netns-294b745a758a274d54d9\": 1021994`\n\nThis is at least the only thing which can consistently trigger this, so the question then would be what killed `podman pause`? One command which does that is `podman system migrate` but I cannot find any reference of this in either e2e or system tests.\n\n@giuseppe Any idea?"
+        },
+        {
+            "user": "edsantiago",
+            "body": "Nice detective work. Unfortunately I can't confirm anything because the log I linked above is the only instance I've found of that failure. But if we look at the sequence of tests:\n```\nok 417 podman pod manages /etc/hosts correctly  <<<<<<<<<<<<<<<<<<<<<<<<<<<\nok 418 podman run with slirp4ns assigns correct addresses to /etc/hosts\nok 419 podman run with slirp4ns adds correct dns address to resolv.conf\nok 420 podman run with slirp4ns assigns correct ip address container\nnot ok 421 podman network create\n```\n...and we look at the source of the `417` test: https://github.com/containers/podman/blob/80a199a83c2b27089898ecbb01a25cb54846bddb/test/system/500-networking.bats#L171-L175\n\n...we see pod and pause-image cleanup, which is consistent with your findings (even if the timing doesn't appear to be). Is it worth poking into pod removal code to see if something is not being cleaned up properly?"
+        },
+        {
+            "user": "Luap99",
+            "body": "The pod pause image is different and should not be related to the `podman pause` process.\n\nThe `podman pause` process is created by the first podman command you run, podman will create the user namesapce once and to keep it alive it needs a running process (podman pause). All the following process will join this user and mount namespace via setns(). You can find the pause pid in `$XDG_RUNTIME_DIR/libpod/tmp/pause.pid`"
+        },
+        {
+            "user": "Luap99",
+            "body": "https://github.com/containers/podman/pull/18024 should at least let us recover so not all tests blow up when it happens. This should restore the previous behavior but it doesn't address the root cause."
+        },
+        {
+            "user": "giuseppe",
+            "body": "> I think I understand now what may trigger this. In order for the netns to be valid it must be a child of the podman user namespace. This namespace is kept alive by the `podman pause` process.\n> \n> I can reproduce this the following way:\n> \n> ```\n> $ podman unshare --rootless-netns ip a\n> $ pkill \"podman pause\"\n> $ podman unshare --rootless-netns ip a\n> Error: creating rootless network namespace: open /run/user/1000/netns/rootless-netns-294b745a758a274d54d9: file exists\n> ```\n> \n> and if I patch it to show the error from `ns.GetNS()` we see that this is the same issue: `Error: getting rootless network namespace: unknown FS magic on \"/run/user/1000/netns/rootless-netns-294b745a758a274d54d9\": 1021994`\n> \n> This is at least the only thing which can consistently trigger this, so the question then would be what killed `podman pause`? One command which does that is `podman system migrate` but I cannot find any reference of this in either e2e or system tests.\n> \n> @giuseppe Any idea?\n\nwhen we kill the pause process, the kernel will clean up the rootless user namespace and the mount namespace.\n\nCleaning up the mount namespace, it will also destroy all the network namespaces that are bind mounted under `/run/user/1000/netns` but their files are still present.\n\nIMO, we should either clean up that directory or not fail if a file already exists.  I think your patch is correct.\n\nAnother potential solution could be to mount a tmpfs on /run/user/1000/netns` so that the tmpfs won't live longer than the podman pause process since it is mounted in the rootless mount namespace.  When the pause process exits, the entire tmpfs is cleaned up\n\n"
+        },
+        {
+            "user": "Luap99",
+            "body": "> IMO, we should either clean up that directory or not fail if a file already exists. I think your patch is correct.\n\nOk lets go with that then for now.\n\nHowever we still need to figure out if the pause process really got killed in the CI env. I think one possibility is to patch the test to read `cat $XDG_RUNTIME_DIR/libpod/tmp/pause.pid` before and after each test and compare if the pid changed."
+        },
+        {
+            "user": "edsantiago",
+            "body": "I've been playing with variations of `--this --that` in my PR, and just noted [this one, f37 rootless](https://api.cirrus-ci.com/v1/artifact/task/5290546739019776/html/int-podman-fedora-37-rootless-host-sqlite.log.html#t--stop-podman-service--1):\n```\nExecing [...]/podman --storage-opt vfs.imagestore=/tmp/imagecachedir \\\n    --root /tmp/podman_test986753573/server_root \\\n     --tmpdir /tmp/podman_test986753573 \\\n     --runtime crun \\\n     --cgroup-manager systemd \\\n     --db-backend sqlite \\\n     --storage-driver vfs \\\n     rm -f top_RPXePqrY\n  time=\"2023-04-04T19:59:20-05:00\" level=error \\\n     msg=\"Unable to clean up network for container <id>: \n      \\\"unmounting network namespace for container <id>:\n      failed to unmount NS: at /run/user/5575/netns/netns-e4831cc7-2e54-668d-84c1-a34e39804cf9:\n     invalid argument\\\"\"\n         top_RPXePqrY\n```\nGranted, for rootless I should've included `--net-something /private-dir` but I was lazy.\n\nAnyhow, this was a push from tonight, and it includes #18024, so I was surprised to see that message. Quitting for the day. "
+        },
+        {
+            "user": "Luap99",
+            "body": "> I've been playing with variations of `--this --that` in my PR, and just noted [this one, f37 rootless](https://api.cirrus-ci.com/v1/artifact/task/5290546739019776/html/int-podman-fedora-37-rootless-host-sqlite.log.html#t--stop-podman-service--1):\n> \n> ```\n> Execing [...]/podman --storage-opt vfs.imagestore=/tmp/imagecachedir \\\n>     --root /tmp/podman_test986753573/server_root \\\n>      --tmpdir /tmp/podman_test986753573 \\\n>      --runtime crun \\\n>      --cgroup-manager systemd \\\n>      --db-backend sqlite \\\n>      --storage-driver vfs \\\n>      rm -f top_RPXePqrY\n>   time=\"2023-04-04T19:59:20-05:00\" level=error \\\n>      msg=\"Unable to clean up network for container <id>: \n>       \\\"unmounting network namespace for container <id>:\n>       failed to unmount NS: at /run/user/5575/netns/netns-e4831cc7-2e54-668d-84c1-a34e39804cf9:\n>      invalid argument\\\"\"\n>          top_RPXePqrY\n> ```\n> \n> Granted, for rootless I should've included `--net-something /private-dir` but I was lazy.\n> \n> Anyhow, this was a push from tonight, and it includes #18024, so I was surprised to see that message. Quitting for the day.\n\nNote that #18024 made no attempt at fixing this issue, all it fixed was the regression I introduced with the c/common change, so only the error from https://github.com/containers/podman/issues/17903#issuecomment-1494169843 was fixed.\n\n"
+        },
+        {
+            "user": "Luap99",
+            "body": "Ok, `--this --that` was a good hint:\nI now understand were it goes wrong, here is a reproducer:\n\nFirst make sure you have no podman processes or containers running running, then kill the pause process to start from a clean system:\n```\n$ pkill \"podman pause\"\n$ dir=$(mktemp -d)\n$ podman --root $dir/root --runroot $dir/runroot --tmpdir $dir/tmp  run -d --name test alpine top\n# Now this process will create a pause.pid file but not under $XDG_RUNTIME_DIR/libpod/tmp/pause.pid,\n# instead it uses the --tmpdir value so $dir/tmp/pause.pid\n# If you then use a regular podman command without the custom options:\n$ podman run -d --name test alpine top\n$ pgrep \"podman pause\"\n18786\n19198\n# The normal command had no clue about the pause process so it created its own, so far no problem with that.\n# The problem happens when we now use the command with the options again:\n$ podman --root $dir/root --runroot $dir/runroot --tmpdir $dir/tmp  stop test\nERRO[0000] Unable to clean up network for container 6fc14126834157223df6318300affcce613b0a3acc0cdeec5e3e8df55a1335c1: \"unmounting network namespace for container 6fc14126834157223df6318300affcce613b0a3acc0cdeec5e3e8df55a1335c1: failed to unmount NS: at /run/user/1000/netns/netns-34ab0c13-c7e0-6c3e-2f98-32d2f67bb4e1: invalid argument\"\n```\n\nThe bug here is that there is a shortcut in [pkg/rootless/rootless_linux.c](https://github.com/containers/podman/blob/main/pkg/rootless/rootless_linux.c) which is always run before any go code is run (including the option parsing). The c code just sees $XDG_RUNTIME_DIR/libpod/tmp/pause.pid and imminently joins this namespace from this process.\nThis shortcut is only there to join, so if the process does not exits it will do nothing and let podman handle the namespace  and pause process creation. \n\nSo that is why you have to run the first time with `--tmpdir` before the pause process p pid existed at `$XDG_RUNTIME_DIR/libpod/tmp/pause.pid` . If you do it the other way around even the process with `--tmpdir` it would have joined the namespace via the shortcut so it would use the same one and not cause issues.\nSee the possibility for flakes here?\n\nThe fix for this is of course to not do the shortcut when we see `--tmpdir` so the podman go code can handle it, Note that we already special case other commands: https://github.com/containers/podman/blob/ac1d297fc76f4423d6f44b98c864476cbeffce86/pkg/rootless/rootless_linux.c#L378-L384\n"
+        },
+        {
+            "user": "edsantiago",
+            "body": "Slightly different symptom seen yesterday, [f37 rootless](https://api.cirrus-ci.com/v1/artifact/task/6297747473563648/html/int-podman-fedora-37-rootless-host-sqlite.log.html#t--podman-play-kube-no-host--1):\n```\n  podman play kube --no-host\n...\n$ podman [options] exec <workerCID> cat /etc/hosts\nError: OCI runtime error: crun: fchown std stream 0: Bad file descriptor\n```\nThat causes the test to fail. Then, in cleanup:\n```\n[AfterEach] Podman play kube\n$ podman [options] pod rm -fa -t 0\ntime=\"2023-04-05T19:00:41-05:00\" level=error msg=\"getting rootless network namespace:\n          unknown FS magic on \\\"/run/user/6459/netns/rootless-netns-0e73abf2193b2cbf501b\\\": 1021994\"\ntime=\"2023-04-05T19:00:41-05:00\" level=error msg=\"Unable to clean up network for container <infraCID>:\n          \\\"unmounting network namespace for container <infraCID>:\n          failed to unmount NS: at /run/user/6459/netns/netns-b2c8e3d5-a67a-913a-7c99-0e32a0092781: invalid argument\\\"\"\n```\nI'm assiging that flake to this issue."
+        },
+        {
+            "user": "Luap99",
+            "body": "Still happening:\nhttps://github.com/containers/podman/pull/18083#issuecomment-1503770151\n"
+        },
+        {
+            "user": "edsantiago",
+            "body": "Locks are dangerous of course, but isn't there some way that `podman system reset` tests can be wrapped inside a lock? That command is too dangerous to run in parallel, even with every possible `--root --tmpdir --networkdir --everything` option."
+        },
+        {
+            "user": "Luap99",
+            "body": "I only see two callers of system reset in the e2e test. I think we can convert them into system tests to fix this issue.\nThen make sure nobody ever adds new system migrate or reset tests into e2e."
+        },
+        {
+            "user": "Luap99",
+            "body": "Ok new plan, my goal is to update to ginkgo v2 (#18163) so we can use decorators to mark a single test as serial.\nhttps://onsi.github.io/ginkgo/#serial-specs\n\n"
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "containers",
+            "repository": "common",
+            "number": 1381
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 18024
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 18057
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 18083
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 18056
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 18163
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 17042
+        },
+        {
+            "organization": "containers",
+            "repository": "crun",
+            "number": 1264
+        }
+    ]
+}

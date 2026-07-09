@@ -1,0 +1,130 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 14559,
+    "type": "pull_request",
+    "title": "gitlab: fix wait and exit-code logic",
+    "state": "closed",
+    "labels": [
+        "approved",
+        "release-note",
+        "locked - please file new issue/PR"
+    ],
+    "user": "vrothberg",
+    "body": "This commit addresses three intertwined bugs to fix an issue when using\nGitlab runner on Podman.  The three bug fixes are not split into\nseparate commits as tests won't pass otherwise; avoidable noise when\nbisecting future issues.\n\n1) Podman conflated states: even when asking to wait for the `exited`\n   state, Podman returned as soon as a container transitioned to\n   `stopped`.  The issues surfaced in Gitlab tests to fail [1] as\n   `conmon`'s buffers have not (yet) been emptied when attaching to a\n   container right after a wait.  The race window was extremely narrow,\n   and I only managed to reproduce with the Gitlab runner [1] unit\n   tests.\n\n2) The clearer separation between `exited` and `stopped` revealed a race\n   condition predating the changes.  If a container is configured for\n   autoremoval (e.g., via `run --rm`), the \"run\" process competes with\n   the \"cleanup\" process running in the background.  The window of the\n   race condition was sufficiently large that the \"cleanup\" process has\n   already removed the container and storage before the \"run\" process\n   could read the exit code and hence waited indefinitely.\n\n   Address the exit-code race condition by recording exit codes in the\n   main libpod database.  Exit codes can now be read from a database.\n   When waiting for a container to exit, Podman first waits for the\n   container to transition to `exited` and will then query the database\n   for its exit code. Outdated exit codes are pruned during cleanup\n   (i.e., non-performance critical) and when refreshing the database\n   after a reboot.  An exit code is considered outdated when it is older\n   than 5 minutes.\n\n   While the race condition predates this change, the waiting process\n   has apparently always been fast enough in catching the exit code due\n   to issue 1): `exited` and `stopped` were conflated.  The waiting\n   process hence caught the exit code after the container transitioned\n   to `stopped` but before it `exited` and got removed.\n\n3) With 1) and 2), Podman is now waiting for a container to properly\n   transition to the `exited` state.  Some tests did not pass after 1)\n   and 2) which revealed the third bug: `conmon` was executed with its\n   working directory pointing to the OCI runtime bundle of the\n   container.  The changed working directory broke resolving relative\n   paths in the \"cleanup\" process.  The \"cleanup\" process error'ed\n   before actually cleaning up the container and waiting \"main\" process\n   ran indefinitely - or until hitting a timeout.  Fix the issue by\n   executing `conmon` with the same working directory as Podman.\n\nNote that fixing 3) *may* address a number of issues we have seen in the\npast where for *some* reason cleanup processes did not fire.\n\n[1] https://gitlab.com/gitlab-org/gitlab-runner/-/issues/27119#note_970712864\n\n\n\n#### Does this PR introduce a user-facing change?\n\n<!--\nIf no, just write `None` in the release-note block below. If yes, a release note\nis required: Enter your extended release note in the block below. If the PR\nrequires additional action from users switching to the new release, include the\nstring \"action required\".\n\nFor more information on release notes, please follow the Kubernetes model:\nhttps://git.k8s.io/community/contributors/guide/release-notes.md\n-->\n\n```release-note\nFix a bug in the wait logic to enable Podman on Gitlab runner.\n```\n",
+    "comments": [
+        {
+            "user": "vrothberg",
+            "body": "@mheon @baude PTAL"
+        },
+        {
+            "user": "vrothberg",
+            "body": "OK, no infinite loops anymore but still not yet there. I will continue on Monday morning."
+        },
+        {
+            "user": "vrothberg",
+            "body": "@mheon, early feedback is good feeback.  As discussed, I moved the exit codes into the database.  It's working locally, let's see if CI likes it.\n\nI still need to do wiring for cleaning up the exit codes."
+        },
+        {
+            "user": "vrothberg",
+            "body": "https://github.com/containers/common/pull/1067 should fix (parts) of the test farts."
+        },
+        {
+            "user": "vrothberg",
+            "body": "OK, that was rough.  Tests setting a custom CONTAINERS_CONF have failed.  What I observed at some point was that the cleanup processes did not fire in those cases.\n\nIt turned out that Podman started conmon with the working directory pointing to the runtime bundle.  The changed working directory ultimately broke resolving relative paths (e.g., for env variables such as CONTAINERS_CONF).  Since we set the bundle path explicitly, we don't need to do that and let conmon have the same working dir.\n\n@mheon this should explain why cleanups do not happen sometimes."
+        },
+        {
+            "user": "vrothberg",
+            "body": "This was really hard to debug.  I think Podman should log the final error to the syslog to make such things discoverable.  Or fire the cleanup process with `--syslog`?"
+        },
+        {
+            "user": "rhatdan",
+            "body": "The cleanup process should match the main process flags."
+        },
+        {
+            "user": "vrothberg",
+            "body": "> The cleanup process should match the main process flags.\n\nShould the final error in the cleanup process then always be logged to the syslog?  I really think we need to leave a breadcrumb somewhere?  Otherwise, errors in the cleanup process are just lost."
+        },
+        {
+            "user": "mheon",
+            "body": "Per discussion with Valentin: We should consider enabling syslog unconditionally on cleanup processes and setting log level to error, so errors are always logged"
+        },
+        {
+            "user": "rhatdan",
+            "body": "SGTM."
+        },
+        {
+            "user": "vrothberg",
+            "body": "> Per discussion with Valentin: We should consider enabling syslog unconditionally on cleanup processes and setting log level to error, so errors are always logged\n\nI'll add another commit to this PR."
+        },
+        {
+            "user": "vrothberg",
+            "body": "@mheon @edsantiago I did not manage to create a reproducer for the Gitlab issue.  The important thing to reproduce would be issue 1).  Issue 2) and 3) are covered by existing tests."
+        },
+        {
+            "user": "vrothberg",
+            "body": "> > Per discussion with Valentin: We should consider enabling syslog unconditionally on cleanup processes and setting log level to error, so errors are always logged\n> \n> I'll add another commit to this PR.\n\nThis seems to break containerized tests. Presumably because we cannot access the syslog there.  I'll revert these parts."
+        },
+        {
+            "user": "vrothberg",
+            "body": "@mheon PTAL.  It's ready for review."
+        },
+        {
+            "user": "vrothberg",
+            "body": "Three system test jobs failed in the `cp` tests.  The logs suggested that there was a timeout during `kill`.\n\nI am unable to reproduce and don't yet see how it could happen. @mheon, any idea?"
+        },
+        {
+            "user": "vrothberg",
+            "body": "> While I understand from the discussion why this is a separate bucket it is not obvious why the normal container state is not enough. I would love to have this explained in the comment.\n\nDone."
+        },
+        {
+            "user": "vrothberg",
+            "body": "Repushing the same state to increase confidence.  I have the cp tests running for almost two hours without a single hiccup."
+        },
+        {
+            "user": "openshift-ci[bot]",
+            "body": "[APPROVALNOTIFIER] This PR is **APPROVED**\n\nThis pull-request has been approved by: *<a href=\"https://github.com/containers/podman/pull/14559#pullrequestreview-1010417616\" title=\"Approved\">rhatdan</a>*, *<a href=\"https://github.com/containers/podman/pull/14559#\" title=\"Author self-approved\">vrothberg</a>*\n\nThe full list of commands accepted by this bot can be found [here](https://go.k8s.io/bot-commands?repo=containers%2Fpodman).\n\nThe pull request process is described [here](https://git.k8s.io/community/contributors/guide/owners.md#the-code-review-process)\n\n<details >\nNeeds approval from an approver in each of these files:\n\n- ~~[OWNERS](https://github.com/containers/podman/blob/main/OWNERS)~~ [rhatdan,vrothberg]\n\nApprovers can indicate their approval by writing `/approve` in a comment\nApprovers can cancel approval by writing `/approve cancel` in a comment\n</details>\n<!-- META={\"approvers\":[]} -->"
+        },
+        {
+            "user": "vrothberg",
+            "body": "I am jumping into my PTO now.\n\nWhat I have been fighting today is a flake caused by the changes in this PR.  The observation is that the 065-cp.bats test fails trying to kill a number of containers in https://github.com/containers/podman/blob/main/test/system/065-cp.bats#L287. After that, all attempts trying to remove the `cpcontainer` fail. It smells like a infinite loop somewhere.\n\nMaybe the changes I just pushed fixed it. If not, @mheon agreed to take over this PR so we can push things forward."
+        },
+        {
+            "user": "vrothberg",
+            "body": "@mheon one thing I noticed: it fails `root` exclusively."
+        },
+        {
+            "user": "mheon",
+            "body": "I'll take a look on Tuesday. Thanks for the work so far Valentin!"
+        },
+        {
+            "user": "Conan-Kudo",
+            "body": "The commit message saying \"gitlab:\" as the prefix makes no sense. Can you please drop it?"
+        },
+        {
+            "user": "baude",
+            "body": "> The commit message saying \"gitlab:\" as the prefix makes no sense. Can you please drop it?\n\nfor the team, it makes sense.  anyways, this pr is likely to trumped byy one from @mheon as is already noted."
+        },
+        {
+            "user": "vrothberg",
+            "body": "Closing in favor of https://github.com/containers/podman/pull/14685."
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 14579
+        },
+        {
+            "organization": "containers",
+            "repository": "common",
+            "number": 1067
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 14685
+        }
+    ]
+}

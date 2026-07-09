@@ -1,0 +1,78 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 17110,
+    "type": "pull_request",
+    "title": "podman-restart: Drop `network-online.target` dependency",
+    "state": "closed",
+    "labels": [
+        "do-not-merge/work-in-progress",
+        "do-not-merge/release-note-label-needed",
+        "locked - please file new issue/PR"
+    ],
+    "user": "cgwalters",
+    "body": "This service recently got enabled by default, which forces a `network-online.target` dependency for *everyone* even if they're not using autostarted containers.  That's a bad bug.\n\nSee discussion in https://bugzilla.redhat.com/show_bug.cgi?id=2149642\n\nFor this service itself, we shouldn't be trying to pull the container, so networking shouldn't be required.\n\nIf we want the *autostarted containers* to have networking...I don't think this is the right way to go about it.  Really each container should probably either:\n\n- Handle network availability dynamically\n- Run as an individual systemd unit with its own ordering\n\nSigned-off-by: Colin Walters <walters@verbum.org>\n",
+    "comments": [
+        {
+            "user": "openshift-ci[bot]",
+            "body": "@cgwalters: Adding the \"do-not-merge/release-note-label-needed\" label because no release-note block was detected, please follow our [release note process](https://git.k8s.io/community/contributors/guide/release-notes.md) to remove it.\n\n<details>\n\nInstructions for interacting with me using PR comments are available [here](https://git.k8s.io/community/contributors/guide/pull-requests.md).  If you have questions or suggestions related to my behavior, please file an issue against the [kubernetes/test-infra](https://github.com/kubernetes/test-infra/issues/new?title=Prow%20issue:) repository.\n</details>"
+        },
+        {
+            "user": "openshift-ci[bot]",
+            "body": "[APPROVALNOTIFIER] This PR is **NOT APPROVED**\n\nThis pull-request has been approved by: *<a href=\"https://github.com/containers/podman/pull/17110#\" title=\"Author self-approved\">cgwalters</a>*\n**Once this PR has been reviewed and has the lgtm label**, please assign edsantiago for approval by writing `/assign @edsantiago` in a comment. For more information see [the Kubernetes Code Review Process](https://git.k8s.io/community/contributors/guide/owners.md#the-code-review-process).\n\nThe full list of commands accepted by this bot can be found [here](https://go.k8s.io/bot-commands?repo=containers%2Fpodman).\n\n<details open>\nNeeds approval from an approver in each of these files:\n\n- **[OWNERS](https://github.com/containers/podman/blob/main/OWNERS)**\n\nApprovers can indicate their approval by writing `/approve` in a comment\nApprovers can cancel approval by writing `/approve cancel` in a comment\n</details>\n<!-- META={\"approvers\":[\"edsantiago\"]} -->"
+        },
+        {
+            "user": "baude",
+            "body": "changes lgtm"
+        },
+        {
+            "user": "cgwalters",
+            "body": "Ohh.  I see https://github.com/containers/podman/issues/10655\n\nBut really the root problem here is that we're caching the host's state of networking at the time of container start, and not updating it.  Which I guess is partially still rooted in things like he default clash between a local caching resolver like systemd-resolved and the default docker/podman bridged networking.  So we're manually unwrapping the DNS server today."
+        },
+        {
+            "user": "Luap99",
+            "body": "\nI would argue that this is very important to have the network up, we have no control over what is run in the container. If they start failing because of network errors we caused a big regression. You could have `-p <ip>:...` to bind a specific ip. If that interface is not there podman will fail.\n\nAlso https://github.com/containers/podman/pull/10962 added this for podman generate systemd and the related issue https://github.com/containers/podman/issues/10655 provides more reasons why this is needed.\n\n---\n\nIf this is such an issue then we should just revert the change to enable the restart service by default and just let users do it.\n"
+        },
+        {
+            "user": "cgwalters",
+            "body": "Yes, I agree that there are possibly users relying on this implicit behavior today.\n\nI do think:\n\n- No one should use this `--restart` CLI option really - they should be generating systemd units to run individual containers, and *those* can and should control their own dependencies (and those dependencies should actually *not* pull in `Requires=network-online.target` by default, but that's a distinct bug)\n- Eventually we should figure out how to fix things so that `/etc/resolv.conf` can be reliably dynamically updated and so that default bridged containers don't bypass the host's caching resolver etc.\n\nAnyways, as far as fixes:\n\n> If this is such an issue then we should just revert the change to enable the restart service by default and just let users do it.\n\nYes, but that's also going to cause regressions, no?  I guess Fedora is only just now enabling the service, but it's pretty old now and others could have already enabled it by default, right?\n\nI think the key fix here is to make this unit only run iff there is an autostarted container enabled.  The only real sane fix here is to use a systemd generator, i.e. we have `/usr/lib/systemd/system-generators/podman` that only enables `podman-restart.service` if there are autostarted containers (by querying for them)\n\nA bit more efficient variant would be to change the container create/destroy logic to maintain a cache file `/var/lib/containers/.autostart-stamp` that exists iff an autostarted container exists, that way we don't have to execute podman and query the whole container database early in system startup, we just stat a file.\n"
+        },
+        {
+            "user": "Luap99",
+            "body": "\n\n\n> Yes, I agree that there are possibly users relying on this implicit behavior today.\n> \n> I do think:\n> \n>     * No one should use this `--restart` CLI option really - they should be generating systemd units to run individual containers, and _those_ can and should control their own dependencies (and those dependencies should actually _not_ pull in `Requires=network-online.target`, but that's a distinct bug)\n\nI totally agree but the real world looks different, we claim to be docker compatible. People just run `podman run --restart always` like they did with docker and expect a running container after boot. Telling a user to just enable one service is easier then telling them to `podman generate systemd` copy the file enable it, etc... Then when they no longer have that container to remove it again. We had more than enough complains about that so podman-restart.service was created to make it as simple as possible. Same problem with podman-desktop, etc... Can we really expect mac/windows users to podman machine ssh to do these steps. No they all just want `just works`. \n\n>     * Eventually we should figure out how to fix things so that `/etc/resolv.conf` can be reliably dynamically updated and so that default bridged containers don't bypass the host's caching resolver etc.\n\nYeah definitely but without having a daemon this is very hard to fix. There is already `podman network reload` but it does not handle resolv.conf at the moment.\n\n \n\n> \n> Anyways, as far as fixes:\n> \n> > If this is such an issue then we should just revert the change to enable the restart service by default and just let users do it.\n> \n> Yes, but that's also going to cause regressions, no? I guess Fedora is only just now enabling the service, but it's pretty old now and others could have already enabled it by default, right?\n\nWell all I want to do is to not have it automatically enabled by default. Just revert the exact change that was done to the spec file. I don't see how this is going to cause a regression other then a person relying on it being enabled. But since the change was just made we can still revert it IMO.\n\n> \n> I think the key fix here is to make this unit only run iff there is an autostarted container enabled. The only real sane fix here is to use a systemd generator, i.e. we have `/usr/lib/systemd/system-generators/podman` that only enables `podman-restart.service` if there are autostarted containers (by querying for them)\n\nAFAIK you should not use podman in a systemd generator because it is to big. At least that was the concern with quadlet. \n\n> \n> A bit more efficient variant would be to change the container create/destroy logic to maintain a cache file `/var/lib/containers/.autostart-stamp` that exists iff an autostarted container exists, that way we don't have to execute podman and query the whole container database early in system startup, we just stat a file.\n\nMaybe we can have podman run `systemctl enable podman-restart` when such a container is created? That sounds easier to me.\n"
+        },
+        {
+            "user": "dustymabe",
+            "body": "> But since the change was just made we can still revert it IMO.\n\nAgree. If we had caught it later then there would be some concern here, but we just enabled it days ago in `rawhide` so we should be able to revert without much complaint (if that's the way we decide to go about it). "
+        },
+        {
+            "user": "rhatdan",
+            "body": "We need `podman run --restart=always` to work, on podman machine by default, as @Luap99 says.\n\nCan we just do it on multi-user target?"
+        },
+        {
+            "user": "vrothberg",
+            "body": "> Can we just do it on multi-user target?\n\nWe need the network one."
+        },
+        {
+            "user": "jlebon",
+            "body": "OK, proposal to revert in https://src.fedoraproject.org/rpms/fedora-release/pull-request/244. If there's agreement on temporarily reverting this until it's ironed out, can someone from the podman team chime in there?"
+        },
+        {
+            "user": "vrothberg",
+            "body": "> OK, proposal to revert in https://src.fedoraproject.org/rpms/fedora-release/pull-request/244. If there's agreement on temporarily reverting this until it's ironed out, can someone from the podman team chime in there?\n\nACK from my end.  @rhatdan @Luap99 @cgwalters WDYT?"
+        },
+        {
+            "user": "Luap99",
+            "body": "As already mentioned above I am fine to revert the change"
+        },
+        {
+            "user": "rhatdan",
+            "body": "I am fine with reverting it as well."
+        },
+        {
+            "user": "vrothberg",
+            "body": "OK, I think we can close as https://src.fedoraproject.org/rpms/fedora-release/pull-request/244 merged.  Please let me know if there's more to do."
+        }
+    ],
+    "cross_references": []
+}

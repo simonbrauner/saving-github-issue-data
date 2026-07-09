@@ -1,0 +1,143 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 2996,
+    "type": "issue",
+    "title": "podman-run --systemd=true insufficient to properly run systemd",
+    "state": "closed",
+    "labels": [
+        "kind/bug",
+        "locked - please file new issue/PR"
+    ],
+    "user": "caffeinejolt",
+    "body": "podman-0.12.1.2-2.git9551f6b.el7.centos.x86_64\ncentos-release-7-6.1810.2.el7.centos.x86_64\nsystemd-219-62.el7_6.5.x86_64\n\nAs noted in the podman-run man page for --systemd=true (default value): \"podman will setup tmpfs mount points - /run, /run/lock, /tmp, /sys/fs/cgroup/systemd, /var/lib/journal\n\nHowever - running systemd as such, result in numerous errors on startup (visible in podman-run when using \"-i -t\"):\n\n[FAILED] Failed to start Load/Save Random Seed.\n│See 'systemctl status systemd-random-seed.service' for details.\n[FAILED] Failed to start Create Volatile Files and Directories.\n│See 'systemctl status systemd-tmpfiles-setup.service' for details.\n[FAILED] Failed to start Update UTMP about System Boot/Shutdown.\n│See 'systemctl status systemd-update-utmp.service' for details.\n\nIt turns out that systemd needs some of the stuff those failures allude to since it won't actually start services specified in unit files via ExecStart either as such service start attempts end in failures:\n\nFailed to create file /var/log/wtmp: Permission denied\nFailed to create file /var/log/btmp: Permission denied\nFailed to write utmp record: Permission denied\nsystemd-update-utmp.service: main process exited, code=exited, status=1/FAILURE\nUnit systemd-update-utmp.service has failed.\n\nAnd if systemd unit files cannot be used to launch services, it belittles the value of having a --systemd option at all.\n\nA work-around is to do something like --tmpfs=/var:rw,noexec,nosuid,nodev,size=524288000\n\nWith /var mounted as a tmpfs, everything works fine.  Its possible tmpfs mounts could be more selective (i.e. not doing all of /var) - I tried adding just /var/log and that did get rid of some errors - but not all of them.  I am fine with /var as a tmpfs and the systemd guys seem to do the same with systemd-nspawn containers: https://www.freedesktop.org/software/systemd/man/systemd-nspawn.html\n",
+    "comments": [
+        {
+            "user": "rhatdan",
+            "body": "I think you have issues in your labeling.  systemd should be able to write anywhere within the container image.\n\nCould you remove the tmpfs and check if you have an issue with SELinux.  \n\nYou could see if SELinux is causing the permission denied via setenforce 0 to test it.\n\nI would expect you have a labeling issue in /var/lib/containers\n\nrestorecon -R -v /var/lib/containers\n\nWould fix the labels."
+        },
+        {
+            "user": "caffeinejolt",
+            "body": "my bad - i totally forgot to mention --read-only was being used - but that is typically the case i would imagine for a production container - systemd artifacts would mostly be considered transient (tmpfs) - or at least that is how i run containers - everything is read-only except tmpfs stuff and bind mounts are used for anything that must be permanent"
+        },
+        {
+            "user": "caffeinejolt",
+            "body": "which i think is what the --systemd option seems to be meant for - to enable systemd to function within a mostly/completely immutable image"
+        },
+        {
+            "user": "caffeinejolt",
+            "body": "however.. if this is not the common use case scenario (treating stuff in /var as transient/discarded on restarting the container) - then this is probably not a bug"
+        },
+        {
+            "user": "rhatdan",
+            "body": "Would just mounting the tmpfs on /var/log be enough to get this to work?"
+        },
+        {
+            "user": "caffeinejolt",
+            "body": "So.. I played around with this a bit - it seems these are needed:\n\n/var/tmp\n/var/log\n/var/lib/systemd\n\n/var/tmp is needed for systemd units which specify PrivateTmp (a popular setting).  /var/lib/systemd is needed for systemd's random_seed.  It should be noted that I did not exhaustively test this - there may be others.\n\npodman makes provisions for /var/lib/journal - but at least on centos/rhel 7 - that is not even a standard directory in a base install.  This could vary based on systemd version and/or linux distribution as well.  Maybe there is a /var/lib/journal in rhel8 - I have not yet had the chance to play with that yet.\n\nI am personally just sticking to mounting /var as tmpfs, but I understand why it makes sense to limit tmpfs mounts to those only required by systemd to function - I suppose."
+        },
+        {
+            "user": "caffeinejolt",
+            "body": "For what it is worth...  I find the --systemd and --rootfs features of podman super useful - just passing that along since I know that running systemd inside a container or not using the formal /var/lib/containers location for storage is not considered by some to be the \"right way\".  Just letting you know that there are users out there who appreciate these podman features."
+        },
+        {
+            "user": "mheon",
+            "body": "We ought get some of the systemd maintainers in here and ask their opinions on how they'd like us to handle this."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@poettering @lnykryn WDYT"
+        },
+        {
+            "user": "lnykryn",
+            "body": "Do you have any steps to reproduce?\nWith podman-1.0.0-2.git921f98f.module+el8.0.0+2958+4e823551.x86_64\nI've tried \"podman run -i -t --systemd=true centos /usr/lib/systemd/systemd\" and I've run into a completely different set of error messages, mostly about cgroupfs not being writable\n\nFailed to create cgroup /machine.slice/libpod-714a01a10a64d5fb72c394f064bdfe5dff78957e1da7484c2bb6a6a716bc48b3.scope/system.slice/dbus.service: Permission denied\n\n"
+        },
+        {
+            "user": "caffeinejolt",
+            "body": "> \n> \n> Do you have any steps to reproduce?\n> With podman-1.0.0-2.git921f98f.module+el8.0.0+2958+4e823551.x86_64\n> I've tried \"podman run -i -t --systemd=true centos /usr/lib/systemd/systemd\" and I've run into a completely different set of error messages, mostly about cgroupfs not being writable\n> \n> Failed to create cgroup /machine.slice/libpod-714a01a10a64d5fb72c394f064bdfe5dff78957e1da7484c2bb6a6a716bc48b3.scope/system.slice/dbus.service: Permission denied\n\nsetsebool container_manage_cgroup true"
+        },
+        {
+            "user": "lnykryn",
+            "body": "Hmm so I just did \"setenforce 0\" '(sorry @rhatdan ) and now everything seems to work just fine.\nhttps://paste.fedoraproject.org/paste/Ey9hEhZ6~~cmdCXf5rUczA"
+        },
+        {
+            "user": "rhatdan",
+            "body": "@lnykryn Setting the boolean above would fix it.\n\nThe think @caffeinejolt is trying to do is run the systemd as pid 1 in a read-only container.\n\nSo add --read-only to you podman command.  We are looking for the directories where systemd expects to be able to write."
+        },
+        {
+            "user": "lnykryn",
+            "body": "Sorry, I missed that part, that is an entirely different topic, that is not related just to containers. I would like to see the same thing also working on the bare metal, since there we are for the same use-case still using the ancient readonly-root from initscripts[1]. I think we need to discuss that with @poettering  @keszybz \n\n[1] https://github.com/fedora-sysv/initscripts/blob/master/usr/libexec/readonly-root"
+        },
+        {
+            "user": "keszybz",
+            "body": "`/var/tmp` — this directory is generally needed and must be writeable. It's a standard linux interface and many things will make use of it, not just systemd.\n\nAs for `/var/log` and `/var/lib` — I *think* it's better to make them available, or even to make the whole `/var` available. In file-hierarchy(7) we say\n> `/var/`\n> Must be writable. Persistency is recommended, but optional, ...\n\nThere will be applications which expect to create file in /var/cache and so on. So providing a full-featured writeable `/var` will just make things smoother.\n\nAlternatives would be either make `systemd-update-utmp.service` somehow conditional on /var being writeable, or disable or mask that service in the image or even compile systemd without it. None of those options seems nice: it should be possible to run a fully generic image without any errors, this is generally our goal with containers. And if systemd-update-utmp.service is compiled-in and enabled, it should work and complain if it can't do it's job. This service is not only a cosmetic thing — the files it creates are part of the compatibility layer for sysvinit, in particular for applications which want to know the \"runlevel\".\n\n`systemd-random-seed.service` is a different story. It has `ConditionVirtualization=!container`. If it gets run, it seems systemd does not think it is running in a container. Please figure out why that is, and fix that, and then this service will not be started."
+        },
+        {
+            "user": "rhatdan",
+            "body": "/var/tmp probably should, but the other directories are up to the user to mount volumes in.\nI suppose podman could react to --read-only flag and mount some of these, but I am looking for specifically what systemd would need to successfully run.\n\nIf the unit file is running mariadb then it is up to the person packaging mariadb to make /var/log/mariadb and /var/lib/mariadb writeable to the container."
+        },
+        {
+            "user": "rhatdan",
+            "body": "```\n# podman run alpine printenv container\npodman\n```\nIsn't systemd just looking to see if the `container` environment variable is enabled?  Shouldn't this be enough to not execute the systemd-random-seed.service service with `ConditionVirtualization=!container`. "
+        },
+        {
+            "user": "keszybz",
+            "body": "> Isn't systemd just looking to see if the container environment variable is enabled?\n\nThat's the check that should apply in this case. https://www.freedesktop.org/wiki/Software/systemd/ContainerInterface/#environmentvariables describes `$container`.\n\nWhat does `SYSTEMD_LOG_LEVEL=debug systemd-detect-virt` say under podman?\n\n> but I am looking for specifically what systemd would need to successfully run.\n\nThe stuff that @caffeinejolt lists in https://github.com/containers/libpod/issues/2996#issuecomment-486317771 should be enough, at least for now.\n\n"
+        },
+        {
+            "user": "rhatdan",
+            "body": "SYSTEMD_LOG_LEVEL=debug systemd-detect-virt \nFound container virtualization container-other.\ncontainer-other\n"
+        },
+        {
+            "user": "poettering",
+            "body": "The assumption is that /var is writable really, it's already in the name... everything else may be read-only. I mean, we worked hard on getting /etc/mtab and /etc/resolv.conf out of /etc, so that /etc can be read-only, and we moved it to /var, but /var should really be writable. /tmp needs to be writable too, /run as well. otoh / itself, /etc, /usr can all be read-only.\n\nThat said, you can get away with making /var/log/journal read-only if you turn off persistent storage of journald (using Storage=volatile in journald.conf).\n\nBut in general: if it's not systemd itself that wants to write to /var, it's going to be some package you install in addition, since the general assumption is that you can write to /var.\n\n/run/lock should not be a separate fs, it should just be a regular subdir of /run. It's pretty much legacy, and there's nothing special about it really, it's just one subdir of /run among many others... It should not require any special hookup whatsoever. please remove any special mention of that dir in podman."
+        },
+        {
+            "user": "poettering",
+            "body": "btw, this all reminds me of the \"--volatile=\" switch in nspawn. If you pick \"--volatile=state\" then this means that nspawn will mount the container image read-only as a whole, and then overmount /var with an empty tmpfs. Moreover /tmp and /run are mounted as tmpfs (as they always are, even without --volatile=). systemd as payload has been carefully tuned so that it can boot up fine with an entirely empty /var, and that everything it needs is automatically re-populated again via tmpfiles.d entries. It appears to me, that podman should just set things up the same way and make use of the fact that systemd is totally happy in such an environment. To summarize:\n\n1. /var writable tmpfs, as a whole, including /var/tmp\n2. /tmp writable tmpfs\n3. /run writable tmpfs\n4. everything else read-only, including /, /etc and /usr\n\nWhich means:\n1. drop podman's special handling of /run/lock\n2. drop podma's special handling of /var/lib/journal\n3. instead add special handling of /var as a whole"
+        },
+        {
+            "user": "poettering",
+            "body": "btw, the requirements we make are documented here: https://www.freedesktop.org/wiki/Software/systemd/ContainerInterface/ — it's (mostly) up-to-date even"
+        },
+        {
+            "user": "rhatdan",
+            "body": "Well OCI Containers are a little different then can come with a pre-populated /var,  For example you might want a container with lots of html pages in /var/www that are static and you don't want the container able to write there. \n\nPodman/runc does have the ability to copy the content under a tmpfs on top of the tmpfs.\n\nI think the change to podman would be to mount a tmpfs on /run, /tmp, and /var/tmp when run in --read-only mode.\n\nThen make sure the other directories where systemd needs to write are writable when it comes up.\n\nChanging the  journald.conf entry is not really something we can do with podman, since we have no control over the image that is handed to us."
+        },
+        {
+            "user": "mheon",
+            "body": "I think we can close this one with the changes @rhatdan landed for mounting some directories tmpfs when the container is read-only."
+        },
+        {
+            "user": "sffc",
+            "body": "I think systemd continues to fail out of the box in read-only mode, due to the `/var` permissions.\n\nSteps to reproduce:\n\n1. Make a Dockerfile according to @rhatdan's [blog post](https://developers.redhat.com/blog/2019/04/24/how-to-run-systemd-in-a-container/):\n```dockerfile\nFROM centos:centos8\nRUN yum install -y httpd && systemctl enable httpd\nEXPOSE 80\nCMD [ \"/sbin/init\" ]\n```\n2. Build the image:\n```\n# podman build -t init .\n```\n3. Run the image in read-only mode:\n```\n# podman run -it --read-only init\n```\n\n**Expected:** systemd should start without any warnings.\n\n**Actual:** Many errors in the output, such as `[FAILED] Failed to start Journal Service` and `[FAILED] Failed to start The Apache HTTP Server`.\n\nIs there a way to redirect journal logs from systemd services inside the container to be in the host's journal instead?  If journald didn't try to write to `/var/log`, that would solve many of the startup errors.  Of course, httpd will still try to write to `/var/log`, so maybe some other solution is needed.\n\nAnother option is to punt this to userland, and say that it's your responsibility to mount necessary paths as tmpfs if you plan to use systemd.  However, my expectation is that *at least* journald should work out of the box, since it runs in virtually any systemd setup."
+        },
+        {
+            "user": "sffc",
+            "body": "Note: I am running RHEL 8 with Podman 1.4.2, the latest version from `sudo yum module install container-tools:rhel8`."
+        },
+        {
+            "user": "rhatdan",
+            "body": "Why not volume mount in /var/log into your container.\n```\n# mkdir /var/log/mylog\n# podman run -it -v /var/log/mylog:/var/log:Z  --read-only init\n```"
+        },
+        {
+            "user": "mheon",
+            "body": "I can't duplicate your `Failed to start Journal service` result, but I do see httpd in the failed state.\n\n`Jan 02 14:45:52 4a86362ca6eb httpd[28]: AH00015: Unable to open logs` seems the most likely error?"
+        },
+        {
+            "user": "mheon",
+            "body": "If I had to guess here - we're only mounting a tmpfs on `/var/log/journal` and not `/var/log` itself. Apache wants to write logs to `/var/log/httpd/` which is now on a read-only filesystem courtesy of `--read-only` and is failing as such."
+        },
+        {
+            "user": "mheon",
+            "body": "Recommended solution: Modify your Apache configuration to log elsewhere, or mount either a tmpfs or a volume at `/var/log/httpd` to allow Apache to log."
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 3434
+        }
+    ]
+}

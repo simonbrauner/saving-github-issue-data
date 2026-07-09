@@ -1,0 +1,132 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 13383,
+    "type": "issue",
+    "title": "looking up image by short name should not fallback to match *any* name",
+    "state": "open",
+    "labels": [
+        "kind/feature",
+        "breaking-change",
+        "needs-design-doc"
+    ],
+    "user": "ianw",
+    "body": "/kind bug\n\n**Description**\n\nI have a `registries.conf` that looks like\n\n```\nunqualified-search-registries = [\"docker.io\"]\n\n[[registry]]\nprefix = \"docker.io\"\nlocation = \"docker.io\"\n\n[[registry.mirror]]\nlocation = \"localhost:9000\"\n\n[[registry.mirror]]\nlocation = \"docker.io\"\n```\n\ni.e. try to pull from ```localhost:9000```, and if not there, fall-back to docker.io\n\nOur CI has put ```test/image``` into ```localhost:9000```.  If I try to pull it with no images in podman, it works as you expect and uses ```unqualified-search-registries``` and pulls ```docker.io/test/image``` from the mirror at ```localhost:9000```.\n\n```\n$ podman pull test/image\nResolving \"test/image\" using unqualified-search registries (/etc/containers/registries.conf)\nTrying to pull docker.io/test/image:latest...\n... so on ...\n\n$ podman image ls --all --digests --no-trunc\nREPOSITORY            TAG         DIGEST                                                                   IMAGE ID                                                                 CREATED         SIZE\ndocker.io/test/image  latest      sha256:5bab641dda26cd8e0c263d32e7dee6e4f358711225016ee80d119d893c73b9c3  sha256:9987f09d6b4fe6694e420c735d493eb469edf8c6d7e9c4946ecfb78c1a6e2a29  24 minutes ago  2.19 kB\n```\n\nHowever, if I **already have** ```localhost:9000/test/image``` pulled locally, when I do a pull with the short/unqualified name ```test/image```, instead of recognising it as unqualified-search and looking for ```docker.io/test/image:latest```, it seems decide what I mean is to update the existing ```localhost:9000/test/image``` and pulls it again.\n\n```\n$ podman pull localhost:9000/test/image\n\n$ podman image ls --all --digests --no-trunc\nREPOSITORY                 TAG         DIGEST                                                                   IMAGE ID                                                                 CREATED         SIZE\nlocalhost:9000/test/image  latest      sha256:5bab641dda26cd8e0c263d32e7dee6e4f358711225016ee80d119d893c73b9c3  sha256:9987f09d6b4fe6694e420c735d493eb469edf8c6d7e9c4946ecfb78c1a6e2a29  26 minutes ago  2.19 kB\n\n$ podman pull test/image\nTrying to pull localhost:9000/test/image:latest...\nGetting image source signatures\n....\n````\n\nI noticed this when our CI was upgraded from ```3.0.1``` to ```3.4.2```.  Previously, this second pull would recognise the input as unqualified and go and add the ```docker.io``` to it and pull the image \"new\" as ```docker.io/test/image``` [1].\n\nIs this an expected change of the short-name resolution at some point?  I can see arguments for it working both ways.  I did try and look for anything obvious relating to this, but if ti's there, I missed it sorry.  I can work around this in our CI, but I'm not sure if this is a podman bug or feature.\n\n[1] You can actually see this working on 3.0.1 all in great detail at some old build results, e.g. https://zuul.opendev.org/t/zuul/build/102793032aab4e69a10355a5644e7204/console.  https://zuul.opendev.org/t/zuul/build/102793032aab4e69a10355a5644e7204/console#3/6/9/ubuntu-bionic prints out the images already existing, then the following task https://zuul.opendev.org/t/zuul/build/102793032aab4e69a10355a5644e7204/console#3/6/10/ubuntu-bionic pulls ```test/image``` which goes into the unqualified path.  https://zuul.opendev.org/t/zuul/build/102793032aab4e69a10355a5644e7204/console#3/6/10/ubuntu-bionic shows the podman version, 3.0.1\n\n**Output of `podman version`:**\n\n```\n$ podman --version\npodman version 3.4.2\n```",
+    "comments": [
+        {
+            "user": "vrothberg",
+            "body": "Thanks for reaching out, @ianw!\n\nYou are right.  When pulling, Podman will first attempt to resolve the image locally and then use the name of the detected image.\n\nPodman behaves like that as long as I can remember but I would find it cleaner, just as you suggested, to only use the unqualified-search-registries as the source of truth.\n\nChanging the current behavior would be a breaking change, so it is something we had to defer to Podman 5.0 (which I hope is in the distant future).\n\nCc: @mtrmac @rhatdan \n"
+        },
+        {
+            "user": "mtrmac",
+            "body": "Isn’t there even https://github.com/containers/common/blob/9880eb424fde47b51cae762cfc35533edb1613fc/libimage/image.go#L670 , where we don’t require a host match at all?"
+        },
+        {
+            "user": "vrothberg",
+            "body": "> Isn’t there even https://github.com/containers/common/blob/9880eb424fde47b51cae762cfc35533edb1613fc/libimage/image.go#L670 , where we don’t require a host match at all?\n\nYes, that is the source of the behavior."
+        },
+        {
+            "user": "mtrmac",
+            "body": "I’m all for dropping that in principle, but it’s certainly a 5.0 item. Pragmatically, I vaguely remember that we might have tried that, and that it broke our CI quite severely — and based on that we assumed that other external users are also likely to rely on that loose behavior, and gave up."
+        },
+        {
+            "user": "vrothberg",
+            "body": "> I’m all for dropping that in principle, but it’s certainly a 5.0 item. Pragmatically, I vaguely remember that we might have tried that, and that it broke our CI quite severely — and based on that we assumed that other external users are also likely to rely on that loose behavior, and gave up.\n\nSome bells are ringing in my head, yes.\n\nOne possible middle-ground could be to not resolve to a local image with `podman pull` or the `pull=always` pull policy but the terrain is full of traps and I am scared of breaking users."
+        },
+        {
+            "user": "rhatdan",
+            "body": "Yay, our first 5.0 issue."
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "vrothberg",
+            "body": "I readded the stale-issue label.  We're still far from 5.0 and don't need the reminder until then."
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "vrothberg",
+            "body": "@rhatdan @mtrmac are we still feeling comfortable with keeping this as a 5.0 change?"
+        },
+        {
+            "user": "rhatdan",
+            "body": "I am."
+        },
+        {
+            "user": "mheon",
+            "body": "This did not make 5.0. Retagging 6.0"
+        },
+        {
+            "user": "nathanweeks",
+            "body": "Related example (using podman 5.1.1 on macOS via podman desktop 1.11.1): \n\n```\n% podman machine ssh 'grep unqualified-search-registries /etc/containers/registries.conf'\nunqualified-search-registries = [\"registry.fedoraproject.org\", \"registry.access.redhat.com\", \"docker.io\", \"quay.io\"]\n% podman images | grep python\nmcr.microsoft.com/cbl-mariner/base/python                3.9                 fc963415d9b1  3 weeks ago        110 MB\n% podman pull python:3.9\nTrying to pull mcr.microsoft.com/cbl-mariner/base/python:3.9...\n...\n% podman run -it --rm python:3.9 cat /etc/os-release\nNAME=\"Common Base Linux Mariner\"\n...\n```\nI was surprised that after pulling \"mcr.microsoft.com/cbl-mariner/base/python:3.9\", `FROM python:3.9` in a Dockerfile used \"mcr.microsoft.com/cbl-mariner/base/python:3.9\" instead of \"docker.io/library/python:3.9\" (which is based on debian:bookworm).\n\n"
+        },
+        {
+            "user": "rhatdan",
+            "body": "You must have pulled this separately? I don't see ow this image would get pulled into your containers/storage with those default registries?\n\n@ashley-cui @baude I thought we were defaulting podman machines to only use docker.io for unquailified-search-registries?"
+        },
+        {
+            "user": "mtrmac",
+            "body": "This is not caused by pulling, it is just as the topic says - local lookup."
+        },
+        {
+            "user": "rhatdan",
+            "body": "That is probably in containers/common libimage then."
+        },
+        {
+            "user": "mtrmac",
+            "body": "@rhatdan we know pretty well where the code is, that’s not a difficulty. The issue is that changing it would probably break deployments."
+        },
+        {
+            "user": "mtrmac",
+            "body": "> we know pretty well where the code is\n\nhttps://github.com/containers/common/blob/296e7e5b048c82df59433a5dc3226cc4807e83a3/libimage/image.go#L707 , for the record."
+        },
+        {
+            "user": "rhatdan",
+            "body": "Would it make sense to look locally only if the search results match?  And pull remotely otherwise to match docker behaviour."
+        },
+        {
+            "user": "mtrmac",
+            "body": "It seems to me that “look locally only if the local imprecise results match exactly” is the same thing as “stop matching imprecisely and match precisely”; it’s very possible I’m misunderstanding the suggestion."
+        },
+        {
+            "user": "vrothberg",
+            "body": "Just a reminder that any change to this behavior/code path has pretty much always caused some deployments to break. I caution to batch a potential change with a major version bump.\n\nA flag may be a cheap way out. Podman didn't match Docker's behavior initially, so now we have two user bases with conflicting expectations."
+        },
+        {
+            "user": "rhatdan",
+            "body": "With unqualified search [ a, b, c ]\n\npodman run foobar should look locally for\na/foobar, b/foobar, c/foobar, localhost/foobar  And then attempt pulling.\n\nIf d/foobar exists, then it is ignored.\n"
+        },
+        {
+            "user": "mheon",
+            "body": "Not going to make 6.0. Some debate as to whether this even makes sense. 7.0 at earliest."
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "skopeo",
+            "number": 1768
+        }
+    ]
+}

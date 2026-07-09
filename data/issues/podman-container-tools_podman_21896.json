@@ -1,0 +1,144 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 21896,
+    "type": "issue",
+    "title": "pasta regression: starting user container fails with \"No routable interface for IPv4: IPv4 is disabled\"",
+    "state": "closed",
+    "labels": [
+        "network",
+        "5.0",
+        "pasta",
+        "locked - please file new issue/PR"
+    ],
+    "user": "martinpitt",
+    "body": "Yesterday's PR #21563 introduced a major regression with starting user containers on machines without a default route. This wasn't spotted by the \"revdeps\" tests, as they run in tmt and are always connected to the internet. But in cockpit-podman's CI the tests run without a default route (as we want to ensure that nothing in the test requires internet access, to make tests reproducible and avoid network flakes), and they [started to fail last night](https://github.com/cockpit-project/cockpit-podman/issues/1595).\n\nReproducer:\n\n - Enable podman-next COPR: `dnf -y copr enable rhcontainerbot/podman-next >&2; dnf -y update --repo 'copr*'`\n- Log in as user (not root, that works fine)\n- `podman pull docker.io/busybox`\n- `podman run -it --rm docker.io/busybox whoami` works fine.\n- Disable default route: `sudo ip route del default` (that's not what happens in our tests, but it's easiest to do as a human)\n- Now `podman run -it --rm docker.io/busybox whoami` exits with code 126 and fails with\n```\nError: pasta failed with exit code 1:\nNo routable interface for IPv4: IPv4 is disabled\nExternal interface not usable\n```\n\nFirst of all it's kind of a lie -- IPv4 is *not* disabled, there *is* both a `lo` and an `eth0` with routing to a local network (in our case), just no default route. And also, that should not be an error, and even less so fatal.\n\nThis is with podman-5.0.0~dev-1.20240301003639672061.main.140.38546de7b.fc39.x86_64 and passt-0^20240220.g1e6f92b-1.fc39.x86_64 on Fedora 39.",
+    "comments": [
+        {
+            "user": "sbrivio-rh",
+            "body": "> ```\n> Error: pasta failed with exit code 1:\n> No routable interface for IPv4: IPv4 is disabled\n> External interface not usable\n> ```\n> \n> First of all it's kind of a lie -- IPv4 is _not_ disabled, there _is_ both a `lo` and an `eth0` with routing to a local network (in our case), just no default route.\n\nThat message means that IPv4 is going to be disabled *in the container*. We already have an improved message as suggested by @Luap99 upstream: https://archives.passt.top/passt-dev/20240227162949.2442048-1-sbrivio@redhat.com/\n\n> And also, that should not be an error, and even less so fatal.\n\nThe problem is that pasta(1) doesn't know what to do in this case, as routes in the container are copied from the outer network namespace, by default.\n\nA question from my side: you don't expect connectivity to work in the container in this case, right? Shouldn't then Podman be started with `--network=none` here?"
+        },
+        {
+            "user": "martinpitt",
+            "body": "I *do* expect connectivity to the host. Also, when running it with e.g. `-p 80:8000` then the host should be able to communicate to the container's port 80. This works fine with current podman in user mode, and also with root.\n\n> as routes in the container are copied from the outer network namespace\n\nHmm, I don't know how pasta works, but conceptually the container is it's own machine in network terms and should have its own routing? I.e. usually that means setting a default route to the host and letting the host decide where to go on. The old slirp stack looked like this in the container:\n```\n# ip a show tap0\n2: tap0: <BROADCAST,UP,LOWER_UP> mtu 65520 qdisc fq_codel state UNKNOWN group default qlen 1000\n    link/ether 22:a5:c7:4e:bb:38 brd ff:ff:ff:ff:ff:ff\n    inet 10.0.2.100/24 brd 10.0.2.255 scope global tap0\n       valid_lft forever preferred_lft forever\n[IPv6 bits snipped]\n\n# ip route\ndefault via 10.0.2.2 dev tap0 \n10.0.2.0/24 dev tap0 proto kernel scope link src 10.0.2.100 \n```\n\nOf course pasta has to emulate this somehow, I'm afraid I don't know how this works internally."
+        },
+        {
+            "user": "martinpitt",
+            "body": "> Shouldn't then Podman be started with `--network=none` here?\n\nThat doesn't fail, but is also way too strong -- you can't do port mappings any more, and the container can't communicate with anything outside more."
+        },
+        {
+            "user": "sbrivio-rh",
+            "body": "> I _do_ expect connectivity to the host. Also, when running it with e.g. `-p 80:8000` then the host should be able to communicate to the container's port 80. This works fine with current podman in user mode, and also with root.\n> \n> > as routes in the container are copied from the outer network namespace\n> \n> Hmm, I don't know how pasta works, but conceptually the container is it's own machine in network terms and should have its own routing? I.e. usually that means setting a default route to the host and letting the host decide where to go on. \n\nSure, it's a separate network namespace. This is a matter of default configuration: pasta(1) is designed to avoid NAT if not needed, so, by default, it [sources](https://passt.top#addresses) addresses and routes from the parent network namespace.\n\nIt doesn't have a hardcoded 10.0.2.2 like slirp4netns has. One can change that with `--gateway` and `--address` options, so that pasta doesn't try to copy stuff from somewhere. I'm not suggesting this is what you should be doing, I'm trying to define the problem a bit better first.\n\n> The old slirp stack looked like this in the container:\n> \n> ```\n> # ip a show tap0\n> 2: tap0: <BROADCAST,UP,LOWER_UP> mtu 65520 qdisc fq_codel state UNKNOWN group default qlen 1000\n>     link/ether 22:a5:c7:4e:bb:38 brd ff:ff:ff:ff:ff:ff\n>     inet 10.0.2.100/24 brd 10.0.2.255 scope global tap0\n>        valid_lft forever preferred_lft forever\n> [IPv6 bits snipped]\n> \n> # ip route\n> default via 10.0.2.2 dev tap0 \n> 10.0.2.0/24 dev tap0 proto kernel scope link src 10.0.2.100 \n> ```\n\nThere's a problem with this: the container is told that 10.0.2.2 will route any IPv4 traffic. But, if they don't match the single route you have on the host, packets won't go anywhere. It's also a lie in some sense.\n\nWe could change the default in pasta to **not** fail if there's no interface with a default route, and just copy the routes that actually exist, instead of creating a default route in the container which can't work, like slirp4netns does. Is this going to mislead users, though?\n"
+        },
+        {
+            "user": "sbrivio-rh",
+            "body": "> It doesn't have a hardcoded 10.0.2.2 like slirp4netns has. One can change that with `--gateway` and `--address` options, so that pasta doesn't try to copy stuff from somewhere.\n\nThat is, `podman run --net=pasta:-4,-a,10.0.2.100,-g,10.0.2.2,-I,tap0 -it --rm docker.io/busybox whoami` mimics the slirp4netns behaviour for your case, if you want to try.\n"
+        },
+        {
+            "user": "martinpitt",
+            "body": "> `podman run --net=pasta:-4,-a,10.0.2.100,-g,10.0.2.2,-I,tap0 -it --rm docker.io/busybox whoami` mimics the slirp4netns behaviour for your case, if you want to try.\n\nThat fails with the same error, I'm afraid.\n\n> There's a problem with [the old slirp stack]: the container is told that 10.0.2.2 will route any IPv4 traffic. But, if they don't match the single route you have on the host, packets won't go anywhere. It's also a lie in some sense.\n\nI don't understand this, I'm afraid. From the container's POV this is completely correct, same as for any other machine: You have some explicit routes about the ranges you know, and delegate unknown addresses to the default route, i.e. \"kick the can down the road\". The container cannot, and also does not need to know if the host (or your home router, or your ISP, etc.) can actually reach *any* IP.\n\n> We could change the default in pasta to not fail if there's no interface with a default route, and just copy the routes that actually exist\n\nYeah, that sounds right. I'm curious (please forgive my ignorance): why does it make a particular check on default route, conceptually? If it \"just copies the routes\",  that should be fine? In our case, the host does have a route:\n\n```\n$ ip route\n172.27.0.0/24 dev eth0 proto kernel scope link src 172.27.0.15 metric 100 \n```\n\nso the container can also reach anything within the 172.27* network, and of course the host itself. I.e. it can do exactly what the host does, with one extra hop between container and host, which is true for any kind of IP network."
+        },
+        {
+            "user": "sbrivio-rh",
+            "body": "> > `podman run --net=pasta:-4,-a,10.0.2.100,-g,10.0.2.2,-I,tap0 -it --rm docker.io/busybox whoami` mimics the slirp4netns behaviour for your case, if you want to try.\n> \n> That fails with the same error, I'm afraid.\n\nAh, sorry, you have to add `-i,eth0`, because pasta is still looking for a \"default\" interface in the outer namespace.\n\n> > There's a problem with [the old slirp stack]: the container is told that 10.0.2.2 will route any IPv4 traffic. But, if they don't match the single route you have on the host, packets won't go anywhere. It's also a lie in some sense.\n> \n> I don't understand this, I'm afraid. From the container's POV this is completely correct, same as for any other machine: You have some explicit routes about the ranges you know, and delegate unknown addresses to the default route, i.e. \"kick the can down the road\". The container cannot, and also does not need to know if the host (or your home router, or your ISP, etc.) can actually reach _any_ IP.\n\nSeveral standards aim at coordinating network configuration in such a way that things ultimately work. Say, DHCP tells a host that it can use a particular default gateway, and router advertisements carry information about a prefix, usually global, that can be used.\n\npasta(1) tries to do the same while configuring the container.\n\nIf the container had absolutely nothing to do with parent (user, networking) namespaces, then it also wouldn't need to know that `grep` needs to be built for x86_64 when running on a x86_64 machine. Network isolation doesn't imply network unawareness.\n\n> > We could change the default in pasta to not fail if there's no interface with a default route, and just copy the routes that actually exist\n> \n> Yeah, that sounds right. I'm curious (please forgive my ignorance): why does it make a particular check on default route, conceptually?\n\nBecause it tries to figure out which interface should be used to copy addresses and routes, and a sensible choice is to use an upstream interface, which will have a default route.\n\n> If it \"just copies the routes\", that should be fine? In our case, the host does have a route:\n> \n> ```\n> $ ip route\n> 172.27.0.0/24 dev eth0 proto kernel scope link src 172.27.0.15 metric 100 \n> ```\n\nFine, yes, except that picking `eth0` is arbitrary if there's another interface with non-default routes only. Here it's clear that we want to pick `eth0`, its addresses and routes.\n\nWe can/should change pasta to cover this obvious case, but with multiple interfaces and no default routes, it should force the user to provide explicit configuration.\n\nI would wait for @Luap99 to chime in before going ahead with this.\n\nAnd you also need a temporary workaround, I suppose?"
+        },
+        {
+            "user": "martinpitt",
+            "body": "> Because it tries to figure out which interface should be used to copy addresses and routes, and a sensible choice is to use an upstream interface, which will have a default route.\n\nThanks for the explanation! (To fully understand it I'd need to know how pasta works, but I take it this is not just a simple oversight, but a deliberate implemenation).\n\n> except that picking eth0 is arbitrary if there's another interface with non-default routes only. Here it's clear that we want to pick eth0\n\nAnd this bit shows my ignorance -- with \"real\" networking there wouldn't be anything to \"pick\" for the container, it'd just need to set up a route to the host. But I suppose that's not how an userspace networking stack works, as the kernel doesn't actually do the routing -- pasta has to make that decision.\n\n> And you also need a temporary workaround, I suppose?\n\nDon't worry about that, I'll find one for our tests (presumably by just adding a fake default route which leads to nowhere or so). I'm more worried about breaking actual user scenarios -- isolated networks are not uncommon especially in corporate or CI environments.\n\nThanks!"
+        },
+        {
+            "user": "sbrivio-rh",
+            "body": "> And this bit shows my ignorance -- with \"real\" networking there wouldn't be anything to \"pick\" for the container, it'd just need to set up a route to the host. But I suppose that's not how an userspace networking stack works, as the kernel doesn't actually do the routing -- pasta has to make that decision.\n\nWell, kind of... pasta doesn't actually do routing -- you can't do routing if you're running unprivileged, you just have Layer-4 sockets. Look at those pink sockets on the right of this [diagram](https://passt.top/#pasta-pack-a-subtle-tap-abstraction): pasta can't touch the blue stuff.\n\nThe kernel does it. But we need to configure something in the inner network namespace for the kernel to do it.\n\n> > And you also need a temporary workaround, I suppose?\n> \n> Don't worry about that, I'll find one for our tests (presumably by just adding a fake default route which leads to nowhere or so). I'm more worried about breaking actual user scenarios -- isolated networks are not uncommon especially in corporate or CI environments.\n\nIsolated networks, sure, but usually there's a default route. Anyway, if this is not blocking for you, I'll wait a bit for more feedback and then implement the change I was mentioning.\n"
+        },
+        {
+            "user": "Luap99",
+            "body": "As far as actual workarounds go users can set the pasta options in containers.conf so it will effect everything:\n```\n[network]\npasta_options = [\"-i\", \"eth0\",...]\n```\nor revert back to slirp4netns if pasta is not working for them for whatever reason(s)\n```\n[network]\ndefault_rootless_network_cmd = \"slirp4netns\"\n```\n\n---\n\n\n> > > We could change the default in pasta to not fail if there's no interface with a default route, and just copy the routes that actually exist\n> > \n> > \n> > Yeah, that sounds right. I'm curious (please forgive my ignorance): why does it make a particular check on default route, conceptually?\n> \n> Because it tries to figure out which interface should be used to copy addresses and routes, and a sensible choice is to use an upstream interface, which will have a default route.\n> \n> > If it \"just copies the routes\", that should be fine? In our case, the host does have a route:\n> > ```\n> > $ ip route\n> > 172.27.0.0/24 dev eth0 proto kernel scope link src 172.27.0.15 metric 100 \n> > ```\n> \n> Fine, yes, except that picking `eth0` is arbitrary if there's another interface with non-default routes only. Here it's clear that we want to pick `eth0`, its addresses and routes.\n> \n> We can/should change pasta to cover this obvious case, but with multiple interfaces and no default routes, it should force the user to provide explicit configuration.\n\n\nI think making pasta better at picking a correct interface is desirable like in this case but I also agree that there is not much that can be done if there is more than one interface available."
+        },
+        {
+            "user": "Luap99",
+            "body": "Also another noticeable difference with pasta is that you cannot connect to the interface ip from the container and reach the host interface because pasta uses the same ip address inside the namespace so it will never reach the host.\nThis is expected but may cause troubles for some users that relied on this which is the reason I wanted to push this changes with Podman 5.0 as I fully expect that some workflow will be broken because of this change."
+        },
+        {
+            "user": "martinpitt",
+            "body": "I sent https://github.com/cockpit-project/cockpit-podman/pull/1600 to work around this. This shouldn't affect the revdeps tests in podman, just our nightly podman-next scenario. So not much of your concern I figure :grin: "
+        },
+        {
+            "user": "baude",
+            "body": "can this be closed?"
+        },
+        {
+            "user": "martinpitt",
+            "body": "I haven't seen any fix for it."
+        },
+        {
+            "user": "sbrivio-rh",
+            "body": "I haven't implemented that yet. As the workaround is already in place, it's not extremely urgent I'd say."
+        },
+        {
+            "user": "sbrivio-rh",
+            "body": "Pending review: https://archives.passt.top/passt-dev/20240315125456.487166-1-sbrivio@redhat.com/"
+        },
+        {
+            "user": "sbrivio-rh",
+            "body": "Fixed in version [2024_03_18.615d370](https://archives.passt.top/passt-user/20240318115655.0863abbb@elisabeth/) and matching Fedora 39 [update](https://bodhi.fedoraproject.org/updates/FEDORA-2024-32e9db365e)."
+        },
+        {
+            "user": "Luap99",
+            "body": "@sbrivio-rh Thanks, I am going to close this one then. "
+        },
+        {
+            "user": "martinpitt",
+            "body": "This is still problematic. Tracked in https://bugzilla.redhat.com/show_bug.cgi?id=2277954 now, but at least it has a workaround which isn't as intrusive/unsave as adding general internet access to the VM."
+        },
+        {
+            "user": "Luap99",
+            "body": "> This is still problematic. Tracked in https://bugzilla.redhat.com/show_bug.cgi?id=2277954 now, but at least it has a workaround which isn't as intrusive/unsave as adding general internet access to the VM.\n\nsee https://github.com/containers/podman/discussions/22737"
+        },
+        {
+            "user": "martinpitt",
+            "body": "Excellent, thanks @sbrivio-rh ! I tested the [passt F40 update](https://bodhi.fedoraproject.org/updates/FEDORA-2024-4632bfa865) in https://github.com/cockpit-project/cockpit-podman/pull/1768 and it's happy! :star2: "
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 21563
+        },
+        {
+            "organization": "cockpit-project",
+            "repository": "cockpit-podman",
+            "number": 1595
+        },
+        {
+            "organization": "cockpit-project",
+            "repository": "cockpit-podman",
+            "number": 1600
+        },
+        {
+            "organization": "cockpit-project",
+            "repository": "bots",
+            "number": 6050
+        },
+        {
+            "organization": "cockpit-project",
+            "repository": "cockpit-podman",
+            "number": 1608
+        },
+        {
+            "organization": "cockpit-project",
+            "repository": "cockpit",
+            "number": 20153
+        },
+        {
+            "organization": "cockpit-project",
+            "repository": "cockpit-podman",
+            "number": 1623
+        },
+        {
+            "organization": "cockpit-project",
+            "repository": "bots",
+            "number": 6435
+        }
+    ]
+}

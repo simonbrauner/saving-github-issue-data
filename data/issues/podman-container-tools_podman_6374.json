@@ -1,0 +1,116 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 6374,
+    "type": "pull_request",
+    "title": "Turn on the podman-commands script to verify man pages",
+    "state": "closed",
+    "labels": [
+        "lgtm",
+        "approved",
+        "locked - please file new issue/PR"
+    ],
+    "user": "rhatdan",
+    "body": "Signed-off-by: Daniel J Walsh <dwalsh@redhat.com>",
+    "comments": [
+        {
+            "user": "openshift-ci-robot",
+            "body": "[APPROVALNOTIFIER] This PR is **APPROVED**\n\nThis pull-request has been approved by: *<a href=\"https://github.com/containers/libpod/pull/6374#\" title=\"Author self-approved\">rhatdan</a>*\n\nThe full list of commands accepted by this bot can be found [here](https://go.k8s.io/bot-commands?repo=containers%2Flibpod).\n\nThe pull request process is described [here](https://git.k8s.io/community/contributors/guide/owners.md#the-code-review-process)\n\n<details >\nNeeds approval from an approver in each of these files:\n\n- ~~[OWNERS](https://github.com/containers/libpod/blob/master/OWNERS)~~ [rhatdan]\n\nApprovers can indicate their approval by writing `/approve` in a comment\nApprovers can cancel approval by writing `/approve cancel` in a comment\n</details>\n<!-- META={\"approvers\":[]} -->"
+        },
+        {
+            "user": "TomSweeneyRedHat",
+            "body": "@rhatdan looks like your script is working.  Gating is failing due to missing pieces...."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@TomSweeneyRedHat Not sure what you mean?  Missing pieces?"
+        },
+        {
+            "user": "TomSweeneyRedHat",
+            "body": "@rhatdan pieces == your script had found things that were missing in the docs as it was designed to do and it looked to be failing the gating due to that."
+        },
+        {
+            "user": "rhatdan",
+            "body": "If I run that container and the script within it, it passes every time.  What I am trying to figure out is why it is blowing up in CI?"
+        },
+        {
+            "user": "rhatdan",
+            "body": "@baude @cevich What command exactly is cirrus running on, so I can run this locally.  If I download the image and run the test with podman, it works for me.  But there must be some other way that cirrus is running that test that is not passing."
+        },
+        {
+            "user": "baude",
+            "body": "it looks like the first podman command in this instance is going belly up.  Notice the error:\n\n```\n[+0000s] checking: podman \n[+0000s] Error: mount /var/lib/containers/storage/overlay:/var/lib/containers/storage/overlay, flags: 0x1000: permission denied\n```\n\nI wonder if this makes it all wrong from there.  @edsantiago WDYT is going on here?"
+        },
+        {
+            "user": "edsantiago",
+            "body": "As best I can tell from the error context, that message is coming from `./bin/podman help`. As in (reconstruction):\n```console\n$ ./bin/podman help\nError: mount /var/lib/etc etc\n```\n(without the expected output of podman help).\n\nI have to guess that the problem is in the previous line:\n```yml\n- '/usr/local/bin/entrypoint.sh podman |& ${TIMESTAMP}'\n```\nI think this might be succeeding, but leaving behind a corrupt `bin/podman`"
+        },
+        {
+            "user": "edsantiago",
+            "body": "`hack/podman-commands.sh` was disabled on April 16. Since then there have been seven commits in `contrib/gate`. Running a very quick diff, I've got a hunch that the culprit might be ab0681380f4603049c87663aaf8d549725facbff and its followup 154debb8048504ed65206b643b15ef17b83cec87:\n```diff\n RUN dnf -y install \\\n-   $(grep \"^[^#]\" $GOSRC/contrib/dependencies.txt) conmon crun \\\n+   $(grep \"^[^#]\" $GOSRC/contrib/dependencies.txt) diffutils containers-common fuse-overlayfs conmon crun runc --exclude container-selinux; \\\n+   sed -i -e 's|^#mount_program|mount_program|g' /etc/containers/storage.conf \\\n    && dnf clean all\n```\nUnfortunately the git commit message doesn't explain why this was added. @rhatdan do you remember what that `sed` was intended to solve? Could it be causing the EPERM problem we're seeing in this PR?"
+        },
+        {
+            "user": "rhatdan",
+            "body": "That change enabeled fuse-overlayfs inside of the container."
+        },
+        {
+            "user": "edsantiago",
+            "body": "I figured out that much :wink: -- what I don't understand is the why. I assume this solved some problem, but what? And is it possible that this is causing the mount error? And if so, how can we achieve the dual goals of (whatever it was that needs fuse-overlayfs) and (getting the check-podman script to work in the gating container)?"
+        },
+        {
+            "user": "rhatdan",
+            "body": "It was an attempt to fix this issue.  The error I was seeing when I tested this locally was mounting overlay  on overlay, so I added fuse-overlayfs and the local test passed. The problem with this test altogether, is I can't figure out how to do it locally.  If you know the Podman command to execute, then we could examine what is going on.\n\nIf I pull down this container image and run with the libpod directory mounted on /usr/src and run a shell within the container, the script succeeds.  \n\nWe can remove the fuse-overlay line and see if the tests passes."
+        },
+        {
+            "user": "edsantiago",
+            "body": "Okay, here is the shortest recipe I can devise for reproducing the problem:\n```\n! Create local libpod source dir\nhost# mkdir /tmp/gate; cd /tmp/gate\nhost# git clone https://github.com/containers/libpod.git libpod\n\n! Run a shell in the gate container\nhost# podman run -it -v /tmp/gate/libpod:/usr/src/libpod:z --entrypoint /bin/bash quay.io/libpod/gate:master\n\n! Build podman inside the container\ncontainer# /usr/local/bin/entrypoint.sh podman\n\n! Run the newly-built podman\ncontainer# /var/tmp/go/src/github.com/containers/libpod/bin/podman\nError: mount /var/lib/containers/storage/overlay:/var/lib/containers/storage/overlay, flags: 0x1000: operation not permitted\n```\nEditing `/etc/containers/storage.conf` and re-commenting-out the `mount_program` line yields:\n```\nError: 'overlay' is not supported over overlayfs, a mount_program is required: backing file system is unsupported for this graph driver\n```\nAdding `--storage-driver vfs` to the host podman command fails, of course, because I've already run podman once and that is now stuck in the db:\n```\nError: error creating libpod runtime: database storage graph driver \"overlay\" does not match our storage graph driver \"vfs\": database configuration mismatch\n```\nAt this point, since I'm playing on my own laptop, I don't want to destabilize anything so I'm giving up for now. I can spin up a virt to continue testing if so desired."
+        },
+        {
+            "user": "rhatdan",
+            "body": "podman run --dev /dev/fuse -it -v /tmp/gate/libpod:/usr/src/libpod:z --entrypoint /bin/bash quay.io/libpod/gate:master"
+        },
+        {
+            "user": "rhatdan",
+            "body": "@giuseppe Something is failing when trying to mount fuse-overlayfs, looks like we require CAP_SYSADMIN?\n\nAny ideas?"
+        },
+        {
+            "user": "rhatdan",
+            "body": "If I run podman above with --device /dev/fuse and then follow @edsantiago Procedure, I am now getting\nError: mount /var/lib/containers/storage/overlay:/var/lib/containers/storage/overlay, flags: 0x1000: operation not permitted\n\nIf I add --add-cap SYS_ADMIN the command works."
+        },
+        {
+            "user": "rhatdan",
+            "body": "Looks like the bind mount is failing.\nmount(\"/var/lib/containers/storage/overlay\", \"/var/lib/containers/storage/overlay\", 0xc0003b4248, MS_BIND, NULL) = -1 EPERM (Operation not permitted)\n"
+        },
+        {
+            "user": "edsantiago",
+            "body": "Update: `fuse-overlayfs` doesn't come into the picture _at all_. It's a red herring. What seems to be happening is:\n* with commented-out `mount_program` in storage.conf: podman detects, early on, that overlay-on-overlay will not work, and exits with `a mount_program is required` error\n* with `mount_program = \"/bin/echo\"` (or anything whatsoever as long as it exists on disk): podman makes it past the above check, tries to bind-mount `/var/lib/containers/storage/overlay`, and fails with the `flags: 0x1000` error.\n\nIn no case does podman even make it to fork/execing `fuse-overlayfs`. This is all internal podman.\n\n@giuseppe your expert opinion would be greatly appreciated"
+        },
+        {
+            "user": "rhatdan",
+            "body": "If we merge https://github.com/containers/storage/pull/639 then we can set the skip_mount option and allow this to proceed."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@baude @edsantiago @vrothberg @giuseppe @mheon @QiWang19 @TomSweeneyRedHat \nThis is finally by the gating, PTAL and get it merged.\n"
+        },
+        {
+            "user": "TomSweeneyRedHat",
+            "body": "LGTM \nassuming happy tests and I'd like a head nod from @edsantiago "
+        },
+        {
+            "user": "edsantiago",
+            "body": "@rhatdan I think we've all had thousand-line PRs that were easier to review than this one!\n\nGating results confirmed. Thank you for persevering in tracking this down.\n\n/lgtm\n/hold"
+        },
+        {
+            "user": "mheon",
+            "body": "/hold cancel"
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "containers",
+            "repository": "storage",
+            "number": 639
+        }
+    ]
+}

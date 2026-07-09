@@ -1,0 +1,36 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 24804,
+    "type": "issue",
+    "title": "rawhide, pasta: new test issue with connections to local registry container",
+    "state": "closed",
+    "labels": [
+        "kind/bug",
+        "network",
+        "pasta",
+        "locked - please file new issue/PR",
+        "regression"
+    ],
+    "user": "Luap99",
+    "body": "With the latest image update in https://github.com/containers/podman/pull/24759 many `podman login and logout` started to fail on rawhide.\nThe issue seems to come down to the local registry container running with pasta and somehow the connections from podman login/push/pull are no longer handled correctly resulting in different erro messages such as\n```\nauthenticating creds for \"localhost:5435\": Get \"https://localhost:5435/v2/\": read tcp 127.0.0.1:35068->127.0.0.1:5435: read: connection reset by peer\nsetting up to read manifest and configuration from \"docker://localhost:5748/citest:latest\": pinging container registry localhost:5748: Get \"http://localhost:5748/v2/\": dial tcp [::1]:5748: connect: connection refused\ntrying to reuse blob sha256:03901b4a2ea88eeaad62dbe59b072b28b6efa00491962b8741081c5df50c65e0 at destination: pinging container registry localhost:5650: Get \"https://localhost:5650/v2/\": dial tcp [::1]:5650: connect: connection refused\n```\n\nEven on a local non CI rawhide VM the issue can be reproduced with `make localintegration FOCUS=\"Podman login and logout\"`, it is some kind of race as the errors are always slightly different and not always the same tests fails.\n\nThe CI update brought us to:\npasst 0^20241127.gc0fbc7e-1.fc42-x86_64\nkernel 6.13.0-0.rc1.20241203gitcdd30ebb1b9f.16.fc42.x86_64\n\nHowever I already tried to downgrade both pasta and the kernel and neither made difference and the same pasta version works fine on f41/40 in our VMs so it does not look like pasta issue. And given we also confirmed it fails on older kernels it does not seem to be triggered by the kernel either. So something else must have changed on rawhide that triggers it.\n\n\nExample CI failure log:\nhttps://api.cirrus-ci.com/v1/artifact/task/5908289420001280/html/int-podman-rawhide-rootless-host-sqlite.log.html#t--Podman-login-and-logout-podman-login-and-logout-with-cert-dir--1\n\n\n",
+    "comments": [
+        {
+            "user": "Luap99",
+            "body": "```diff\ndiff --git a/test/e2e/login_logout_test.go b/test/e2e/login_logout_test.go\nindex d0b5bb940e..5bdea4ca61 100644\n--- a/test/e2e/login_logout_test.go\n+++ b/test/e2e/login_logout_test.go\n@@ -5,10 +5,13 @@ package integration\n import (\n \t\"encoding/json\"\n \t\"fmt\"\n+\t\"io\"\n \t\"os\"\n \t\"path/filepath\"\n \t\"strconv\"\n \t\"strings\"\n+\t\"syscall\"\n+\t\"time\"\n \n \t. \"github.com/containers/podman/v5/test/utils\"\n \t. \"github.com/onsi/ginkgo/v2\"\n@@ -24,6 +27,9 @@ var _ = Describe(\"Podman login and logout\", func() {\n \t\tserver                   string\n \t\ttestImg                  string\n \t\tregistriesConfWithSearch []byte\n+\t\tlogFile                  string\n+\t\tstrace                   *PodmanSession\n+\t\tstraceLog                string\n \t)\n \n \tBeforeEach(func() {\n@@ -59,7 +65,12 @@ var _ = Describe(\"Podman login and logout\", func() {\n \t\tsetup := SystemExec(\"cp\", []string{filepath.Join(certPath, \"domain.crt\"), filepath.Join(certDirPath, \"ca.crt\")})\n \t\tsetup.WaitWithDefaultTimeout()\n \n+\t\tlogFile = filepath.Join(podmanTest.TempDir, \"pasta.log\")\n+\t\tpidfile := filepath.Join(podmanTest.TempDir, \"pasta.pid\")\n+\n \t\tsession := podmanTest.Podman([]string{\"run\", \"-d\", \"-p\", strings.Join([]string{strconv.Itoa(port), strconv.Itoa(port)}, \":\"),\n+\t\t\t\"--network\", \"pasta:--trace,--pid,\" + pidfile + \",--log-file,\" + logFile + \",--pcap,/tmp/pasta-\" +\n+\t\t\t\tCurrentSpecReport().LeafNodeText + time.Now().Format(time.RFC3339) + \".pcap\",\n \t\t\t\"-e\", strings.Join([]string{\"REGISTRY_HTTP_ADDR=0.0.0.0\", strconv.Itoa(port)}, \":\"), \"--name\", \"registry\", \"-v\",\n \t\t\tstrings.Join([]string{authPath, \"/auth:Z\"}, \":\"), \"-e\", \"REGISTRY_AUTH=htpasswd\", \"-e\",\n \t\t\t\"REGISTRY_AUTH_HTPASSWD_REALM=Registry Realm\", \"-e\", \"REGISTRY_AUTH_HTPASSWD_PATH=/auth/htpasswd\",\n@@ -68,6 +79,12 @@ var _ = Describe(\"Podman login and logout\", func() {\n \t\tsession.WaitWithDefaultTimeout()\n \t\tExpect(session).Should(ExitCleanly())\n \n+\t\tpid, err := os.ReadFile(pidfile)\n+\t\tExpect(err).ToNot(HaveOccurred())\n+\n+\t\tstraceLog = filepath.Join(podmanTest.TempDir, \"strace.log\")\n+\t\tstrace = StartSystemExec(\"strace\", []string{\"-o\", straceLog, \"-f\", \"-p\", strings.TrimSpace(string(pid))})\n+\n \t\tif !WaitContainerReady(podmanTest, \"registry\", \"listening on\", 20, 1) {\n \t\t\tSkip(\"Cannot start docker registry.\")\n \t\t}\n@@ -77,6 +94,28 @@ var _ = Describe(\"Podman login and logout\", func() {\n \t})\n \n \tAfterEach(func() {\n+\t\tif CurrentSpecReport().Failed() {\n+\t\t\tsession := podmanTest.Podman([]string{\"logs\", \"registry\"})\n+\t\t\tsession.WaitWithDefaultTimeout()\n+\n+\t\t\tf, err := os.Open(logFile)\n+\t\t\tExpect(err).ToNot(HaveOccurred())\n+\n+\t\t\tGinkgoWriter.Println(\"pasta trace log:\")\n+\t\t\t_, err = io.Copy(GinkgoWriter, f)\n+\t\t\tf.Close()\n+\t\t\tExpect(err).ToNot(HaveOccurred())\n+\n+\t\t\tstrace.Signal(syscall.SIGTERM)\n+\n+\t\t\tf, err = os.Open(straceLog)\n+\t\t\tExpect(err).ToNot(HaveOccurred())\n+\t\t\tGinkgoWriter.Println(\"pasta strace log:\")\n+\t\t\t_, err = io.Copy(GinkgoWriter, f)\n+\t\t\tf.Close()\n+\t\t\tExpect(err).ToNot(HaveOccurred())\n+\t\t}\n+\n \t\tos.Unsetenv(\"REGISTRY_AUTH_FILE\")\n \t\tos.RemoveAll(authPath)\n \t\tos.RemoveAll(certDirPath)\n```\nDiff to get pasta log file, strace and pcap files for debugging"
+        },
+        {
+            "user": "Luap99",
+            "body": "Just to add a short summary, it seems the glibc upgrade causes issues with the strict pasta seccomp profile.\n@sbrivio-rh is working on a fix\n"
+        },
+        {
+            "user": "sbrivio-rh",
+            "body": "Fix posted at https://archives.passt.top/passt-dev/20241210232909.1034903-1-sbrivio@redhat.com/, now pending review. The gory details are reported in the commit message.\n\nLong story short: seccomp profiles for pasta(1) disallow getrandom(2) and brk(2). If those system calls are issued, the process terminates. With glibc > 2.40, strerror(3), used to display descriptions of errors that sometimes occur during those tests, allocates memory in a way that needs both system calls. Replace strerror(3) calls by strerrordesc_np(3), only if available. Keep calling strerror(3) if it's not (e.g. for musl)."
+        },
+        {
+            "user": "sbrivio-rh",
+            "body": "Fixed in pasta [2024_12_11.09478d5](https://archives.passt.top/passt-user/20241212103107.6c8243a8@elisabeth/), matching Fedora Rawhide update [passt-0^20241211.g09478d5-1.fc42](https://bodhi.fedoraproject.org/updates/FEDORA-2024-27c9e74f65) and Debian unstable's [passt-0.0~git20241211.09478d5-1](https://tracker.debian.org/news/1593641/accepted-passt-00git2024121109478d5-1-source-into-unstable/)."
+        }
+    ],
+    "cross_references": []
+}

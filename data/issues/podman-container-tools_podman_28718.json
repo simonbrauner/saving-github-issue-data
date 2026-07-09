@@ -1,0 +1,37 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 28718,
+    "type": "issue",
+    "title": "host.containers.internal unreachable from rootless bridge containers: shared rootless-netns pasta missing --map-host-loopback",
+    "state": "closed",
+    "labels": [],
+    "user": "fecet",
+    "body": "# `host.containers.internal` unreachable from rootless bridge containers: shared rootless-netns pasta missing `--map-host-loopback`\n\n## Issue Description\n\nPodman writes `169.254.1.2 host.containers.internal` into every container's\n`/etc/hosts` and passes `--map-guest-addr=169.254.1.2` to the shared\nrootless-netns pasta, but never passes the outbound counterpart\n`--map-host-loopback=169.254.1.2`. The `host.containers.internal` contract is\nhalf-wired:\n\n- inbound (host → container at 169.254.1.2): handled by `--map-guest-addr`\n- outbound (container → host via 169.254.1.2): **not handled** — packets to\n  `169.254.1.2` fall through to the default route and die\n\nFor rootless bridge containers (the common case for any custom network) this\nmakes `host.containers.internal` unreachable, despite podman's own\n`/etc/hosts` entry promising it works.\n\n## Reproducer\n\n```sh\n# host: any TCP service on loopback\npython3 -m http.server 9100 &\n\n# fresh rootless container on a podman-created bridge network\npodman run --rm --network=podman docker.io/alpine \\\n  wget -qO- --timeout=3 http://host.containers.internal:9100/\n\n# actual:   wget: download timed out\n# expected: directory listing from the python server\n```\n\n`/etc/hosts` inside the container correctly contains:\n\n```\n169.254.1.2     host.containers.internal host.docker.internal\n```\n\nThe shared rootless-netns pasta launched by podman has:\n\n```\n/usr/bin/pasta --config-net --pid ... --dns-forward 169.254.1.1 \\\n  -t none -u none -T none -U none --quiet \\\n  --netns /run/user/$UID/containers/networks/rootless-netns/rootless-netns \\\n  --map-guest-addr 169.254.1.2\n```\n\n`--map-host-loopback` is missing. pasta has full support for the flag; podman\njust doesn't pass it.\n\n## Workaround (confirms the root cause)\n\n```ini\n# ~/.config/containers/containers.conf\n[network]\npasta_options = [\"--map-host-loopback=169.254.1.2\"]\n```\n\nThen stop all rootless containers using the shared rootless-netns so the\nlong-running pasta exits, and let the next container spawn re-launch pasta\nwith the new argv. Verify:\n\n```sh\nps -eo cmd | grep -F /usr/bin/pasta\n# /usr/bin/pasta --config-net --map-host-loopback=169.254.1.2 ... --map-guest-addr 169.254.1.2\n```\n\n`host.containers.internal:<port>` then reaches host services from bridge\ncontainers as the `/etc/hosts` entry implies.\n\n## Suggested Fix\n\nIn the rootless-netns pasta launcher\n(`containers/common/libnetwork/pasta/pasta_linux.go` `createPastaArgs`), add\n`--map-host-loopback` symmetrically with the existing `--map-guest-addr`\ndefault. The two are both halves of the same `host.containers.internal`\ncontract and should never be split.\n\nRough sketch:\n\n```go\nif len(mapGuestAddrIPs) == 0 {\n    cmdArgs = append(cmdArgs, mapGuestAddrOpt, mapGuestAddrIpv4)\n    mapGuestAddrIPs = append(mapGuestAddrIPs, mapGuestAddrIpv4)\n}\n// outbound counterpart: without this the /etc/hosts entry podman writes for\n// host.containers.internal is unreachable from bridge containers\nif !containsArg(cmdArgs, \"--map-host-loopback\") {\n    cmdArgs = append(cmdArgs, \"--map-host-loopback\", mapGuestAddrIpv4)\n}\n```\n\nThe IP picked should track `host_containers_internal_ip` so a custom contract\nIP stays consistent across `/etc/hosts`, `--map-guest-addr`, and\n`--map-host-loopback`.\n\n## Environment\n\n| component   | version                          |\n|-------------|----------------------------------|\n| podman      | 5.8.2                            |\n| netavark    | 1.17.2                           |\n| pasta       | 2026_05_07.1afd4ed               |\n| kernel      | 7.0.6-1-cachyos                  |\n| distro      | CachyOS (Arch-based)             |\n\n## Related Issues\n\n- #22653 — *Host unreachable from container with bridge network on Podman v5*\n  (closed). Same user-visible symptom; the discussion settled on\n  \"rootlessport vs pasta\" as a design trade-off, but that frame only applies\n  to inbound port mapping. The outbound path for bridge containers actually\n  goes through pasta already — the workaround above is direct proof.\n- #24970 — *host.containers.internal non functional when host address changes*\n  (open). Same area; same broken contract.\n- #26581 — *rootlessport is still used instead of pasta when running a\n  container connected to a bridge network* (closed as expected). About\n  inbound port mapping only; doesn't cover the outbound side this issue is\n  about.\n- #8193 — long-term tracker for rootless port-handler redesign. Largely\n  orthogonal: that's about inbound. This issue is one missing flag on the\n  outbound side that doesn't require any redesign.\n",
+    "comments": [
+        {
+            "user": "amyssnippet",
+            "body": "@fecet thanks for the reporting this issue. \n\ni verified the behaviour and looked into the pasta init logic, `createPastaArgs()` indeed conditionally sets `--map-guest-addr 169.254.1.2` for out-of-the-box `host.containers.internal` support, but completely omits the `--map-host-loopback` counterpart, breaking the outbound packet flow from the bridge containers as you described.\n\nbecause the pasta_linux.go file is maintained in the [containers/common](https://github.com/containers/common) repository and vendored into podman and the fix needs to be submitted there first."
+        },
+        {
+            "user": "amyssnippet",
+            "body": "will soon fix this patch and open a pr which will fix it.\n"
+        },
+        {
+            "user": "Luap99",
+            "body": "@fecet please note https://github.com/containers/podman/blob/main/LLM_POLICY.md\n\nThe host loopback must not be reachable from within a container, this has nothing to do with inbound vs outbund differences. The --map-guest-addr option is mapped to the pasta ip which uses the default interface on the host as default.\nSo you will need to bind your services there not just on loopback. If you do want --map-host-loopback then you have to specify that user explicitly. "
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "containers",
+            "repository": "common",
+            "number": 2546
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "container-libs",
+            "number": 850
+        }
+    ]
+}

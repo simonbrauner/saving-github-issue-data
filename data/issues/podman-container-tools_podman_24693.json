@@ -1,0 +1,32 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 24693,
+    "type": "issue",
+    "title": "[quadlet][rootless][selinux] quadlet generated service files are inaccessible for confined selinux user",
+    "state": "open",
+    "labels": [
+        "quadlet"
+    ],
+    "user": "JosVerheij",
+    "body": "### Issue description\n\nUsing quadlet results in .service files that are inaccessible to a confined selinux user such as `staff_u`.\n\n### Steps to reproduce\n\nCreate new user\n```console\n# useradd -Z staff_u <podman_user>\n```\n\nEnsure user can run necessary commands within selinux bounds\n```console\n# cat /etc/sudoers.d/podman\npodman ALL=(podman:podman) ROLE=container_user_r TYPE=container_user_t /usr/bin/podman\npodman ALL=(podman:podman) TYPE=systemd_systemctl_exec_t /usr/bin/systemctl  \n```\n\nCreate container quadlet\n\n```console\n$ cat ~/.config/containers/systemd/mysleep.container \n[Unit]\nDescription=The sleep container\nAfter=local-fs.target\n\n[Container]\nImage=registry.access.redhat.com/ubi8-minimal:latest\nExec=sleep 1000\n\n[Install]\nWantedBy=multi-user.target default.target\n````\nLoad service\n```console\n$ systemctl --user daemon-reload\n```\nEnsure service was created\n```console\n$ ls -lZ /var/run/user/<uid>/systemd/generator/\ntotal 4\n...\n-rw-r--r--. 1 podman podman staff_u:object_r:user_tmp_t:s0 889 Nov 27 15:53 mysleep.service\n```\n\nRunning service command for existing services poses no problem.\n```console\n$ systemctl --user status podman-auto-update\n○ podman-auto-update.service - Podman auto-update service\n     Loaded: loaded (/usr/lib/systemd/user/podman-auto-update.service; disabled; preset: disabled)\n     Active: inactive (dead)\n       Docs: man:podman-auto-update(1)\n```\n\nBut running container service command, e.g. `status`, `start`, ... fails. \n```console\n$ systemctl --user status mysleep.service\nFailed to get properties: Access denied\n```\n\n\n### Workaround\n\nChange seuser to `unconfined_u`:\n```\n# usermod -Z unconfined_u <podman_user>\n```\n```\n# restorecon -RvF /home/<podman_user>\n```\n\nRun service\n```console\n$ systemctl --user start mysleep.service\n$ systemctl --user status mysleep.service\n● mysleep.service - The sleep container\n     Loaded: loaded (/home/podman/.config/containers/systemd/mysleep.container; generated)\n     Active: active (running) since Wed 2024-11-27 16:13:50 CET; 16s ago\n   Main PID: 29510 (conmon)\n      Tasks: 3 (limit: 98964)\n     Memory: 17.9M\n        CPU: 401ms\n     CGroup: /user.slice/user-<uid>.slice/user@<uid>.service/app.slice/mysleep.service\n             ├─libpod-payload-d165a94f15b145a469b0031b184986c090f3a00d8694ccf5b4c9f12a64dc0353\n             │ └─29512 /usr/bin/coreutils --coreutils-prog-shebang=sleep /usr/bin/sleep 1000\n             └─runtime\n               ├─29506 /usr/bin/pasta --config-net --dns-forward 169.254.0.1 -t none -u none -T none -U none --no-map-gw --quiet --netns /run/user/2816/netns/netns-f0dddf4d-6b33-b9fe-7f22-5d5412a7be>\n               └─29510 /usr/bin/conmon --api-version 1 -c d165a94f15b145a469b0031b184986c090f3a00d8694ccf5b4c9f12a64dc0353 -u d165a94f15b145a469b0031b184986c090f3a00d8694ccf5b4c9f12a64dc0353 -r /usr>\nlines 1-13/13 (END)\n```\n\n### System information\n\n#### SYSTEM\n\n```console\n$ podman --version\npodman version 5.2.2\n```\n\n```console\n$ podman info | head -n 8\nhost:\n  arch: amd64\n  buildahVersion: 1.37.5\n  cgroupControllers:\n  - memory\n  - pids\n  cgroupManager: systemd\n  cgroupVersion: v2\n```\n\n```console\n$ cat /etc/os-release \nNAME=\"AlmaLinux\"\nVERSION=\"9.5 (Teal Serval)\"\nID=\"almalinux\"\nID_LIKE=\"rhel centos fedora\"\nVERSION_ID=\"9.5\"\n...\n```\n\nSystem is installed with DSA STIG security profile, see [here](https://wiki.almalinux.org/documentation/openscap-guide-for-9.html) and [here](https://static.open-scap.org/ssg-guides/ssg-rhel9-guide-stig_gui.html)\n```console\n$ fips-mode-setup --check\nFIPS mode is enabled.\n```\n\n#### USER\n\n```console\n$ id\nuid=<uid>(podman) gid=<uid>(podman) groups=<uid>(podman) context=staff_u:staff_r:staff_t:s0\n```\n\n```console\n# cat /etc/sudoers.d/podman\npodman ALL=(podman:podman) ROLE=container_user_r TYPE=container_user_t /usr/bin/podman\npodman ALL=(podman:podman) TYPE=systemd_systemctl_exec_t /usr/bin/systemctl  \n```\n\n#### FILE PERMISSIONS\n\n```console\n$ ls -lZ .config/containers/systemd/\ntotal 4\n-rw-------. 1 podman podman staff_u:object_r:config_home_t:s0 223 Nov 27 13:32 mysleep.container\n```\n```console\n$ ls -lZ /var/run/user/<uid>/systemd/generator/\ntotal 4\n...\n-rw-r--r--. 1 podman podman staff_u:object_r:user_tmp_t:s0 889 Nov 27 15:53 mysleep.service\n```\n\n### LOG\n\nRelevant log\n```console\n# ausearch -m AVC,USER_AVC,SELINUX_ERR,USER_SELINUX_ERR -ts recent | grep mysleep\nNov 27 14:16:21 Gandalf systemd[1847]: selinux: avc:  denied  { status } for auid=n/a uid=<UID> gid=<UID> path=\"/run/user/<UID>/systemd/generator/mysleep.service\" cmdline=\"\" function=\"mac_selinux_filter\" scontext=staff_u:staff_r:staff_t:s0 tcontext=staff_u:object_r:user_tmp_t:s0 tclass=service permissive=0\n```",
+    "comments": [
+        {
+            "user": "rhatdan",
+            "body": "AVC messages?"
+        },
+        {
+            "user": "JosVerheij",
+            "body": "Do you mean this?\n\n```console\n# ausearch -m AVC,USER_AVC,SELINUX_ERR,USER_SELINUX_ERR -ts recent | grep mysleep\nNov 27 14:16:21 Gandalf systemd[1847]: selinux: avc:  denied  { status } for auid=n/a uid=<UID> gid=<UID> path=\"/run/user/<UID>/systemd/generator/mysleep.service\" cmdline=\"\" function=\"mac_selinux_filter\" scontext=staff_u:staff_r:staff_t:s0 tcontext=staff_u:object_r:user_tmp_t:s0 tclass=service permissive=0\n```"
+        },
+        {
+            "user": "AakrutiPatel",
+            "body": "```\n# useradd -Z staff_u poduser\n$ systemctl --user daemon-reload\n$ ls /run/user/$UID/systemd/generator/\n$ systemctl --user status nginx.service\nFailed to get properties: Access denied\n```\n\nrhel 9 system, rootless mode, `staff_u` type user cannot use `systemctl --user` command."
+        },
+        {
+            "user": "raushan2yolo",
+            "body": "Maybe ' semanage fcontext -a -t systemd_unit_file_t \"/run/user/[0-9]+/systemd/generator(/.*)?\" ' ？"
+        }
+    ],
+    "cross_references": []
+}

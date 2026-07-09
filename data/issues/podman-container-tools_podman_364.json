@@ -1,0 +1,46 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 364,
+    "type": "issue",
+    "title": "podman stats does not reflect resource constraints of container",
+    "state": "closed",
+    "labels": [
+        "locked - please file new issue/PR"
+    ],
+    "user": "sunilcio",
+    "body": "It appears that when running a container with resource limits like memory and cpu,\nthe limits are not being imposed on containers. podman stats does not reflect the limit.\n\nFurther checking cgroup slices in /sys filesystem, I see the cgroup slice for container \ndoes not have the limit set on them which was set during podman run.\n\nversion: podman-0.2.1-1.git3723cec.fc27.x86_64\n\nSteps to reproduce:\n\n- Run a container with resource constraints\n\n`# podman run --cpu-shares 100 --memory 100m -d alpine sleep 10000 &`\n\n```\n# podman ps\nCONTAINER ID   IMAGE    COMMAND       CREATED AT                      STATUS             PORTS   NAMES\n22085e5fde9a   alpine   sleep 10000   2018-02-20 05:08:00 -0500 EST   Up 2 seconds ago           keen_borg\n```\n\n- Check output of `podman stats`\n```\n# podman stats --no-stream\nID             NAME        CPU %   MEM USAGE / LIMIT   MEM %   NET IO    BLOCK IO   PIDS\n22085e5fde9a   keen_borg   --      1.47MB / 4.136GB    0.04%   -- / --   -- / --    2\n```\n- Check cgroup slice of container\n```\n# cat /sys/fs/cgroup/cpu/libpod_parent/libpod-conmon-22085e5fde9acb7f2b82487f1f140da6919bfa539a1cb684d65232e90dfbeb1b/tasks\n1950\n1952\n\n# cat /sys/fs/cgroup/cpu/libpod_parent/libpod-conmon-22085e5fde9acb7f2b82487f1f140da6919bfa539a1cb684d65232e90dfbeb1b/cpu.shares\n1024\n```\n```\n# cat /sys/fs/cgroup/memory/libpod_parent/libpod-conmon-22085e5fde9acb7f2b82487f1f140da6919bfa539a1cb684d65232e90dfbeb1b/tasks\n1950\n1952\n\n# cat /sys/fs/cgroup/memory/libpod_parent/libpod-conmon-22085e5fde9acb7f2b82487f1f140da6919bfa539a1cb684d65232e90dfbeb1b/memory.limit_in_bytes\n9223372036854771712\n\n# cat /sys/fs/cgroup/memory/libpod_parent/libpod-conmon-22085e5fde9acb7f2b82487f1f140da6919bfa539a1cb684d65232e90dfbeb1b/memory.usage_in_bytes\n1470464\n```",
+    "comments": [
+        {
+            "user": "baude",
+            "body": "@sunilcio I started a container with the same run commands as you and the resulting container ID is bf32e0b00fdb41bf28c775bb374042e8dce6d60fc27e3f2885e8d61ed8cffe27.\n\nIf i look in /sys, i see:\n\n```\n 2018-02-21 08:34:11 ⌚  localhost in ~/tmp/keylabelvalue\n○ → cat /sys/fs/cgroup/cpu/libpod_parent/libpod-conmon-bf32e0b00fdb41bf28c775bb374042e8dce6d60fc27e3f2885e8d61ed8cffe27/cpu.shares \n1024\n\n 2018-02-21 08:36:16 ⌚  localhost in ~/tmp/keylabelvalue\n○ → cat /sys/fs/cgroup/cpu/libpod_parent/libpod-conmon-bf32e0b00fdb41bf28c775bb374042e8dce6d60fc27e3f2885e8d61ed8cffe27/bf32e0b00fdb41bf28c775bb374042e8dce6d60fc27e3f2885e8d61ed8cffe27/cpu.shares\n100\n```\n\nI cannot remember the reasoning for how this is done but I believe the subdir bf32.../cpu.shares are the actual ones to look at.  @mheon can you comment on this?\n\nmeanwhile i will look at the stat issue."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@umohnani8 Also take a look."
+        },
+        {
+            "user": "sunilcio",
+            "body": "Adding what I further understood after discussion with @baude  ++ on irc.\n\nIn cgroup directory of the container, there is one more sub directory with \ncontainer ID which actually contains the resource limits for the container.\n\nIf we check the `tasks` in parent directory, it contains `PID` of `conmon` process.\nAnd if we check the `tasks` in sub directory, it contains `PIDs` of processes running \ninside container. This now makes sense to me as the cgroup resource limit will be \nimposed on the processes running inside container.\n \n- For example, run a container with limits:\n```\n# podman run --cpu-shares 100 --memory 100m -d alpine sleep 10000 &\n# ff67fb184d21d9862d4bd10e77ad6e05db61790c6085c30741b6ba1c47bf5220\n\n# podman ps\nCONTAINER ID   IMAGE    COMMAND       CREATED AT                      STATUS             PORTS   NAMES\nff67fb184d21   alpine   sleep 10000   2018-02-23 10:56:12 -0500 EST   Up 5 seconds ago           quirky_meninsky\n```\n\n- Navigate to cgroup slice directory and check `tasks`, it contains `PID` of `conmon` process:\n```\n# pwd\n/sys/fs/cgroup/memory/libpod_parent/libpod-conmon-ff67fb184d21d9862d4bd10e77ad6e05db61790c6085c30741b6ba1c47bf5220\n\n# cat tasks\n4674\n4676\n\n# ps alxwww | grep -e PID -e 4674 -e 4676\nF   UID   PID  PPID PRI  NI    VSZ   RSS WCHAN  STAT TTY        TIME COMMAND\n1     0  4674     1  20   0  86080  1896 SyS_po Ssl  ?          0:00 /usr/libexec/crio/conmon -c ff67fb184d21d9862d4bd10e77ad6e05db61790c6085c30741b6ba1c47bf5220 -u ff67fb184d21d9862d4bd10e77ad6e05db61790c6085c30741b6ba1c47bf5220 -r /usr/bin/runc -b /var/lib/containers/storage/overlay-containers/ff67fb184d21d9862d4bd10e77ad6e05db61790c6085c30741b6ba1c47bf5220/userdata -p /var/run/containers/storage/overlay-containers/ff67fb184d21d9862d4bd10e77ad6e05db61790c6085c30741b6ba1c47bf5220/userdata/pidfile -l /var/lib/containers/storage/overlay-containers/ff67fb184d21d9862d4bd10e77ad6e05db61790c6085c30741b6ba1c47bf5220/userdata/ctr.log --exit-dir /var/run/libpod/exits --socket-dir-path /var/run/libpod/socket\n4     0  4684  4674  20   0   1512     4 hrtime Ss   ?          0:00 sleep 10000\n```\n\n- Check `PID` of process running inside container:\n```\n# podman top quirky_meninsky\n  UID   PID  PPID  C STIME TTY          TIME CMD\n    0  4684  4674  0 10:56 ?        00:00:00 sleep 10000\n```\n\n- Inside sub directory with container ID, `tasks` contains `PID` of process running inside container:\n```\n# pwd\n/sys/fs/cgroup/memory/libpod_parent/libpod-conmon-ff67fb184d21d9862d4bd10e77ad6e05db61790c6085c30741b6ba1c47bf5220/ff67fb184d21d9862d4bd10e77ad6e05db61790c6085c30741b6ba1c47bf5220\n\n# cat tasks \n4684\n```\n\n- And the subdirectory have cgroup limits:\n```\n# cat memory.limit_in_bytes \n104857600\n\n# cat /sys/fs/cgroup/cpu/libpod_parent/libpod-conmon-ff67fb184d21d9862d4bd10e77ad6e05db61790c6085c30741b6ba1c47bf5220/ff67fb184d21d9862d4bd10e77ad6e05db61790c6085c30741b6ba1c47bf5220/cpu.shares \n100\n```\n\n- However `podman stats` does not reflect the resource limits:\n```\n# podman stats --no-stream\nID             NAME              CPU %   MEM USAGE / LIMIT   MEM %   NET IO    BLOCK IO   PIDS\nff67fb184d21   quirky_meninsky   --      1.212MB / 4.136GB   0.03%   -- / --   -- / --    2\n```"
+        },
+        {
+            "user": "rhatdan",
+            "body": "@mrunalp Is this correct the cgroups should only apply to the container processes not the conmon process?"
+        },
+        {
+            "user": "sunilcio",
+            "body": "With `podman 0.3.2-dev`, I see the limits in `podman stats`.\n```\n# podman version\nVersion:       0.3.2-dev\nGo Version:    go1.9.4\nGit Commit:    \"c187538b9e7fa9af75a4123ff3dc128ce6f4ba1b\"\nBuilt:         Fri Mar  2 17:12:53 2018\nOS/Arch:       linux/amd64\n```\n```\n# podman run --cpu-shares 100 --memory 100m -d alpine sleep 10000 &\n\n# podman stats --no-stream\nID             NAME                  CPU %   MEM USAGE / LIMIT   MEM %   NET IO        BLOCK IO   PIDS\n055d9f3843df   gallant_nightingale   --      671.7kB / 104.9MB   0.64%   586B / 766B   -- / --    1\n```"
+        },
+        {
+            "user": "mheon",
+            "body": "Awesome, this seems ready to close then"
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 417
+        }
+    ]
+}

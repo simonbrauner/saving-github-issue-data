@@ -1,0 +1,194 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 10828,
+    "type": "pull_request",
+    "title": "Created image scp feature",
+    "state": "closed",
+    "labels": [
+        "lgtm",
+        "approved",
+        "locked - please file new issue/PR"
+    ],
+    "user": "cdoern",
+    "body": "Created image scp feature for secure image copy\n\nadded functionality for image secure copying from local to remote.\n\n-  Added a new cmd/podman scp.go file which utilizes Save() and Load()\n- made necessary tests\n- edited man pages and documentation\n\nSigned-off-by: cdoern <cdoern@redhat.com>\n\n<!--\nThanks for sending a pull request!\n\nPlease make sure you've read our contributing guidelines and how to submit a pull request (https://github.com/containers/podman/blob/master/CONTRIBUTING.md#submitting-pull-requests).\n\nIn case you're only changing docs, make sure to prefix the pull-request title with \"[CI:DOCS]\".  That will prevent functional tests from running and save time and energy.\n-->\n",
+    "comments": [
+        {
+            "user": "rhatdan",
+            "body": "Podman push can already do almost all of the functionality you have.  What `podman image scp` Is supposed to do is allow me to copy images between a to ssh connected hosts, as is my understanding.\n\npodman image scp alpine REMOTESERVER:\npodman image scp 10.20.3.15:alpine dir:/tmp/alpine\npodman image scp fedora.registry.com:fedora server.dev.redhat.com:\n\n\n"
+        },
+        {
+            "user": "cdoern",
+            "body": "Okay @rhatdan I wasn't sure of the proper functionality. @jwhonce mentioned how `Save()` and `Load()` cannot be used in conjunction with ssh so I am unsure how we would get around that.\n\nEdit: I think I see what you mean and am implementing an abi save() and then an ssh call to load the saved image"
+        },
+        {
+            "user": "rhatdan",
+            "body": "Yes, you would do the equivalent of \n\npodman save image /tmp/TMPFILE\nscp cp /tmp/TMPFILE HOST:/tmp\npodman remote --connect HOST: load /tmp/TMPFILE\n"
+        },
+        {
+            "user": "vrothberg",
+            "body": "> Yes, you would do the equivalent of\n> \n> podman save image /tmp/TMPFILE\n> scp cp /tmp/TMPFILE HOST:/tmp\n> podman remote --connect HOST: load /tmp/TMPFILE\n\nThat's not entirely correct. `podman-remote` does _not_ load any path on the remote machine.  With `podman-remote load -i fedora.tar` \"fedora.tar\" is at the client but will be uploaded to the server.\n\nSo I think that `image scp` boils down to:\n`podman save -o /tmp/archive.tar $image`\n`podman-remote load -i /tmp/archive.tar`"
+        },
+        {
+            "user": "rhatdan",
+            "body": "Correct.  podman -load would be doing the ssh stuff under the covers.\nI guess it is best to only handle loading into container/storage and then force the user to do podman --remote if they want to get the image into other storage transports on the remote machine."
+        },
+        {
+            "user": "rhatdan",
+            "body": "Actually the code will end up doing the equivalent of \n\npodman save $image | podman-remote load \n"
+        },
+        {
+            "user": "vrothberg",
+            "body": "> I guess it is best to only handle loading into container/storage and then force the user to do podman --remote if they want to get the image into other storage transports on the remote machine.\n\n:+1: limiting to storage SGTM"
+        },
+        {
+            "user": "cdoern",
+            "body": "@vrothberg @rhatdan so is the load I am doing in conjunction with `--remote` not the proper functionality? \n\nI also had an idea if we really wanted to do a proper ssh I could mimic some of the connection behavior in [add.go](https://www.github.com/containers/podman/tree/main/cmd%2Fpodman%2Fsystem%2Fconnection%2Fadd.go) validating that the connection the user gave is one that exists in `connection list` and then execute an ssh session. "
+        },
+        {
+            "user": "rhatdan",
+            "body": "I have not looked at the underlying code, I am just trying to come to an understanding of the functionality.  If you have podman-remote load code in here, then it SGTM.\n"
+        },
+        {
+            "user": "cdoern",
+            "body": "@rhatdan figured out a pretty interesting way to provide both --remote support and native ssh."
+        },
+        {
+            "user": "vrothberg",
+            "body": "Impressive work, @cdoern!  Please don't let my comments below discourage you.\n\n```\npodman image scp CONNECTIONNAME:alpine .\npodman image scp myimage CONNECTIONNAME:remoteImage\npodman image scp root@localhost:foobar .\npodman image scp foobar 10.20.3.1:docker-daemon:image:tag\npodman image scp oci-archive:/tmp/image:tag roo@localhost:\n```\n\nI think this is _way too complex_.  Can we take a step back and agree on what `image scp` should do and what not?  Designing while implementing is at risk of missing details (and changing directions).\n\nWhat is the primary use case? Who is the primary audience?  I fear that doing everything for everyone makes it rather hard to use and the code complex; we have to maintain it for long.\n\nMy understanding was the following:\n> Actually the code will end up doing the equivalent of\n> \n> podman save $image | podman-remote load\n\nSo why are we embedding complex ssh and scp syntax and mix that with the image transports?  `podman load` does not support `docker-daemon` or any other transport than `containers-storage`.\n\nI strongly prefer to keep `image scp` as simple as possible and rely on the ssh functionality already provided by the remote client via `--connection`.  IMHO it should really just be a `podman save $image | podman-remote load -`.  If users want more, they are free to use Podman in combination with ssh/scp etc."
+        },
+        {
+            "user": "rhatdan",
+            "body": "We can talk about this next week. But I am looking at what a user would expect.  Do we need this in the first version, no.  But this is the syntax that I would expect to just work.  Talking about underlying function of podman save/load is not important. \n\nI see this tool as a way to use ssh connections to move images around.  Most of the time, this would just be from container/storage to containers/storage.  Which is why @edsantiago suggested the improvement in UI, in my opinion.\n\nI would see this tool being used potentially to copy images between root C/S to nonroot C/S.  Between VM and Host.  And between client and server.\n"
+        },
+        {
+            "user": "cdoern",
+            "body": "@vrothberg Thanks for the feedback! looking back at [the issue](https://github.com/containers/podman/issues/10108) I believe what @edsantiago wanted was, something that \"nicely packaged\" save/load to a remote host using ssh, into a podman command. That combined with Brent's idea to use system connection led me down this path.\n\nIt is a slightly complicated feature but I think it is a useful one. Being able to specify a remote host and image even on your own network can allow for some cool applications and integrations down the line. I think we should meet next week with @rhatdan to discuss design because there might be too much here to begin with. However, what I have currently seems to function pretty well and after some tweaks with the actual input, is pretty easy to use! \n\nOverall, it seems to me like we have two different ideas of what scp should be but as Dan pointed out when I first started, the `podman save/podman --remote load` version doesn't necessarily add much functionality over what we currently have."
+        },
+        {
+            "user": "cdoern",
+            "body": "so @rhatdan @mtrmac should we take the `--format` flag? I used it because save and load in conjunction w/ one another only seem to accept two formats. Also, any other general changes I should be working towards on this. The version in this PR (I think) seems to do all of the test commands on the slides I sent you"
+        },
+        {
+            "user": "mtrmac",
+            "body": "> so @rhatdan @mtrmac should we take the `--format` flag?\n\nI think in https://github.com/containers/podman/pull/10828#discussion_r663347616 we both wanted it removed.\n\n> I used it because save and load in conjunction w/ one another only seem to accept two formats.\n\nSo have `image scp` choose one, don’t bother the user with this. (Assuming there is _one_ that works; I’m not 100% sure that is true (`dir:` is probably better than `docker-archive` and OCI) — but even if the right one to choose, and maybe _especially_ if the right one to choose, depended on the format of the source image, `image scp` should automatically choose the right thing instead of requiring the user to be an expert."
+        },
+        {
+            "user": "mtrmac",
+            "body": "> (Warning: I’m afraid this is not a review\n\n… and I also might have jumped the gun; is the UI settled enough that we should be talking about the code now? I’m afraid I’m only somewhat paying attention right now."
+        },
+        {
+            "user": "cdoern",
+            "body": "@mtrmac spent most of today working on organizing the code, I believe it is in a better place. I will work on the ssh repetitive code tomorrow. I also had to add functionality for `podman image scp host1:: host2::image` for a remote -> remote scp but the image is specified from the second host."
+        },
+        {
+            "user": "mtrmac",
+            "body": "To establish a shared background for discussing the design, I think right now `scp` implements:\n\n- `FromRemote && ToRemote`: save uri[0]::imageName, load in uri[1]::imageName (no way to specify different destination name)\n- `FromRemote && !ToRemote`: save uri[0]::imageName, load locally\n- `!FromRemote && ToRemote`: save args[0] locally, load in uri[0]\n- `podman --remote && !FromRemote && !ToRemote`: save args[0] locally, then use “remote load” based on urls[0]\n  How is this different from the `!FromRemote && ToRemote` case?\n- other: save args[0] locally, load it locally.\n  Do we need this at all? Does it even do anything?\n- (The way to do a cross-local-account copy, e.g. root/non-root is to use ssh to localhost? That might actually be the best option, especially for non-root → root …)\n\nSome questions about the above, at least the From/ToRemote code is generally plausible.\n\nOne notable aspect is that AFAICS there isn’t a way to load an image under a different name, i.e. `scp oldName remote::newName` is not possible. That might require extra infrastructure that does not exist yet (= another scope expansion), but the code should at least refuse to do that if asked.\n\n---\n\nTrying to decode the parser:\n- scp no-colons0 no-colons1\n  !FromRemote && ToRemote\n  ImageName unset, url = [based on ActiveService]\n  == save no-colons0 locally, load it remotely in ActiveService; no-colons1 completely ignored\n- scp no-colons0 prefix1::name1\n  !FromRemote && ToRemote\n  ImageName = name1, url = [based on prefix1]\n  == save no-colon0 locally, load it remotely in prefix1; name1 ignored\n- scp prefix0::name0 no-colons1\n  !FromRemote && ToRemote\n  ImageName = name0, url = [based on prefix0]\n  == save prefix0::name0 locally (doesn’t work), load it remotely in prefix0; no-colons1 completely ignored\n- scp prefix0::name0 prefix1::name1\n  !FromRemote && !ToRemote\n  ImageName = name1, url = [based on prefix0, based on prefix1]\n  == save prefix0::name0 locally (doesn’t work), load it locally (does nothing? and prefix1::name1 completely ignored)\n- scp prefix0::name0\n  FromRemote && !ToRemote\n  ImageName = name0, url = [based on prefix0]\n  == save name0 remotely in prefix0, load it locally\n- scp no-colons\n  !FromRemote && !ToRemote\n  ImageName unset, url = [based on ActiveService]\n  == save no-colons locally, load it locally (does nothing?)\n- --remote scp no-colons\n  !FromRemote && !ToRemote\n  ImageName unset, url = [based on ActiveService]\n  == save no-colons locally, load it remotely in ActiveService\n\nEither I’m seriously misunderstanding, or this looks very confusing. The basic save-remote/load-locally and load-remote/save-locally paths do have at least one working syntax, but the save-remote/load-remote one isn’t reachable.\n\nI’d suggest, for a starting point, to make _both_ source/destination arguments required, and fully explicit (e.g. the image name must be specified in both). That will decouple their semantics, drastically simplifying the parsing (parse each into an (is-remote?; optional URI; image name) triple).\n\nWe can add defaults (like the ActiveService remote, or letting the user only specify the image name once, or Dan’s proposal to have the second `.` mean “load locally”) later, after the functionality is solid — or give up on it if we are out of time."
+        },
+        {
+            "user": "cdoern",
+            "body": "Fixed many of the functionality issues after redesigning as of 7/20. \n\nCurrently `image scp` can do the following:\n\n1.  `Podman image scp imageName host::` local => remote w/out new name\n2.  `Podman image scp host::imageName` remote => local w/out new name\n3.  `Podman image scp host::imageName host::` remote=>remote w/out new name\n4.  `Podman image scp  host:: host::imageName` remote=>remote w/out new name\n5.  `Podman image scp imageName` local=>local currently placeholder for the root=>user feature\n6.  `Podman --remote image scp imageName` local=>remote socket\n\n@rhatdan @mtrmac this is what I will reference tomorrow when discussing code and what features work currently\n\n"
+        },
+        {
+            "user": "cdoern",
+            "body": "@mtrmac @rhatdan Added the key things from this morning's meeting\n\n- fixed localhost issue, every command now displays proper information\n- reused system connection add ssh code, modified that file a bit to make it work\n- added a way to re-tag images if the user gives a new name so remote::alpine remote::foobar will make another image called foobar\n\nI think we are good to go on a v1 if all tests pass and no other issues arise. Left --remote code in as a TODO for future development"
+        },
+        {
+            "user": "rhatdan",
+            "body": "Now you need to get it to pass the tests."
+        },
+        {
+            "user": "openshift-ci[bot]",
+            "body": "[APPROVALNOTIFIER] This PR is **APPROVED**\n\nThis pull-request has been approved by: *<a href=\"https://github.com/containers/podman/pull/10828#\" title=\"Author self-approved\">cdoern</a>*, *<a href=\"https://github.com/containers/podman/pull/10828#pullrequestreview-713009258\" title=\"Approved\">edsantiago</a>*, *<a href=\"https://github.com/containers/podman/pull/10828#pullrequestreview-712027291\" title=\"Approved\">rhatdan</a>*\n\nThe full list of commands accepted by this bot can be found [here](https://go.k8s.io/bot-commands?repo=containers%2Fpodman).\n\nThe pull request process is described [here](https://git.k8s.io/community/contributors/guide/owners.md#the-code-review-process)\n\n<details >\nNeeds approval from an approver in each of these files:\n\n- ~~[OWNERS](https://github.com/containers/podman/blob/main/OWNERS)~~ [edsantiago,rhatdan]\n\nApprovers can indicate their approval by writing `/approve` in a comment\nApprovers can cancel approval by writing `/approve cancel` in a comment\n</details>\n<!-- META={\"approvers\":[]} -->"
+        },
+        {
+            "user": "cdoern",
+            "body": "@jwhonce made necessary changes and fixed system connection issues. @rhatdan PTAL whenever you get a chance."
+        },
+        {
+            "user": "cdoern",
+            "body": "@rhatdan @TomSweeneyRedHat @jwhonce is this good to go?"
+        },
+        {
+            "user": "edsantiago",
+            "body": "@cdoern I think what @jwhonce is saying, and others in the group might silently be waiting for, is that there are unresolved review questions. If you look at the Github `Files changed` tab (the diffs), and scroll through, there are several questions and review comments that are unanswered. Could you go through those, address them in code and/or github response, and, when appropriate, use the 'Mark resolved' button?"
+        },
+        {
+            "user": "cdoern",
+            "body": "Thanks @edsantiago I totally forgot about those comments from a little while back. I made the necessary changes from all of them and repushed!"
+        },
+        {
+            "user": "cdoern",
+            "body": "@jwhonce, failing since I added the annotation saying it does not recognize the quiet flag even though it is being set. Any idea to why this would happen?\n\nEDIT: forgot to remove the remote tests, fixed now"
+        },
+        {
+            "user": "cdoern",
+            "body": "@mtrmac made requested changes most importantly: got rid of arg mentions anywhere but `parseArgs` and removed unnecessary (for now) remote code (began with `len(scpOpts.Connections) == 0`). Thank you so much for all of the comments and help, I really appreciate it!!!I think now we should prioritize getting this through as is especially for the community meeting next week where we are demoing it, I am sure people will break it and show me even more vulnerabilities. "
+        },
+        {
+            "user": "cdoern",
+            "body": "@mtrmac @rhatdan, functionality wise this works as it is supposed to. Should we wait for other semantic/feature changes for a future version? I think the users will show us some good gaps in functionality."
+        },
+        {
+            "user": "cdoern",
+            "body": "@mtrmac I can't reply directly but in response to:\n\n> Now we saving DestImageName, documented as “the one user desires to load”; isn’t the image we are saving a source, and “the one the user wants to copy elsewhere”?\n\n\"the image the user desires to load on their machine or elsewhere\" is synonymous to \"the one the user wants to copy elsewhere\" I believe.\n"
+        },
+        {
+            "user": "cdoern",
+            "body": "Fixed grammatical things and changed some var names to make more clear. I think the logic should stay as is for now (since it works as expected for v1)"
+        },
+        {
+            "user": "cdoern",
+            "body": "Deleted comment because it was outdated @mtrmac "
+        },
+        {
+            "user": "cdoern",
+            "body": "@mtrmac I can't keep up with all of the old comments and replies. I suggest that we keep this as is (barring any major issues) and open up a new PR once this merges to modify little nits."
+        },
+        {
+            "user": "cdoern",
+            "body": "also @mtrmac I added the `ParseNormalizedNamed` to the image name, works the same way as before so I assume that means I used it correctly! :+1: "
+        },
+        {
+            "user": "edsantiago",
+            "body": "Just to weigh in with the experience of an old, old programmer: bugs deferred \"for later\" are never fixed. You move on to other things; review comments are misplaced and forgotten. It is painful to get everything just-right at the beginning, but it is exponentially more painful to find and fix them afterward. \n\n@cdoern your work on this and your responsiveness have been outstanding. @mtrmac you know I always admire your review skills, in this case it's amazing: you're catching subtle but serious issues, and doing so despite constant churn. I don't know how you do it. If I may humbly offer some advice to both of you, it would be: take your time. Wait for each other to finish writing/resolving comments, then wait a little longer, even a day maybe, and then reiterate. That will give time for each issue to get digested. There is no hurry on this. Thanks to both of you for your hard work."
+        },
+        {
+            "user": "cdoern",
+            "body": "Ok I agree with what both of you are saying @edsantiago @mtrmac lets hold off on merging until we get it right!!! I am confident we are getting close. I just implemented the shared `execRemoteCommand` function and eliminated all argument parsing errors. Thank you both for your input, this has really taught me ALOT about podman and development in general"
+        },
+        {
+            "user": "mtrmac",
+            "body": "> Podman maintainers, two outstanding functional issues:\n\nBoth resolved now. There might be some argument parsing issues but those would quickly show up in practical usage."
+        },
+        {
+            "user": "cdoern",
+            "body": "Ok @mtrmac  thank you again for all of the semantic and structural help. I really needed some practice with code elegance. "
+        },
+        {
+            "user": "mtrmac",
+            "body": "@cdoern Thanks for all your work, it’s been an enormous amount.\n\nAt this point the code LGTM, though I realize that we might not actually be agreeing on what the CLI design is :) I’ll happily leave that part to others.\n\n---\n\nNote to self/others: outstanding:\n- https://github.com/containers/podman/pull/10828#discussion_r678680945\n- https://github.com/containers/podman/pull/10828#discussion_r678686839\n- and possibly things since https://github.com/containers/podman/pull/10828#pullrequestreview-719281665"
+        },
+        {
+            "user": "cdoern",
+            "body": "Just made small doc changes and the suggested sematic changes above. Looking forward to showing this off at the community meeting 😀"
+        },
+        {
+            "user": "cdoern",
+            "body": "@rhatdan @TomSweeneyRedHat PTAL"
+        },
+        {
+            "user": "rhatdan",
+            "body": "/lgtm"
+        },
+        {
+            "user": "aardbol",
+            "body": "using scp has been discouraged since openssh 8.0 and should be replaced with sftp or rsync. See https://www.openssh.com/txt/release-8.0\n\nAlthough recent 8.8 update mentions, so expect potential breaking changes:\n\n> A near-future release of OpenSSH will switch scp(1) from using the\n> legacy scp/rcp protocol to using SFTP by default.\n> \n> Legacy scp/rcp performs wildcard expansion of remote filenames (e.g.\n> \"scp host:* .\") through the remote shell. This has the side effect of\n> requiring double quoting of shell meta-characters in file names\n> included on scp(1) command-lines, otherwise they could be interpreted\n> as shell commands on the remote side.\n> \n> This creates one area of potential incompatibility: scp(1) when using\n> the SFTP protocol no longer requires this finicky and brittle quoting,\n> and attempts to use it may cause transfers to fail. We consider the\n> removal of the need for double-quoting shell characters in file names\n> to be a benefit and do not intend to introduce bug- compatibility for\n> legacy scp/rcp in scp(1) when using the SFTP protocol.\n> \n> Another area of potential incompatibility relates to the use of remote\n> paths relative to other user's home directories, for example -\n> \"scp host:~user/file /tmp\". The SFTP protocol has no native way to\n> expand a ~user path. However, sftp-server(8) in OpenSSH 8.7 and later\n> support a protocol extension \"expand-path@openssh.com\" to support\n"
+        },
+        {
+            "user": "rhatdan",
+            "body": "I don't believe we are actually using scp to copy the files between containers/storage.  We are using the ssh protocol to copy them though and we called the command scp, to make it clearer what is happening,  Calling this sftp or rsync would not have made that clear.  But if you would like to rename it to some other command, I am all ears."
+        }
+    ],
+    "cross_references": []
+}

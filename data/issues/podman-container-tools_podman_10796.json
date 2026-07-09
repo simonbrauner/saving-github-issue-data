@@ -1,0 +1,95 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 10796,
+    "type": "issue",
+    "title": "new \"podman secret import\" action",
+    "state": "closed",
+    "labels": [
+        "kind/feature",
+        "stale-issue",
+        "needs-design-doc",
+        "locked - please file new issue/PR"
+    ],
+    "user": "trusch",
+    "body": "<!--\n---------------------------------------------------\nBUG REPORT INFORMATION\n---------------------------------------------------\nUse the commands below to provide key information from your environment:\nYou do NOT have to include this information if this is a FEATURE REQUEST\n\n**NOTE** A large number of issues reported against Podman are often found to already be fixed\nin more current versions of the project.  Before reporting an issue, please verify the\nversion you are running with `podman version` and compare it to the latest release\ndocumented on the top of Podman's [README.md](../README.md).  If they differ, please\nupdate your version of Podman to the latest possible and retry your command before creating\nan issue.\n\nAlso, there is a running list of known issues in the [Podman Troubleshooting Guide](https://github.com/containers/podman/blob/master/troubleshooting.md),\nplease reference that page before opening a new issue.\n\nIf you are filing a bug against `podman build`, please instead file a bug\nagainst Buildah (https://github.com/containers/buildah/issues). Podman build\nexecutes Buildah to perform container builds, and as such the Buildah\nmaintainers are best equipped to handle these bugs.\n-->\n\n**Is this a BUG REPORT or FEATURE REQUEST? (leave only one on its own line)**\n\n/kind feature\n\n**Description**\n\nSince we now have support for the new `passdriver` for secrets and hopefully soon support for external secrets using the `shelldriver`, we should have a way to import already existing secrets.\n\nIn the current approach of secret subsystem the actual secret driver acts like a storage engine for the actual secret data only, the secret metadata (secret name to id mapping + driver + driver options) is stored by the secret manager which wraps the operations of the drivers. Therefor we can only \"see\" secrets which are created through `podman secret create`, because the metadata has to be known to podman.\n\nIf we have secrets that already exist within a certain infrastructure (central repo for the encrypted `gpg` secrets, vault server, bitwarden server etc.), we currently need to extract them and create a copy of them through `podman secret create` so that we can reference the secrets when we run containers. It would be much nicer if we could just tell podman that there **is** a secret accessable via a specific driver with specific options and a driver specific lookup key, so that podman could just create the metadata.\n\nThink about the following setup:\n\n* Alice and Bob are developers for a company.\n* API keys to various services are stored as a central git repo filled with a `gopass` password store\n* Carl joins the company and receives the gpg key to the API keys\n* Carl clones the secret repo `gopass clone https://acme.com/git/secrets.git ~/.passwords/acme`\n* Now he imports the secrets he needs into podman\n\n```\npodman secret import \\\n  --driver pass \\\n  --driver-opts root=$HOME/.passwords/acme \\\n  --driver-opts key=dev@acme.com \\\n  --id services/aws/playground \\\n  aws-credentials\n```\n\nThis would have the advantage that the secret is automatically up to data, because the data is centrally managed.\n\nAnother usecase would be to locally access secrets that are stored on a k8s cluster where we have access:\n\n```\npodman secret import \\\n  --driver shell \\\n  --driver-opts lookup='kubectl get secrets certs -o json | jq -r .data[${SECRET_ID}] | base64 -d' \\\n  --driver-opts store='false' \\\n  --driver-opts list='false' \\\n  --driver-opts delete='false' \\\n  --id \"ca.crt\" \\\n  k8s-ca-certificate\n```  \n\nThe implementation should be straight forward since the driver interface already allows that kind of operation. If we want to import a secret, we would first do a lookup with the specified options and the user supplied id. If we find a valid secret we just update the metadata store and are done. The only problem that I see is that currently the keys that are used to identify secrets on the driver layer are random fixed sized strings. Obviously we would need to check for side effects when relaxing that requirement because then we must allow (reasonably) arbitary id's because the actual backend might have some strange forms (like having slashes for example).\n     \nIf we want, we could also bulk import from the secret driver, since it also supports a `List()` method, but that might require some name mangling to generate reasonable names for the created secrets.\n\nI would like to build this, but wanted to open a issue first to gather feedback.\n\nDoes that sound like a good addition? I think it would be super nice because it improves how podman integrates with other systems and that would be something that you can't do with docker :-P",
+    "comments": [
+        {
+            "user": "rhatdan",
+            "body": "Why not just extend podman secret create to allow it to point at a `remote` store?"
+        },
+        {
+            "user": "trusch",
+            "body": "@rhatdan we could also do that, all it would take in addition then would be the id that the remote store uses.\n\nI guess we would need a dedicated import method on the secret manager though.\n\nI thought the semantic would be much clearer if we give that functionality a new verb"
+        },
+        {
+            "user": "rhatdan",
+            "body": "I would like to see what @ashley-cui and @vrothberg Think."
+        },
+        {
+            "user": "ashley-cui",
+            "body": "It sounds interesting. It seems like this can just use the List() method of a driver, and parse the results, and then make a note of all the available secrets. There has to be checking for duplicates of secret id's too. I don't think allowing arbitrary id's and relaxing of id's is a good idea though, since we want the id's to match what kind of id's docker uses. \n\nI'm still a little wary, since I'm not too sure of the added complexity. The design of secrets originally was that the secrets store sits on top of the driver store and manages it, but this seems like it would need to go the other way a little. We would also need validation etc, and to make sure the id format remains compatible with docker. \n\n@vrothberg wdyt?"
+        },
+        {
+            "user": "vrothberg",
+            "body": "I am torn but sympathize with the idea.\n\nExtending the secrets-driver interface with an \"Import\" method would work but it's a lot of work to implement _now_, to maintain _over time_ and when potentially adding new drivers _in the future._\n\nOn the other hand, writing a bash script to populate/import secrets seems fairly easy. `pass find/list` ... `pass show` -> `podman secret create`.\n\nI think it's important to draw a line where we want secrets to be.  My general rule of thumb is that business logic does not belong into Podman but infrastructure to build business logic.  But I have a hard time deciding whether that's the case here.\n\nOne thing is clear to me though: we cannot support all kinds of backends for importing secrets which lets me gravitate more toward telling users to write custom import scripts for whatever they're using (there are _many_ stores and password managers in the wild)."
+        },
+        {
+            "user": "trusch",
+            "body": "@vrothberg I think you got one thing wrong: we don't have to touch the secret driver interface. All that would be needed is a new function in the secret manager that imports a secret. This action would just take the driver, driver options and a secret id as used in the backend and write that into the secret metadata store. That method *could* call the driver to validate that the secret exists, but that wouldn't be technically needed.\nSo this change wouldn't need to be considered when adding new or maintaining existing drivers.\n\nI totally agree that we can not have dedicated drivers for all possible backends, but with things like the shelldriver (which will probably make it into common@0.41.0) we can make it very convenient to integrate them. Sure users could write import scripts, but my feeling is that it would cause less friction if secrets can be imported because once imported, they always stay up to date + there is one less layer of secret caching that may cause secrets to leak.\n\n"
+        },
+        {
+            "user": "trusch",
+            "body": "@ashley-cui I think having duplicate driver level secret IDs is not a problem, as long as the driver/opts differ. But we should indeed forbid importing the very same secret with the same config twice.\n\nI'm not that opinionated on being compatible with the secret id handling of docker. As far as I know these IDs are not user facing, and the mapping from secret name to driver ID happens in the secret manager. So from my perspective the shape of that ID is an implementation detail. What would be the actual problem when relaxing that format?"
+        },
+        {
+            "user": "ashley-cui",
+            "body": "@trusch secret id's can be used as args to inspect, rm, as well as an arg to the --secret flag, so it is user facing. Podman strives as much as possible to keep docker compatibility in these circumstances. Currently, driver level secret ID's and manager level ID's are the same, and I think driver secrets are indexed using ID's and not name. "
+        },
+        {
+            "user": "vrothberg",
+            "body": "Thanks for clarifying, @trusch.  No objections from my side.  I let you and @ashley-cui figure out the details :)"
+        },
+        {
+            "user": "trusch",
+            "body": "@ashley-cui Ok, I see that this is not working then. How about adding a \"driver-id\" field to the secret spec? In the regular case (user creates secret through podman-secret-create) the driver id would just be equal to the secret id, but in the import case this ID will be specified by the user and can be different from the secret id. That way we have uniform, docker-compatible secret IDs but will still be able to specifiy any driver level key when importing a secret."
+        },
+        {
+            "user": "trusch",
+            "body": "@ashley-cui you are right that the secrets are only indexed by id on the driver level. The driver actually doesn't know anything about the name of the secret."
+        },
+        {
+            "user": "ashley-cui",
+            "body": "Adding as driver-id sounds like it could work! Do you have any ideas on how we would we deal with generating secret names for each imported secret, since the driver does't know anything about secret names? \n\n"
+        },
+        {
+            "user": "trusch",
+            "body": "@ashley-cui for now I would go with implementing this as a single secret operation so that the user specifies the secret name like `podman secret import my-ext-secret --driver ... --driver-opts ... --driver-id external/secret/id` \n\nFor bulk importing we will indeed need something to generate the names. But I would exclude this for now and will open a new issue when the single import is implemented. Does that sound good?"
+        },
+        {
+            "user": "rhatdan",
+            "body": "Yes, lets keep this simple.  Users can build scripts for more complex loads."
+        },
+        {
+            "user": "ashley-cui",
+            "body": "@trusch SGTM! Thanks :D "
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "vrothberg",
+            "body": "Over a year has passed and I begin to believe that `podman secret create` is sufficient as it easily integrates into scripts.\n\n@rhatdan @ashley-cui WDYT?"
+        },
+        {
+            "user": "ashley-cui",
+            "body": "I think so as well, and would be comfortable closing this issue. "
+        }
+    ],
+    "cross_references": []
+}

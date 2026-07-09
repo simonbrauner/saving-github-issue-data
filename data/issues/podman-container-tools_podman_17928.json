@@ -1,0 +1,54 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 17928,
+    "type": "pull_request",
+    "title": "Pass build args in annotations on `kube play`.",
+    "state": "closed",
+    "labels": [
+        "stale-pr",
+        "release-note",
+        "locked - please file new issue/PR"
+    ],
+    "user": "RedTopper",
+    "body": "Hey! I'm trying to find more reasons to use `kube play` over something like podman/docker compose. Those build systems allow build arguments to be passed to the builder when using a Containerfile/Dockerfile as a source.\n\nDuring my search to find if there was a documented (or undocumented!) way to apply these build arguments from a provided kube.yaml file, I ended up getting familiar with the code enough to write a patch.\n\n## Use Case\n\nProviding different build-time arguments for the SHA commits of cloned repositories that are used in specific kube files.\n\nProviding the same Containerfile different GPU architectures to build for depending on the kube file used.\n\n## Example\n\nGiven the setup:\n`test.yaml`\n```yaml\napiVersion: v1\nkind: Pod\nmetadata:\n  annotations:\n    io.podman.build-args.MESSAGE/test1: Hello from test1!\n    io.podman.build-args.MESSAGE/test2: Hello from test2!\n    io.podman.build-args.COMMON: BUILD\n  name: test\nspec:\n  containers:\n  - image: test1:latest\n    name: test1\n  - image: test2:latest\n    name: test2\n```\n\n`test1/Containerfile`\n```Dockerfile\nFROM alpine:latest\nARG MESSAGE=\"Please override me!\"\nARG COMMON=\"test1\"\nRUN echo $COMMON: $MESSAGE > message.txt\nCMD cat message.txt\n```\n\n`test2/Containerfile`\n```Dockerfile\nFROM alpine:latest\nARG MESSAGE=\"Please override me as well!\"\nARG COMMON=\"test2\"\nRUN echo $COMMON: $MESSAGE > message.txt\nCMD cat message.txt\n```\n\nWithout change:\n```\n❯ podman play kube test.yaml --build\n<snip>\n❯ podman run --rm test1\ntest1: Please override me!\n❯ podman run --rm test2\ntest2: Please override me as well!\n```\n\nWith change:\n```\n❯ podman kube play test.yaml --build\n<snip>\n❯ podman run --rm test1\nBUILD: Hello from test1!\n❯ podman run --rm test2\nBUILD: Hello from test2!\n```\n\n## Questions\n\nBuild arguments are probably not the only parameter someone might want to provide to the builder. Should all types of arguments be handled similarly?\n\nWhat of the 63 character limit? Since this is used only for Podman, does it matter?\n\nSometimes build arguments are used to pass secrets. Should these labels be removed? Example showing build value is preserved:\n\n```\n❯ podman generate kube test                         \n# Save the output of this file and use kubectl create -f to import\n# it into Kubernetes.\n#\n# Created with podman-4.5.0-dev\napiVersion: v1\nkind: Pod\nmetadata:\n  annotations:\n    io.podman.build-args.COMMON: BUILD\n    io.podman.build-args.MESSAGE/test1: Hello from test1!\n    io.podman.build-args.MESSAGE/test2: Hello from test2!\n    org.opencontainers.image.base.digest/test-test1: sha256:e2e16842c9b54d985bf1ef9242a313f36b856181f188de21313820e1\n    org.opencontainers.image.base.digest/test-test2: sha256:e2e16842c9b54d985bf1ef9242a313f36b856181f188de21313820e1\n    org.opencontainers.image.base.name/test-test1: docker.io/library/alpine:latest\n    org.opencontainers.image.base.name/test-test2: docker.io/library/alpine:latest\n<snip>\n```\n\n#### Does this PR introduce a user-facing change?\n\n```release-note\nYes, but let's review this before we get this far. Documentation changes would also be needed.\n```\n",
+    "comments": [
+        {
+            "user": "openshift-ci[bot]",
+            "body": "[APPROVALNOTIFIER] This PR is **NOT APPROVED**\n\nThis pull-request has been approved by: *<a href=\"https://github.com/containers/podman/pull/17928#\" title=\"Author self-approved\">RedTopper</a>*\n**Once this PR has been reviewed and has the lgtm label**, please assign ygalblum for approval. For more information see [the Kubernetes Code Review Process](https://git.k8s.io/community/contributors/guide/owners.md#the-code-review-process).\n\nThe full list of commands accepted by this bot can be found [here](https://go.k8s.io/bot-commands?repo=containers%2Fpodman).\n\n<details open>\nNeeds approval from an approver in each of these files:\n\n- **[OWNERS](https://github.com/containers/podman/blob/main/OWNERS)**\n\nApprovers can indicate their approval by writing `/approve` in a comment\nApprovers can cancel approval by writing `/approve cancel` in a comment\n</details>\n<!-- META={\"approvers\":[\"ygalblum\"]} -->"
+        },
+        {
+            "user": "rhatdan",
+            "body": "@flouthoc @nalind PTAL"
+        },
+        {
+            "user": "vrothberg",
+            "body": "@umohnani8 @baude PTAL"
+        },
+        {
+            "user": "nalind",
+            "body": "My understanding of annotation names in Kubernetes is that prefixes are used for namespacing and generally resemble DNS domains.  [Here's a reference.](https://kubernetes.io/docs/concepts/overview/working-with-objects/annotations/#syntax-and-character-set)\nThe current `BuildArgumentsAnnotationPrefix` value puts its subdomains in the reverse of the order suggested, and the part of an annotation's name that's derived by mixing `BuildArgumentsAnnotationPrefix` and a given build arg's name is either the \"prefix\" or the \"name\" part depending on whether or not the build arg is aimed at a specific image."
+        },
+        {
+            "user": "RedTopper",
+            "body": "@nalind yeah, good point!\n\n I originally was using `build-args.podman.io/VARNAME`, but changed it when I was making this PR due to the output of `podman generate kube`. `org.opencontainers.image.base.digest/test-test1` inspired both the reverse notation along with using `/podname` for scoping.\n\nThe original style would also output as `build-args.podman.io/VARNAME/test-test1`, which had two `/` characters. But that can be fixed in `libpod/kube.go` like it is now.\n\nI'm still looking for feedback on this idea in general. Perhaps one of these might be better?\n\n```yaml\n# Just to have the domain in the correct order\nVAR.build-args.podman.io: VAL\nVAR.build-args.podman.io/pod1: VAL\n\n# To have the \"name\" part of the key be the arg name\nbuild-args.podman.io/VAR: VAL\n# Would require a second variable to specify which pods get the var, or all if unset.\nbuild-args-scope.podman.io/VAR: \"pod1 pod2\"\n\n# Maybe specify the pod as part of the key?\nbuild-args.podman.io/VAR: \"pod1 pod2: VAL\"\n```\n\nI haven't tried any of those above examples in practice yet, though."
+        },
+        {
+            "user": "RedTopper",
+            "body": "@nalind Do any of those proposals look reasonable? I can give one a shot, or turn this into a regular issue if more thought is needed."
+        },
+        {
+            "user": "vrothberg",
+            "body": "@nalind WDYT?"
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this PR had no activity for 30 days."
+        },
+        {
+            "user": "RedTopper",
+            "body": "I'll close this for now. If anyone wants to revisit this feature, feel free to re-open it!"
+        }
+    ],
+    "cross_references": []
+}

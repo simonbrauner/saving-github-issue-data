@@ -1,0 +1,98 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 14527,
+    "type": "issue",
+    "title": "Add podman play kube --build support for podman remotes",
+    "state": "open",
+    "labels": [
+        "kind/feature",
+        "kube"
+    ],
+    "user": "1player",
+    "body": "**Is this a BUG REPORT or FEATURE REQUEST? (leave only one on its own line)**\n\n/kind feature\n\n**Description**\n\n`podman play kube --build` is not supported on remote podman. The documentation doesn't specify why, and I wasn't able to find any discussion of why exactly it isn't working, as `podman build` works on remote mode.\n\nThe use case is developing on immutable distributions like Fedora Silverblue. I'm running podman inside a toolbox, I can build images manually with `podman --remote build`, I would like `podman play kube` to be able to build as well, so I only need one command to local development.\n\n**Steps to reproduce the issue:**\n\n1. Set up a toolbox with access to the host podman socket\n2. `podman play kube --build`\n\n**Describe the results you received:**\n\n`Error: unknown flag: --build`\n\n**Describe the results you expected:**\n\nBuild to work on remote podman.\n\n**Additional information you deem important (e.g. issue happens only occasionally):**\n\n**Output of `podman version`:**\n\n```\nClient:       Podman Engine\nVersion:      4.1.0\nAPI Version:  4.1.0\nGo Version:   go1.18.1\nGit Commit:   e4b03902052294d4f342a185bb54702ed5bed8b1\nBuilt:        Fri May  6 19:18:30 2022\nOS/Arch:      linux/amd64\n\nServer:       Podman Engine\nVersion:      4.1.0\nAPI Version:  4.1.0\nGo Version:   go1.18\nBuilt:        Fri May  6 17:15:54 2022\nOS/Arch:      linux/amd64\n```\n",
+    "comments": [
+        {
+            "user": "Luap99",
+            "body": "@baude PTAL\n\nThe problem with remote support is that remote build has to tar the full context dir and send it to the remote server.\nCurrently the client only sends the yaml content to the server and the server does all the work. To make remote build work the client would need to parse the yaml and then build the images. This is significant more complex."
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@flouthoc PTAL"
+        },
+        {
+            "user": "axel7083",
+            "body": "> The problem with remote support is that remote build has to tar the full context dir and send it to the remote server. \n\nWhy is it a problem ? It is what `podman build` is doing isn't it ? One possibility could be to have --build default to false on remote machine, so the context-dir is not send if it is not explicitly required "
+        },
+        {
+            "user": "Luap99",
+            "body": "The client doesn't parse the yaml so it has no idea what is specified in the file as such it can never perform any builds.\n\nYou would need a major rewrite of the API in order to allow such things and this is not trivial. "
+        },
+        {
+            "user": "axel7083",
+            "body": "> The client doesn't parse the yaml so it has no idea what is specified in the file as such it can never perform any builds.\n\n@Luap99 After looking a bit at the code, I still think that the client **does not need to parse the file**.\n\n### `build` mechanism\n\nLet's look at the `build` command and how it provide the context to the server. The client never parse the Containerfile, it creates a tar from the ContextDirectory _(and other elements such as secrets)_.\n\nhttps://github.com/containers/podman/blob/acc78af0c3870021ef683b8ca672522b8478b4d1/pkg/bindings/images/build.go#L438\n\nThen it provide in the POST request at `/build` the tar file as the body\n\nhttps://github.com/containers/podman/blob/acc78af0c3870021ef683b8ca672522b8478b4d1/pkg/bindings/images/build.go#L590\n\nOn the server side, it will ensure the content body is `x-tar`.\n\nhttps://github.com/containers/podman/blob/bd00c6fef9b8dce1784fd531a8f3037eafb69008/pkg/api/handlers/compat/images_build.go#L42-L43\n\nThen untar, and uses it as the ContextDirectory\n\nhttps://github.com/containers/podman/blob/bd00c6fef9b8dce1784fd531a8f3037eafb69008/pkg/api/handlers/compat/images_build.go#L74C27-L74C41\n\n### `kube play` mechanism\n\nWhen using `kube play` according to the documentation, the default ContextDirectory will be the parent folder of the yaml file provided. Or the value defined by --context-dir option.\n\nThe body of the request `kube play` is not the context directory as it is not supported, but simply concat all the yaml resources\n\nhttps://github.com/containers/podman/blob/72f1617facbb83fbc1e74583f62394dfc6142109/pkg/bindings/kube/kube.go#L70\n\nand provide them as body.\n\nhttps://github.com/containers/podman/blob/72f1617facbb83fbc1e74583f62394dfc6142109/pkg/bindings/kube/kube.go#L78\n\n### Question\n\nMy question is, why just like the `build` command, where the Containerfile is not parsed by the client, and the context is simply send to the server, the same could be done for the `kube play`"
+        },
+        {
+            "user": "Luap99",
+            "body": "From the docs:\n\nKube play is capable of building images on the fly given the correct directory layout and Containerfiles. This option is not available for remote clients, including Mac and Windows (excluding WSL2) machines, yet. Consider the following excerpt from a YAML file:\n```\napiVersion: v1\nkind: Pod\nmetadata:\n...\nspec:\n  containers:\n  - name: container\n    image: foobar\n...\n```\nIf there is a directory named foobar in the current working directory with a file named Containerfile or Dockerfile, Podman kube play builds that image and name it foobar. An example directory structure for this example looks like:\n```\n|- mykubefiles\n    |- myplayfile.yaml\n    |- foobar\n         |- Containerfile\n```\n\nThe build considers foobar to be the context directory for the build NOT . If there is an image in local storage called foobar, the image is not built unless the --build flag is used. Use --build=false to completely disable builds.\n\n\n---\n\nSo without reading the file you cannot know what the dir on the client because the context dir is based of the image name foobar. Also without reading the file we wouldn't even know how to name the final image."
+        },
+        {
+            "user": "axel7083",
+            "body": "> So without reading the file you cannot know what the dir on the client because the context dir is based of the image name foobar. Also without reading the file we wouldn't even know how to name the final image.\n\nI do not see the problem of sending the entire directory where `myplayfile.yaml` is, and let the backend uses what it needs after parsing it, just like the build command is sending all the context-dir without knowing in advance what the Containerfile will used.\n\n"
+        },
+        {
+            "user": "Luap99",
+            "body": "Sending a (possible) large directory by default is very bad."
+        },
+        {
+            "user": "axel7083",
+            "body": "> Sending a (possible) large directory by default is very bad.\n\nI understand the concerns, context directory can be very big on build too, but we are still sending them. IMO the sizing issue is the user responsibility: when building an image or a pod making a context directory that is okey to deal with is on the user part.\n\nI still think that this would be manageable, and could be improve by having the `build` option to false by default. Having this feature working on more platforms by supporting the remote feel like it would have a lot of benefits, overlapping the few drawback already facing when using podman build."
+        },
+        {
+            "user": "Luap99",
+            "body": "If you want to propose a specific way on how to do it then sure please do so here.\n\nYou can also join our cabal meetings to discus it there, next one on July 2 (https://hackmd.io/gQCfskDuRLm7iOsWgH2yrg?both). So feel free to add this topic there."
+        },
+        {
+            "user": "l0rd",
+            "body": "This issue has been mentioned by [this PR](https://github.com/containers/podman/pull/23894) that tries to fix it. \n\nThe right way to solve this would be to package and send the images-named folders and context-dir folders (and that requires the client to parse YAMLs and the API to be adapted) but as mentioned by @Luap99 this is not trivial and since it's not a top priority it's unlikely that we are going to implement it in the short term.\n\nBut there may be a workaround solution, easy to implement, that would address the default podman machine cases.\n\nPodman machine automatically mounts some host folders inside the VM (mainly [`/Users/` for Mac](https://github.com/containers/common/blob/8ccd0ee1f81cfdd2d423cb64d1f0fd5fc56afbbf/pkg/config/default_darwin.go#L16), [`C:/` for Windows](https://github.com/containers/common/blob/8ccd0ee1f81cfdd2d423cb64d1f0fd5fc56afbbf/pkg/config/default_windows.go#L48) and [`$HOME` for Linux](https://github.com/containers/common/blob/8ccd0ee1f81cfdd2d423cb64d1f0fd5fc56afbbf/pkg/config/default_linux.go#L63)). And there are already some `podman` commands that map a local folder to a folder in the VM:\nFor example in the command `podman build ... --build-context context1=C:\\User\\bob\\my-project ...`, the path `C:\\User\\bob\\my-project` is automatically mapped to `/mnt/c/User/bob/my-project` (see function [ConvertWinMountPath()](https://github.com/containers/podman/blob/a46f798831df06c472b288db7b34de8536a7ea5a/pkg/specgen/winpath.go#L24)). On MacOS and Linux the mapping is not required as the host and guest folders paths are identical.\nThe same mechanism is used for local volumes paths such as in `podman run -v C:\\User\\bob\\my-project` where the volume path argument is mapped to `/mnt/c/User/bob/my-project` using the same function.\n\nFor `podman kube play`, instead of preventing builds from happening, we could implement a similar \"best effort\" solution. That means that on windows we should convert the current working path and the optional `--context-dir` to the corresponding path in the VM (using [ConvertWinMountPath()](https://github.com/containers/podman/blob/a46f798831df06c472b288db7b34de8536a7ea5a/pkg/specgen/winpath.go#L24)) and, server side, we should always look for the Containerfiles in the image folders and build them when they exist.\n\nThis doesn’t solve all the use cases (i.e. remote hosts, non-default machine mounts, build contexts in non-mounted paths etc…) but is simple to implement and unblock the podman machine cases.\n\n@fixomatic-ctrl would this address your use case?"
+        },
+        {
+            "user": "fixomatic-ctrl",
+            "body": "> The right way to solve this would be to package and send the images and context-dir folders (and that requires the client to parse YAMLs and the API to be adapted)\n\nI understand that this is a complicated task, and clearly not trivial, thanks for the explanation and details.\n\n> @fixomatic-ctrl would this address your use case?\n\nThis would partially address some of my use cases, but I would not be able to continue using podman from inside a dev-container, the solution provided would not fix the problem as it would not be able to find a valid path to provide the resources.\n\nGiven the details of the explanation for the `The right way`, I think the work can be divided in two tasks:\n- [ ] The libpod api should support the tar Content-Type, same as the build but should still support text/json/yaml for backward compatiblity\n- [ ] The remote client should support (when --build provided) building a tar with the minimum contexts required in it.   "
+        },
+        {
+            "user": "l0rd",
+            "body": "> This would partially address some of my use cases, but I would not be able to continue using podman from inside a dev-container, the solution provided would not fix the problem as it would not be able to find a valid path to provide the resources.\n\n@fixomatic-ctrl please provide more details. My understanding is that you are running `podman kube play` from VS Code terminal from within a devcontainer. Podman running inside the container should be able to build the `Containerfile` that is mounted in the container. That should already work now. But I may have misunderstood your scenario."
+        },
+        {
+            "user": "john-westcott-iv",
+            "body": "Our devs have a mixture of both OS X and Linux. It would be really nice for this feature to work."
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 23894
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 24015
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 24435
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 25250
+        }
+    ]
+}

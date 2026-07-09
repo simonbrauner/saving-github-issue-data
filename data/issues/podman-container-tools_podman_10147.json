@@ -1,0 +1,130 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 10147,
+    "type": "pull_request",
+    "title": "migrate Podman to containers/common/libimage",
+    "state": "closed",
+    "labels": [
+        "lgtm",
+        "approved",
+        "locked - please file new issue/PR"
+    ],
+    "user": "vrothberg",
+    "body": "Migrate the Podman code base over to `common/libimage` which replaces\n`libpod/image` and a lot of glue code entirely.\n\nNote that I tried to leave bread crumbs for changed tests.\n\nMiscellaneous changes:\n\n * Some errors yield different messages which required to alter some\n   tests.\n\n * I fixed some pre-existing issues in the code.  Others were marked as\n   `//TODO`s to prevent the PR from exploding.\n\n * The `NamesHistory` of an image is returned as is from the storage.\n   Previously, we did some filtering which I think is undesirable.\n   Instead we should return the data as stored in the storage.\n\n * Touched handlers use the ABI interfaces where possible.\n\n * Local image resolution: previously Podman would match \"foo\" on\n   \"myfoo\".  This behaviour has been changed and Podman will now\n   only match on repository boundaries such that \"foo\" would match\n   \"my/foo\" but not \"myfoo\".  I consider the old behaviour to be a\n   bug, at the very least an exotic corner case.\n\n * Futhermore, \"foo:none\" does *not* resolve to a local image \"foo\"\n   without tag anymore.  It's a hill I am (almost) willing to die on.\n\n * `image prune` prints the IDs of pruned images.  Previously, in some\n   cases, the names were printed instead.  The API clearly states ID,\n   so we should stick to it.\n\n * Compat endpoint image removal with _force_ deletes the entire not\n   only the specified tag.\n\nSigned-off-by: Valentin Rothberg <rothberg@redhat.com>",
+    "comments": [
+        {
+            "user": "vrothberg",
+            "body": "Note: this does _not_ yet implement an event system in `libimage`.  I want to tackle that _after_ this PR has been merged. Then, I'll update Buildah to the latest `libimage`."
+        },
+        {
+            "user": "vrothberg",
+            "body": "@mheon @baude PTAL.\n\nI'm now massaging the changes until they pass CI. But early feedback is good feedback."
+        },
+        {
+            "user": "vrothberg",
+            "body": "@jwhonce if you have some cycles to check why `podman/test/e2e/create_test.go:634` is failing, I'd love to have your eyes on it.\n\nI cannot reproduce locally and this seems to be the last remote fart."
+        },
+        {
+            "user": "vrothberg",
+            "body": "Now all tests _but_ the buildah-bud one should pass.  The reason for that is that saving/loading is now smarter than before which breaks exactly one bud test.\n\nOnce the updates to libimage are merged into c/common, we can merge it into Buildah and then vendor buildah and c/common here."
+        },
+        {
+            "user": "vrothberg",
+            "body": "Note: this should fix https://github.com/containers/podman/issues/10116."
+        },
+        {
+            "user": "vrothberg",
+            "body": "Events for image operations will be added in a follow-up PR."
+        },
+        {
+            "user": "vrothberg",
+            "body": "@mheon, can you have a look at the libpod changes?"
+        },
+        {
+            "user": "mheon",
+            "body": "Looks fine to me"
+        },
+        {
+            "user": "vrothberg",
+            "body": "> Looks fine to me\n\nThanks for checking!"
+        },
+        {
+            "user": "vrothberg",
+            "body": "@containers/podman-maintainers should turn green now"
+        },
+        {
+            "user": "rhatdan",
+            "body": "Fixes: https://github.com/containers/podman/issues/10116"
+        },
+        {
+            "user": "edsantiago",
+            "body": "Fix for bud test:\n```diff\ndiff --git a/test/buildah-bud/apply-podman-deltas b/test/buildah-bud/apply-podman-deltas\nindex 9f6f38190..57cca7a04 100755\n--- a/test/buildah-bud/apply-podman-deltas\n+++ b/test/buildah-bud/apply-podman-deltas\n@@ -137,7 +137,8 @@ skip \"podman requires a directory, not a Dockerfile\" \\\n\n # ...or due to Ed's laziness\n skip \"Too much effort to spin up a local registry\" \\\n-     \"bud with encrypted FROM image\"\n+     \"bud with encrypted FROM image\" \\\n+     \"bud --authfile\"\n\n # ...or due to a fundamental arg-parsing difference between buildah and podman\n # which we could and perhaps should fix in the buildah repo via:\n@@ -146,6 +147,10 @@ skip \"Too much effort to spin up a local registry\" \\\n skip \"FIXME FIXME FIXME: argument-order incompatible with podman\" \\\n      \"bud-squash-hardlinks\"\n\n+skip \"FIXME FIXME FIXME we'll figure these out later\" \\\n+     \"bud-multi-stage-nocache-nocommit\" \\\n+     \"bud with --cgroup-parent\"\n+\n ###############################################################################\n # BEGIN tests which are skipped due to actual podman bugs.\n skip \"FIXME: podman #9915\" \\\n```\n[or, download [buildah-bud-skip.diff.txt](https://github.com/containers/podman/files/6423855/buildah-bud-skip.diff.txt)]\n\nThe `--authfile` one is a permanent skip. The other two will have to be fixed in buildah itself: both are newly-added or -edited tests, and I guessI didn't review them properly for working under podman. That is a problem for later (I will take it on)."
+        },
+        {
+            "user": "vrothberg",
+            "body": "Thank you very much, @edsantiago!"
+        },
+        {
+            "user": "vrothberg",
+            "body": "```\n[+0100s] not ok 8 bud with --layers and --no-cache flags\n[...]\n[+0100s] # #/vvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv\n[+0100s] # #|     FAIL: buildah inspect --format {{index .Docker.History 2}} test1\n[+0100s] # #| expected: 'FROM localhost/alpine:latest'\n[+0100s] # #|   actual: '{2021-05-05 07:37:21.000305695 +0000 UTC  /bin/sh -c mkdir /hello FROM docker.io/library/alpine:latest false}'\n```\n\nOne last to go.  Once Podman is updated in the Buildah CI VMs, we'll run into the same issue there.  Some background: previously `podman save` would tag `alpine` as `localhost/alpine` in the tar archive (even if the local image is actually docker.io/library/alpine).  This has been fixed in libimage, hence the error.\n\nWhile it changes previous behavior, I see it as fixing a bug."
+        },
+        {
+            "user": "vrothberg",
+            "body": "Ready to be merged"
+        },
+        {
+            "user": "openshift-ci-robot",
+            "body": "[APPROVALNOTIFIER] This PR is **APPROVED**\n\nThis pull-request has been approved by: *<a href=\"https://github.com/containers/podman/pull/10147#pullrequestreview-652245030\" title=\"Approved\">rhatdan</a>*, *<a href=\"https://github.com/containers/podman/pull/10147#\" title=\"Author self-approved\">vrothberg</a>*\n\nThe full list of commands accepted by this bot can be found [here](https://go.k8s.io/bot-commands?repo=containers%2Fpodman).\n\nThe pull request process is described [here](https://git.k8s.io/community/contributors/guide/owners.md#the-code-review-process)\n\n<details >\nNeeds approval from an approver in each of these files:\n\n- ~~[OWNERS](https://github.com/containers/podman/blob/master/OWNERS)~~ [rhatdan,vrothberg]\n\nApprovers can indicate their approval by writing `/approve` in a comment\nApprovers can cancel approval by writing `/approve cancel` in a comment\n</details>\n<!-- META={\"approvers\":[]} -->"
+        },
+        {
+            "user": "rhatdan",
+            "body": "As Nancy Pelosi famously said \"\"We have to pass the bill so that you can find out what is in it.\" \n\nMeaning this PR is so huge we probably have to merge it and hope that the CI/CD system was good enough to catch regressions, then we need to cut a beta release and request as many users as possible use it, to find if we have regressions."
+        },
+        {
+            "user": "vrothberg",
+            "body": "> As Nancy Pelosi famously said \"\"We have to pass the bill so that you can find out what is in it.\"\n> \n> Meaning this PR is so huge we probably have to merge it and hope that the CI/CD system was good enough to catch regressions, then we need to cut a beta release and request as many users as possible use it, to find if we have regressions.\n\nTotally agree.  It's too big to review entirely.  I think we can cut a first RC next week.  I want the team to test manually before."
+        },
+        {
+            "user": "mheon",
+            "body": "/lgtm"
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "buildah",
+            "number": 3194
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 10192
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 10193
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 10116
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 10215
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 11669
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 11718
+        }
+    ]
+}

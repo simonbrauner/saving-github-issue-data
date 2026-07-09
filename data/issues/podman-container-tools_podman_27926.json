@@ -1,0 +1,65 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 27926,
+    "type": "pull_request",
+    "title": "healthcheck_linux: avoid failing transient units",
+    "state": "closed",
+    "labels": [
+        "locked - please file new issue/PR",
+        "5.8"
+    ],
+    "user": "Arctize",
+    "body": "Add a new flag `--ignore-result` to `podman healthcheck run` and use it in the transient services that trigger the healthchecks. The services only have to trigger the execution, their own state should not depend on the result of the healthchecks. This way there are no failing systemd services unless there is actually a fatal error.\n\nContext:\n\nA change was introduced in 88bacfc133cd7a2e388cf6c2f2e3be157d0f6e74 that skips execution of the healthcheck command during the startup period when the K8s `initialDelaySeconds` is defined for a liveness probe. A `HealthCheckDefined` is returned instead. This means that `podman healthcheck run` always exits with a non-zero code during that time and the transient systemd unit that triggers the healthcheck fails.\n\n<!--\nThanks for sending a pull request!\n\nFor more detailed information, please review our contributing guidelines:\nhttps://github.com/containers/podman/blob/main/CONTRIBUTING.md#submitting-pull-requests\n-->\n\n#### Checklist\n\nEnsure you have completed the following checklist for your pull request to be reviewed:\n<!-- Use [x] to mark as done, or click the checkbox after opening PR -->\n\n- [x] Certify you wrote the patch or otherwise have the right to pass it on as an open-source patch by signing all\ncommits. (`git commit -s`). (If needed, use `git commit -s --amend`).  The author email must match\nthe sign-off email address. See [CONTRIBUTING.md](https://github.com/containers/podman/blob/main/CONTRIBUTING.md#sign-your-prs)\nfor more information.\n- [ ] Referenced issues using `Fixes: #00000` in commit message (if applicable)\n- [x] [Tests](https://github.com/containers/podman/tree/main/test#readme) have been added/updated (or no tests are needed)\n- [x] [Documentation](https://github.com/containers/podman/blob/main/docs/README.md) has been updated (or no documentation changes are needed)\n- [x] All commits pass `make validatepr` (format/lint checks)\n- [x] [Release note](https://github.com/kubernetes/community/blob/master/contributors/guide/release-notes.md) entered in the section below (or `None` if no user-facing changes)\n\n#### Does this PR introduce a user-facing change?\n\n<!--\nWrite `None` if there are no user-facing changes, otherwise enter your release note below.\nInclude \"action required\" if users need to take action when upgrading.\n-->\n\n```release-note\nAvoid failures of transient healthcheck services\n```\n",
+    "comments": [
+        {
+            "user": "Arctize",
+            "body": "TBH, I'm not entirely sure how the semantics of kubernetes liveness probes could be mapped to those of podman health checks.\n\nAccording to the current docs https://docs.podman.io/en/latest/markdown/podman-healthcheck-run.1.html:\n\n> \n\n    * 0 = healthcheck command succeeded\n\n    * 1 = healthcheck command failed\n\n    * 125 = an error has occurred\n\nIf `podman healthcheck run` is run before the initialDelaySeconds have passed, the healthcheck command has neither succeeded nor failed. It simply hasn't run yet.\nPersonally I think it would be cleaner to return 0 to avoid failed services (that is how I noticed this in the first place, due to occasional healthcheck service failures in the journal logs) but I do realize that this might not be the most intuitive behavior.\n\nThe best solution would probably be to use `HealthCheckStarted` (which still results in exit code 1 when running a healthcheck manually) but then additionally avoid triggering the transient service for the healthcheck before initialDelaySeconds are over. I attempted this quickly in https://github.com/containers/podman/blob/main/libpod/healthcheck_linux.go#L44 by setting `OnActiveSec=` for the timer, but the timer will trigger if any of the conditions are met so the healthcheck still triggers too early if the `periodSeconds` is lower. So implementing it like this would require more refactoring. I saw [here](https://github.com/containers/podman/issues/27678#issuecomment-3613326289) that changes in this area are planned so I didn't pursue this further."
+        },
+        {
+            "user": "jankaluza",
+            "body": "I definitely understand you motivation here, but I personally do not like the easy way to fix it. It means we return \"succeed\" for health-check even before we start it. But at the same time, the current code most likely breaks some setup, so doing this until we have cleaner solution might not be completely wrong.\n\nLet's see what other say."
+        },
+        {
+            "user": "Arctize",
+            "body": "Approaching this from a slightly different direction: Do the transient services running the healthchecks necessarily have to fail? From what I gather they serve primarly as the infrastructure to get the healthchecks to execute at the specified intervals. So in a sense one could say the service was successful if it triggered the healthcheck.\n\nAnother approach would then be:\n\n- Make the transient services that run `podman healthcheck run` pass regardless of healtcheck result and only fail if the exit code is `125 = an error has occurred`\n- Have `podman healthcheck run` continue to return a non-zero code when called before `initialDelaySeconds`\n  - Perhaps use a new exit code `2 = starting` for clarity / correctness\n\nWDYT?"
+        },
+        {
+            "user": "jankaluza",
+            "body": "I got your point and it somehow makes sense to me too :-).\n\n@mheon @Luap99 , what do you think?\n\nThe code change is trivial, but I cannot tell if we want it or not :-)."
+        },
+        {
+            "user": "mheon",
+            "body": "My worry would be that people are calling `podman healthcheck run` manually and checking exit code (we do document it, after all). Maybe do this as an option on the command? Since we control the way healthchecks are invoked via systemd, we can make sure it's passed with the new argument."
+        },
+        {
+            "user": "Arctize",
+            "body": "> Maybe do this as an option on the command? Since we control the way healthchecks are invoked via systemd, we can make sure it's passed with the new argument.\n\nShould I add a new exit code 2 (starting) to `podman healthcheck run` and and then a flag `--ignore-startup`?\n\nOr just a flag like `--ignore-result` which makes the exit code 0 regardless of healthcheck result or if execution was skipped altogether.\n\n"
+        },
+        {
+            "user": "mheon",
+            "body": "I think my preference would be for the 2nd option - anything that wasn't a legitimately fatal error should return 0"
+        },
+        {
+            "user": "packit-as-a-service[bot]",
+            "body": "[NON-BLOCKING] Packit jobs failed. @containers/packit-build please check. Everyone else, feel free to ignore."
+        },
+        {
+            "user": "Arctize",
+            "body": "Could it be that the remaining failing tests are just flaky? Otherwise, this is ready from my side."
+        },
+        {
+            "user": "mheon",
+            "body": "Github is having issues. Restarting tests."
+        },
+        {
+            "user": "mheon",
+            "body": "Few comments. Approach LGTM. I'd love to have this in 5.8.0"
+        },
+        {
+            "user": "mheon",
+            "body": "LGTM\n@containers/podman-maintainers PTAL and merge"
+        }
+    ],
+    "cross_references": []
+}

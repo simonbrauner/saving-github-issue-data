@@ -1,0 +1,48 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 11283,
+    "type": "issue",
+    "title": "Most podman commands hung after improper container shutdown",
+    "state": "closed",
+    "labels": [
+        "kind/bug",
+        "stale-issue",
+        "locked - please file new issue/PR"
+    ],
+    "user": "PhracturedBlue",
+    "body": "/kind bug\n**Description**\n\nAfter doing a `systemctl restart <podman container>` , the process hung.  after a 'ctrl-c' all attempts to access that container now hang:\n```\npodman ps  --> hangs\npodman info --> hangs\npodman inspect <broken container> --> hangs\npodman inspect <other container> --> success\npodman inpect <network> --> success\npodman stop <broken container> -->hangs\n```\n\n```\npodman version\nVersion:      3.2.3\nAPI Version:  3.2.3\nGo Version:   go1.16.6\nBuilt:        Wed Dec 31 16:00:00 1969\nOS/Arch:      linux/amd64\n```\n\n```\npodman --log-level=debug ps\nINFO[0000] podman filtering at log level debug          \nDEBU[0000] Called ps.PersistentPreRunE(podman --log-level=debug ps) \nDEBU[0000] Merged system config \"/etc/containers/containers.conf\" \nDEBU[0000] Using conmon: \"/opt/podman/libexec/podman/conmon\" \nDEBU[0000] Initializing boltdb state at /var/lib/containers/storage/libpod/bolt_state.db \nDEBU[0000] Overriding run root \"/var/run/containers/storage\" with \"/run/containers/storage\" from database \nDEBU[0000] Using graph driver overlay                   \nDEBU[0000] Using graph root /var/lib/containers/storage \nDEBU[0000] Using run root /run/containers/storage       \nDEBU[0000] Using static dir /var/lib/containers/storage/libpod \nDEBU[0000] Using tmp dir /run/libpod                    \nDEBU[0000] Using volume path /var/lib/containers/storage/volumes \nDEBU[0000] Set libpod namespace to \"\"                   \nDEBU[0000] [graphdriver] trying provided driver \"overlay\" \nDEBU[0000] overlay: ignore_chown_errors=true            \nDEBU[0000] overlay: mount_program=/opt/podman/bin/fuse-overlayfs \nDEBU[0000] backingFs=extfs, projectQuotaSupported=false, useNativeDiff=false, usingMetacopy=false \nDEBU[0000] Initializing event backend file              \nDEBU[0000] configured OCI runtime crun initialization failed: no valid executable found for OCI runtime crun: invalid argument \nDEBU[0000] configured OCI runtime kata initialization failed: no valid executable found for OCI runtime kata: invalid argument \nDEBU[0000] configured OCI runtime runsc initialization failed: no valid executable found for OCI runtime runsc: invalid argument \nDEBU[0000] Using OCI runtime \"/usr/bin/runc\"            \nINFO[0000] Found CNI network podman (type=bridge) at /etc/cni/net.d/87-podman-bridge.conflist \nINFO[0000] Found CNI network inter-cont (type=bridge) at /etc/cni/net.d/inter-cont.conflist \nDEBU[0000] Default CNI network name podman is unchangeable \nINFO[0000] Setting parallel job count to 13             \n<< hang >>\n```\nThere are no containers running:\n```\nps -ef | grep podman\nroot     14813  3790  0 10:14 pts/1    00:00:00 grep podman\nps -ef | grep conmon\nroot     14816  3790  0 10:15 pts/1    00:00:00 grep conmon\n```\n\n```podman stop 920ddf1d\nDEBU[0000] Using OCI runtime \"/usr/bin/runc\"            \nINFO[0000] Found CNI network podman (type=bridge) at /etc/cni/net.d/87-podman-bridge.conflist \nINFO[0000] Found CNI network inter-cont (type=bridge) at /etc/cni/net.d/inter-cont.conflist \nDEBU[0000] Default CNI network name podman is unchangeable \nINFO[0000] Setting parallel job count to 13             \nDEBU[0000] Starting parallel job on container 920ddf1d9675a312ab6802d2c6f91e8a2beb85a6f5778794652c608833c02bc0 \n<< hang >>\n```\n\nI'd like to figure out how I can unlock my system so I can delete this container and move forward.",
+    "comments": [
+        {
+            "user": "mheon",
+            "body": "You can force Podman to detect that a reboot has occurred (which will reset all container states) by removing `/run/libpod/alive` file. You can also remove the `/dev/shm/libpod_lock` file at the same time to force a full recreation of shared container locks.\n\nOtherwise - can you provide additional information on your environment (distribution, architecture, etc)? This looks like a container lock is being held despite no Podman process running, but that should not be possible - we're using standard library locks which guarantee stale locks can be detected and freed.\n\nOtherwise, please provide the systemd unit you're using - could have some bearing on why this failed."
+        },
+        {
+            "user": "PhracturedBlue",
+            "body": "I'm running on debian-buster x86_64, with ext4 filesystem, but am using statically built podman, conmon, runc.\nI'm in the process of moving my docker based images to podman so I have both podman and docker installed and running concurrently.\n\nThere is nothing special about my unit files:\n```\n[Unit]\nDescription=Syncthing container\nAfter=docker.service\nRequires=docker.service\n\n[Service]\n#TimeoutStartSec=0\nRestart=always\nExecStartPre=-/usr/local/sbin/systemd_docker stop %N\nExecStartPre=-/usr/local/sbin/systemd_docker rm %N\nExecStart=/usr/local/sbin/systemd_docker run --name %N \\\n  -e VIRTUAL_HOST=syncthing.lan \\\n  -e VIRTUAL_PORT=8384 \\\n  --network inter-cont \\\n  -p 22000:22000/tcp \\\n  -p 22000:22000/udp \\\n  -v syncthing:/var/syncthing \\\n    syncthing/syncthing:latest\n\n[Install]\nWantedBy=multi-user.target\n```\nYou can ignore the 'docker' stuff in there.  I use the same service files for docker or podman depending on configuration, so 'systemd_docker' is just a wrapper:\n```\n#!/bin/sh\nexec /opt/podman/bin/podman \"$@\"\n```\nIf I remove the `/run/libpod/alive` while containers are running, will they be re-detected as running? (I don't actually have any running containers, but would like to understand the process).  While I appreciate the steps to get mysystem unstuck, I'm much more interested in ensuring that podman is robust for my use case.  I haven't actually run the steps you proposed in the hope I can provide more information first.\n"
+        },
+        {
+            "user": "mheon",
+            "body": "That unit file doesn't look correct - systemd defaults to `type=simple`, which has issues with tracking container state (it tracks the Podman binary, but Podman is not the container, and the Podman process dying does not mean the container process stopped - this can cause systemd to become confused as to the state of the container). We strongly recommend that you use `podman generate systemd` (`podman generate systemd --new` in this case) to create unit files that are guaranteed to avoid pitfalls like this.\n\nThat said - there's nothing in there that would cause the issues you're seeing.\n\nTo answer your question: no - the post-restart state refresh resets container state on all containers to either Exited or Created, assuming that no process can survive a restart.\n\nIf I had to hazard a guess, this might be caused by static linking? The locks in question are pthread Mutexes - possible that static-linking brought in a version of that library that doesn't support the advanced shared-memory locking features we're using. Seems unlikely, but it's the best guess I have at present."
+        },
+        {
+            "user": "PhracturedBlue",
+            "body": "Actually, the pthread idea may be more likely.  my static build was done using musl.  I have no idea if they have a fully compliant pthread implementation or not (though I guess there would be more reports of failures on Alpine linux if it was common.  I'll try rebuilding the binaries with glibc and see if I can reproduce the issue."
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "vrothberg",
+            "body": "I assume the issue was caused by using a static build with musl.  Please reopen if I am mistaken."
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "hashicorp",
+            "repository": "nomad-driver-podman",
+            "number": 229
+        }
+    ]
+}

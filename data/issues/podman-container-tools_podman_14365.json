@@ -1,0 +1,132 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 14365,
+    "type": "issue",
+    "title": "Unable to access UDP port 53 exposed by container from network",
+    "state": "closed",
+    "labels": [
+        "kind/bug",
+        "network",
+        "locked - please file new issue/PR"
+    ],
+    "user": "tmds",
+    "body": "I currently have [pihole](https://pi-hole.net/) running with docker on Debian, and I'm trying to get it to work on Fedora Server 36 with podman.\n\nTo be able to use port 53, I set `DNSStubListener=no` in `/etc/systemd/resolved.conf`\n\nI've started the container using `podman` as the root user.\n\n```\n# podman ps -a\nCONTAINER ID  IMAGE                           COMMAND               CREATED         STATUS                      PORTS                                                                             NAMES\ne92da0e3e69b  docker.io/pihole/pihole:latest                        9 minutes ago   Up 9 minutes ago (healthy)  0.0.0.0:53->53/udp, 0.0.0.0:67->67/udp, 0.0.0.0:53->53/tcp, 0.0.0.0:8090->80/tcp  pihole\n```\nI can use the DNS server using `127.0.0.1`:\n```\n# nslookup www.google.com 127.0.0.1\nServer:\t\t127.0.0.1\nAddress:\t127.0.0.1#53\n\nNon-authoritative answer:\nName:\twww.google.com\nAddress: 142.250.179.164\nName:\twww.google.com\nAddress: 2a00:1450:400e:80c::2004\n```\nHowever, it doesn't work from the network. And, even on the machine itself it doesn't work when using the interface ip address:\n```\n# nslookup www.google.com 192.168.1.237\n;; connection timed out; no servers could be reached\n\n```\nI tried disabling SELinux, and firewalld, but that doesn't make a difference.\n```\n# firewall-cmd --state\nnot running\n# getenforce\nDisabled\n```\n\nThe UDP port (53) can only be reach from localhost.\nThe TCP ports can be reached from the network.\n\ncc @mheon @rhatdan ",
+    "comments": [
+        {
+            "user": "mheon",
+            "body": "By \"from the network\" do you mean other hosts on the same physical network, and not other containers on a Podman network, correct?\n\nIf so, I'd assume that you have firewall rules blocking UDP traffic from reaching the host running Podman on that port. Firewalld being off doesn't prevent that, they could be plain iptables. Can you provide the output of `iptables -nvL`?"
+        },
+        {
+            "user": "tmds",
+            "body": "> By \"from the network\" do you mean other hosts on the same physical network, and not other containers on a Podman network, correct?\n\nYes.\n\n> Can you provide the output of iptables -nvL?\n\n```\n# iptables -nvL\nChain INPUT (policy ACCEPT 0 packets, 0 bytes)\n pkts bytes target     prot opt in     out     source               destination         \n\nChain FORWARD (policy ACCEPT 0 packets, 0 bytes)\n pkts bytes target     prot opt in     out     source               destination         \n 3945 1190K NETAVARK_FORWARD  all  --  *      *       0.0.0.0/0            0.0.0.0/0            /* netavark firewall plugin rules */\n\nChain OUTPUT (policy ACCEPT 0 packets, 0 bytes)\n pkts bytes target     prot opt in     out     source               destination         \n\nChain NETAVARK_FORWARD (1 references)\n pkts bytes target     prot opt in     out     source               destination         \n 1552 1052K ACCEPT     all  --  *      *       0.0.0.0/0            10.88.0.0/16         ctstate RELATED,ESTABLISHED\n 1756 96827 ACCEPT     all  --  *      *       10.88.0.0/16         0.0.0.0/0           \n\n```"
+        },
+        {
+            "user": "kontza",
+            "body": "Hi,\n\nI'm battling with a similar problem, only my new OS is openSUSE MicroOS.\n\nI've been using netcat as a low-level connection tester. I've set it up to listen to either UDP or TCP traffic and in another terminal another instance of netcat is used to connect to the first. You could try that to see at low-level if there is any traffic."
+        },
+        {
+            "user": "tmds",
+            "body": "> I've been using netcat as a low-level connection tester. I've set it up to listen to either UDP or TCP traffic and in another terminal another instance of netcat is used to connect to the first. You could try that to see at low-level if there is any traffic.\n\nIf I run `nc` on the system and listen on UDP 53, I See `recvmsg` calls for DNS queries coming in.\n\nI noticed these in the `pihole` log.\n```\ncap[cap_net_raw] not permitted\ncap[cap_net_admin] not permitted\ncap[cap_sys_nice] not permitted\n```\n\nI forgot to add these caps. Adding them didn't solve the issue though.\n\nI'm now starting `pihole` as:\n```\npodman run --rm -p 53:53/udp -p 53:53/tcp -p 67:67/udp -p 8090:80/tcp --cap-add CAP_NET_RAW --cap-add CAP_NET_ADMIN --cap-add CAP_SYS_NICE docker.io/pihole/pihole\n```\n\n`netstat` shows the udp ports being bound to the any address.\n\n```\n# netstat -lunp\nActive Internet connections (only servers)\nProto Recv-Q Send-Q Local Address           Foreign Address         State       PID/Program name    \nudp        0      0 0.0.0.0:53              0.0.0.0:*                           69742/conmon        \nudp        0      0 0.0.0.0:67              0.0.0.0:*                           69742/conmon        \n```\n\nI don't understand why using `127.0.0.1` works, and `192.168.1.237` does not.\n\nWhen I `strace` the PID that shows up in `netstat` I don't see any activity, even for the queries that succeed."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@Luap99 @mheon @flouthoc This feels a lot like ardvark-dns holding onto port 53 causing issues."
+        },
+        {
+            "user": "mheon",
+            "body": "Aardvark isn't running, otherwise Conmon wouldn't have been able to bind to 0.0.0.0:53.\n\nCan you also provide `iptables -t -nat -nvL`? I'm beginning to suspect port forwarding itself is the issue."
+        },
+        {
+            "user": "tmds",
+            "body": "```\n# iptables -t -nat -nvL\niptables v1.8.7 (nf_tables): table '-nat' does not exist\nPerhaps iptables or your kernel needs to be upgraded.\n```\nMy Fedora VM runs kernel v5.17.5."
+        },
+        {
+            "user": "mheon",
+            "body": "Oh, sorry, typo on my part - `iptables -t nat -nvL` (no `-` before nat)"
+        },
+        {
+            "user": "tmds",
+            "body": "```\n# iptables -t nat -nvL\nChain PREROUTING (policy ACCEPT 0 packets, 0 bytes)\n pkts bytes target     prot opt in     out     source               destination         \n 1799  108K NETAVARK-HOSTPORT-DNAT  all  --  *      *       0.0.0.0/0            0.0.0.0/0            ADDRTYPE match dst-type LOCAL\n\nChain INPUT (policy ACCEPT 0 packets, 0 bytes)\n pkts bytes target     prot opt in     out     source               destination         \n\nChain OUTPUT (policy ACCEPT 0 packets, 0 bytes)\n pkts bytes target     prot opt in     out     source               destination         \n    1    84 NETAVARK-HOSTPORT-DNAT  all  --  *      *       0.0.0.0/0            0.0.0.0/0            ADDRTYPE match dst-type LOCAL\n\nChain POSTROUTING (policy ACCEPT 0 packets, 0 bytes)\n pkts bytes target     prot opt in     out     source               destination         \n 4797  317K NETAVARK-HOSTPORT-MASQ  all  --  *      *       0.0.0.0/0            0.0.0.0/0           \n 1616 97383 NETAVARK-1D8721804F16F  all  --  *      *       10.88.0.0/16         0.0.0.0/0           \n\nChain NETAVARK-1D8721804F16F (1 references)\n pkts bytes target     prot opt in     out     source               destination         \n    0     0 ACCEPT     all  --  *      *       0.0.0.0/0            10.88.0.0/16        \n 1616 97383 MASQUERADE  all  --  *      *       0.0.0.0/0           !224.0.0.0/4         \n\nChain NETAVARK-DN-1D8721804F16F (9 references)\n pkts bytes target     prot opt in     out     source               destination         \n    0     0 NETAVARK-HOSTPORT-SETMARK  tcp  --  *      *       10.88.0.0/16         0.0.0.0/0            tcp dpt:2022\n    0     0 NETAVARK-HOSTPORT-SETMARK  tcp  --  *      *       127.0.0.1            0.0.0.0/0            tcp dpt:2022\n    3   180 DNAT       tcp  --  *      *       0.0.0.0/0            0.0.0.0/0            tcp dpt:2022 to:10.88.0.6:22\n 1206 72360 NETAVARK-HOSTPORT-SETMARK  tcp  --  *      *       10.88.0.0/16         0.0.0.0/0            tcp dpt:8082\n    0     0 NETAVARK-HOSTPORT-SETMARK  tcp  --  *      *       127.0.0.1            0.0.0.0/0            tcp dpt:8082\n 1206 72360 DNAT       tcp  --  *      *       0.0.0.0/0            0.0.0.0/0            tcp dpt:8082 to:10.88.0.6:3000\n  132  7920 NETAVARK-HOSTPORT-SETMARK  tcp  --  *      *       10.88.0.0/16         0.0.0.0/0            tcp dpts:80:81\n    0     0 NETAVARK-HOSTPORT-SETMARK  tcp  --  *      *       127.0.0.1            0.0.0.0/0            tcp dpts:80:81\n  316 18960 DNAT       tcp  --  *      *       0.0.0.0/0            0.0.0.0/0            tcp dpts:80:81 to:10.88.0.9:80-81/80\n    0     0 NETAVARK-HOSTPORT-SETMARK  tcp  --  *      *       10.88.0.0/16         0.0.0.0/0            tcp dpt:443\n    0     0 NETAVARK-HOSTPORT-SETMARK  tcp  --  *      *       127.0.0.1            0.0.0.0/0            tcp dpt:443\n   64  3840 DNAT       tcp  --  *      *       0.0.0.0/0            0.0.0.0/0            tcp dpt:443 to:10.88.0.9:443\n    0     0 NETAVARK-HOSTPORT-SETMARK  tcp  --  *      *       10.88.0.0/16         0.0.0.0/0            tcp dpt:53\n    0     0 NETAVARK-HOSTPORT-SETMARK  tcp  --  *      *       127.0.0.1            0.0.0.0/0            tcp dpt:53\n    0     0 DNAT       tcp  --  *      *       0.0.0.0/0            0.0.0.0/0            tcp dpt:53 to:10.88.0.10:53\n    0     0 NETAVARK-HOSTPORT-SETMARK  tcp  --  *      *       10.88.0.0/16         0.0.0.0/0            tcp dpt:8090\n    0     0 NETAVARK-HOSTPORT-SETMARK  tcp  --  *      *       127.0.0.1            0.0.0.0/0            tcp dpt:8090\n    0     0 DNAT       tcp  --  *      *       0.0.0.0/0            0.0.0.0/0            tcp dpt:8090 to:10.88.0.10:80\n    0     0 NETAVARK-HOSTPORT-SETMARK  udp  --  *      *       10.88.0.0/16         0.0.0.0/0            udp dpt:53\n    0     0 NETAVARK-HOSTPORT-SETMARK  udp  --  *      *       127.0.0.1            0.0.0.0/0            udp dpt:53\n    0     0 DNAT       udp  --  *      *       0.0.0.0/0            0.0.0.0/0            udp dpt:53 to:10.88.0.10:53\n    0     0 NETAVARK-HOSTPORT-SETMARK  udp  --  *      *       10.88.0.0/16         0.0.0.0/0            udp dpt:67\n    0     0 NETAVARK-HOSTPORT-SETMARK  udp  --  *      *       127.0.0.1            0.0.0.0/0            udp dpt:67\n    0     0 DNAT       udp  --  *      *       0.0.0.0/0            0.0.0.0/0            udp dpt:67 to:10.88.0.10:67\n   11   660 NETAVARK-HOSTPORT-SETMARK  tcp  --  *      *       10.88.0.0/16         0.0.0.0/0            tcp dpt:8001\n    0     0 NETAVARK-HOSTPORT-SETMARK  tcp  --  *      *       127.0.0.1            0.0.0.0/0            tcp dpt:8001\n   11   660 DNAT       tcp  --  *      *       0.0.0.0/0            0.0.0.0/0            tcp dpt:8001 to:10.88.0.11:5000\n\nChain NETAVARK-HOSTPORT-DNAT (2 references)\n pkts bytes target     prot opt in     out     source               destination         \n    3   180 NETAVARK-DN-1D8721804F16F  tcp  --  *      *       0.0.0.0/0            0.0.0.0/0            tcp dpt:2022 /* dnat name: podman id: d86bb02c970c0bea527beef6d9077d7a6ee12e375c47856c7d2d6740eb4084d6 */\n 1206 72360 NETAVARK-DN-1D8721804F16F  tcp  --  *      *       0.0.0.0/0            0.0.0.0/0            tcp dpt:8082 /* dnat name: podman id: d86bb02c970c0bea527beef6d9077d7a6ee12e375c47856c7d2d6740eb4084d6 */\n  316 18960 NETAVARK-DN-1D8721804F16F  tcp  --  *      *       0.0.0.0/0            0.0.0.0/0            tcp dpts:80:81 /* dnat name: podman id: 6f504a3214e7d4cf2ff00d173c3f5b04cf108c8d09e469fdebb8226eaa1733c2 */\n   64  3840 NETAVARK-DN-1D8721804F16F  tcp  --  *      *       0.0.0.0/0            0.0.0.0/0            tcp dpt:443 /* dnat name: podman id: 6f504a3214e7d4cf2ff00d173c3f5b04cf108c8d09e469fdebb8226eaa1733c2 */\n    0     0 NETAVARK-DN-1D8721804F16F  tcp  --  *      *       0.0.0.0/0            0.0.0.0/0            tcp dpt:53 /* dnat name: podman id: ce14d7e9bd0c9a11609b183551ad71752c592fb9eb178b844c44c5285be7acce */\n    0     0 NETAVARK-DN-1D8721804F16F  tcp  --  *      *       0.0.0.0/0            0.0.0.0/0            tcp dpt:8090 /* dnat name: podman id: ce14d7e9bd0c9a11609b183551ad71752c592fb9eb178b844c44c5285be7acce */\n    0     0 NETAVARK-DN-1D8721804F16F  udp  --  *      *       0.0.0.0/0            0.0.0.0/0            udp dpt:53 /* dnat name: podman id: ce14d7e9bd0c9a11609b183551ad71752c592fb9eb178b844c44c5285be7acce */\n    0     0 NETAVARK-DN-1D8721804F16F  udp  --  *      *       0.0.0.0/0            0.0.0.0/0            udp dpt:67 /* dnat name: podman id: ce14d7e9bd0c9a11609b183551ad71752c592fb9eb178b844c44c5285be7acce */\n   11   660 NETAVARK-DN-1D8721804F16F  tcp  --  *      *       0.0.0.0/0            0.0.0.0/0            tcp dpt:8001 /* dnat name: podman id: a4c9e82487307a8fbb85f23140e673175e154340b89dc4e7e4cd3d71d6a7b41f */\n\nChain NETAVARK-HOSTPORT-MASQ (1 references)\n pkts bytes target     prot opt in     out     source               destination         \n 1349 80940 MASQUERADE  all  --  *      *       0.0.0.0/0            0.0.0.0/0            /* netavark portfw masq mark */ mark match 0x2000/0x2000\n\nChain NETAVARK-HOSTPORT-SETMARK (18 references)\n pkts bytes target     prot opt in     out     source               destination         \n 1349 80940 MARK       all  --  *      *       0.0.0.0/0            0.0.0.0/0            MARK or 0x2000\n```"
+        },
+        {
+            "user": "tmds",
+            "body": "@mheon do you see something useful?\n\nYou should be able to reproduce the issue if you stop systemd resolved from using the port as indicated in the top comment, and using the `podman run` command from https://github.com/containers/podman/issues/14365#issuecomment-1138300635."
+        },
+        {
+            "user": "mheon",
+            "body": "```\n    0     0 NETAVARK-HOSTPORT-SETMARK  udp  --  *      *       10.88.0.0/16         0.0.0.0/0            udp dpt:53\n    0     0 NETAVARK-HOSTPORT-SETMARK  udp  --  *      *       127.0.0.1            0.0.0.0/0            udp dpt:53\n    0     0 DNAT       udp  --  *      *       0.0.0.0/0            0.0.0.0/0            udp dpt:53 to:10.88.0.10:53\n```\n\n0 packets matched the for our UDP/53 rules. Same in the hostport-dnat chain. The UDP rules are not matching, so no NAT is happening.\n\nAny chance you can run a DNS server on the local system without the Podman stack (maybe run the container with `--net=host`?) and verify if traffic flows? The Netavark rules look correct, aside from traffic not reaching them.\n\n@Luap99 Thoughts?"
+        },
+        {
+            "user": "Luap99",
+            "body": "I have no idea. I agree that the iptables rules look correct.\n\nCan you check with tcpdump where the traffic is going?"
+        },
+        {
+            "user": "kontza",
+            "body": "Do you have host directories mapped into the container as volumes? My connection problems were finally solved when I found out, that if I don't map a local directory as a volume into the container, Pi-hole works perfectly. If I uncomment those two volume definitions Pi-hole does not work as a nameserver, I can access web UI, but when volumes are commented out, everything works as with my previous Docker setup.\n```\npodman create \\                               \n        --cap-add CAP_NET_RAW \\               \n        --cap-add CAP_NET_ADMIN \\             \n        --cap-add CAP_SYS_NICE \\              \n        --env TZ='Europe/Helsinki' \\          \n        --env WEBPASSWORD='e_inutile' \\       \n        --replace \\                           \n        --name pihole \\                       \n        docker.io/pihole/pihole               \n#       --volume ./pihole/:/etc/pihole:z \\    \n#       --volume ./dnsmasq/:/etc/dnsmasq.d:z \\\n```"
+        },
+        {
+            "user": "mheon",
+            "body": "That makes very little sense. Volume mounting and networking are entirely distinct. Are you sure that it's not something to do with the config files you're mounting into the container?\n"
+        },
+        {
+            "user": "kontza",
+            "body": "> That makes very little sense. Volume mounting and networking are entirely distinct. Are you sure that it's not something to do with the config files you're mounting into the container?\n\nThanks! I was so sure that mounting volumes broke something that I never checked the state of my host directory. It was empty, and by accident I had deleted the Ansible task responsible for creating that directory and its contents :)\n\nThis is what you get when you try to do these things tired."
+        },
+        {
+            "user": "tmds",
+            "body": "> 0 packets matched the for our UDP/53 rules. Same in the hostport-dnat chain. The UDP rules are not matching, so no NAT is happening.\n\ninitial:\n```\n    0     0 NETAVARK-HOSTPORT-SETMARK  udp  --  *      *       10.88.0.0/16         0.0.0.0/0            udp dpt:53\n    6   360 NETAVARK-HOSTPORT-SETMARK  udp  --  *      *       127.0.0.1            0.0.0.0/0            udp dpt:53\n    9   540 DNAT       udp  --  *      *       0.0.0.0/0            0.0.0.0/0            udp dpt:53 to:10.88.0.12:53\n    9   540 NETAVARK-DN-1D8721804F16F  udp  --  *      *       0.0.0.0/0            0.0.0.0/0            udp dpt:53 /* dnat name: podman id: 049e3ead6dc752de7c48e355b84b7bc50131cc6367e2ea9d90211855866d4b59 */\n```\nAfter working query: `nslookup www.google.com 127.0.0.1`\n```\n    0     0 NETAVARK-HOSTPORT-SETMARK  udp  --  *      *       10.88.0.0/16         0.0.0.0/0            udp dpt:53\n    8   480 NETAVARK-HOSTPORT-SETMARK  udp  --  *      *       127.0.0.1            0.0.0.0/0            udp dpt:53\n   11   660 DNAT       udp  --  *      *       0.0.0.0/0            0.0.0.0/0            udp dpt:53 to:10.88.0.12:53\n   11   660 NETAVARK-DN-1D8721804F16F  udp  --  *      *       0.0.0.0/0            0.0.0.0/0            udp dpt:53 /* dnat name: podman id: 049e3ead6dc752de7c48e355b84b7bc50131cc6367e2ea9d90211855866d4b59 */\n```\nAnd now a query that times out: `nslookup www.google.com 192.168.1.237`\n```\n    0     0 NETAVARK-HOSTPORT-SETMARK  udp  --  *      *       10.88.0.0/16         0.0.0.0/0            udp dpt:53\n    8   480 NETAVARK-HOSTPORT-SETMARK  udp  --  *      *       127.0.0.1            0.0.0.0/0            udp dpt:53\n   12   720 DNAT       udp  --  *      *       0.0.0.0/0            0.0.0.0/0            udp dpt:53 to:10.88.0.12:53\n   12   720 NETAVARK-DN-1D8721804F16F  udp  --  *      *       0.0.0.0/0            0.0.0.0/0            udp dpt:53 /* dnat name: podman id: 049e3ead6dc752de7c48e355b84b7bc50131cc6367e2ea9d90211855866d4b59 */\n```\n\nSo the `pkts` does increment for some lines on the failed query.\n\n> Any chance you can run a DNS server on the local system without the Podman stack (maybe run the container with --net=host?) and verify if traffic flows?\n\nUsing `--net=host` it works.\n\n> Can you check with tcpdump where the traffic is going?\n\nI'm not sure what options to use. I'm using: `tcpdump -n -i any 'udp port 53'`.\n\nFor a query that works (`nslookup www.google.com 127.0.0.1`) I see this:\n```\n19:55:35.988148 podman0 Out IP 10.88.0.1.57803 > 10.88.0.13.domain: 55997+ A? www.google.com. (32)\n19:55:35.988160 vethc9a07db3 Out IP 10.88.0.1.57803 > 10.88.0.13.domain: 55997+ A? www.google.com. (32)\n19:55:35.988585 vethc9a07db3 P   IP 10.88.0.13.domain > 10.88.0.1.57803: 55997 1/0/0 A 172.217.168.196 (48)\n19:55:35.988585 podman0 In  IP 10.88.0.13.domain > 10.88.0.1.57803: 55997 1/0/0 A 172.217.168.196 (48)\n19:55:35.990171 podman0 Out IP 10.88.0.1.48226 > 10.88.0.13.domain: 16800+ AAAA? www.google.com. (32)\n19:55:35.990188 vethc9a07db3 Out IP 10.88.0.1.48226 > 10.88.0.13.domain: 16800+ AAAA? www.google.com. (32)\n19:55:35.990643 vethc9a07db3 P   IP 10.88.0.13.domain > 10.88.0.1.48226: 16800 1/0/0 AAAA 2a00:1450:400e:80c::2004 (60)\n19:55:35.990643 podman0 In  IP 10.88.0.13.domain > 10.88.0.1.48226: 16800 1/0/0 AAAA 2a00:1450:400e:80c::2004 (60)\n```\nFor a query that times out (`nslookup www.google.com 192.168.1.237`), I get:\n```\n19:56:14.676757 podman0 Out IP 192.168.1.237.44751 > 10.88.0.13.domain: 30904+ A? www.google.com. (32)\n19:56:14.676771 vethc9a07db3 Out IP 192.168.1.237.44751 > 10.88.0.13.domain: 30904+ A? www.google.com. (32)\n19:56:19.675120 podman0 Out IP 192.168.1.237.44751 > 10.88.0.13.domain: 30904+ A? www.google.com. (32)\n19:56:19.675138 vethc9a07db3 Out IP 192.168.1.237.44751 > 10.88.0.13.domain: 30904+ A? www.google.com. (32)\n19:56:24.674844 podman0 Out IP 192.168.1.237.44751 > 10.88.0.13.domain: 30904+ A? www.google.com. (32)\n19:56:24.674862 vethc9a07db3 Out IP 192.168.1.237.44751 > 10.88.0.13.domain: 30904+ A? www.google.com. (32)\n```\nWe don't seem to get a reply (or it doesn't show up here)."
+        },
+        {
+            "user": "tmds",
+            "body": "@mheon did you see my last comment? Some values are incrementing on the rules."
+        },
+        {
+            "user": "mheon",
+            "body": "Sorry, been caught up in other issues. I'll try and take a look today or tomorrow."
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@mheon Any update?"
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "finzzz",
+            "body": "I'm having exact same issue even when it's not port 53"
+        },
+        {
+            "user": "rhatdan",
+            "body": "@Luap99 PTAL"
+        },
+        {
+            "user": "Constantin1489",
+            "body": "macOS has the same error. I can't bind.\n\n`sudo lsof -i:53`\nThere is no output.\n\n```\npodman run -d --name pihole7 \\\n    -e WEBPASSWORD=\"11111\" \\\n    -e DNS1=8.8.8.8 \\\n    -e DNS2=1.1.1.1 \\\n    -v pihole_pihole:/etc/pihole:Z \\\n    -v pihole_dnsmasq:/etc/dnsmasq.d:Z \\\n    -p 8889:80 \\\n    -p 53:53/tcp \\\n    -p 53:53/udp \\\n    -p 443:443 pihole/pihole:latest\n```\n\nOutput is \n\n`Error: unable to start container \"13f722fc3600bcf6ac50c595dc214fa74e0804b56efe69dcafb7bec67b528f61\": cannot listen on the TCP port: listen tcp4 :53: bind: address already in use`"
+        },
+        {
+            "user": "mheon",
+            "body": "OS X is going to be a separate issue, due to the involvement of `podman machine` and a VM. Please open a fresh issue."
+        },
+        {
+            "user": "Luap99",
+            "body": "@tmds Is this still an issue?"
+        },
+        {
+            "user": "Luap99",
+            "body": "I am going to close this since I haven't heard back anything. "
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 14376
+        }
+    ]
+}

@@ -1,0 +1,126 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 7312,
+    "type": "pull_request",
+    "title": "podman.service: use sdnotify",
+    "state": "closed",
+    "labels": [
+        "lgtm",
+        "approved",
+        "locked - please file new issue/PR"
+    ],
+    "user": "vrothberg",
+    "body": "Commit 2b6dd3fb4384 set the killmode of the podman.service to the\nsystemd default which ultimately lead to the problem that systemd\nwill kill *all* processes inside the unit's cgroup and hence kill\nall containers whenever the service is stopped.\n\nFix it by setting the type to sdnotify and the killmode to process.\n`podman system service` will send the necessary notify messages\nwhen the SDNOTIFY_SOCKET is set and unset it right after to prevent\nthe backend and container runtimes from jumping in between and send\nmessages as well.\n\nFixes: #7294\nSigned-off-by: Valentin Rothberg <rothberg@redhat.com>",
+    "comments": [
+        {
+            "user": "vrothberg",
+            "body": "@martinpitt @goochjj PTAL"
+        },
+        {
+            "user": "vrothberg",
+            "body": "/hold"
+        },
+        {
+            "user": "vrothberg",
+            "body": "This looks good to me now. Podman will now be stopped as systemd knows it's PID. Also systemd is not complaining about old conmons hanging around but it actually reports them. Below you can see what I'm referring to. I ran a bunch of containers, waited for the service to timeout and then did an `image list` to fire up the service again:\n```\n[root@nebuchadnezzar libpod]# systemctl status podman.service\n● podman.service - Podman API Service\n     Loaded: loaded (/usr/local/lib/systemd/system/podman.service; enabled; vendor preset: disabled)\n     Active: active (running) since Thu 2020-08-13 13:18:14 CEST; 3s ago\nTriggeredBy: ● podman.socket\n       Docs: man:podman-system-service(1)\n   Main PID: 1198502 (podman)\n      Tasks: 27 (limit: 19009)\n     Memory: 39.0M\n        CPU: 191ms\n     CGroup: /system.slice/podman.service\n             ├─1197016 /usr/bin/conmon --api-version 1 -c b3ef44b91d1108f23c04f19b61b59c8ec1d6f57918ccca6a84bc64bf86eac834 \n             ├─1197240 /usr/bin/conmon --api-version 1 -c fb6e0ae46293a97bf166dc3a76e17f549b949b28a6d66601ca27b220ce9431ec \n             ├─1197955 /usr/bin/conmon --api-version 1 -c da360f41e2d854e4c12b0f061b230c04a5f4f7e1abc408e60ef15ec1efc57c9c \n             ├─1198029 /usr/bin/conmon --api-version 1 -c d931f5e0bea1dc2acad2c1c32bedad7cc5b5571d4b5048a1f5d5fbae2ba76d60 \n             ├─1198096 /usr/bin/conmon --api-version 1 -c 1b84665fa739d408146bfbf03ab775c9bc18c7b648e13d848bd832dcfb432312 \n             ├─1198162 /usr/bin/conmon --api-version 1 -c 1ba81c25316fb91e2f585969a6cc6a2df4f9352fa3e44fa931fe8981f5f89308 \n             ├─1198229 /usr/bin/conmon --api-version 1 -c aaabfd54a0fd3e3513ab91c73aaf91e9184df9f420150c1b2e9cd5a2a013d893 \n             └─1198502 /usr/local/bin/podman system service\n```"
+        },
+        {
+            "user": "rhatdan",
+            "body": "/lgtm"
+        },
+        {
+            "user": "mheon",
+            "body": "LGTM"
+        },
+        {
+            "user": "vrothberg",
+            "body": "Please wait with merging until we have more acks on it."
+        },
+        {
+            "user": "rhatdan",
+            "body": "I thought you had two.  But you have control anyways."
+        },
+        {
+            "user": "giuseppe",
+            "body": "> This looks good to me now. Podman will now be stopped as systemd knows it's PID. Also systemd is not complaining about old conmons hanging around but it actually reports them. Below you can see what I'm referring to. I ran a bunch of containers, waited for the service to timeout and then did an `image list` to fire up the service again:\n\nwhy do we have conmon processes in the podman.service cgroup?  I thought we moved them to a separate cgroup"
+        },
+        {
+            "user": "vrothberg",
+            "body": "> why do we have conmon processes in the podman.service cgroup? I thought we moved them to a separate cgroup\n\nCould it be because we're unsetting NOTIFY_SOCKET?"
+        },
+        {
+            "user": "giuseppe",
+            "body": "> Could it be because we're unsetting NOTIFY_SOCKET?\n\nthat should not happen (at least I don't see we are using it internally in Podman).  I don't think the issue is introduced with this change.  Or are those old containers that are configured with --cgroup-mode=split?"
+        },
+        {
+            "user": "vrothberg",
+            "body": "> > Could it be because we're unsetting NOTIFY_SOCKET?\n> \n> that should not happen (at least I don't see we are using it internally in Podman). I don't think the issue is introduced with this change. Or are those old containers that are configured with --cgroup-mode=split?\n\nThey are created with the remote client. Maybe we're missing that in the remote code paths?"
+        },
+        {
+            "user": "giuseppe",
+            "body": "\n\n\n> They are created with the remote client. Maybe we're missing that in the remote code paths?\n\nthis patch seems to do the trick:\n```\ndiff --git a/pkg/api/server/server.go b/pkg/api/server/server.go\nindex 18b48a3f6..2a3e44e04 100644\n--- a/pkg/api/server/server.go\n+++ b/pkg/api/server/server.go\n@@ -153,6 +153,7 @@ func (s *APIServer) Serve() error {\n        signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)\n        errChan := make(chan error, 1)\n \n+       os.Unsetenv(\"INVOCATION_ID\")\n        go func() {\n                <-s.idleTracker.Done()\n                logrus.Debugf(\"API Server idle for %v\", s.idleTracker.Duration)\n```"
+        },
+        {
+            "user": "vrothberg",
+            "body": "> this patch seems to do the trick:\n\nTested successfully, thanks @giuseppe !"
+        },
+        {
+            "user": "vrothberg",
+            "body": "Allright, now as we've ironed out the last remaining fart, I am good to merge. Thanks all!"
+        },
+        {
+            "user": "openshift-ci-robot",
+            "body": "[APPROVALNOTIFIER] This PR is **APPROVED**\n\nThis pull-request has been approved by: *<a href=\"https://github.com/containers/podman/pull/7312#pullrequestreview-466899299\" title=\"Approved\">giuseppe</a>*, *<a href=\"https://github.com/containers/podman/pull/7312#\" title=\"Author self-approved\">vrothberg</a>*\n\nThe full list of commands accepted by this bot can be found [here](https://go.k8s.io/bot-commands?repo=containers%2Fpodman).\n\nThe pull request process is described [here](https://git.k8s.io/community/contributors/guide/owners.md#the-code-review-process)\n\n<details >\nNeeds approval from an approver in each of these files:\n\n- ~~[OWNERS](https://github.com/containers/podman/blob/master/OWNERS)~~ [giuseppe,vrothberg]\n\nApprovers can indicate their approval by writing `/approve` in a comment\nApprovers can cancel approval by writing `/approve cancel` in a comment\n</details>\n<!-- META={\"approvers\":[]} -->"
+        },
+        {
+            "user": "goochjj",
+            "body": "LGTM\n"
+        },
+        {
+            "user": "TomSweeneyRedHat",
+            "body": "The change LGTM, but it looks like you may have encountered a real error in the tests."
+        },
+        {
+            "user": "mheon",
+            "body": "F31 looks like one of our remote flakes...\n\n/lgtm\n/hold"
+        },
+        {
+            "user": "edsantiago",
+            "body": "yes, it's the #7195 flake"
+        },
+        {
+            "user": "TomSweeneyRedHat",
+            "body": "Thanks, @QiWang19 's #7311 suffers the same issue."
+        },
+        {
+            "user": "edsantiago",
+            "body": "/hold\n\ninvestigating something. Please do not merge yet."
+        },
+        {
+            "user": "edsantiago",
+            "body": "All clear. The problem I was looking at turned out to be caused by something else."
+        },
+        {
+            "user": "rhatdan",
+            "body": "/hold cancel"
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 7294
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 7195
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 7317
+        }
+    ]
+}

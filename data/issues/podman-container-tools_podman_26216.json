@@ -1,0 +1,73 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 26216,
+    "type": "pull_request",
+    "title": "build: reuse `parse.ContainerIgnoreFile` from buildah",
+    "state": "closed",
+    "labels": [
+        "lgtm",
+        "approved",
+        "release-note",
+        "locked - please file new issue/PR"
+    ],
+    "user": "flouthoc",
+    "body": "podman's logic to parse excludes from `--ignorefile` is not consistent with buildah, use code directly from buildah.\n\nCloses: https://github.com/containers/podman/issues/25746\n\n<!--\nThanks for sending a pull request!\n\nPlease make sure you've read our contributing guidelines and how to submit a pull request (https://github.com/containers/podman/blob/main/CONTRIBUTING.md#submitting-pull-requests).\n\nFinally, be sure to sign commits with your real name. Since by opening\na PR you already have commits, you can add signatures if needed with\nsomething like `git commit -s --amend`.\n-->\n\n#### Does this PR introduce a user-facing change?\n\n<!--\nIf no, just write `None` in the release-note block below. If yes, a release note\nis required: Enter your extended release note in the block below. If the PR\nrequires additional action from users switching to the new release, include the\nstring \"action required\".\n\nFor more information on release notes, please follow the Kubernetes model:\nhttps://git.k8s.io/community/contributors/guide/release-notes.md\n-->\n\n```release-note\nbuild: behavior of --ignorefile is consistent with buildah\n```\n",
+    "comments": [
+        {
+            "user": "openshift-ci[bot]",
+            "body": "[APPROVALNOTIFIER] This PR is **APPROVED**\n\nThis pull-request has been approved by: *<a href=\"https://github.com/containers/podman/pull/26216#\" title=\"Author self-approved\">flouthoc</a>*, *<a href=\"https://github.com/containers/podman/pull/26216#pullrequestreview-2875368318\" title=\"Approved\">Luap99</a>*\n\nThe full list of commands accepted by this bot can be found [here](https://go.k8s.io/bot-commands?repo=containers%2Fpodman).\n\nThe pull request process is described [here](https://git.k8s.io/community/contributors/guide/owners.md#the-code-review-process)\n\n<details >\nNeeds approval from an approver in each of these files:\n\n- ~~[OWNERS](https://github.com/containers/podman/blob/main/OWNERS)~~ [Luap99]\n\nApprovers can indicate their approval by writing `/approve` in a comment\nApprovers can cancel approval by writing `/approve cancel` in a comment\n</details>\n<!-- META={\"approvers\":[]} -->"
+        },
+        {
+            "user": "flouthoc",
+            "body": "@containers/podman-maintainers PTAL"
+        },
+        {
+            "user": "flouthoc",
+            "body": "@mtrmac I think we need to do parsing of `ignorefile` and `containerfile` at CLI level and not directly send it to the backend executor because in `remote` setup we need to prepare context and send it to backend. It is beneficial to do parsing of these at CLI level so we can send only appropriate files in the context and ignore sending files which are not needed.\n\nIrrespective of the above case I still think somethings can be fixed at buildah at first and then podman can start using it, do you think it will be okay to those changes in a new PR and scope this PR only to the bug fix above ? "
+        },
+        {
+            "user": "mtrmac",
+            "body": "> @mtrmac I think we need to do parsing of ignorefile and containerfile at CLI level and not directly send it to the backend executor because in remote setup we need to prepare context and send it to backend.\n\nThanks, so I _was_ missing something.\n\n> do you think it will be okay to those changes in a new PR and scope this PR only to the bug fix above ?\n\nWhat about those `{Docker.Container}file.{docker,container}ignore` and `$buildContext/.{docker,container}ignore` files, then? Do they need to be parsed at the CLI, or is that fine to do later because they will be transferred along the whole build context directory?\n\n- If they need to be parsed at the CLI, that’s not happening now.\n- If they will be transferred and parsed later, I’d prefer the Podman implementation, now, to be simplified: I.e. add something like `parse.IgnoreFileAtPath` with only one parameter to Buildah (and use it in Buildah’s `pkg/cli/build.go`), and then make a smaller change in Podman.\n\nThe more comprehensive cleanup of Buildah (_if that still makes sense_) can be done later, that’s pre-existing; but adding extra complexity to Podman would be adding to tech debt and is fairly cheaply avoidable now, when we understand the situation."
+        },
+        {
+            "user": "mtrmac",
+            "body": "> If they need to be parsed at the CLI, that’s not happening now.\n\nLooking _a bit_ more closely, $contextDir is transferred to the remote, but if `containerFiles` are not in $contextDir, `${containerFile}.{docker,container}ignore` files are not currently transferred to the remote?! So that’s currently not working correctly. (But it’s pre-existing and not the bug this PR intends to fix.)\n\nHum… should the `if flags.IgnoreFile != \"\"` be removed in Podman, then? But that would turn this from a rare code path to an always-executing one, so we should be really sure that this is consistent with current Buildah behavior.\n\nOr, maybe, keep the `parse.ContainerIgnoreFile` call as is in the PR now, and add a detailed comment about how this does not do what is necessary — under the theory that we _will_ need to use `containerFiles` in the proper fix in the future, so this PR moves us somewhat in the right direction, even if the _uses_ of `containerFiles` are currently misleading."
+        },
+        {
+            "user": "flouthoc",
+            "body": "> Looking a bit more closely, $contextDir is transferred to the remote, but if containerFiles are not in $contextDir, ${containerFile}.{docker,container}ignore files are not currently transferred to the remote?! So that’s currently not working correctly\n\nI did not understand this comment exactly. As per function `parse.ContainerIgnoreFile` \n\n* If path is directly provided, it parses the ignorefile and returns the list of excludes.\n\n* Second it checks if `ignorefiles` exists on the same path as `Contailerfiles`, if it exists it parses the ignore file and returns the list of file which we want to exclude from the buildcontext.\n\n* If ignorefiles are not found in the same path as `Containerfiles` it looks for ignore files in `$contextDir` and if found it parses them and return list of excludes.\n\nTLDR: It searches for ignorefiles in following order, then if found parses and returns list of excludes.\n\n```\n* The explicitly provided path (if any)\n* For each file in containerFiles:\n     -  <containerfile>.containerignore\n     -  <containerfile>.dockerignore\n* .containerignore in the context directory\n* .dockerignore in the context directory\n```\n\n\nThe function overall appears to me doing correctly and I did not understand why the use of `contaerfiles` is misleading ?"
+        },
+        {
+            "user": "mtrmac",
+            "body": "> > Looking a bit more closely, $contextDir is transferred to the remote, but if containerFiles are not in `contextDir`\n> > `${containerFile}.{docker,container}ignore` files are not currently transferred to the remote?! So that’s currently not working correctly\n> \n> I did not understand this comment exactly. As per function `parse.ContainerIgnoreFile`\n> \n> * If path is directly provided, it parses the ignorefile and returns the list of excludes.\n> * Second \n\nLook at the current call site: it calls `parse.ContainerIgnoreFile` _iff `flags.IgnoreFile` is set_, and in that case the other lookups don’t happen.\n\n> The function overall appears to me doing correctly and I did not understand why the use of `contaerfiles` is misleading ?\n\nThe _function_ is (to my limited knowledge) fine; the misleading part is that the caller passes `containerFiles` in a situation where they are _guaranteed_ to be ignored."
+        },
+        {
+            "user": "packit-as-a-service[bot]",
+            "body": "[NON-BLOCKING] Packit jobs failed. @containers/packit-build please check. Everyone else, feel free to ignore."
+        },
+        {
+            "user": "flouthoc",
+            "body": "Okay it seems like I cannot just remove `flags.IgnoreFile` and process all `excludes` earlier because it changes expected error messages for bud tests.\n\nI have decided to use `imagebuilder.ParseIgnore` which is public and being used by the part of `parse.ContainerIgnoreFile` which makes following patch much more acceptable.\n\nI will refactor things on buildah side and see if we can unify this part with buildah ( unrelated to this bug )."
+        },
+        {
+            "user": "mtrmac",
+            "body": "LGTM, that’s a clear local improvement."
+        },
+        {
+            "user": "flouthoc",
+            "body": "@containers/podman-maintainers PTAL"
+        },
+        {
+            "user": "rhatdan",
+            "body": "/lgtm"
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 25746
+        }
+    ]
+}

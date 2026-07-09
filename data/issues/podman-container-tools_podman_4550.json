@@ -1,0 +1,73 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 4550,
+    "type": "issue",
+    "title": "\"--device\" should not resolve symbolic links",
+    "state": "closed",
+    "labels": [
+        "kind/bug",
+        "stale-issue",
+        "locked - please file new issue/PR"
+    ],
+    "user": "stefanb2",
+    "body": "**Is this a BUG REPORT or FEATURE REQUEST? (leave only one on its own line)**\n\n/kind bug  (well, could also be considered feature request, see below)\n\n**Description**\n\nDevice numbering, e.g. for USB devices, is non-deterministic. Take f.ex. the use case of having two USB-to-serial devices connected via a hub to the host: it is not determined which of them will be `/dev/ttyUSB0` after disconnecting and reconnecting the hub from the host. In order for non-root users not to have to resort to root \"magic incantations\" the OS generates symbolic links with fixed names based on unique device properties as `/dev/serial/by-id/XXX`.\n\nUnfortunately the `--device` option resolves the symbolic link, hence a container will be hard-coded to the real `/dev/ttyUSBx` that the symbolic link was pointing to at the time of the creation of the container. But on container restart that may be the wrong device or the device may no longer exist.\n\n**Steps to reproduce the issue:**\n\n```sh\n# no devices connected\n$ ls -lht /dev/serial/by-id\n\n# connect device A (the one we want to use inside the container) -> ttyUSB0\n$ ls -lht /dev/serial/by-id\nlrwxrwxrwx. 1 root root 13 Nov 22 08:43 usb-FTDI_FT230X_Basic_UART_DN03TPFH-if00-port0 -> ../../ttyUSB0\n\n# connect device B -> ttyUSB1\n$ ls -lht /dev/serial/by-id\nlrwxrwxrwx. 1 root root 13 Nov 22 08:43 usb-FTDI_FT230X_Basic_UART_DN03LNJE-if00-port0 -> ../../ttyUSB1\nlrwxrwxrwx. 1 root root 13 Nov 22 08:43 usb-FTDI_FT230X_Basic_UART_DN03TPFH-if00-port0 -> ../../ttyUSB0\n\n# create the container, passing in device A with the fixed name\n# NOTE: SELinux / crun annotation required for rootless container\n$ podman run -it --name alpine-serial --security-opt label=disable --annotation io.crun.keep_original_groups=1 --device /dev/serial/by-id/usb-FTDI_FT230X_Basic_UART_DN03TPFH-if00-port0:/dev/ttyUSB0 alpine\n/ # ls -lht /dev/ttyUSB*\ncrw-rw----    1 nobody   nobody    188,   0 Nov 22 06:43 /dev/ttyUSB0\n/ # exit\n$\n\n# start the container again\n$ podman start -ia alpine-serial\n/ # ls -lht /dev/ttyUSB*\ncrw-rw----    1 nobody   nobody    188,   0 Nov 22 06:50 /dev/ttyUSB0\n/ # exit\n$\n\n# remove device A & B\n$ ls -lht /dev/serial/by-id\n\n# connect device B -> ttyUSB0\n$ ls -lht /dev/serial/by-id\nlrwxrwxrwx. 1 root root 13 Nov 22 08:51 usb-FTDI_FT230X_Basic_UART_DN03LNJE-if00-port0 -> ../../ttyUSB0\n\n# connect device A -> ttyUSB1\n$ ls -lht /dev/serial/by-id\nlrwxrwxrwx. 1 root root 13 Nov 22 08:51 usb-FTDI_FT230X_Basic_UART_DN03TPFH-if00-port0 -> ../../ttyUSB1\nlrwxrwxrwx. 1 root root 13 Nov 22 08:51 usb-FTDI_FT230X_Basic_UART_DN03LNJE-if00-port0 -> ../../ttyUSB0\n\n# remove device B(!!!) -> device A stays as ttyUSB1\n$ ls -lht /dev/serial/by-id\nlrwxrwxrwx. 1 root root 13 Nov 22 08:51 usb-FTDI_FT230X_Basic_UART_DN03TPFH-if00-port0 -> ../../ttyUSB1\n\n# now start the container again\n$ podman start -ia alpine-serial\nError: unable to start container 7fe07dafa43e6752be593710d1303a1180271f4b358433db6e5557b024ec5d0c: error stat'ing file '/dev/ttyUSB0': No such file or directory: OCI runtime command not found error\n```\n\n**Describe the results you received:**\n\nCan't start the container again or get the wrong device unless I make sure that device A is assigned to `/dev/ttyUSB0`\n\n**Describe the results you expected:**\n\nContainer should access device A using the symbolic link hence ensuring it is always talking to the correct device.\n\n**Additional information you deem important (e.g. issue happens only occasionally):**\n\nI see two ways this could be addressed:\n\n* don't resolve the symbolic link (i.e. this is a bug)\n* add a \"don't follow symbolic link\" flag to permissions (maybe follow `find -P` convention?), e.g. `--device /dev/serial/by-id/usb-FTDI_FT230X_Basic_UART_DN03TPFH-if00-port0:/dev/ttyUSB0:rwP` (i.e. this is a feature request)\n\nOr is this an OCI runtime issue? I couldn't find the device information when I used `podman inspect alpine-serial`.\n\n**Output of `podman version`:**\n\n```\nVersion:            1.6.2\nRemoteAPI Version:  1\nGo Version:         go1.13.1\nOS/Arch:            linux/amd64\n```\n\n**Output of `podman info --debug`:**\n\n```\ndebug:\n  compiler: gc\n  git commit: \"\"\n  go version: go1.13.1\n  podman version: 1.6.2\nhost:\n  BuildahVersion: 1.11.3\n  CgroupVersion: v2\n  Conmon:\n    package: conmon-2.0.2-1.fc31.x86_64\n    path: /usr/bin/conmon\n    version: 'conmon version 2.0.2, commit: 186a550ba0866ce799d74006dab97969a2107979'\n  Distribution:\n    distribution: fedora\n    version: \"31\"\n  IDMappings:\n    gidmap:\n    - container_id: 0\n      host_id: 1000\n      size: 1\n    - container_id: 1\n      host_id: 100000\n      size: 65536\n    uidmap:\n    - container_id: 0\n      host_id: 1000\n      size: 1\n    - container_id: 1\n      host_id: 100000\n      size: 65536\n  MemFree: 7781224448\n  MemTotal: 16461656064\n  OCIRuntime:\n    name: crun\n    package: crun-0.10.5-2.fc31.x86_64\n    path: /usr/bin/crun\n    version: |-\n      crun version 0.10.5\n      spec: 1.0.0\n      +SYSTEMD +SELINUX +APPARMOR +CAP +SECCOMP +EBPF +YAJL\n  SwapFree: 15024144384\n  SwapTotal: 20002631680\n  arch: amd64\n  cpus: 8\n  eventlogger: journald\n  hostname: stefanb-lnx.localdomain\n  kernel: 5.3.11-300.fc31.x86_64\n  os: linux\n  rootless: true\n  slirp4netns:\n    Executable: /usr/bin/slirp4netns\n    Package: slirp4netns-0.4.0-20.1.dev.gitbbd6f25.fc31.x86_64\n    Version: |-\n      slirp4netns version 0.4.0-beta.3+dev\n      commit: bbd6f25c70d5db2a1cd3bfb0416a8db99a75ed7e\n  uptime: 167h 41m 8.59s (Approximately 6.96 days)\nregistries:\n  blocked: null\n  insecure: null\n  search:\n  - docker.io\n  - registry.fedoraproject.org\n  - quay.io\n  - registry.access.redhat.com\n  - registry.centos.org\nstore:\n  ConfigFile: /home/stefanb/.config/containers/storage.conf\n  ContainerStore:\n    number: 3\n  GraphDriverName: vfs\n  GraphOptions: {}\n  GraphRoot: /home/stefanb/workarea/containers/storage\n  GraphStatus: {}\n  ImageStore:\n    number: 10\n  RunRoot: /run/user/1000\n  VolumePath: /home/stefanb/workarea/containers/storage/volumes\n```\n\n**Package info (e.g. output of `rpm -q podman` or `apt list podman`):**\n\n```\npodman-1.6.2-2.fc31.x86_64\n```\n\n**Additional environment details (AWS, VirtualBox, physical, etc.):**\n\nnone",
+    "comments": [
+        {
+            "user": "giuseppe",
+            "body": "for the OCI runtime it should not matter as anyway the symlink is resolved at mount time.\n\nI think we should store the original path provided to `--device` instead of resolving it, so that when we restart the container we'll resolve it again.\n\nWould you like to open a PR for doing it?"
+        },
+        {
+            "user": "stefanb2",
+            "body": "I can probably look into the source code over the weekend."
+        },
+        {
+            "user": "mheon",
+            "body": "The core issue is that we're not storing devices in the DB, but in the OCI spec, which only contains the major and minor numbers for each (plus the destination path). We don't know where the original source of the device was. To fix, we'd need to add devices to the database and add them to the container as part of final spec generation, but I'm not sure if I like that approach - shifts a lot of burden that normally only happens once to happen every time the container starts."
+        },
+        {
+            "user": "rhatdan",
+            "body": "BTW, their might be a lot of changes coming the --device option way.\nAfter discussions with nvidia and intel on their specialized GPUS for containers, they are looking to add a command like\n\npodman device create foobar\n\nand then \n\npodman run --device foobar\n\nWhere foobar gets translated into an actual device, after some code is run to configure the devices."
+        },
+        {
+            "user": "mheon",
+            "body": "If we do that, can we please not overload the existing syntax? Adding a new flag is easy and doesn't make parsing overly complicated."
+        },
+        {
+            "user": "rhatdan",
+            "body": "Except you have a different CLI then how you handle volumes, networks.  The hope is that nvidia and/or Intel work on this, since they are the experts."
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "This issue had no activity for 30 days. In the absence of activity or the \"do-not-close\" label, the issue will be automatically closed within 7 days."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@mheon @stefanb2 Do we still have this issue?"
+        },
+        {
+            "user": "stefanb2",
+            "body": "Unless the mentioned updates by Nvidia/Intel have been integrated the issue still exists.\n\nIf the consensus is that it can't/won't be fixed then I would suggest that the limitation is added to the documentation of the `--device` option."
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@stefanb2 could you open a PR to fix the troublshooting guide on --device, and perhaps also fix the man pages."
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 5304
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 11688
+        }
+    ]
+}

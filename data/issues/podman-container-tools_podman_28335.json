@@ -1,0 +1,173 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 28335,
+    "type": "pull_request",
+    "title": "refactor: podman quadlet sub-command",
+    "state": "closed",
+    "labels": [
+        "kind/api-change",
+        "6.0"
+    ],
+    "user": "axel7083",
+    "body": "<!--\nThanks for sending a pull request!\n\nFor more detailed information, please review our contributing guidelines:\nhttps://github.com/containers/podman/blob/main/CONTRIBUTING.md#submitting-pull-requests\n-->\n\n#### Checklist\n\nEnsure you have completed the following checklist for your pull request to be reviewed:\n<!-- Use [x] to mark as done, or click the checkbox after opening PR -->\n\n- [x] Certify you wrote the patch or otherwise have the right to pass it on as an open-source patch by signing all\ncommits. (`git commit -s`). (If needed, use `git commit -s --amend`).  The author email must match\nthe sign-off email address. See [CONTRIBUTING.md](https://github.com/containers/podman/blob/main/CONTRIBUTING.md#sign-your-prs)\nfor more information.\n- [x] Referenced issues using `Fixes: #00000` in commit message (if applicable)\n- [x] [Tests](https://github.com/containers/podman/tree/main/test#readme) have been added/updated (or no tests are needed)\n- [x] [Documentation](https://github.com/containers/podman/blob/main/docs/README.md) has been updated (or no documentation changes are needed)\n- [x] All commits pass `make validatepr` (format/lint checks)\n- [x] [Release note](https://github.com/kubernetes/community/blob/master/contributors/guide/release-notes.md) entered in the section below (or `None` if no user-facing changes)\n\n#### Does this PR introduce a user-facing change?\n\n<!--\nWrite `None` if there are no user-facing changes, otherwise enter your release note below.\nInclude \"action required\" if users need to take action when upgrading.\n-->\n\n```release-note\nrefactor the podman quadlet command\n```\n\nWhile working on https://github.com/containers/podman/issues/28117 and the comment from @Luap99 (https://github.com/containers/podman/issues/28117#issuecomment-4040695507) I had a lot of issues working around the `.app` and `.asset` file, a suggestion made was to get rid of  those and consider an application as a folder.\n\nHere is a POC / proposal of how it could works\n\n### `podman quadlet install`\n\nWhen trying to install from a directory, you will need to specify `--application` as we want to avoid dumping all the content of the directory at the root.\n\nInstalling from a directory (support recursive)\n\n```bash\n$: podman quadlet install --application flask-redis ./flask-redis\n$: ree /home/axel7083/.config/containers/systemd\n/home/axel7083/.config/containers/systemd\n└── flask-redis\n    ├── app\n    │   ├── app.py\n    │   ├── Containerfile\n    │   └── requirements.txt\n    ├── flask.kube\n    ├── play.yaml\n    └── README.md\n```\n\n### `podman quadlet ls --format=json`\n\nFollowing `flask-redis` installed above we get\n\n```json\n$: podman quadlet ls --format=json\n[\n  {\n    \"Name\": \"flask.kube\",\n    \"UnitName\": \"flask.service\",\n    \"Path\": \"/home/axel7083/.config/containers/systemd/flask-redis/flask.kube\",\n    \"Status\": \"inactive/dead\",\n    \"App\": \"flask-redis\" <-- application name is the name of the sub directory\n  },\n]\n```\n\nNow let's add an `nginx.image` \n\n```json\n$: podman quadlet install ./nginx.image\n$: podman quadlet ls --format=json\n[\n  {\n    \"Name\": \"flask.kube\",\n    \"UnitName\": \"flask.service\",\n    \"Path\": \"/home/axel7083/.config/containers/systemd/flask-redis/flask.kube\",\n    \"Status\": \"inactive/dead\",\n    \"App\": \"flask-redis\"\n  },\n  {\n    \"Name\": \"nginx.image\",\n    \"UnitName\": \"nginx-image.service\",\n    \"Path\": \"/home/axel7083/.config/containers/systemd/nginx.image\",\n    \"Status\": \"inactive/dead\",\n    \"App\": \"\" <-- No application name as it is at the root\n  }\n]\n```\n\n> :warning: this is only taking the first directory, if we have `/home/axel7083/.config/containers/systemd/flask-redis/nested/flask.kube\"` it will still be `flask-redis`.\n\n### `podman quadlet rm`\n\nI added a `--recursive` option, the rm support two input, a quadlet file (E.g. `foo.image`) or an application name. However when trying t o delete an application it will throw an error\n\n```bash\n$: /bin/podman quadlet rm flask-redis\nError: unable to remove Quadlet: cannot find application \"flask-redis\"\n```\n\nYou need to specify the `--recursive` flag to delete **the quadlets** in the application \n\n> I did not in this POC deleted the full application directory, I was not sure, open to suggestion ",
+    "comments": [
+        {
+            "user": "mheon",
+            "body": "Ummm. Given how new these commands are, it would not be *unprecedented* to break folks, but it's still a very bad user experience...\n\nOur migration options are also not particularly pretty though. I suppose we could detect legacy project files and convert to a directory and remove the file on finding them?"
+        },
+        {
+            "user": "Luap99",
+            "body": "> Our migration options are also not particularly pretty though. I suppose we could detect legacy project files and convert to a directory and remove the file on finding them?\n\nConvert when? \"inside quadlet\"? when running \"podman quadlet list/install/remove\"? For install/remove it is not clear to me we should migrate other files. And on list it seems strange to do a rewrite of files, i.e. there is no sane way to make this in a atomic fashion so we risk leaving the files in a bad state when getting killed."
+        },
+        {
+            "user": "simonbrauner",
+            "body": "I also like using directories instead of the `.app` files, introducing the `--application` option instead depending on directory name, as well as removing the `If a quadlet is part of an application, removing that specific quadlet will remove the entire application.` functionality.\n\n### Service naming conflicts\n\nBut this introduces the possibility of having multiple services of the same name.\n\n```\n$ podman quadlet install postgres-17-test --application=a\n/home/sbrauner/.config/containers/systemd/a/A.container\n/home/sbrauner/.config/containers/systemd/a/B.container\n/home/sbrauner/.config/containers/systemd/a/README.md\n$ podman quadlet install postgres-17-test --application=b\n/home/sbrauner/.config/containers/systemd/b/A.container\n/home/sbrauner/.config/containers/systemd/b/B.container\n/home/sbrauner/.config/containers/systemd/b/README.md\n$ podman quadlet list\nERRO[0000] Unexpected unit returned by systemd - was not searching for A.service \nERRO[0000] Unexpected unit returned by systemd - was not searching for B.service \nNAME         UNIT NAME   PATH ON DISK                                             STATUS         APPLICATION\nA.container  A.service   /home/sbrauner/.config/containers/systemd/b/A.container  inactive/dead  b\nB.container  B.service   /home/sbrauner/.config/containers/systemd/b/B.container  inactive/dead  b\n             A.service                                                            inactive/dead  \n             B.service                                                            inactive/dead  \n```\n\nSo I suppose it should either check for naming conflicts, or make the application name part of the service name, so that multiple quadlets with the same application-local name can exist independently.\n\n### Implicit merge of applications\n\nI am also thinking that maybe it would be slightly more convenient for the user if they were notified that they are adding quadlets to an existing application. Now it happens implicitly,  so it can hypothetically happen that the user:\n\n\n```\ncreates application `webserver`, with containers `A` and `B`\nforgets about it\ncreates different application and decides to also call it `webserver`, with containers `C` and `D`\nremoves `webserver`, thinking they are removing `C` and `D`, but `A` and `B` would also get removed.\n```"
+        },
+        {
+            "user": "simonbrauner",
+            "body": "Also took a mostly high level look, it looks nice overall.\n\nIt does not look like it's ready to be merged, there are TODOs.\n\nMy previous comment should probably be addressed, as installing multiple quadlets with the same name breaks.\n\nRemoving the whole application keeps non-quadlet files and the directory itself.\n\nThe word `refactor` does not seem right, as this changes functionality."
+        },
+        {
+            "user": "axel7083",
+            "body": "Hey @simonbrauner !\n\n> It does not look like it's ready to be merged, there are TODOs.\n\nI removed the TODOs\n\n> My previous comment should probably be addressed, as installing multiple quadlets with the same name breaks.\n\nThis is something already possible with the current, so not sure how this could been addressed? Maybe we need a dedicated issue to try to address that?\n\n> Removing the whole application keeps non-quadlet files and the directory itself.\n\nIt does if there is no errors while removing each quadlet in the application, the directory will be removed :+1: \n\nhttps://github.com/containers/podman/blob/5d121652e8dc28158bb64ec98fc92c46fd621e9f/pkg/domain/infra/abi/quadlet.go#L626-L637"
+        },
+        {
+            "user": "packit-as-a-service[bot]",
+            "body": "[NON-BLOCKING] Packit jobs failed. @containers/packit-build please check. Everyone else, feel free to ignore."
+        },
+        {
+            "user": "simonbrauner",
+            "body": "Hello @axel7083.\n\n> I removed the TODOs\n\nThere is still one about validation of application name https://github.com/containers/podman/pull/28335/changes#diff-98a6e1ecc741f449262cca173c6e557c64dbf2706e5b062967b07b76018b62adR10\n\n> This is something already possible with the current, so not sure how this could been addressed? Maybe we need a dedicated issue to try to address that?\n\nI would say this is introduced by the possibility of having multiple quadlets of the same name across different applications.\n\nWith the original approach, installing multiple quadlets of the same name fails:\n\n```\n$ podman quadlet install postgres-17-test\n/home/sbrauner/.config/containers/systemd/README.md\n/home/sbrauner/.config/containers/systemd/A.container\n/home/sbrauner/.config/containers/systemd/B.container\n\n$ podman/bin/podman quadlet install postgres-17-test-2\nError: quadlet \"postgres-17-test-2/A.container\" failed to install: a Quadlet with name A.container already exists, refusing to overwrite\nError: quadlet \"postgres-17-test-2/B.container\" failed to install: a Quadlet with name B.container already exists, refusing to overwrite\nError: quadlet \"postgres-17-test-2/README.md\" failed to install: a Quadlet with name README.md already exists, refusing to overwrite\nError: errors occurred installing some Quadlets\n```\n\nSo I am thinking, the two ideas would be:\n\n1. Check if quadlet of that name exists anywhere regardless of the application and fail if it does.\n2. Add some prefix to the unit name, so that systemd is not confused, for example `a/A.service` and `b/A.service` would be two separate services which just happen to have the same file name of a corresponding quadlet, but can coexist independently.\n\nBut I am not saying this is something that has to be done as part of this PR, I was just thinking of the consequences of your changes and this is what I thought of.\n\n> It does if there is no errors while removing each quadlet in the application, the directory will be removed 👍\n\n👍"
+        },
+        {
+            "user": "axel7083",
+            "body": "> So I am thinking, the two ideas would be:\n> \n> 1. Check if quadlet of that name exists anywhere regardless of the application and fail if it does.\n\nI will try to add this tomorrow morning :+1: "
+        },
+        {
+            "user": "axel7083",
+            "body": "@simonbrauner I reviewed the problem, and the current behavior that you are seeing is not preventing \"duplicate\" quadlets with the same service name, but rather preventing you to override, the logic is technically still here.\n\nIf you try to `podman quadlet install ./foo.image` twice with the change you will get the same error.\n\nhttps://github.com/containers/podman/blob/af3ed8dd3c6bd4e4d91391963e08b0b04a9eff2d/pkg/domain/infra/abi/quadlet.go#L285-L287\n\nThe problem of duplicates service name is a bit more annoying to solve, let me explain. A service name is either define by its name or by its `Service=<name>` key.\n\nThe quadlet systemd generator is reading and parsing the unit file, and lookup for the `Service` key in the `[Unit]` group as shown bellow\n\nhttps://github.com/containers/podman/blob/2cc3be73323e9dfbeaa9d603cac7f359bb8b8f05/pkg/systemd/quadlet/quadlet.go#L1580-L1590\n\nBut for us this is a little bit a challenge, as when should we fails? If the user is installing `foo.image` and `bar.image` and they both have `Service=hello.service` this is a problem, and currently one will be randomly picked (I reported the problem in https://github.com/containers/podman/issues/28118).\n\n---\n\nSo my question would be, when should we fails?\n\n If the user already have multiple quadlets with the same service name, if we try to install another should we fail? \n\nDoes the quadlet generator should fail if multiple quadlets have the same service name? Or just a warning in the stderr?\n\nI think we can parse every quadlets we try to install and check that in the list of quadlets we try to install (when passing a directory or a tar) we could read and parse them, but what if they are invalid? currently I don't think we are checking if the quadlets files are valid :thinking: .\n\nAnyway, I think this is going a bit out of scope of this PR, and as it is already big enough, I think we may skip the service name issue, wdyt?"
+        },
+        {
+            "user": "simonbrauner",
+            "body": "> Anyway, I think this is going a bit out of scope of this PR, and as it is already big enough, I think we may skip the service name issue, wdyt?\n\nYes, sure. Initially I thought that this is strange behavior introduced by this PR, but if it's just something that was there already (just less likely to happen), then I have nothing against considering it out of scope."
+        },
+        {
+            "user": "packit-as-a-service[bot]",
+            "body": "Cockpit tests failed for commit c026ffca1b3c6acfc53f5617281cba8e6240f9d2. @martinpitt, @jelly, @mvollmer please check."
+        },
+        {
+            "user": "packit-as-a-service[bot]",
+            "body": "[NON-BLOCKING] Packit jobs failed. @containers/packit-build please check. Everyone else, feel free to ignore."
+        },
+        {
+            "user": "simonbrauner",
+            "body": "@axel7083 I had similar CI failures and it got solved by rebasing on the latest `main`."
+        },
+        {
+            "user": "l0rd",
+            "body": "> what happens if you do `podman quadlet install --application nameofapp.container directory/` and you have installed `nameofapp.container` already?\n> \n> I know that disambiguation is an issue we'll have to deal with eventually out of this PR, but it makes sense to me to at least check for valid application names that can collide with quadlet files. I could definitely see a user calling \"container\" their application and running into an unexpected collision.\n\nDo you mean we should avoid installing an application whose name would be a valid quadlet name? Or that we should check the names of the existing quadlets (not services) and avoid collisions?"
+        },
+        {
+            "user": "inknos",
+            "body": "> Do you mean we should avoid installing an application whose name would be a valid quadlet name? Or that we should check the names of the existing quadlets (not services) and avoid collisions?\n\nAvoid the application has a valid quadlet name, like it should not end with `.container`,`.pod`, etc"
+        },
+        {
+            "user": "l0rd",
+            "body": "> Avoid the application has a valid quadlet name, like it should not end with .container,.pod, etc\n\nI have added [this condition to the function that validates application names](https://github.com/containers/podman/pull/28335/changes#diff-25d829278fb871521263f3aadf13b60b10253d7c828523cfebdc0adf8a59a649R297-R299) and a [new unit test as well](https://github.com/containers/podman/pull/28335/changes#diff-d2b5121a81dd2f01cca8e5e461fb231c8140bf376384c341eedaec9b1dcb6f6fR75-R78)."
+        },
+        {
+            "user": "kavishgr",
+            "body": "I think the `--recursive` flag adds another layer of complexity for users. We can do something like this:\n\n#### Case 1: Remove individual quadlet from an app (safe, no confirmation needed)\n\n```sh\n$ podman quadlet rm myapp/web.container \nweb.container\n```\n\n#### Case 2: Remove by application name (auto-detects it's an app, requires confirmation)\n\n```sh\n$ podman quadlet rm myapp\nError: refusing to remove application 'myapp': this will delete 5 quadlets:\n  web.container, db.container, cache.container, network.volume, config.conf\n  \nUse --force to remove 'myapp'\n```\n\n#### Case 3: With `--force`\n\n```sh\n$ podman quadlet rm myapp --force\nweb.container\ndb.container\ncache.container\nnetwork.volume\nconfig.conf\n```"
+        },
+        {
+            "user": "l0rd",
+            "body": "> I think the `--recursive` flag adds another layer of complexity for users. We can do something like this:\n> \n> #### Case 1: Remove individual quadlet from an app (safe, no confirmation needed)\n> ```shell\n> $ podman quadlet rm myapp/web.container \n> web.container\n> ```\n> \n> #### Case 2: Remove by application name (auto-detects it's an app, requires confirmation)\n> ```shell\n> $ podman quadlet rm myapp\n> Error: refusing to remove application 'myapp': this will delete 5 quadlets:\n>   web.container, db.container, cache.container, network.volume, config.conf\n>   \n> Use --force to remove 'myapp'\n> ```\n> \n> #### Case 3: With `--force`\n> ```shell\n> $ podman quadlet rm myapp --force\n> web.container\n> db.container\n> cache.container\n> network.volume\n> config.conf\n> ```\n\n@kavishgr thank you for the proposals. There are a couple of things I would like to note:\n\n1. In `Case 1` we currently delete the whole application, which makes more sense in my opinion.\n2. The `--force` option exists already and is used to remove active quadlets too. So, a different meaning. If we use `--force` for `Case 3` as well, how can users avoid removing active apps?\n\nAs an alternative, if you and others think that's better, I can remove the `--recursive` flag and make `quadlet rm` work for apps as it does for single qualets, without the need for extra flags."
+        },
+        {
+            "user": "simonbrauner",
+            "body": "> #### Case 1: Remove individual quadlet from an app (safe, no confirmation needed)\n> ```shell\n> $ podman quadlet rm myapp/web.container \n> web.container\n> ```\n\nThis makes sense, when removing a quadlet, there is no ambiguity (because of the `.container` extension). The `myapp/` prefix is not even necessary as podman can find the quadlet.\n\n\n> #### Case 2: Remove by application name (auto-detects it's an app, requires confirmation)\n> ```shell\n> $ podman quadlet rm myapp\n> Error: refusing to remove application 'myapp': this will delete 5 quadlets:\n>   web.container, db.container, cache.container, network.volume, config.conf\n>   \n> Use --force to remove 'myapp'\n> ```\n> \n> #### Case 3: With `--force`\n> ```shell\n> $ podman quadlet rm myapp --force\n> web.container\n> db.container\n> cache.container\n> network.volume\n> config.conf\n> ```\n\nThis combines two different concepts, because currently `--force` is about whether a running quadlet should be omitted or stopped, while `--recursive` is about whether a directory or a file is removed.\n\nI'd say that if a user types `podman quadlet rm applicationName` then the expected behavior would be removing the whole application so I don't think `recursive` should be off by default.\n\nBut on the other hand, if a user wants to remove a container which has the same name as an application (without the extension), then they will get the application in autocomplete and might mistake it with the quadlet and therefore remove something they didn't want to remove.\n\n```shell\npodman quadlet install --application test test\ntest.container\n...\npodman quadlet rm test # removes the whole application by mistake\n```\n\nSo from my point of view, it would make the most sense to call the parameter `--application` because the semantics is `removing application`, not `recursion`, as the fact that application is represented as a directory is just an implementation detail. And the autocomplete for application names could be turned off otherwise.\n\n```shell\npodman quadlet install --application test test\ntest.container\n...\npodman quadlet rm test.container # tab adds the container extension\ntest.container\npodman quadlet rm --application test # tab does not add the extension\n...\n\n```\n\n`--recursive` would definitely make sense to me if we supported subfolders, so that the semantics would be `remove this folder, not the whole application`. But as far as I know, we don't support that.\n\nFor context, the behavior before this PR is `if a quadlet which is a part of the application is removed, the whole application is removed automatically`, so even removing the whole application without confirmation by a specific argument would not be so unexpected."
+        },
+        {
+            "user": "simonbrauner",
+            "body": "> 1. In `Case 1` we currently delete the whole application, which makes more sense in my opinion.\n\nThis PR used to remove that behavior, was it introduced again? I don't think it makes much sense to remove the whole application if a single quadlet is removed, but if we decide to do it that way, then I'd say it makes even less sense to have the `--recursive` flag:\n\n```shell\npodman quadlet rm test.container # removes the whole application unexpectedly, does not require confirmation flag, even though the semantics is not so obvious\npodman quadlet rm testapp # fails, despite having clear semantics, because it requires confirmation flag\n```"
+        },
+        {
+            "user": "mheon",
+            "body": "I kind of agree with the `rm test.container` bits here. Removing single parts of an application sounds like something that should be allowed?"
+        },
+        {
+            "user": "l0rd",
+            "body": "My bad. I've got confused because the source code was updated but not the documentation (install and remove). I will fix the doc.\n\n@simonbrauner replacing `--recursive` with `--application` has a side effect: `--recursive=true <app1> <app2>` becomes `--application=<app1> --application=<app2>`. I am fine with that, it makes `install` and `remove` consistent. But I want to make sure that's what you intended before updating the PR."
+        },
+        {
+            "user": "Luap99",
+            "body": "> This makes sense, when removing a quadlet, there is no ambiguity (because of the .container extension). The myapp/ prefix is not even necessary as podman can find the quadlet.\n\nIt is technically possible to have the same file names in many search directories so I think having some way to say this application does make sense.\n\nI am not sure how people plan to use a application to me there are one unit, added/removed as one.\nIf you allow removing a single file then you need to handle all the resulting special cases, how are the data files installed along with the app removed then? What happens if you removed all quadlet files, does it automatically remove data files and the directory or do we end up with an empty application dir without quadlets? The later is bad because that would no longer show up in podman quadlet ls.\n\nI think the require --recursive and delete the whole app as one is simple and logical to document, adding special cases makes this more complicated than it needs to be I think."
+        },
+        {
+            "user": "mheon",
+            "body": "I don't fully agree, but it is a reasonable starting point. We can always add the additional edge cases of removing individual quadlets out of an app, and similar things, in future versions."
+        },
+        {
+            "user": "l0rd",
+            "body": "I agree with @Luap99, removing an application's single quadlet introduces new problems, and we should avoid that.\n\nBut `quadlet rm --recursive app/backend.volume` is also a weird way to remove an app. So my proposal is to fail in such a case:\n\n```bash\n$ podman quadlet rm --recursive app/backend.volume\nError: quadlet \"backend.volume\" is part of the application \"app\" and can't be individually removed. Remove the application instead.\n```"
+        },
+        {
+            "user": "simonbrauner",
+            "body": "> I am not sure how people plan to use a application to me there are one unit, added/removed as one.\nIf you allow removing a single file then you need to handle all the resulting special cases, how are the data files installed along with the app removed then? What happens if you removed all quadlet files, does it automatically remove data files and the directory or do we end up with an empty application dir without quadlets? The later is bad because that would no longer show up in podman quadlet ls.\n\nIt depends on what an application actually is.\n\nIf it's something atomic which does not make sense unless it's complete, then yes, allowing partial removal only introduces problems.\n\nIf it's just a group of quadlets then partial removal makes sense to me and it has clear semantics. If a user truly wants to remove a quadlet then I think they should be allowed to do so, and it's their responsibility that it may cause unused directory/broken dependency.\n\n> replacing `--recursive` with `--application` has a side effect: `--recursive=true <app1> <app2>` becomes `--application=<app1> --application=<app2>`. \n\nI don't think this is *that* tedious to write. I think it would be common to remove more quadlets at once, but many applications at once? But yes, I didn't think about it and it surely is something to consider."
+        },
+        {
+            "user": "l0rd",
+            "body": "> If it's just a group of quadlets then partial removal makes sense to me and it has clear semantics. If a user truly wants to remove a quadlet then I think they should be allowed to do so, and it's their responsibility that it may cause unused directory/broken dependency.\n\nI have ideas on how people should use applications (see compose files and kubernetes deployments) and it's not a group of independent services. No, that's not what an application should be."
+        },
+        {
+            "user": "simonbrauner",
+            "body": "> I have ideas on how people should use applications (see compose files and kubernetes deployments) and it's not a group of independent services. No, that's not what an application should be.\n\nThen it's good that we are making it clearer now. I probably have this mindset from the current implementation because `quadlet install directory` made me think that `it's just a group of quadlets which happens  to be in the same directory, so they are coupled in some sense, but not necessarily tightly`"
+        },
+        {
+            "user": "l0rd",
+            "body": "During last Thursday's community call, we decided that:\n- `--recursive` is required when removing an application\n- the full application is deleted when removing a quadlet that is part of it (`--recursive` is required)\n\nCode, docs and tests have been updated accordingly.\n\n@mheon @Luap99 @simonbrauner @inknos @Honny1 PTAL"
+        },
+        {
+            "user": "gmipf",
+            "body": "Thanks for the directory-as-application refactor — dropping the marker files is a genuine simplification.\n\nAdding a feature suggestion for consideration: the \"first directory = application\" rule doesn't cover grouping apps under a **parent directory** (by team, owner or tenant):\n\n```\n~/.config/containers/systemd/\n├── team-a/\n│   ├── web/   (web.container …)\n│   └── db/    (db.container …)\n└── team-b/\n    └── api/   (api.container …)\n```\n\nHere the natural application is each leaf (`web`, `db`, `api`), but `App` resolves to `team-a` / `team-b`, so distinct apps collapse into one. Unit generation is unaffected — it's purely the application attribution.\n\nCould an opt-in to set the application boundary (e.g. an install-time flag, or a small per-directory hint, rather than reintroducing `.app` files) be in scope? It would let grouped / multi-tenant layouts keep one application per leaf directory while preserving the marker-free default.\n\n*Generated with Claude Opus 4.8.*\n"
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 27573
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 27694
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 28860
+        },
+        {
+            "organization": "podman-desktop",
+            "repository": "extension-podman-quadlet",
+            "number": 1538
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 27647
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 27653
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 27069
+        }
+    ]
+}

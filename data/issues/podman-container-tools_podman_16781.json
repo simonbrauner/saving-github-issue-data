@@ -1,0 +1,301 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 16781,
+    "type": "pull_request",
+    "title": "fix: event read from syslog when syslog entry too long",
+    "state": "closed",
+    "labels": [
+        "lgtm",
+        "approved",
+        "kind/bug",
+        "release-note",
+        "locked - please file new issue/PR"
+    ],
+    "user": "matejvasek",
+    "body": "When labels map is too big we may get syslog entry truncated.\nThis breaks JSON parsing making event loading impossible.\n\n```\nERRO[0016] Unable to decode event: unexpected end of JSON input\n```\n\nBy default the limit is 64KiB, this PR set it to 0 == unlimited.\n\n\n```release-note\nfix: increased event syslog deserialization buffer \n```\n\nrelated to:\n* https://github.com/containers/podman/issues/16834\n* https://github.com/containers/container-selinux/pull/196",
+    "comments": [
+        {
+            "user": "matejvasek",
+            "body": "/cc @rhatdan @mheon "
+        },
+        {
+            "user": "matejvasek",
+            "body": "/kind bug"
+        },
+        {
+            "user": "matejvasek",
+            "body": "This affects container wait endpoint of Docker Compat API, since it relies on events.\nIt is quite a problem on 4.3+,\non 4.2 it's all right since 4.2 is not dumping labels to log."
+        },
+        {
+            "user": "matejvasek",
+            "body": "This is imo worth backporting to 4.3."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@giuseppe @Luap99 @mheon PTAL\nI wish there was a way to figure out the max, rather then hard coding it."
+        },
+        {
+            "user": "matejvasek",
+            "body": "> @giuseppe @Luap99 @mheon PTAL\nI wish there was a way to figure out the max, rather then hard coding it.\n\n640K ought to be enough for anybody."
+        },
+        {
+            "user": "matejvasek",
+            "body": "My specific case needs `104059` bytes."
+        },
+        {
+            "user": "Luap99",
+            "body": "From `sd_journal_get_data(3)`\n\n> sd_journal_set_data_threshold() may be used to change the data field size threshold for data returned by sd_journal_get_data(), sd_journal_enumerate_data() and sd_journal_enumerate_unique(). This threshold is a hint only: it indicates that the client program is interested only in the initial parts of the data fields, up to the threshold in size — but the library might still return larger data objects. That means applications should not rely exclusively on this setting to limit the size of the data fields returned, but need to apply an explicit size limit on the returned data as well. This threshold defaults to 64K by default. To retrieve the complete data fields this threshold should be turned off by setting it to 0, so that the library always returns the complete data objects. It is recommended to set this threshold as low as possible since this relieves the library from having to decompress large compressed data objects in full.\n\nGiven that we always need to full information we should set it to `0` instead, at least according to this description I have not tested it.\n\n@matejvasek You should also add a test with labels > 64 KiB to make sure we do not regress again."
+        },
+        {
+            "user": "matejvasek",
+            "body": "@Luap99 I did add a test at first, but it was failing in CI for some reason so I reverted it."
+        },
+        {
+            "user": "matejvasek",
+            "body": "The test worked locally perfectly fine, and I cannot debug what is wrong in CI."
+        },
+        {
+            "user": "matejvasek",
+            "body": "I set the threshold to 0 as suggested @Luap99 ."
+        },
+        {
+            "user": "matejvasek",
+            "body": "@giuseppe @Luap99 @mheon \nAny idea why test failing (timing out) in CI? I can only think of `events_logger=\"none\"`, but I doubt that is used there."
+        },
+        {
+            "user": "Luap99",
+            "body": "I think API test force `--events-backend file`. I suggest you create a new test in test/system/090-events.bats, I it is enough to create create a container with a big label and then podman events should fail right now?"
+        },
+        {
+            "user": "matejvasek",
+            "body": "@Luap99 but the `file` backend should work too, although it wouldn't test the actuall issue with journald.\nOnly the `none` backend should timeout."
+        },
+        {
+            "user": "Luap99",
+            "body": "> @Luap99 but the `file` backend should work too, although it wouldn't test the actuall issue with journald. Only the `none` backend should timeout.\n\nYeah I am not sure what the API tests use, I recommend to use the system tests and run this for both file and journald driver. This makes it more explicit what is actually being tested."
+        },
+        {
+            "user": "mheon",
+            "body": "Code changes LGTM"
+        },
+        {
+            "user": "matejvasek",
+            "body": "@Luap99 I am close to finishing tests in `test/system/090-events.bats`.\nIt has however one tiny issue, the podman CLI and/or testing framework cannot handle big labes :rofl: .\n\n```\n# Error: unable to process labels: bufio.Scanner: token too long\n```"
+        },
+        {
+            "user": "matejvasek",
+            "body": "@Luap99 @mheon PTAL"
+        },
+        {
+            "user": "matejvasek",
+            "body": "> @Luap99 I am close to finishing tests in `test/system/090-events.bats`. It has however one tiny issue, the podman CLI and/or testing framework cannot handle big labes rofl .\n> \n> ```\n> # Error: unable to process labels: bufio.Scanner: token too long\n> ```\n\nI had to increase scanner buffer in parser of `label-file`."
+        },
+        {
+            "user": "edsantiago",
+            "body": "And, whew, CI failed. It's not just me. The `start` event is never actually getting logged. It's not throwing an error, but it's not getting logged. Actually, **no** events for this container are being logged."
+        },
+        {
+            "user": "matejvasek",
+            "body": "@edsantiago suggested changes incorporated."
+        },
+        {
+            "user": "edsantiago",
+            "body": "Thanks - but the code doesn't actually, like, work. As mentioned above, the events are not logged. It is super trivial to confirm this:\n```console\nterminal1$ bin/podman --events-backend=journald events\n```\n```console\nterminal2$ (echo -n foo=;seq 1 50000|tr -cd 0-9) >| /tmp/mylabel \nterminal2$ bin/podman --events-backend=journald run --name foo --label-file=/tmp/mylabel --rm quay.io/libpod/testimage:20221018 date\n```\nIn case it matters: 6.0.9-300.fc37.x86_64 systemd-251.8-586.fc37.x86_64"
+        },
+        {
+            "user": "edsantiago",
+            "body": "My week is almost over (I work 4-day weeks) and I'm on PTO the next two weeks. I will check in as time allows this weekend, but that may not be much nor will it be real-time. Good luck, and thanks again. (And don't forget to squash your commits before submitting for final review)."
+        },
+        {
+            "user": "edsantiago",
+            "body": "Quick quick followup: the discrepancy is an AVC. On my system, and presumably in CI as well, the long label triggers an AVC:\n```\ntime->Thu Dec  8 15:37:24 2022\ntype=PROCTITLE msg=audit(1670539044.227:45451): proctitle=\"/usr/lib/systemd/systemd-journald\"\ntype=SOCKADDR msg=audit(1670539044.227:45451): saddr=0100003730653963\ntype=SYSCALL msg=audit(1670539044.227:45451): arch=c000003e syscall=47 success=yes exit=0 a0=4 a1=7ffcb9bf5ec0 a2=40000040 a3=7ffcb9bf9080 items=0 ppid=1 pid=3613 auid=4294967295 uid=0 gid=0 euid=0 suid=0 fsuid=0 egid=0 sgid=0 fsgid=0 tty=(none) ses=4294967295 comm=\"systemd-journal\" exe=\"/usr/lib/systemd/systemd-journald\" subj=system_u:system_r:syslogd_t:s0 key=(null)\ntype=AVC msg=audit(1670539044.227:45451): avc:  denied  { read write } for  pid=3613 comm=\"systemd-journal\" path=2F6465762F73686D2F6A6F75726E616C2E5858585858333432343638333132202864656C6574656429 dev=\"tmpfs\" ino=70516 scontext=system_u:system_r:syslogd_t:s0 tcontext=unconfined_u:object_r:container_runtime_tmpfs_t:s0 tclass=file permissive=0\n```\nOn @matejvasek's system, it does not. \n\nOn my system, with `setenforce 0`, the log entries make it into the journal.  So does `s/50000/23445/` in my `seq` reproducer above. It is a line-length issue. With `23446`, it fails.\n\nI'm out of time today, sorry."
+        },
+        {
+            "user": "matejvasek",
+            "body": "@rhatdan ^^^ any ideas about the SELinux issues?"
+        },
+        {
+            "user": "matejvasek",
+            "body": ">On @matejvasek's system, it does not.\n\nAlso note I have SELinux enabled on Fedora 36."
+        },
+        {
+            "user": "matejvasek",
+            "body": "Also why do we log labels?"
+        },
+        {
+            "user": "edsantiago",
+            "body": "More info: it only fails if the `podman` binary is `container_runtime_exec_t`. That's almost certainly why it doesn't fail for you, @matejvasek . Try this:\n```console\n$ chcon -t container_runtime_exec_t bin/podman\n```\n...and then try my reproducers, and then try them with `23445` (works) and `23446` (fails).\n\nI really, really have to leave now."
+        },
+        {
+            "user": "mheon",
+            "body": "@matejvasek I think it's for filtering events, but I'm not 100% sure about that."
+        },
+        {
+            "user": "matejvasek",
+            "body": "@edsantiago I looks like you are correct, after chcon the test fails."
+        },
+        {
+            "user": "edsantiago",
+            "body": "Okay, here's a compromise. @matejvasek write your test like this:\n```bash\n    (echo -n l=;head -c106122 /dev/zero|tr '\\0' 'x') >| /tmp/mylabel\n    $PODMAN --events-backend=journald run --name foo --label-file=/tmp/mylabel --pull=never --rm $IMAGE date  \n```\n(or something along those lines, use random chars if you like). That will FAIL with podman@main, as expected:\n```\nError: unable to process labels: bufio.Scanner: token too long\n```\n...but it will PASS with podman @ your-pr. 106122 is the magic cutoff: one more byte, and it semireliably fails with the AVC (not always) (and no, I'm not going to investigate why the not-always). To play it safe, trim off a few more bytes. That should give you a pretty decent test of your new functionality."
+        },
+        {
+            "user": "matejvasek",
+            "body": "But 106122 is dangerously close to what we actually have."
+        },
+        {
+            "user": "matejvasek",
+            "body": "We actually use image that has 100K long labels."
+        },
+        {
+            "user": "matejvasek",
+            "body": "```\ndocker image inspect gcr.io/paketo-buildpacks/builder:base | jq -r '.[0].Config.Labels'  | wc -c\n104282\n```"
+        },
+        {
+            "user": "matejvasek",
+            "body": "@mheon ah of course, that makes sense.\nBut couldn't it be optimised: search container matching labels and the filer only on ctr id? "
+        },
+        {
+            "user": "matejvasek",
+            "body": "@rhatdan any idea why binary with `container_runtime_exec_t` cannot write long journal entries?"
+        },
+        {
+            "user": "rhatdan",
+            "body": "The AVCs indicate that syslogd_t (systemd-journald) is not allowed to read/write a file created on a tmpfs_t directory.\n\nThis might be something where temporary memory is created on behalf of the container engine. that systemd-journald needs to be able to read\n"
+        },
+        {
+            "user": "rhatdan",
+            "body": "It is now allowed in container-selinux.\nhttps://github.com/containers/container-selinux/releases/tag/v2.194.0\n"
+        },
+        {
+            "user": "matejvasek",
+            "body": "@rhatdan  Thanks a lot for help.\n\nOut of curiosity, why it happens only for long entries? Buffering or something else?\nHow did you managed to debugged the issue?\n\nI assume it takes some time to propagate SELinux policies to Linux distributions, right?\nWould you agree with merging this PR without tests for now?"
+        },
+        {
+            "user": "Luap99",
+            "body": "I am fine with skipping the test if you create an issue for it so we do not forget to unskip it once the fix is the VM images."
+        },
+        {
+            "user": "matejvasek",
+            "body": "@Luap99 @mheon I removed tests (and created an issue for their future addition) PTAL"
+        },
+        {
+            "user": "Luap99",
+            "body": "> @Luap99 @mheon I removed tests (and created an issue for their future addition) PTAL\n\nThat is not what I meant, I would like you to keep it and just add a `skip \"Issue #XXXX: selinux problem with to long labels\"` this makes it easer for someone to later enable it and also keeps the git history more accurate."
+        },
+        {
+            "user": "matejvasek",
+            "body": "> > @Luap99 @mheon I removed tests (and created an issue for their future addition) PTAL\n> \n> That is not what I meant, I would like you to keep it and just add a `skip \"Issue #XXXX: selinux problem with to long labels\"` this makes it easer for someone to later enable it and also keeps the git history more accurate.\n\ndone"
+        },
+        {
+            "user": "rhatdan",
+            "body": "As far as why this is happening, in  the first place. I think the kernel is creating a temporary file in tmpfs when the buffer is big enough.  This file is labeled from an SELinux point with a tmpfs_t label. Since this has not happened in the past, the policy did not allow it by default. Bottom line I believe this is normal behavior."
+        },
+        {
+            "user": "matejvasek",
+            "body": "@Luap99 @mheon are latest test failures flakes? I don't see how they are related to my changes."
+        },
+        {
+            "user": "rhatdan",
+            "body": "LGTM"
+        },
+        {
+            "user": "openshift-ci[bot]",
+            "body": "[APPROVALNOTIFIER] This PR is **APPROVED**\n\nThis pull-request has been approved by: *<a href=\"https://github.com/containers/podman/pull/16781#pullrequestreview-1220741813\" title=\"Approved\">giuseppe</a>*, *<a href=\"https://github.com/containers/podman/pull/16781#\" title=\"Author self-approved\">matejvasek</a>*\n\nThe full list of commands accepted by this bot can be found [here](https://go.k8s.io/bot-commands?repo=containers%2Fpodman).\n\nThe pull request process is described [here](https://git.k8s.io/community/contributors/guide/owners.md#the-code-review-process)\n\n<details >\nNeeds approval from an approver in each of these files:\n\n- ~~[OWNERS](https://github.com/containers/podman/blob/main/OWNERS)~~ [giuseppe]\n\nApprovers can indicate their approval by writing `/approve` in a comment\nApprovers can cancel approval by writing `/approve cancel` in a comment\n</details>\n<!-- META={\"approvers\":[]} -->"
+        },
+        {
+            "user": "rhatdan",
+            "body": "/lgtm"
+        },
+        {
+            "user": "matejvasek",
+            "body": "@rhatdan @mheon will be this backported to 4.3?"
+        },
+        {
+            "user": "mheon",
+            "body": "Probably not, we're starting to work on 4.4 for a late January release now."
+        },
+        {
+            "user": "matejvasek",
+            "body": "> Probably not, we're starting to work on 4.4 for a late January release now.\n\n@mheon \nWill Fedora use it soon? What about RHEL?"
+        },
+        {
+            "user": "mheon",
+            "body": "For Fedora, it should land as soon as it releases (minus delay waiting for the bodhi updates to make it to stable). For RHEL, RHEL 8.8 will get it."
+        },
+        {
+            "user": "matejvasek",
+            "body": "@mheon \nI am asking because this is affect not only `podman events` but also Docker compat. API.\nThings might not work for people using podman as docker daemon replacement."
+        },
+        {
+            "user": "mheon",
+            "body": "How so? Would this be considered a breaking change?"
+        },
+        {
+            "user": "matejvasek",
+            "body": "@mheon \nThe `wait` endpoint must be able to detect transition between running->exited.\nIn order to do that we use events (I implemented that, polling is not reliable).\n\nWithout this PR the events are not written and/or read.\nFor example this causes freeze for [`pack`](https://github.com/buildpacks/pack) CLI."
+        },
+        {
+            "user": "matejvasek",
+            "body": "We noticed problems after https://github.com/containers/podman/pull/15633 (4.3).\nIn that PR we started writing labels for start and exit events."
+        },
+        {
+            "user": "mheon",
+            "body": "Ack, OK. I don't think we're considering another 4.3 release, but if we do this should definitely be in consideration."
+        },
+        {
+            "user": "rhatdan",
+            "body": "Yes no 4.3 updates, you will get it in 4.4.  We should have RC1 available this week."
+        },
+        {
+            "user": "matejvasek",
+            "body": "@rhatdan  `RHEL 8.7` seems to use `4.2` and `RHEL 8.8` will use `4.4` so we are good I guess?"
+        },
+        {
+            "user": "matejvasek",
+            "body": "Or will any `RHEL` use 4.3?"
+        },
+        {
+            "user": "matejvasek",
+            "body": "I noticed `v4.3.1-rhel` branch exists, how it is used?"
+        },
+        {
+            "user": "rhatdan",
+            "body": "It is not used, 4.3 was never released to RHEL, this branch was created in anticipation of releasing it to RHEL, but since the releases fell in the wrong way we decided to skip that release.  RHEL8.8 and 9.2 will get 4.4"
+        },
+        {
+            "user": "mheon",
+            "body": "4.3.1-rhel was used for a CentOS stream release or two, I think. It won't make it into RHEL proper."
+        },
+        {
+            "user": "matejvasek",
+            "body": "@rhatdan @mheon thanks, that sounds good!\n\nWhat about the SELinux policy pkg `container-selinux v2.198.0` will it available in RHEL and Fedora?"
+        },
+        {
+            "user": "matejvasek",
+            "body": "@rhatdan @mheon fedora-coreos used by `podman machine` still uses 4.3.1.\nIt is an issue for people on macOS.\nMaybe we should have backported after all? Or will fedora-coreos receive 4.4 soon?"
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 16834
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 16835
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 16076
+        },
+        {
+            "organization": "knative",
+            "repository": "func",
+            "number": 1561
+        }
+    ]
+}

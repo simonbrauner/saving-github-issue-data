@@ -1,0 +1,118 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 27628,
+    "type": "issue",
+    "title": "Add support to migrate data in boltdb to sqlite",
+    "state": "closed",
+    "labels": [
+        "kind/feature",
+        "sqlite",
+        "5.8"
+    ],
+    "user": "markbeazley",
+    "body": "### Feature request description\n\nWith version 6.0 boltdb is being removed, ahead of this in version 5.7.0 the message `The deprecated BoltDB database driver is in use. This driver will be removed in the upcoming Podman 6.0 release in mid 2026. It is advised that you migrate to SQLite to avoid issues when this occurs. Set SUPPRESS_BOLTDB_WARNING environment variable to remove this message.` is displayed.\n\nThere seems to be currently no way to migrate the data, and according to [this Fedora discussion thread](https://discussion.fedoraproject.org/t/podman-5-7-boltdb-to-sqlite-migration/171172) the only way to switch to sqlite is to call `podman system reset` which will delete all data including containers and volumes.\n\nIt would be good if a migration feature could be added that allows for the data to be copied from the boltdb database to the new sqlite database.\n\n### Suggest potential solution\n\nAs boltdb isn't an SQL DB a simple SQL export and import wont work, but would it not be possible to load the data from boltdb and use that to populate the new sqlite DB?\n\nIf not as some sort of automatic process, if it was  manual command that could be run in a pre version 6 version of podman to migrate ahead of time\n\n### Have you considered any alternatives?\n\nManually backing up and restoring data in the volumes would work but I have quite a few volumes I'd need to do this for, so much more time consuming and more potential for human error.\n\n### Additional context\n\n_No response_",
+    "comments": [
+        {
+            "user": "Luap99",
+            "body": "Thanks for creating the issue.\n\ncc @mheon @baude "
+        },
+        {
+            "user": "cgwalters",
+            "body": "Is this issue the right place to discuss the UX?\n\nI think the most user-friendly approach is one in which this transition is seamless and invisible (right?). \n\nOne way in which it might not be seamless is e.g. rollbacks between major versions. Supporting that might be hard (or it might not, I don't know personally).\n\nFrom there is further down a spectrum; the \"least user friendly\" end of the spectrum is probably what is in the current code \"we just fail on startup and say you need to reinitialize all state\".\n\nA middle ground there is starting in https://github.com/containers/podman/pull/27660 but that's where I'd like to understand the intended UX behind a new CLI verb. Do all containers fail to start until the user runs that manually? Or do we aim to ensure that a migration tool is automatically executed during system shutdown or startup in most scenarios via a systemd unit?\n\n\n"
+        },
+        {
+            "user": "mheon",
+            "body": "The core problem is that I can't really do a seamless migration in 6 because the BoltDB code is entirely gone, so a migration of 5.x to 6.x will have to make a stop at 5.8 to do a migration.\n\nOn manual vs automatic migration: the biggest issue is that, to ensure data transfers smoothly, all Podman processes should be shut down. Note that this doesn't mean containers need to go down, so long as there's no Podman attached - Conmon is fine - but if there's, say, a running `podman system service`, that needs to be shut down. I can't really do that automatically - we never built a mechanism into Podman to know there are other active processes, only a way to prevent new processes from starting until a migration is performed. I would say that's my biggest hesitation - we could do this automatically but if there are active Podman processes we risk losing data."
+        },
+        {
+            "user": "mheon",
+            "body": "One more issue, now that I think of it: manually-configured `boltdb` usage in the configuration file. I can't override that myself, that required explicit user intervention to alter the config."
+        },
+        {
+            "user": "Luap99",
+            "body": "> Is this issue the right place to discuss the UX?\n\nSure\n\n\nI agree with @mheon here. Also another point is what if there was some special bug in the migration that doesn't make the migrate fail but corrupts \"silently\". Having a user explicitly run this migration can ensure they have the chance to backup their system first.\n\n\n\n> One way in which it might not be seamless is e.g. rollbacks between major versions. Supporting that might be hard (or it might not, I don't know personally).\n\nThat should not matter to much, if the migration part worked you can rollback and it should be using sqlite just fine. Podman has been using sqlite as default since podman v4.8 so that is not really a concern to me."
+        },
+        {
+            "user": "cgwalters",
+            "body": "> Also another point is what if there was some special bug in the migration that doesn't make the migrate fail but corrupts \"silently\". Having a user explicitly run this migration can ensure they have the chance to backup their system first.\n\nI'm not sure that \"there might be bugs in code\" implies that users should take the hit.\n\n> The core problem is that I can't really do a seamless migration in 6 because the BoltDB code is entirely gone, so a migration of 5.x to 6.x will have to make a stop at 5.8 to do a migration.\n\nOK, though probably if this idea of automatic or assisted migration had been designed in the from the start, we probably wouldn't have removed it. Presumably it could come back too...\n\n> I can't really do that automatically - we never built a mechanism into Podman to know there are other active processes, only a way to prevent new processes from starting until a migration is performed.\n\nThere's really no filesystem-level lock grabbed external to the databases?\n\n---\n\nAnyways, I am not personally affected directly by this, I tend to reprovision systems on a relatively regular basis so none of my personal systems have boltdb.\n\nBut I am affected *indirectly* in building things around and on top of podman, and having painful transitions like this creates a cloud of instability that partially undermines that. And since I think there may be some similar data-format migrations in the future that I am interested in (especially around composefs) I want to make sure we set precedent for doing those in a more seamless manner.\n\n\nAnd on that topic:\n\n> I would say that's my biggest hesitation - we could do this automatically but if there are active Podman processes we risk losing data.\n\nI think many use cases can create mechanisms to greatly decrease the chance of concurrency here, by e.g. again running the migration code from a systemd unit at shutdown time. But yes, if there's not a suitable lock around this, it probably makes sense to add one now so that we can do something in the future right?\n\n"
+        },
+        {
+            "user": "mheon",
+            "body": "While we do grab a filesystem lock, it's only used to control the creation of new Libpod instances. Existing Libpods can continue running without issue. Other than that, we have the c/storage locks, which would shut absolutely everything down - which we really don't want to do, as things like Buildah and CRI-O are completely uninvolved and stalling any storage-related operations indefinitely while our (hopefully quick, but who knows how many containers/volumes/pods people have?) migration runs seems like a bad idea.\n\nWe could consider adding a global Libpod lock, but there's a lot of complexity in there. We'd either need a file lock - which is a large amount of overhead - or a new SHM lock, which would need either a breaking change to the existing locks format - which seems like a bad idea - or an entirely new SHM segment just for this lock. None of the options here is really appetizing.\n\nI'd also say your proposed composefs data migration doesn't have the same requirements as this. Any c/storage change is going to want to take and hold the c/storage locks for the duration; there's a reasonable expectation all consumers of images and containers should be stopped. Podman migrating its database doesn't have that expectation - I shouldn't be blocking other applications from using their containers because Podman's database needed changes.\n"
+        },
+        {
+            "user": "Luap99",
+            "body": "> We could consider adding a global Libpod lock\n\nI am not sure that would be a good idea, it means we loose all the more efficient/smarter locking that sqlite does for example so it could be perf hit as well.\n\n> I think many use cases can create mechanisms to greatly decrease the chance of concurrency here, by e.g. again running the migration code from a systemd unit at shutdown time\n\nI think that is certainly worth exploring, but also do we know how long this process takes? Sure, for a few containers it would be fast but I worry it might be slower for a lot of containers,pod,volumes... and I think users would get impatient if we block their shutdown for to long and might kill the migration.\n\n"
+        },
+        {
+            "user": "travier",
+            "body": "Instead of running the migration at shutdown time, I would run it at system start-up time. If I understand correctly, both formats have been supported for a while in podman so we could do the migration automatically on boot with podman 5.8.\n\n- If anything fails, we warn the user extra loudly and we keep running with boltdb. This would give us the entire 5.8 cycle to find and fix bugs in the migration code that users may hit.\n\n- If the migration succeeds and but the user rolls back their system with podman 5.8 to a previous system version then they would likely still be able to run their containers as older podman versions have had support for the new database for a while if I understood correctly.\n\nWe then require that old systems running podman containers update to a system version with podman 5.8, boot that at least once to perform the migration and then update again to a version with podman v6."
+        },
+        {
+            "user": "mheon",
+            "body": "@Luap99 Maximum migration size is bounded by NUM_LOCKS in containers.conf, so we have a maximum of 2048 objects in default configuration. So I think even our worst case is fairly bounded."
+        },
+        {
+            "user": "Luap99",
+            "body": "> @Luap99 Maximum migration size is bounded by NUM_LOCKS in containers.conf, so we have a maximum of 2048 objects in default configuration. So I think even our worst case is fairly bounded.\n\nWell it is a config setting for a reason, from past bug reports I know there are people who bumped it. Though yeah I guess you are right on average it won't matter much"
+        },
+        {
+            "user": "mheon",
+            "body": "Current design (thanks to @Luap99 for pointing out this is possible): Podman will attempt automatic migration when the first Podman process runs after a fresh boot, if and only if boltdb is not manually configured. If boltdb is manually configured, or the user does not reboot, a manual migration will be required via the `podman system migrate --migrate-db` command."
+        },
+        {
+            "user": "Eoin-ONeill-Yokai",
+            "body": "> Current design (thanks to [@Luap99](https://github.com/Luap99) for pointing out this is possible): Podman will attempt automatic migration when the first Podman process runs after a fresh boot, if and only if boltdb is not manually configured. If boltdb is manually configured, or the user does not reboot, a manual migration will be required via the `podman system migrate --migrate-db` command.\n\nThis would be really reassuring. I've been trying to track this for a while to make sure I don't miss my opportunity to migrate on my various podman systems, so making it as transparent as possible would be nice. "
+        },
+        {
+            "user": "cryptomilk",
+            "body": "> Podman will now automatically attempt to migrate legacy BoltDB databases to SQLite when the system reboots. This is necessary as support for BoltDB will be removed in Podman 6.0 in May. If automatic migration is not possible, a new option, podman system migrate --migrate-db, will manually force a migration.\n\nhttps://github.com/containers/podman/releases/tag/v5.8.0\n"
+        },
+        {
+            "user": "mheon",
+            "body": "Oh, did this issue not auto-close when https://github.com/containers/podman/pull/27660 merged? Oops.\n\nFixed in Podman 5.8, please open a new issue if you encounter issues with the migration."
+        },
+        {
+            "user": "jaalzateolaya",
+            "body": "Hmm, I didn't get any error at migrating but now, the migration seems not to be applied... Also, none of my images and containers are available. Can I restore something? Or am I fu##d up?\n\n```\n$: podman system migrate --migrate-db\n\nWARN[0000] The deprecated BoltDB database driver is in use. This driver will be removed in the upcoming Podman 6.0 release in mid 2026. It is advised that you migrate to SQLite to avoid issues when this occurs using the `podman system migrate --migrate-db` command. Set SUPPRESS_BOLTDB_WARNING environment variable to remove this message. \n\nError: migrating database from BoltDB to SQLite: a SQLite database already exists at /home/jaalzateolaya/.local/share/containers/storage/db.sql, refusing to overwrite\n```"
+        },
+        {
+            "user": "Luap99",
+            "body": "@jaalzateolaya please file a new issue and we will try to help you there and not bother all the people here over and over"
+        },
+        {
+            "user": "avikivity",
+            "body": "Updated to podman 5.8, the database was immediately migrated, no issues."
+        },
+        {
+            "user": "avikivity",
+            "body": "btw, did not have to run podman system migrate -- it auto-migrated."
+        },
+        {
+            "user": "MartinX3",
+            "body": "After upgrading and several reboots the logs still tell me I have to migrate.  \n\nSo I'll better start the manual process.  \nIs it save now to migrate?  \nAre there specific backups I can do before?"
+        },
+        {
+            "user": "Luap99",
+            "body": "Note as I found out myself the logic is kinda broken if you have concurrent podman commands running at startup, i.e. multiple quadlets, see  https://github.com/containers/podman/issues/28216\n\nIn general if you have problems please file new issues instead of commenting here.\n"
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "coreos",
+            "repository": "fedora-coreos-tracker",
+            "number": 2073
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 27660
+        },
+        {
+            "organization": "kubestellar",
+            "repository": "console-kb",
+            "number": 1087
+        }
+    ]
+}

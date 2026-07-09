@@ -1,0 +1,44 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 1984,
+    "type": "issue",
+    "title": "podman build hangs on ARG step forever",
+    "state": "closed",
+    "labels": [
+        "locked - please file new issue/PR"
+    ],
+    "user": "pmlopes",
+    "body": "I'm on fedora 29 and podman 0.12.1 is my current version.\n\nWhen building this `Dockerfile`:\n\n```Dockerfile\n# define the build image to use\nARG BUILDIMAGE=openjdk:11-oracle\nARG RUNTIMEIMAGE=debian:stable-slim\n\nFROM $BUILDIMAGE AS build-base\n# enable JMVCI\nARG JVMCI=1\n# enable JLINK\nARG JLINK=1\nARG ARTIFACT\n\nADD target/dist /dist\n\n# setup (avoid guessing file names)\nRUN mv /dist/${ARTIFACT?not set!} /dist/main.jar\n# setup (create empty directory)\nRUN if [ \"x$JLINK\" == \"x\" ]; then \\\n      mkdir /runtime ; \\\n    fi\n\n# Collect the jmods used in the application\nRUN if [ \"x$JLINK\" != \"x\" ]; then \\\n      jdeps --module-path /dist/java-libs --print-module-deps /dist/main.jar > /tmp/jmods.dependencies ; \\\n      tr -d '\\n' < /tmp/jmods.dependencies > /tmp/jmods ; \\\n    fi\n\n# remove nashorn dependencies (if JVMCI) + jvmci jmod\nRUN if [ \"x$JLINK\" != \"x\" ] && [ \"x$JVMCI\" != \"x\" ]; then \\\n      sed -i -e 's/,jdk.scripting.nashorn,/,/g' /tmp/jmods ; \\\n      sed -i -e 's/,jdk.dynalink,/,/g' /tmp/jmods ; \\\n      echo \",jdk.internal.vm.ci\" >> /tmp/jmods ; \\\n    fi\n\n# jlink\nRUN if [ \"x$JLINK\" != \"\" ]; then \\\n      cat /tmp/jmods ; \\\n      jlink \\\n        --no-header-files \\\n        --no-man-pages \\\n        --compress=2 \\\n        --strip-debug \\\n        --add-modules $(cat /tmp/jmods) \\\n        --output /runtime ; \\\n    fi\n\n# remove the compiler bits if not jvmci\nRUN if [ \"x$JVMCI\" != \"x\" ]; then \\\n      rm -Rf /dist/compiler ; \\\n    fi\n\n# final image images\nFROM $RUNTIMEIMAGE AS jvmci\n# collect artifacts\nCOPY --from=build-base /runtime /usr\nCOPY --from=build-base /dist /dist\n# define entry point\nENTRYPOINT [ \"java\", \"-XX:+IgnoreUnrecognizedVMOptions\", \"-XX:+UnlockExperimentalVMOptions\", \"-XX:+UseCGroupMemoryLimitForHeap\", \"-XX:+UseContainerSupport\", \"--module-path=/dist/compiler\", \"-XX:+EnableJVMCI\", \"--upgrade-module-path=/dist/compiler/compiler.jar\", \"-jar\", \"/dist/main.jar\" ]\n\n# final image images\nFROM $RUNTIMEIMAGE AS nojvmci\n# collect artifacts\nCOPY --from=build-base /runtime /usr\nCOPY --from=build-base /dist /dist\n# define entry point\nENTRYPOINT [ \"java\", \"-XX:+IgnoreUnrecognizedVMOptions\", \"-XX:+UnlockExperimentalVMOptions\", \"-XX:+UseCGroupMemoryLimitForHeap\", \"-XX:+UseContainerSupport\", \"-jar\", \"/dist/main.jar\" ]\n```\n\nPodman hangs at:\n\n```\nARG JVMCI=1\n```\n\nwhich i don't pass as build argument and I can only see that there are 2 podman processes with the same command line args running (I've confirmed that I only launch 1) plus there's a defunct podman process.\n\nI've tryed to rm my local installation `rm -Rf ~/.local/share/containers && rm -Rf ~/.config/containers` but no success.\n\nOnce this hands no other podman will work, such as: `podman images`.",
+    "comments": [
+        {
+            "user": "TomSweeneyRedHat",
+            "body": "Hey @pmlopes, thanks for the issue.\n\nCan you show me what you're seeing when you run the command?  It gets past that ARG command for me, see below.  Then fails later as it can't find the directory for the add.  Just a quick thought, which shouldn't matter, could you try with all the 'ARG' command lines at the beginning of the file?\n\n```\n# podman build -t tom -f ~/Dockerfile .\nSTEP 1: FROM openjdk:11-oracle AS build-base\nSTEP 2: ARG JVMCI=1\n--> 0ab0535e621bd09f8ffb81df2373e5366c9d317db29696e38f9db5f37982f6c3\nSTEP 3: FROM 0ab0535e621bd09f8ffb81df2373e5366c9d317db29696e38f9db5f37982f6c3 AS build-base\nSTEP 4: ARG JLINK=1\n--> e737da03cfeb35e1a5a397dad2c1ba30ba979190cac6aa28a6feb28b75a35be2\nSTEP 5: FROM e737da03cfeb35e1a5a397dad2c1ba30ba979190cac6aa28a6feb28b75a35be2 AS build-base\nSTEP 6: ARG ARTIFACT\n--> 37153be4ebfc8e6bd9b2278e654aa96d075ee47cc08e9435dafe173f425ef078\nSTEP 7: FROM 37153be4ebfc8e6bd9b2278e654aa96d075ee47cc08e9435dafe173f425ef078 AS build-base\nSTEP 8: ADD target/dist /dist\nerror building at step {Env:[PATH=/usr/java/openjdk-11/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin JAVA_HOME=/usr/java/openjdk-11 JAVA_VERSION=11.0.1 JAVA_URL=https://download.java.net/java/GA/jdk11/13/GPL/openjdk-11.0.1_linux-x64_bin.tar.gz JAVA_SHA256=7a6bb980b9c91c478421f865087ad2d69086a0583aeeb9e69204785e8e97dcfd BUILDIMAGE=openjdk:11-oracle RUNTIMEIMAGE=debian:stable-slim JVMCI=1 JLINK=1] Command:add Args:[target/dist /dist] Flags:[] Attrs:map[] Message:ADD target/dist /dist Original:ADD target/dist /dist}: no files found matching \"/root/tsweeney/workspaces/buildah/src/github.com/containers/buildah/target/dist\": no such file or directory\n```"
+        },
+        {
+            "user": "mheon",
+            "body": "@pmlopes Can you pastebin the output of `podman --log-level=debug images` after it freezes? I'd be interested to see where we fail"
+        },
+        {
+            "user": "mheon",
+            "body": "I'm suspecting this is a deadlock somewhere in c/storage but I'll hold off tagging that until we can confirm"
+        },
+        {
+            "user": "pmlopes",
+            "body": "sorry I totally missed the updates on the issue. I had to rebuild the machine where this was happening, but I'll give it another try Monday. "
+        },
+        {
+            "user": "rhatdan",
+            "body": "@pmlopes Did you ever try again?"
+        },
+        {
+            "user": "pmlopes",
+            "body": "Sorry I can't reproduce it anymore and in the meantime I saw an update on the stable Fedora 29 repo. I'll keep building my containers with podman and report with the instructions above if it happens again."
+        },
+        {
+            "user": "grzegorzk",
+            "body": "I recently encountered similar issue (I think probably caused by interrupting build process with `ctrl+c` multiple times) and I thought `podman rmi --all --force` resolved it. After a few iterations I see podman hanging during build process even after `podman rmi --all --force`..\nMaybe it's related with `ps -aux | grep runc` which shows many entries."
+        }
+    ],
+    "cross_references": []
+}

@@ -1,0 +1,84 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 20372,
+    "type": "issue",
+    "title": "Support Pod sidecar containers with \"restartPolicy: Always\"",
+    "state": "open",
+    "labels": [
+        "kind/feature",
+        "stale-issue",
+        "kube"
+    ],
+    "user": "arthurbarr",
+    "body": "### Feature request description\n\n[Kubernetes 1.28 added the formal concept of \"sidecar containers\"](https://kubernetes.io/blog/2023/08/25/native-sidecar-containers/), which are basically init containers with `restartPolicy: Always`.  The subsequent containers won't run until the startup probe for the init container has passed.  Currently, Podman does not allow startup probes in init containers, giving the following message:\n\n```\nError: playing YAML file: cannot create an init container that has either of lifecycle, livenessProbe, readinessProbe, or startupProbe set\n```\n\nHaving this feature enables useful local orchestration, as you get better control over the order in which containers are run.\n\n### Suggest potential solution\n\nIt would be brilliant if Podman could remove the limitation described above, and allow ordering of init containers as sidecars.\n\n### Have you considered any alternatives?\n\n_No response_\n\n### Additional context\n\n_No response_",
+    "comments": [
+        {
+            "user": "vincentywdeng",
+            "body": "Interesting, so the requirement would be for sidecar containers (initContainer with restartPolicy=Always) ?\n- Allow the probes, e.g. livenessProbe, startupProbe... etc\n- Continue container initialization when the sidecar container exit or startupProbe returns\n- It won't prevent pod from been terminate"
+        },
+        {
+            "user": "vincentywdeng",
+            "body": "Just started to understand related code base. I found that `podman kube play ` won't exit until init-container exit. I'm very new to the code base, and need suggestions for the design to prevent init-container from blocking Pod starting process. "
+        },
+        {
+            "user": "rhatdan",
+            "body": "Init containers should run to completion and then exit, at which point other containers will run.  If  you want containers to run simultaniously then add both to the pod."
+        },
+        {
+            "user": "vincentywdeng",
+            "body": "yup, I guess this ticket is about to support the native sidecar feature introduced in[ kubernetes 1.28 ](https://kubernetes.io/blog/2023/08/25/native-sidecar-containers/ )\nWith that, user can configure their sidecar as init container to make sure sidecar intialized first. From the doc, if the init container has `restartPolicy=Always`, it can be used as sidecar container. If there is a startupProbe defined for it, the pod initialization continues after startupProbe finished. "
+        },
+        {
+            "user": "rhatdan",
+            "body": "Cool, Podman should grow support for that.  Interested in opening a PR?"
+        },
+        {
+            "user": "vincentywdeng",
+            "body": "I'm willing to do it. However, I am very new to the code base, still studying how to implement it. Kubernetes use kubelet service to reconcile container status in Pods , not sure what is the corresponding component in podman kube. Any advises would be very helpful."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@umohnani8 @baude can you help out @vincentywdeng ?"
+        },
+        {
+            "user": "vincentywdeng",
+            "body": "I take some time to study the behavior of restartable init containers and summarized below\n\n1. Init container can set RestartPolicy property, and the only value is `Always`, which indicate it is restartable init container\n2. The init container still run in the order it is defined. Say if we have two init containers shown below, the restartable init container won't start till the Non-restartable init container exit. \n\n  - Non-restartable init container\n  - Restartable init container\n\n3. If Pod.RestartPolicy = `Never`,  restartable init container won't get restarted. On the other hand, if Pod.RestartPolicy = `Always`, restartable init container will restart when it exit (no mater what the exit code is)\n4. If restartable init container fails because of bad image, the app container won't start and the Pod should be fail\n5. If startupProbe is not defined in restartable init container, the app container won't wait on restartable init container.\n6. If startupProbe is defined in restartable init container, the app container waits the restartable init container finishing startupProbe\n7. When restartable init container's startupProbe faild, the Pod should be restarted \n8. When restartable init container's livenessProbe failed, the Pod should be restarted\n9. If Pod.RestartPolicy = `Always`, and if app container exit, it should be restarted. However, the restartable container won't restart. \n"
+        },
+        {
+            "user": "rhatdan",
+            "body": "@umohnani8 @ygalblum Thoughts?"
+        },
+        {
+            "user": "ygalblum",
+            "body": "SGTM. Just two clarification questions:\n\n> 1. Init container can set RestartPolicy property, and the only value is `Always`, which indicate it is restartable init container\n\nSince the current behavior is `RestartPolicy=no`, I don't see a reason to block this value. However, it should probably fail if `RestartPolicy=on-failure`\n\n> 2. The init container still run in the order it is defined. Say if we have two init containers shown below, the restartable init container won't start till the Non-restartable init container exit.\n> \n> * Non-restartable init container\n> * Restartable init container\n\nYou didn't discuss the different order. Do you mean that if a restartable init container is defined before a non-restartable one, that latter will not start before the former is consider healthy (based on the definition in bullets 5 and 6)\n"
+        },
+        {
+            "user": "vincentywdeng",
+            "body": "> Since the current behavior is RestartPolicy=no, I don't see a reason to block this value. However, it should probably fail if RestartPolicy=on-failure\n\nSo the valid value would be `no` or `Always`?\n\n> You didn't discuss the different order. Do you mean that if a restartable init container is defined before a non-restartable one, that latter will not start before the former is consider healthy (based on the definition in bullets 5 and 6)\n\nLet me study the [KEP-753](https://github.com/kubernetes/enhancements/tree/master/keps/sig-node/753-sidecar-containers#proposal) more"
+        },
+        {
+            "user": "ygalblum",
+            "body": "> So the valid value would be `no` or `Always`?\n \nI think so, yes. See here https://github.com/containers/podman/blob/main/libpod/define/container.go#L3 for generally valid values. Out of these, I think that for the init containers the valid ones should be `no` and `always`\n\n"
+        },
+        {
+            "user": "vincentywdeng",
+            "body": "The [KEP](https://github.com/kubernetes/enhancements/tree/master/keps/sig-node/753-sidecar-containers#proposal) roughtlyn covers \n- start/stop behavior of init container (restartable/non-restartable)\n- resource calucaltion related, e.g. the Pod resource requirement after introducing restartable init container, or which node to schedule the Pod based on the resource requirement\n- Feature gating for restartable init container\n- consideration when downgrading kubernetes to old version not supporting restatable init container\n\nFor this ticket, I think the focus would be start/stop behavior for init containers (restartable/ non-restartable). Here is the summary\n\n1. The restartPolicy is only valid in init-container in kuberneted 1.28, which is independent of the Pod.RestartPolicy, so restartable init container will restart even when Pod.RestartPolicy=Never\nSo my previous statement \n > If Pod.RestartPolicy = Never, restartable init container won't get restarted.\n\nis NOT correct\n\n2. For Pod with restartable and non-restartable init-containers defined, all the init-contianers are started in sequence, i.e., next init-container will not start until previous init-container is started. The only difference is that, for non-restartable init-container, `started` means the entrypoint command is completed. For restartable init-container, because the entrypoint command is supposed to running always, the `started` means postStart hook completed and startupProbe is finished.  And if startupProbe is not defined, the probe result will be success immediately\n\n3.  The restartable init container shouldn't block the termination of Pod, so if Pod.RestartPolicy is `Never` or `OnFailure`, the last restartable init-container will be notified with SIGTERM when the last app container terminates, and the next restartable init-container (in reverse order) will be sent SIGTERM till all restartable init-containers are notified. It is possible for restartable init-containers get restarted when Pod is during terminating\n\n4.  Restartable init-containers supports health probes (startUp, readiniess, liveness) and postStart and preStop hook, which is not supported by non-restartable init-containers\n\n5. The readiness probe result for restartable init-container contributes the readiness of the Pod.\n\nWe can discuss what is the proper scope of this enhancement"
+        },
+        {
+            "user": "vincentywdeng",
+            "body": "Hi, I started to draft the implemention, since I'm very new to both Podman and golang, could you help check am I heading to correct direction? The working in progress PR: https://github.com/containers/podman/pull/20647 "
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 20647
+        }
+    ]
+}

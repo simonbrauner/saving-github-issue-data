@@ -1,0 +1,116 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 19124,
+    "type": "issue",
+    "title": "container-remove event does not set exit code",
+    "state": "closed",
+    "labels": [
+        "kind/feature",
+        "stale-issue",
+        "locked - please file new issue/PR"
+    ],
+    "user": "martinpitt",
+    "body": "### Feature request description\n\ncockpit-podman is plagued with lots of race conditions and flaky tests. I have [investigated many of them](https://github.com/cockpit-project/cockpit-podman/pull/1324), but the remaining ones are due to a fundamental issue with the monitoring API.\n\nThe UI uses the [libpod/events API](https://docs.podman.io/en/latest/_static/api.html#tag/system/operation/SystemEventsLibpod), which notifies about high-level actions such as `start` or `died`, for example:\n```json\n{\"status\":\"start\",\"id\":\"39c0313e0e35c49f56fa3b8a0c228cc6a58455846d5271c05365fa0df56876a2\",\"from\":\"localhost/test-busybox:latest\",\"Type\":\"container\",\"Action\":\"start\",\"Actor\":{\"ID\":\"39c0313e0e35c49f56fa3b8a0c228cc6a58455846d5271c05365fa0df56876a2\",\"Attributes\":{\"containerExitCode\":\"0\",\"image\":\"localhost/test-busybox:latest\",\"name\":\"swamped-crate\",\"podId\":\"\"}},\"scope\":\"local\",\"time\":1688533611,\"timeNano\":1688533611933738591}\n```\n\nHowever, this does not contain any (or at least most) of the properties that the UI needs to show, so [in reaction to these](https://github.com/cockpit-project/cockpit-podman/blob/17e9f8f84a707d27d84f7a97dd3d361aeb96ae14/src/app.jsx#L380), the UI does a `containers/json` query for that container:\n\n```json\n{\"method\":\"GET\",\"path\":\"/v1.12/libpod/containers/json\",\"body\":\"\",\"params\":{\"all\":true,\"filters\":\"{\\\"id\\\":[\\\"39c0313e0e35c49f56fa3b8a0c228cc6a58455846d5271c05365fa0df56876a2\\\"]}\"}}\n```\n\nwhich then responds with all the info that the UI needs:\n```json\n[{\"AutoRemove\":false,\"Command\":[\"sh\",\"-c\",\"echo 123; sleep infinity\"],\"Created\":\"2023-07-05T05:06:41.355776664Z\",\"CreatedAt\":\"\",\"Exited\":false,\"ExitedAt\":1688533611,\"ExitCode\":0,\"Id\":\"39c0313e0e35c49f56fa3b8a0c228cc6a58455846d5271c05365fa0df56876a2\",\"Image\":\"localhost/test-busybox:latest\",\"ImageID\":\"24ac8b76cfb0440579ade1908a8a765d3c8a62bd366058cf84e1a7d6754ee585\",\"IsInfra\":false,\"Labels\":null,\"Mounts\":[],\"Names\":[\"swamped-crate\"],\"Namespaces\":{},\"Networks\":[],\"Pid\":19176,\"Pod\":\"\",\"PodName\":\"\",\"Ports\":null,\"Size\":null,\"StartedAt\":1688533611,\"State\":\"running\",\"Status\":\"\"}]\n```\n\nThe problem is that this is racy: The /containers/json call is necessarily async, and when events come in bursts, they will then overlap. But their *replies* from podman are not coming in in the same order. This is a log capture from a part of the test where it does a few container operations like stopping and restarting a container. I stripped out all the JSON data for clarity, the important bit is the ordering:\n\n```\n> debug: podman user call 44:\n> debug: podman user call 45:\n> debug: podman user call 45 result:\n> debug: podman user call 46:\n> debug: podman user call 44 result:\n> debug: podman user call 47:\n> debug: podman user call 46 result:\n> debug: podman user call 47 result:\n> debug: podman user call 48:\n> debug: podman user call 43 result:\n> debug: podman user call 49:\n> debug: podman user call 49 result:\n> debug: podman user call 50:\n> debug: podman user call 48 result:\n> debug: podman user call 51:\n> debug: podman user call 50 result\n> debug: podman user call 52:\n> debug: podman user call 52 result:\n> debug: podman user call 51 result:\n```\n\nSo if the container moves from \"Running\" → \"Exited\" → \"Stopped\" → \"Restarting\" → \"Running\", a jumbled response order can lead to swaps, and the final state reported in the UI is e.g. \"Restarting\" or \"Exited\". The latter happened in [this run](https://cockpit-logs.us-east-1.linodeobjects.com/pull-1324-20230705-045900-5a28f0d8-fedora-38-pybridge/log.html#25), where the [screenshot](https://cockpit-logs.us-east-1.linodeobjects.com/pull-1324-20230705-045900-5a28f0d8-fedora-38-pybridge/TestApplication-testLifecycleOperationsUser2-fedora-38-127.0.0.2-2301-FAIL.png) says \"Exited\", but `podman ps` says \"Up\" (i.e. \"Running\"), as can be seen in the \"----- user containers -----\" dump in the log.\n\n### Suggest potential solution\n\nMy prefered solution would be to avoid having to call `/containers/json` after a \"start\" or \"rename\" event in the first place. That only leads to additional API traffic and thus more computational overhead on both the podman and the UI side, and is prone to these  kinds of race conditions. D-Bus services like systemd or udisks generally solved this with the [PropertiesChanged signal](https://dbus.freedesktop.org/doc/dbus-specification.html#standard-interfaces-properties), i.e. there is a notification with the set of changed properties each time when there is a change. These are naturally ordered correctly, and the watcher can tally them up to always have an accurate model of the state without having to do extra \"get\" calls.\n\nFor the podman API, this cannot just be squeezed into the existing `start` (or `remove`, etc.) events, as the container properties can change more often, and also independently  from the coarse-grained lifecycle events.\n\nPerhaps this could introduce a new event type `changed` that gets fired whenever any property changes, and deliver the /containers/json info for the container(s) which changed. Both \"your\" (podman) and \"my\" (cockpit-podman) sides already have the code to generate/parse this information, it would just mean some minor plumbing changes.\n\nIf this is expensive, it may also be adequate to explicitly opt into getting these notifications, although connecting to /events generally already means that the listener wants to know this kind of information.\n\n### Have you considered any alternatives?\n\nIt may also be possible to change podman to not reply to requests out of order. I don't know how easy/hard that is with Go and coroutines. I know that it is very hard in JavaScript on the client side to reorder the replies.\n\nIt might be easier on our side to completely serialize all API calls, but that would make the UI very slow especially if there are many containers. These are independent from each other, so serializing calls is not conceptually necessary.\n\n### Additional context\n\n_No response_",
+    "comments": [
+        {
+            "user": "martinpitt",
+            "body": "@jelly FYI"
+        },
+        {
+            "user": "martinpitt",
+            "body": "I just talked to @vrothberg , many thanks! Notes:\n\npodman has a [mode for logging more information in events](https://www.redhat.com/sysadmin/podman-container-events-auditing), but it's opt-in (containers.conf), so nothing that c-podman can rely on.\n\nBut it should be possible to greatly improve this with the existing API:\n * Only do a /json inspect for the `create` event, to get image, mounts, pod etc. -- this information won't change\n * predict the future state for events like 'died', 'start'; the start time is contained in the 'start' event\n * ignore all transient state events like 'restart', 'mount', they will always be follow by an event for a persistent state (like 'died' or 'start')\n * also ignore unrelated states like 'prune' \n\nWith that, there should be by and large only one /json inspect instead of umpteen, which should avoid the problem to a degree where it's not relevant any more.\n\nI'll try that in the next days (well, some PTO ahead), and report back here. In the best case, I'll just close this.\n\nThanks!"
+        },
+        {
+            "user": "vrothberg",
+            "body": "@martinpitt and I had a quick call on discussing the issue.  We concluded that there is a way to significantly reduce the amount of API calls emitted by Cockpit.\n\nAt the time of writing, Cockpit inspects a container on (too) many container events.  As mentioned in the issue description above, the inspections are done to get the current state of the container.  We can reduce the inspects to only 1 by doing the following:\n* On a `create` event we know that a new container is there.  To get all the metadata, we need to inspect it.  That is the 1 call we need.\n* For all other events, no inspect is needed.\n* To display state (transitions) in the UI, Cockpit can interpret incoming events.\n  * `create` -> Created\n  * `init` -> Initialized\n  * `start` -> Running\n  * `died` -> Exited\n  * `remove` -> Removed (stop displaying the container in the UI)\n  \nWhen starting Cockpit, then all containers must be listed/inspected to get all the metadata and state.\n  \nThanks for your summary, @martinpitt :)  I think we have a shared understanding."
+        },
+        {
+            "user": "Luap99",
+            "body": "> @martinpitt and I had a quick call on discussing the issue. We concluded that there is a way to significantly reduce the amount of API calls emitted by Cockpit.\n> \n> At the time of writing, Cockpit inspects a container on (too) many container events. As mentioned in the issue description above, the inspections are done to get the current state of the container. We can reduce the inspects to only 1 by doing the following:\n> \n>     * On a `create` event we know that a new container is there.  To get all the metadata, we need to inspect it.  That is the 1 call we need.\n> \n>     * For all other events, no inspect is needed.\n> \n>     * To display state (transitions) in the UI, Cockpit can interpret incoming events.\n>       \n>       * `create` -> Created\n>       * `init` -> Initialized\n>       * `start` -> Running\n>       * `died` -> Exited\n>       * `remove` -> Removed (stop displaying the container in the UI)\n> \n> \n> When starting Cockpit, then all containers must be listed/inspected to get all the metadata and state.\n> \n> Thanks for your summary, @martinpitt :) I think we have a shared understanding.\n\nCan we close the issue, sounds like we do not need podman changes?"
+        },
+        {
+            "user": "vrothberg",
+            "body": "I leave it open to @martinpitt.  I expect the issue to be resolved with the proposed idea but I am OK to leave it open until we're sure."
+        },
+        {
+            "user": "martinpitt",
+            "body": "I'm inching closer in https://github.com/cockpit-project/cockpit-podman/pull/1324 , so far it's looking good. I should finish this by tomorrow, and then most probably close this, unless something missing turns up."
+        },
+        {
+            "user": "martinpitt",
+            "body": ">     * On a `create` event we know that a new container is there.  To get all the metadata, we need to inspect it.  That is the 1 call we need.\n>     * For all other events, no inspect is needed.\n\nAgreed, that would be nice. However, that also means that any kind of runtime related property needs to be part of the event info then.\n\n>       * `start` -> Running\n\nThis is missing the `Pid` and `StartedAt` properties. We can make-do without Pid, and we can probably estimate StartedAt with the event's `time` property. So that still seems okay. (I haven't yet put this into practice yet, still working on rearranging the event handling -- that requires some serialization with the /containers/json request).\n\n>       * `died` -> Exited\n\nThis is missing the `ExitCode` and `Error` properties, which cannot be inferred. `FinishedAt` etc. can again be estimated by the event's `time`.\n\n\nBTW, as @vrothberg was mentioning log flooding: Every single event repeats the `Attributes` map -- these are properties of the image, and will never change. The only exception is the `podId`, which feels like it really shouldn't be in that image attributes list, it's a runtime property, not an image one -- and there's also the possibility of namespace collision. This is a separate issue, I filed it as #19143."
+        },
+        {
+            "user": "vrothberg",
+            "body": "> This is missing the Pid and StartedAt properties. We can make-do without Pid, and we can probably estimate StartedAt with the event's time property. So that still seems okay.\n\nYes, that will work.\n\n> This is missing the ExitCode and Error properties, which cannot be inferred.\n\nInteresting!  Should we make the exit code part of the attributes? @Luap99 WDYT?"
+        },
+        {
+            "user": "martinpitt",
+            "body": "> Should we make the exit code part of the attributes\n\nJust to avoid misunderstanding -- please not literally `.Attributes` (see #19143); but to the attributes of the event JSON message, that'd be nice. Thanks!"
+        },
+        {
+            "user": "Luap99",
+            "body": "Adding the exit code seems useful in general but why are you interested in the PID? That should not add any useful value, by the time you read the PID it may be already reused by a different process (well theoretically at least).\n\nAlso what is `Error` even and why should this be only added to died?"
+        },
+        {
+            "user": "martinpitt",
+            "body": "> why are you interested in the PID?\n\nNot particularly -- it's just something that we happen to use in our tests to have a proper indicator when a `restart` command actually finished, but it's something that we can easily replace (with the time stamp).\n\n> so what is `Error` even \n\nI can't say, I'm afraid. It's part of the /containers/json properties. If it can happen for other events, it should surely be added there as well."
+        },
+        {
+            "user": "martinpitt",
+            "body": "Retitling / narrowing the scope of this to `ExitCode`, it seems everything else discussed here has a solution or workaround. Thank you!"
+        },
+        {
+            "user": "martinpitt",
+            "body": "Nevermind, the exit code is part of the `Attributes:` already, at least for the `died` event:\n```json\n{\"status\":\"died\",\"id\":\"319da37bf7e6ee1b078b7d4e348710a67083b10b7ed7cf7e61e166bda92ab074\",\"from\":\"docker.io/library/debian:sid\",\"Type\":\"container\",\"Action\":\"died\",\"Actor\":{\"ID\":\"319da37bf7e6ee1b078b7d4e348710a67083b10b7ed7cf7e61e166bda92ab074\",\"Attributes\":{\"containerExitCode\":\"3\",\"image\":\"docker.io/library/debian:sid\",\"name\":\"admiring_bhabha\",\"podId\":\"\"}},\"scope\":\"local\",\"time\":1689235736,\"timeNano\":1689235736846535953}\n```\n\nIt doesn't stick around, though -- the next event is usually \"remove\", and then it gets reset to 0:\n```json\n{\"status\":\"remove\",\"id\":\"319da37bf7e6ee1b078b7d4e348710a67083b10b7ed7cf7e61e166bda92ab074\",\"from\":\"docker.io/library/debian:sid\",\"Type\":\"container\",\"Action\":\"remove\",\"Actor\":{\"ID\":\"319da37bf7e6ee1b078b7d4e348710a67083b10b7ed7cf7e61e166bda92ab074\",\"Attributes\":{\"containerExitCode\":\"0\",\"image\":\"docker.io/library/debian:sid\",\"name\":\"admiring_bhabha\",\"podId\":\"\"}},\"scope\":\"local\",\"time\":1689235736,\"timeNano\":1689235736905768245}\n```\n\nBut good enough, I suppose."
+        },
+        {
+            "user": "vrothberg",
+            "body": "> It doesn't stick around, though -- the next event is usually \"remove\", and then it gets reset to 0:\n\nThat looks like a bug to me.  Let's reopen and rename the issue :)"
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@martinpitt @vrothberg I take it this is still broken?"
+        },
+        {
+            "user": "vrothberg",
+            "body": "I guess so"
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "cockpit-project",
+            "repository": "cockpit-podman",
+            "number": 1324
+        },
+        {
+            "organization": "cockpit-project",
+            "repository": "cockpit-podman",
+            "number": 1334
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 19143
+        },
+        {
+            "organization": "cockpit-project",
+            "repository": "cockpit-podman",
+            "number": 1353
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 20609
+        }
+    ]
+}

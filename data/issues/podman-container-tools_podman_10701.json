@@ -1,0 +1,90 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 10701,
+    "type": "issue",
+    "title": "podman exec: periodic 30-second CPU-hogging hangs",
+    "state": "closed",
+    "labels": [
+        "flakes",
+        "locked - please file new issue/PR"
+    ],
+    "user": "edsantiago",
+    "body": "```console\n$ ./bin/podman run -d --name foo quay.io/libpod/testimage:20210610 top\n0af6b438059a10b47bc78d15226433c3a794cdb32754c608dc1756ad9dd5901d\n$ while :;do ./bin/podman exec foo date;done\nWed Jun 16 20:20:57 UTC 2021\nWed Jun 16 20:20:58 UTC 2021\nWed Jun 16 20:20:58 UTC 2021\n```\nNow just keep watching, it might take a minute or so. When you hear your CPU fan go loud, hit RETURN so you can mark the spot where it hangs. The next entry will be timestamped 30 seconds after the previous. Example:\n```console\nWed Jun 16 20:21:13 UTC 2021\nWed Jun 16 20:21:13 UTC 2021\n\nWed Jun 16 20:21:41 UTC 2021\n\nWed Jun 16 20:22:11 UTC 2021\nWed Jun 16 20:22:12 UTC 2021\n```\nmaster @ 2509a81c343314fa452a0215d05e9d74ab4ec15c, root and rootless. ",
+    "comments": [
+        {
+            "user": "rhatdan",
+            "body": "One would think we are leaking something.  Perhaps mount points.\n\nHave you tried this as root?  If this works fine as root and not as rootless, that might point to something with fuse-overlay."
+        },
+        {
+            "user": "edsantiago",
+            "body": "Yep, tried root and rootless (see final line of OP). No leaked mounts that I can see (I even checked while the exec hang is in place; no new mounts)"
+        },
+        {
+            "user": "mheon",
+            "body": "Can't reproduce. Had it running for the last 5 minutes without any effect? F34, latest main branch."
+        },
+        {
+            "user": "edsantiago",
+            "body": "Oh, weird. It reproduces within seconds for me as root, and ~1 minute rootless. Also f34, 5.11.17-300.fc34. With root I can't even get three iterations of the loop without a hang."
+        },
+        {
+            "user": "edsantiago",
+            "body": "```console\n$ sudo ./bin/podman info\nhost:\n  arch: amd64\n  buildahVersion: 1.21.1\n  cgroupControllers:\n  - cpuset\n  - cpu\n  - io\n  - memory\n  - hugetlb\n  - pids\n  cgroupManager: systemd\n  cgroupVersion: v2\n  conmon:\n    package: conmon-2.0.27-2.fc34.x86_64\n    path: /usr/bin/conmon\n    version: 'conmon version 2.0.27, commit: '\n  cpus: 8\n  distribution:\n    distribution: fedora\n    version: \"34\"\n  eventLogger: journald\n  hostname: f.edsantiago.com\n  idMappings:\n    gidmap: null\n    uidmap: null\n  kernel: 5.11.17-300.fc34.x86_64\n  linkmode: dynamic\n  memFree: 2526560256\n  memTotal: 33506283520\n  ociRuntime:\n    name: crun\n    package: crun-0.20.1-1.fc34.x86_64\n    path: /usr/bin/crun\n    version: |-\n      crun version 0.20.1\n      commit: 0d42f1109fd73548f44b01b3e84d04a279e99d2e\n      spec: 1.0.0\n      +SYSTEMD +SELINUX +APPARMOR +CAP +SECCOMP +EBPF +CRIU +YAJL\n  os: linux\n  remoteSocket:\n    path: /run/podman/podman.sock\n  security:\n    apparmorEnabled: false\n    capabilities: CAP_CHOWN,CAP_DAC_OVERRIDE,CAP_FOWNER,CAP_FSETID,CAP_KILL,CAP_NET_BIND_SERVICE,CAP_SETFCAP,CAP_SETGID,CAP_SETPCAP,CAP_SETUID,CAP_SYS_CHROOT\n    rootless: false\n    seccompEnabled: true\n    seccompProfilePath: /usr/share/containers/seccomp.json\n    selinuxEnabled: true\n  serviceIsRemote: false\n  slirp4netns:\n    executable: \"\"\n    package: \"\"\n    version: \"\"\n  swapFree: 8543531008\n  swapTotal: 8589930496\n  uptime: 1053h 44m 24.35s (Approximately 43.88 days)\nregistries:\n  search:\n  - registry.fedoraproject.org\n  - registry.access.redhat.com\n  - docker.io\n  - quay.io\nstore:\n  configFile: /etc/containers/storage.conf\n  containerStore:\n    number: 1\n    paused: 0\n    running: 1\n    stopped: 0\n  graphDriverName: overlay\n  graphOptions:\n    overlay.mountopt: nodev,metacopy=on\n  graphRoot: /var/lib/containers/storage\n  graphStatus:\n    Backing Filesystem: btrfs\n    Native Overlay Diff: \"false\"\n    Supports d_type: \"true\"\n    Using metacopy: \"true\"\n  imageStore:\n    number: 1\n  runRoot: /run/containers/storage\n  volumePath: /var/lib/containers/storage/volumes\nversion:\n  APIVersion: 3.3.0-dev\n  Built: 1623872418\n  BuiltTime: Wed Jun 16 13:40:18 2021\n  GitCommit: 2509a81c343314fa452a0215d05e9d74ab4ec15c\n  GoVersion: go1.16.3\n  OsArch: linux/amd64\n  Version: 3.3.0-dev\n```"
+        },
+        {
+            "user": "edsantiago",
+            "body": "Well, drat. I brought up a 1mt VM, 5.11.15-300.fc34, and can't reproduce in almost an hour of looping (using test-and-break so I could leave it unattended):\n```console\n# while :;do t=$SECONDS;podman exec foo date;if [[ $(($SECONDS - $t)) -gt 5 ]]; then break;fi;done\n```"
+        },
+        {
+            "user": "edsantiago",
+            "body": "Hypothesis: it might be the systemd journal GC.\n```console\n# journalctl --disk-usage\nArchived and active journals take up 4.0G in the file system.\n```\nIf I add `--events-backend=file` to my reproducer (both podman-run and podman-exec), the problem goes away. I cannot reproduce the hang, even over the course of many minutes.\n\nI have a 1mt VM running, and am trying my best to fill up the journal by piping binaries through `logger`. It's not filling up fast enough. Any suggestions?"
+        },
+        {
+            "user": "rhatdan",
+            "body": "Does journald do throttling?"
+        },
+        {
+            "user": "vrothberg",
+            "body": "@msekletar,  have you seen such symptoms where writes to the journal are substantially delayed?"
+        },
+        {
+            "user": "msekletar",
+            "body": "@vrothberg I don't recall any recent issue regarding delayed writes. In general writing to journald may cause clients to block (as with any other syslog daemon). Hence logging code should be able to deal with this condition. Answer to question, \"Is message that we are about to log critical enough to stall the entire application in case logging subsystem is busy or otherwise no responsive?\" should be answered (and logging implemented accordingly) by the application developers. Btw, I know it is easy to ask to question and much harder to come up with the correct implementation of the answer."
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "edsantiago",
+            "body": "I can still reproduce this on my laptop, which has been rebooted since the last time I checked in here.\n```\n...\nThu Jul 22 01:07:38 UTC 2021\n\nThu Jul 22 01:08:04 UTC 2021\nThu Jul 22 01:08:04 UTC 2021\nThu Jul 22 01:08:05 UTC 2021\n\nThu Jul 22 01:08:31 UTC 2021\n\nThu Jul 22 01:08:59 UTC 2021\nThu Jul 22 01:08:59 UTC 2021\n...\n```"
+        },
+        {
+            "user": "vrothberg",
+            "body": "I bisected a bit and it looks like it has started with commit 341e6a1628a3."
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 10675
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 10710
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 11049
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 11055
+        }
+    ]
+}

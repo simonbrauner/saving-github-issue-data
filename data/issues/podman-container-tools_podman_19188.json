@@ -1,0 +1,66 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 19188,
+    "type": "pull_request",
+    "title": "Fix container errors not being sent via pod removal API",
+    "state": "closed",
+    "labels": [
+        "lgtm",
+        "approved",
+        "release-note-none",
+        "kind/api-change",
+        "locked - please file new issue/PR"
+    ],
+    "user": "mheon",
+    "body": "When I reworked pod removal to provide more detailed errors (including per-container errors, not just a single multierror with all errors squashed), I made it part of the struct returned by the REST API and assumed that would be enough to get errors through to clients. Unfortunately, in case of an overarching error removing the pod (as any error with any container would cause), we don't send the response struct that would include the container errors - we just send a standardized REST error. We could work around this with custom, potentially backwards incompatible error handling for the REST pod delete endpoint, or we could just do what was done before, and package up all the errors in a multierror to send to the other side. Of those options, the multierror seems far simpler.\n\nFixes #19159\n\n```release-note\nNONE\n```\n(Bug never appeared in a published non-RC release, so no need to document it)",
+    "comments": [
+        {
+            "user": "openshift-ci[bot]",
+            "body": "[APPROVALNOTIFIER] This PR is **APPROVED**\n\nThis pull-request has been approved by: *<a href=\"https://github.com/containers/podman/pull/19188#\" title=\"Author self-approved\">mheon</a>*\n\nThe full list of commands accepted by this bot can be found [here](https://go.k8s.io/bot-commands?repo=containers%2Fpodman).\n\nThe pull request process is described [here](https://git.k8s.io/community/contributors/guide/owners.md#the-code-review-process)\n\n<details >\nNeeds approval from an approver in each of these files:\n\n- ~~[OWNERS](https://github.com/containers/podman/blob/main/OWNERS)~~ [mheon]\n\nApprovers can indicate their approval by writing `/approve` in a comment\nApprovers can cancel approval by writing `/approve cancel` in a comment\n</details>\n<!-- META={\"approvers\":[]} -->"
+        },
+        {
+            "user": "mheon",
+            "body": "Needs a test, will write one tomorrow morning"
+        },
+        {
+            "user": "edsantiago",
+            "body": "Here's one way to get tests passing:\n```diff\ndiff --git a/test/apiv2/40-pods.at b/test/apiv2/40-pods.at\nindex e3e4cb3ea..bb5d7e119 100644\n--- a/test/apiv2/40-pods.at\n+++ b/test/apiv2/40-pods.at\n@@ -36,9 +36,12 @@ t POST libpod/pods/foo/start 304\n \n # Some tests require a single running container.\n # Don't bother saving CID, it will be removed as part of the pod.\n-t POST libpod/containers/create?name=testctr Image=${IMAGE} Pod=foo 201 \\\n+podman pull $IMAGE &>/dev/null\n+t POST libpod/containers/create?name=testctr Image=${IMAGE} Pod=foo Entrypoint='[\"top\"]' 201 \\\n   .Id~[0-9a-f]\\\\{64\\\\}\n \n+t POST libpod/pods/foo/start 200\n+\n t POST libpod/pods/fakename/start 404 \\\n   .cause=\"no such pod\" \\\n   .message=\"no pod with name or ID fakename found: no such pod\"\n@@ -58,8 +61,7 @@ t POST \"libpod/pods/fakename/unpause\" 404\\\n   .message=\"no pod with name or ID fakename found: no such pod\"\n \n t DELETE libpod/pods/foo?force=false 500 \\\n-  .cause=\"removing pod containers\" \\\n-  .message~\".*as it is running.*\"\n+  .cause~\".*cannot remove container .* as it is running.*\"\n \n t POST libpod/pods/foo/stop 200 \\\n   .Errs=null \\\n@@ -102,10 +104,10 @@ t POST libpod/pods/bar/stop?t=1 200 \\\n t POST libpod/pods/bar/start 200\n \n t GET libpod/pods/stats?all=true 200\n-is $(jq '. | length' <<<\"$output\") 3 \"stats?all=true: number of records found\"\n+is $(jq '. | length' <<<\"$output\") 4 \"stats?all=true: number of records found\"\n \n t GET libpod/pods/stats?namesOrIDs=foo 200\n-is $(jq '. | length' <<<\"$output\") 1 \"stats?namesOrIDs=foo: number of records found\"\n+is $(jq '. | length' <<<\"$output\") 2 \"stats?namesOrIDs=foo: number of records found\"\n \n t GET libpod/pods/stats?namesOrIDs=fakename 404 \\\n   .cause=\"no such pod\" \\\n@@ -139,7 +141,7 @@ t GET libpod/pods/json?filters='{\"label\":[\"testl' 400 \\\n #t POST libpod/pods/prune 'a=b' 400     # FIXME: 2020-02-24 returns 200\n \n # Clean up; and try twice, making sure that the second time fails\n-t DELETE  libpod/pods/foo 200\n+t DELETE  libpod/pods/foo?force=true 200\n t DELETE \"libpod/pods/foo (pod has already been deleted)\" 404\n \n # Expect this to time out\n```"
+        },
+        {
+            "user": "edsantiago",
+            "body": "To run tests locally:\n```console\n$ [optional sudo] ./test/apiv2/test-apiv2 40\n```"
+        },
+        {
+            "user": "mheon",
+            "body": "Tests should pass now"
+        },
+        {
+            "user": "TomSweeneyRedHat",
+            "body": "Other than @edsantiago 's comment, LGTM once the tests are hip."
+        },
+        {
+            "user": "edsantiago",
+            "body": "Hey, should you need to repush for any reason, may I suggest one more diff?\n```diff\ndiff --git a/test/system/200-pod.bats b/test/system/200-pod.bats\nindex 442517b46..f159ed6ee 100644\n--- a/test/system/200-pod.bats\n+++ b/test/system/200-pod.bats\n@@ -55,6 +55,16 @@ function teardown() {\n         is \"$output\" \".*0 \\+1 \\+0 \\+[0-9. ?s]\\+/pause\" \"there is a /pause container\"\n     fi\n \n+    # Cannot remove pod while containers are still running. Error messages\n+    # differ slightly between local and remote; these are the common elements.\n+    run_podman 125 pod rm $podid\n+    assert \"${lines[0]}\" =~ \"Error: not all containers could be removed from pod $podid: removing pod containers.*\" \\\n+           \"pod rm while busy: error message line 1 of 3\"\n+    assert \"${lines[1]}\" =~ \"cannot remove container .* as it is running - running or paused containers cannot be removed without force: container state improper\" \\\n+           \"pod rm while busy: error message line 2 of 3\"\n+    assert \"${lines[2]}\" =~ \"cannot remove container .* as it is running - running or paused containers cannot be removed without force: container state improper\" \\\n+           \"pod rm while busy: error message line 3 of 3\"\n+\n     # Clean up\n     run_podman --noout pod rm -f -t 0 $podid\n     is \"$output\" \"\" \"output should be empty\"\n```\nConfirmed to fail on `main`, pass on your PR."
+        },
+        {
+            "user": "mheon",
+            "body": "Force-pushed with updates, all Ed's test suggestions should be included now."
+        },
+        {
+            "user": "rhatdan",
+            "body": "/lgtm\n/hold"
+        },
+        {
+            "user": "ashley-cui",
+            "body": "/hold cancel "
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 19159
+        }
+    ]
+}

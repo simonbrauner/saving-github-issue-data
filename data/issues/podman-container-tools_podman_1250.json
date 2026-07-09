@@ -1,0 +1,134 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 1250,
+    "type": "pull_request",
+    "title": "Do not try to enable AppArmor in rootless mode",
+    "state": "closed",
+    "labels": [
+        "locked - please file new issue/PR"
+    ],
+    "user": "marcov",
+    "body": "When in rootless mode it's not possible to load profiles or check which profiles are loaded. \n\nI am proposing this change is to avoid users having to specify `--security-opt apparmor=unconfined` every time they are running rootless.\n\nIf this is something that makes sense I'll also add some tests.\n\nActually a better way would be to get the parent process effective capabilities to see whether CAP_MAC_ADMIN is set. CAP_MAC_ADMIN allows controlling AppArmor without root permissions. \nHowever I am not sure how to do it given that at the check time we are root in the user namespace and calling capget will give full effective capabilities.\n\nSomething like:\n```diff\n-       aaControllable := !rootless.IsRootless()\n+       aaControllable := true\n+\n+       if rootless.IsRootless() {\n+               myCaps, err := capability.NewPid2(0)\n+               if err != nil {\n+                       return fmt.Errorf(\"Error getting current process capabilities\")\n+               }\n+               err = myCaps.Load()                                                                                                 \n+               err != nil {\n+                       return fmt.Errorf(\"Error getting current process capabilities\")\n+               }\n+               aaControllable = myCaps.Get(capability.EFFECTIVE, capability.CAP_MAC_ADMIN)\n+       }\n```\n\n\n",
+    "comments": [
+        {
+            "user": "marcov",
+            "body": "@vrothberg PTAL"
+        },
+        {
+            "user": "vrothberg",
+            "body": "The proposed changes make the code really complex. I think it's sufficient to add another check here https://github.com/projectatomic/libpod/blob/master/cmd/podman/create.go#L235 and here https://github.com/projectatomic/libpod/blob/master/cmd/podman/create.go#L199. \n\nBut I think it's time to put the AppArmor loading into a separate function `func loadAAProfile(profile string) error` (for instance) which would allow us to do a simple `return nil` instead of increasingly complex branches. For the rootless case, I suggest to log that Podman is not loading the AppArmor profile because of the above mentioned reasons."
+        },
+        {
+            "user": "vrothberg",
+            "body": "@giuseppe PTAL"
+        },
+        {
+            "user": "marcov",
+            "body": "Yes I agree that having a function is probably the cleanest way to do it. I'll do a rewrite. "
+        },
+        {
+            "user": "giuseppe",
+            "body": "I agree with @vrothberg, it is better if you could refactor it in a function.\n\nIf it is something useful to have, we could add the check for the effective capabilities before doing the re-exec and store that result into an env variable.\n\nIf the re-exec code will grow to be too complex we might need to use some other data format instead of env variables, but it is not something for this PR."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@marcov I added the WIP to make sure no one accidently merges it,  Remove it when you are ready to have the PR reviewed."
+        },
+        {
+            "user": "marcov",
+            "body": "@giuseppe thanks for the hint.\nI realized we need to check ambient capabilities (permitted & inheritable) instead of effective.\nAlso it would be best to store the full capability bitmask in the environment variable, but the only way I found to extract the full 64-bit mask is via procfs. So I thought about using [psgo](https://github.com/containers/psgo) for this."
+        },
+        {
+            "user": "giuseppe",
+            "body": "is it something we could do using directly `prctl` on the current thread instead of going through `/proc`?"
+        },
+        {
+            "user": "vrothberg",
+            "body": "> is it something we could do using directly prctl on the current thread instead of going through /proc?\n\nI think that's possible. There's already quite some logic in `psgo/internal/capabilities`. We could sacrifice this package and make it public by moving it to `psgo/pkg/capabilities` and add a new API to do that. @marcov, what do you think?"
+        },
+        {
+            "user": "marcov",
+            "body": "@vrothberg: I like your idea, but consider there's already a [gocapability](https://github.com/syndtr/gocapability/) package to operate on capabilities (even though this does not give access to the full capability bitmasks)\n\n@giuseppe: `prctl` can only read one capabilty bit per call. I thought that reading the full-mask would be more future proof if we need to get other bits in future.\n"
+        },
+        {
+            "user": "rh-atomic-bot",
+            "body": "Can one of the admins verify this patch?\nI understand the following commands:\n- `bot, add author to whitelist`\n- `bot, test pull request`\n- `bot, test pull request once`"
+        },
+        {
+            "user": "mheon",
+            "body": "bot, add author to whitelist"
+        },
+        {
+            "user": "vrothberg",
+            "body": "@marcov Then I suggest going with your initial proposal of extending `psgo` with the required API and go from there."
+        },
+        {
+            "user": "giuseppe",
+            "body": "bot, add author to whitelist"
+        },
+        {
+            "user": "giuseppe",
+            "body": "yes extending psgo is a good idea, but in our case don't we know exactly what capabilities are needed?"
+        },
+        {
+            "user": "marcov",
+            "body": "`prctl` is enough for now but we'll need to call it n times if in future we have to check for n capabilities. That's why I proposed reading the full capabilities once only with psgo. Anyway I am fine in both ways."
+        },
+        {
+            "user": "rh-atomic-bot",
+            "body": ":umbrella: The latest upstream changes (presumably d20f3a5) made this pull request unmergeable. Please resolve the merge conflicts."
+        },
+        {
+            "user": "marcov",
+            "body": "I actually need to correct myself regarding what is possible to do with AppArmor as non-root user.\n\nThe pkg `apparmor` uses `apparmor_parser` as a frontend to AppArmor, and that requires root privileges.\n\nI am sorry for having provided you wrong information.\nSo for now I'll avoid checking capabilities and just do the refactoring of AppArmor code into a function as per your suggestion.\n\nPS: some more details after checking in the AppArmor kernel code (these are my conclusions and may still be imprecise):\n- reading `/sys/kernel/security/apparmor/profiles`  requires to be root user (see `policy_view_capable()` in `policy.c`).\n- administering AppArmor requires to be root user **and** CAP_MAC_ADMIN (see `policy_admin_capable()` in `policy.c`)."
+        },
+        {
+            "user": "marcov",
+            "body": "I've added a few tests in baseline (I could not add them in e2e as they are containered and AppArmor is not usable there, see `IsEnabled()`  in `.../runc/.../apparmor.go`).\n\n@TomSweeneyRedHat  PTAL"
+        },
+        {
+            "user": "TomSweeneyRedHat",
+            "body": "changes LGTM, but would like head nods form @vrothberg and @giuseppe "
+        },
+        {
+            "user": "vrothberg",
+            "body": "bot, retest this please"
+        },
+        {
+            "user": "mheon",
+            "body": "Travis failure is network flakes, restarting"
+        },
+        {
+            "user": "mheon",
+            "body": "Code LGTM. Would like an ack from @TomSweeneyRedHat on the baseline test changes"
+        },
+        {
+            "user": "TomSweeneyRedHat",
+            "body": "Note to self, add a little comment in the test for the whale says positioning."
+        },
+        {
+            "user": "mheon",
+            "body": "@rh-atomic-bot r+"
+        },
+        {
+            "user": "rh-atomic-bot",
+            "body": ":pushpin: Commit cf185a1 has been approved by `mheon`\n\n<!-- @rh-atomic-bot r=mheon cf185a11602fa40c484a0ac6e2c85d8979bcf391 -->"
+        },
+        {
+            "user": "rh-atomic-bot",
+            "body": ":hourglass: Testing commit cf185a1 with merge 72e41c8..."
+        },
+        {
+            "user": "rh-atomic-bot",
+            "body": ":sunny: Test successful - [status-papr](https://s3.amazonaws.com/aos-ci/ghprb/containers/libpod/72e41c81aaa2c5ea39f7b5bd1c0654937703a346.1535132254818014464/index.html)\nApproved by: mheon\nPushing 72e41c81aaa2c5ea39f7b5bd1c0654937703a346 to master..."
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "containers",
+            "repository": "psgo",
+            "number": 32
+        }
+    ]
+}

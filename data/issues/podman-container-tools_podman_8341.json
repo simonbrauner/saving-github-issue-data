@@ -1,0 +1,53 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 8341,
+    "type": "issue",
+    "title": "Volume filtering works differently and misses existing label",
+    "state": "closed",
+    "labels": [
+        "kind/bug",
+        "locked - please file new issue/PR"
+    ],
+    "user": "afbjorklund",
+    "body": "**Is this a BUG REPORT or FEATURE REQUEST? (leave only one on its own line)**\n\n/kind bug\n\n**Description**\n\nVolume filtering works differently in podman, when compared to docker.\n\n**Steps to reproduce the issue:**\n\n1. minikube start --driver podman\n\n2. sudo -n podman volume ls --filter label=name.minikube.sigs.k8s.io=minikube\n\n3.\n\n**Describe the results you received:**\n\n```\n```\n\n\n**Describe the results you expected:**\n\n```\nDRIVER      VOLUME NAME\nlocal       minikube\n```\n\n**Additional information you deem important (e.g. issue happens only occasionally):**\n\nThe --filter doesn't work with label:\n\n`minikube start --driver podman`\n\n```console\n$ sudo -n podman volume ls --filter label=name.minikube.sigs.k8s.io=minikube\n$ sudo -n podman volume ls \nDRIVER      VOLUME NAME\nlocal       minikube\n$ sudo -n podman volume inspect minikube\n[\n     {\n          \"Name\": \"minikube\",\n          \"Driver\": \"local\",\n          \"Mountpoint\": \"/var/lib/containers/storage/volumes/minikube/_data\",\n          \"CreatedAt\": \"2020-11-14T15:13:11.855745076+01:00\",\n          \"Labels\": {\n               \"created_by.minikube.sigs.k8s.io\": \"true\",\n               \"name.minikube.sigs.k8s.io\": \"minikube\"\n          },\n          \"Scope\": \"local\",\n          \"Options\": {\n               \n          },\n          \"UID\": 0,\n          \"GID\": 0,\n          \"Anonymous\": false\n     }\n]\n```\n\nIt works OK with the docker driver.\n\n`minikube start --driver docker`\n\n```console\n$ docker volume ls --filter label=name.minikube.sigs.k8s.io=minikube\nDRIVER              VOLUME NAME\nlocal               minikube\n$ docker volume inspect minikube\n[\n    {\n        \"CreatedAt\": \"2020-11-14T15:22:40+01:00\",\n        \"Driver\": \"local\",\n        \"Labels\": {\n            \"created_by.minikube.sigs.k8s.io\": \"true\",\n            \"name.minikube.sigs.k8s.io\": \"minikube\"\n        },\n        \"Mountpoint\": \"/var/lib/docker/volumes/minikube/_data\",\n        \"Name\": \"minikube\",\n        \"Options\": {},\n        \"Scope\": \"local\"\n    }\n]\n\n\n```\n**Output of `podman version`:**\n\n```\nVersion:      2.1.1\nAPI Version:  2.0.0\nGo Version:   go1.15.2\nBuilt:        Thu Jan  1 01:00:00 1970\nOS/Arch:      linux/amd64\n```\n\n**Output of `podman info --debug`:**\n\n```\n(paste your output here)\n```\n\n**Package info (e.g. output of `rpm -q podman` or `apt list podman`):**\n\n```\n(paste your output here)\n```\n\n**Have you tested with the latest version of Podman and have you checked the Podman Troubleshooting Guide?**\n\nNo\n\n**Additional environment details (AWS, VirtualBox, physical, etc.):**\n\nUbuntu 20.04",
+    "comments": [
+        {
+            "user": "afbjorklund",
+            "body": "There is some bug in the filter construction, that butchers the options.\n\n```go\n        for _, f := range cliOpts.Filter {\n                filterSplit := strings.Split(f, \"=\")\n                if len(filterSplit) < 2 {\n                        return errors.Errorf(\"filter input must be in the form of filter=value: %s is invalid\", f)\n                }\n                lsOpts.Filter[filterSplit[0]] = append(lsOpts.Filter[filterSplit[0]], filterSplit[1:]...)\n        }\n\n```\ncliOpts.Filter [label=name.minikube.sigs.k8s.io=minikube]\nlsOpts.Filter map[label:[name.minikube.sigs.k8s.io minikube]]\n\nThe bug is in GenerateVolumeFilters, in the loop construct.\n\nSo instead of checking key=value, it checks the key twice instead:\n\nlabel name.minikube.sigs.k8s.io\nlabel minikube\n\nThe filter switch needs to come _before_ the value loop.\n```go\n        for filter, v := range filters {\n                for _, val := range v {\n                        switch filter {\n```\n\nOtherwise it won't work for these label=key=value filters ?\n\n`map[label:[name.minikube.sigs.k8s.io minikube]]`\n\nIt looks for a `'='` character, but it has already been lost.\n\n```go\n                        case \"label\":\n                                filterArray := strings.SplitN(val, \"=\", 2)\n```"
+        },
+        {
+            "user": "afbjorklund",
+            "body": "I think it was GenerateVolumeFilters that was right, when having multiple filters.\n\nSo it was the command line flag parser that was too greedy, splitting every '='"
+        },
+        {
+            "user": "afbjorklund",
+            "body": "It also seems that the logic in Volumes() filtering is broken.\n\nCurrently it does an OR of the criteria, instead of an AND...\n\n```go\n        if len(filters) == 0 {\n                return vols, nil\n        }\n\n        volsFiltered := make([]*Volume, 0, len(vols))\n        for _, vol := range vols {\n                include := false\n                for _, filter := range filters {\n                        include = include || filter(vol)\n                }\n\n                if include {\n                        volsFiltered = append(volsFiltered, vol)\n                }\n        }\n\n        return volsFiltered, nil\n```\nSo as long as the label matches, it will include _every_ name:\n\n`podman volume ls --filter name=foo,label=blue`\n\nBut that's a different bug than this one, just found while testing..."
+        },
+        {
+            "user": "Luap99",
+            "body": ">So as long as the label matches, it will include every name:\n\nI think this is not a bug and expected. see: https://github.com/containers/podman/pull/8232"
+        },
+        {
+            "user": "afbjorklund",
+            "body": "Okay, then it was just the example in the docs that was silly (not updated)...\n\n```\nEXAMPLES\n              $ podman volume ls\n\n              $ podman volume ls --format json\n\n              $ podman volume ls --format \"{{.Driver}} {{.Scope}}\"\n\n              $ podman volume ls --filter name=foo,label=blue\n```"
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "kubernetes",
+            "repository": "minikube",
+            "number": 9705
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 8345
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 8457
+        }
+    ]
+}

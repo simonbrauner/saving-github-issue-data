@@ -1,0 +1,77 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 1526,
+    "type": "issue",
+    "title": "Rootless podman loses SUID bit for binaries coming from the base image",
+    "state": "closed",
+    "labels": [
+        "locked - please file new issue/PR"
+    ],
+    "user": "debarshiray",
+    "body": "/kind bug\n\n**Description**\n\nWhile trying to get `sudo` working on the Silverblue [toolbox](https://github.com/debarshiray/fedora-toolbox), we discovered that some binaries are losing their SUID bits inside the toolbox container. Stripping things down to a rootless `podman run ...` still shows the problem, even though the symptoms are slightly altered.\n\nLet's play with the `fedora:28` image that comes with `/usr/bin/su`.\n\nFirst, a simple `podman run`:\n```\n$ podman run -it --rm fedora:28 bash\n# ls -l /usr/bin/su\n-rwsr-xr-x. 1 root root 46128 Jul 16 11:56 /usr/bin/su\n```\n\nNow, we try to specify the UID mapping like [we do](https://github.com/debarshiray/fedora-toolbox/commit/cfcf4eb31e14b3a300804840d315c62bc32e15ae) in the Silverblue toolbox:\n```\n$ podman run -it --rm --uidmap 1000:0:1 --uidmap 0:1:1000 --uidmap 1001:1001:64536 fedora:28 bash\n# ls -l /usr/bin/su\n-rwsr-xr-x. 1 root root 46128 Jul 16 11:56 /usr/bin/su\n```\n\nSo far, so good.\n\nNow, let's try the `fedora-toolbox:28` image that, among other things, [layers](https://github.com/debarshiray/fedora-toolbox/blob/master/Dockerfile) `sudo` over the `fedora:28` image.\n\nLike before, a simple `podman run`:\n```\n$ podman run -it --rm fedora-toolbox:28 bash\n# ls -l /usr/bin/su /usr/bin/sudo\n-rwsr-xr-x. 1 root root  46128 Jul 16 11:56 /usr/bin/su\n---s--x--x. 1 root root 157944 Jun 29 13:00 /usr/bin/sudo\n```\n\nStill good.\n\nNow with the UID mappings:\n```\n$ podman run -it --rm --uidmap 1000:0:1 --uidmap 0:1:1000 --uidmap 1001:1001:64536 fedora-toolbox:28 bash\n# ls -l /usr/bin/su /usr/bin/sudo\n-rwxr-xr-x. 1 root root  46128 Jul 16 11:56 /usr/bin/su\n---s--x--x. 1 root root 157944 Jun 29 13:00 /usr/bin/sudo\n```\n\nNotice how the `/usr/bin/su` binary no longer has the SUID bit.\n\nNote that the Silverblue toolbox doesn't actually use `podman run` nor does it enter the container as `root`. Instead, it uses `podman create`, `podman start` and `podman exec`, and enters the container as `$USER`. So this was an attempt at a more self-contained test case. The Silverblue toolbox will show similar, even if slightly different, symptoms.\n\n**Output of `podman version`:**\n\n```\nVersion:       0.9.1.1\nGo Version:    go1.10.4\nOS/Arch:       linux/amd64\n```\n\nNote that this is `podman-0.9.1.1` with the fix for #1452 cherry-picked on top.\n\n**Output of `podman info`:**\n\n```\nhost:\n  Conmon:\n    package: podman-0.9.1.1-1.1.dev.git95dbcad.fc28.x86_64\n    path: /usr/libexec/podman/conmon\n    version: 'conmon version 1.12.0-dev, commit: 87667d53792e9270cdc3065ad33c34a5eb306e9f-dirty'\n  MemFree: 8267685888\n  MemTotal: 16696311808\n  OCIRuntime:\n    package: runc-1.0.0-53.1.dev.git70ca035.fc28.x86_64\n    path: /usr/bin/runc\n    version: 'runc version spec: 1.0.0'\n  SwapFree: 4208979968\n  SwapTotal: 4208979968\n  arch: amd64\n  cpus: 4\n  hostname: bollard\n  kernel: 4.18.7-200.fc28.x86_64\n  os: linux\n  uptime: 37m 44.46s\ninsecure registries:\n  registries: []\nregistries:\n  registries:\n  - docker.io\n  - registry.fedoraproject.org\n  - quay.io\n  - registry.access.redhat.com\n  - registry.centos.org\nstore:\n  ContainerStore:\n    number: 2\n  GraphDriverName: vfs\n  GraphOptions: []\n  GraphRoot: /var/home/rishi/.local/share/containers/storage\n  GraphStatus: {}\n  ImageStore:\n    number: 3\n  RunRoot: /run/user/1000/run\n```\n\n**Additional environment details (AWS, VirtualBox, physical, etc.):**\n\nThis is a physical laptop running Fedora 28 Silverblue 28.20180918.0.",
+    "comments": [
+        {
+            "user": "debarshiray",
+            "body": "FWIW, the result's the same if I run the above `podman run` examples as `root`."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@nalind @giuseppe This sounds like the chown code in container/storage is loosing the setuid bits?"
+        },
+        {
+            "user": "giuseppe",
+            "body": "I am not able to reproduce this issue with a base image:\n\n```console\n# podman version \nVersion:       0.9.1\nGo Version:    go1.10.4\nOS/Arch:       linux/amd64\n# podman run --rm --uidmap 1000:0:1 --uidmap 0:1:1000 --uidmap 1001:1001:64536 registry.fedoraproject.org/fedora:28 ls -l /usr/bin/su\n-rwsr-xr-x. 1 root root 46128 Jul 16 11:56 /usr/bin/su\n```\n\nand neither with an image using layers:\n\n```console\n$ cat Dockerfile \nFROM registry.fedoraproject.org/fedora:28\nRUN yum install -y sudo\n\n# podman run -it --rm --uidmap 1000:0:1 --uidmap 0:1:1000 --uidmap 1001:1001:64536 layered-image ls -l /usr/bin/su /usr/bin/sudo\n-rwsr-xr-x. 1 root root  46128 Jul 16 11:56 /usr/bin/su\n---s--x--x. 1 root root 157944 Jun 29 13:00 /usr/bin/sudo\n```\n\ncould you try with a fresh storage?"
+        },
+        {
+            "user": "debarshiray",
+            "body": "> could you try with a fresh storage?\n\nUmm... what do you mean by \"fresh storage\"? I guess I have to wipe out some directory somewhere?"
+        },
+        {
+            "user": "giuseppe",
+            "body": "yes, in the rootless case you'd need to rm ~/.local/share/containers/"
+        },
+        {
+            "user": "debarshiray",
+            "body": "> I am not able to reproduce this issue with a base image:\n\nI see. I still see the same behaviour with `podman-0.9.2` (with the fix for #1522 cherry-picked on top). I tried the same commands and Dockerfile - both as root and without.\n\n> could you try with a fresh storage?\n\nI noticed that I couldn't `rm -rf ~/.local/share/containers/` without using `sudo`. Is that indicative of something? I am using `ext4`, in case that matters."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@debarshiray The reason you can not delete  ~/.local/share/containers/ as non root, is their are UIDs in these directories that are different then your default UID.\n\nYou should be able to remove the content if you do a \n\n`buildah unshare`\n\nWhich would make you root within your userns, and then you could delete all of the UIDS within the User Namespace."
+        },
+        {
+            "user": "mscherer",
+            "body": "So, i tried with the Dockerfile given (the one with yum install sudo, based on Fedora 28), built with buildah bud as simple user:\n```\n$ podman run -it --rm --uidmap 1000:0:1 --uidmap 0:1:1000 --uidmap 1001:1001:64536 1f68b79de7eb6cd0c263711e111be80b7fe06fa29db672fb1f3d4e12c8887e34   ls -l /usr/bin/su /usr/bin/sudo\n-rwxr-xr-x. 1 root root  46128 Jul 16 11:56 /usr/bin/su\n---s--x--x. 1 root root 157944 Jun 29 13:00 /usr/bin/sudo\n```\n\nSame process as root, with a image built as root with buildah:\n```\n# podman run -it --rm --uidmap 1000:0:1 --uidmap 0:1:1000 --uidmap 1001:1001:64536 9d77a544e32e4fba1fe2011c72af022b0e3fb904aab34b9501c2fc63bd7fd1f0 ls -l  /usr/bin/su /usr/bin/sudo\n-rwxr-xr-x. 1 root root  46328 Mar 27 09:26 /usr/bin/su\n---s--x--x. 1 root root 157944 Jun 29 13:00 /usr/bin/sudo\n```\n\nIn both case, i see that su lost the suid bit, and not sudo.\n\n```\n# rpm -q podman\npodman-0.9.1-3.gitaba58d1.fc28.x86_64\n```"
+        },
+        {
+            "user": "giuseppe",
+            "body": "I've opened a PR here: https://github.com/containers/storage/pull/216"
+        },
+        {
+            "user": "debarshiray",
+            "body": "Yes, containers/storage#216 fixes this problem for me. Thanks!"
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "containers",
+            "repository": "storage",
+            "number": 216
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 1550
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 1554
+        },
+        {
+            "organization": "containers",
+            "repository": "toolbox",
+            "number": 180
+        }
+    ]
+}

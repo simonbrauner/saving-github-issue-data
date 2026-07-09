@@ -1,0 +1,84 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 864,
+    "type": "pull_request",
+    "title": "libpod: Execute poststop hooks locally",
+    "state": "closed",
+    "labels": [
+        "locked - please file new issue/PR"
+    ],
+    "user": "wking",
+    "body": "Builds on #857, review that first.\n\nExecute the poststop hooks ourselves instead of delegating to the runtime, since [some runtimes do not seem to handle these reliably][1].\n\nThis may be enough for #730, but I'm not sure.\n\nAlso, while the `hooks` package is well-covered by unit tests and this pull requests adds unit tests for `Container.postDeleteHooks`, we don't seem to have integration tests exercising the whole system.  fdcf633a (#155) added [a hook test][2], but its `fileutils.CopyFile` call has no error checking and (as far as I can see) no source `hooks.json` to copy.  I expect we want to patch up that test, but I'm leaving it to follow-up (or parallel) work.\n\n[1]: https://github.com/projectatomic/libpod/issues/730#issuecomment-392959938\n[2]: https://github.com/projectatomic/libpod/blame/824ea4da338891aff122f08f8f97b4d08b1a1e95/test/e2e/run_test.go#L250-L261",
+    "comments": [
+        {
+            "user": "wking",
+            "body": "Hey, `cloud Podman` is actually [happy][1] for once :).  Too bad I'll have to rebase after #857 lands :p.\n\n[1]: https://s3.amazonaws.com/aos-ci/ghprb/projectatomic/libpod/af512d0288481a7b12fdfc933c46773ac6e332ad.2.1527799560216179652/output.log"
+        },
+        {
+            "user": "wking",
+            "body": "#857 landed, so I've rebased this onto master."
+        },
+        {
+            "user": "wking",
+            "body": "I've pushed cc819730 -> ac567d6b with a rebase onto master and a [`delete` wrapper][1].\n\n[1]: https://github.com/projectatomic/libpod/pull/864#discussion_r192391636"
+        },
+        {
+            "user": "mheon",
+            "body": "Test failures are infra issues"
+        },
+        {
+            "user": "rhatdan",
+            "body": "Rebase please"
+        },
+        {
+            "user": "wking",
+            "body": "> Rebase please\n\nRebased with ac567d6b -> 31dead97 (no conflicts)."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@mheon PTAL"
+        },
+        {
+            "user": "mheon",
+            "body": "I have a few concerns around ordering - do poststop hooks need to execute while the container is still mounted? If they do, we might want to move delete earlier in the process for container and pod removal."
+        },
+        {
+            "user": "rhatdan",
+            "body": "Yes I think poststop should be run while the container storage is intact.  \n\nIt looks like oci-systemd-hook is removing ROOTFS/etc/machine-id.  (Not sure why this is necessary.)\n\noci-register-machine unregistered (Sent a dbus message) the container with systemd-machinectl, but we are removing this hook.  It causes much more problems then it is worth.\n\noci-umount does not do poststop.\n\nI am a little surprised at how little we do in poststop."
+        },
+        {
+            "user": "wking",
+            "body": "> I have a few concerns around ordering - do poststop hooks need to execute while the container is still mounted?\n\nThe spec [requires poststop hooks to run after deletion][1], so I think the timing of these is correct as this PR stands.  If you want hooks that fire before deletion, I think we need to use an extension stage.  We've talked about [a postexit stage][2] to fire from `conmon` after the container process exits.  And you could also add a predelete extension stage to fire right before we call the OCI runtime's `delete`.  However, [there are potential compatibility issues][3] with a host-scoped hook directory containing package-scoped extension stages, so we may need to move to package-scoped hook directories if we add those.  In the meantime, this PR implements the OCI-defined semantics for poststop.\n\n[1]: https://github.com/opencontainers/runtime-spec/blob/v1.0.1/config.md#poststop\n[2]: https://github.com/projectatomic/libpod/issues/730#issuecomment-388474559\n[3]: https://github.com/projectatomic/libpod/pull/758#discussion_r188377662"
+        },
+        {
+            "user": "rhatdan",
+            "body": "Pk. Lets merge\n@rh-atomic-bot r+"
+        },
+        {
+            "user": "rh-atomic-bot",
+            "body": ":pushpin: Commit 31dead9 has been approved by `rhatdan`\n\n<!-- @rh-atomic-bot r=rhatdan 31dead9713a632482a2b7a9ffc2e6aac2dd588ce -->"
+        },
+        {
+            "user": "mheon",
+            "body": "@wking I'm mostly concerned about ordering relative to us unmounting the container's storage. I don't believe the OCI spec mandates when that will happen, and there may be hooks that assume that the container's root filesystem is still accessible at this stage. If so, we may want to move the deletion phase earlier in `removeContainer()` where we can guarantee there is still a mounted root filesystem."
+        },
+        {
+            "user": "wking",
+            "body": "> I'm mostly concerned about ordering relative to us unmounting the container's storage. I don't believe the OCI spec mandates when that will happen...\n\nRight, it just talks about [deleting resources allocated during `create`][1].\n\n> ... and there may be hooks that assume that the container's root filesystem is still accessible at this stage. \n\nWhy would you want to run a hook after `delete` if the hook required the container mounts to still exist?  I expect that those hooks should be moved to the postexit or predelete extension stages discussed above.  If, for some reason, you really do want access to the container filesystem post-delete, you could hack that in by bind-mounting the mount namespace in a prestart or poststart hook, and then removing your bind mount in a poststop hook (firing after `delete`).  Or you could launch a process in that mount namespace to hold it open after the container process executes.  But both of those seem like more work than adding an extension stage that fires between the container-process exit and `delete` and moving the hooks to that extension stage.  Also, holding a mount namespace open will work with runc, but it's probably not going to help you out with VM-based containers, etc.\n\n[1]: https://github.com/opencontainers/runtime-spec/blob/v1.0.1/runtime.md#delete"
+        },
+        {
+            "user": "rh-atomic-bot",
+            "body": ":hourglass: Testing commit 31dead9 with merge c9f7634..."
+        },
+        {
+            "user": "mheon",
+            "body": "@wking Fair enough - it does sound rather unreasonable to expect container resources to still exist after deletion. This does make things simpler for us, too."
+        },
+        {
+            "user": "rh-atomic-bot",
+            "body": ":sunny: Test successful - [status-papr](https://s3.amazonaws.com/aos-ci/ghprb/projectatomic/libpod/c9f763456cd8263c3f2d84c6b2b6e17ad81cf3ba.1528138727721144320/index.html)\nApproved by: rhatdan\nPushing c9f763456cd8263c3f2d84c6b2b6e17ad81cf3ba to master..."
+        }
+    ],
+    "cross_references": []
+}

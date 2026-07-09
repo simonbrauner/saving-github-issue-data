@@ -1,0 +1,111 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 9423,
+    "type": "pull_request",
+    "title": "rootless cni without infra container",
+    "state": "closed",
+    "labels": [
+        "rootless",
+        "lgtm",
+        "approved",
+        "CNI",
+        "locked - please file new issue/PR"
+    ],
+    "user": "Luap99",
+    "body": "Instead of creating an extra container create a network and mount\nnamespace inside the podman user namespace. This ns is used to\nfor rootless cni operations.\nThis helps to align the rootless and rootful network code path.\nIf we run as rootless we just have to set up a extra net ns and\ninitialize slirp4netns in it. The ocicni lib will be called in\nthat net ns.\n\nThis design allows allows easier maintenance, no extra container\nwith pause processes, support for rootless cni with --uidmap\nand possibly more.\n\nThe biggest problem is backwards compatibility. I don't think\nlive migration can be possible. If the user reboots or restart\nall cni containers everything should work as expected again.\nThe user is left with the rootless-cni-infa container and image\nbut this can safely be removed.\n\nTo make the existing cni configs work we need execute the cni plugins\nin a extra mount namespace. This ensures that we can safely mount over\n/run and /var which have to be writeable for the cni plugins without\nremoving access to these files by the main podman process. One caveat\nis that we need to keep the netns files at `XDG_RUNTIME_DIR/netns`\naccessible.\n\n`XDG_RUNTIME_DIR/rootless-cni/{run,var}` will be mounted to `/{run,var}`.\nTo ensure that we keep the netns directory we bind mount this relative\nto the new root location, e.g. XDG_RUNTIME_DIR/rootless-cni/run/user/1000/netns\nbefore we mount the run directory. The run directory is mounted recursive,\nthis makes the netns directory at the same path accessible as before.\n\nThis also allows iptables-legacy to work because /run/xtables.lock is\nnow writeable.\n\nAdd rootless support for cni and --uidmap. This is supported with the new rootless cni logic.\n\nLastly enable network connect/disconnect for rootless users.\n\nThe docker-compose test has been changed to work rootless and also test for network connect.\n\nRefer to the individual commits for more details.\n\nFixes #9169\nFixes #8709\n",
+    "comments": [
+        {
+            "user": "Luap99",
+            "body": "@edsantiago I need your input on the docker-compose test. I have two docker-compose test commits in here. The first one should enable `./test/compose/test-compose` to run rootless, however it is super messy. Theoretically it should just work when you change the socket path to a location writeable by the user but there are some serious issues with the test itself. All of the current test cases should be able to run rootless without modification. But it looks like running this as rootless is super flaky.  I added a `sleep 1` and some other changes to make it work. I would love if you could look into this I just changed things until it worked.\n\nOnly the second commit adds a test case which will fail as rootless with the current master. This PR will make it work."
+        },
+        {
+            "user": "Luap99",
+            "body": "@cevich @edsantiago I would like to have the rootless docker-compose functionality tested in CI. I already changed the docker-compose test script to make it work rootless but I do not know what I have to add to the .cirrus.yml file to test it in CI. It is already run as root."
+        },
+        {
+            "user": "edsantiago",
+            "body": "I'm no Cirrus expert, but I think @cevich has left for the day so here's my stab at it:\n```diff\ndiff --git a/.cirrus.yml b/.cirrus.yml\nindex e09db2a81..02ba5fc2c 100644\n--- a/.cirrus.yml\n+++ b/.cirrus.yml\n@@ -440,7 +440,7 @@ apiv2_test_task:\n         time_script: '$SCRIPT_BASE/logcollector.sh time'\n\n compose_test_task:\n-    name: \"compose test on $DISTRO_NV\"\n+    name: \"compose test on $DISTRO_NV ($PRIV_NAME)\"\n     alias: compose_test\n     only_if: *not_docs\n     skip: *tags\n@@ -450,6 +450,11 @@ compose_test_task:\n     env:\n         <<: *stdenvars\n         TEST_FLAVOR: compose\n+    matrix:\n+        - env:\n+              PRIV_NAME: root\n+        - env:\n+              PRIV_NAME: rootless\n     clone_script: *noop  # Comes from cache\n     gopath_cache: *ro_gopath_cache\n     setup_script: *setup\n```"
+        },
+        {
+            "user": "edsantiago",
+            "body": "I'm seeing this (Build failed, gosrc something) in other PRs. I'm guessing Cirrus is down or having problems."
+        },
+        {
+            "user": "cevich",
+            "body": "@edsantiago has it, that should work fine (and looks like it does) for `.cirrus.yml`. However, the compose tests don't go through `dotest()` function in `contrib/cirrus/runner.sh`.  So `compose test on fedora-33 (rootless)` is in name only, we also need to teach the script how to actually run as the user..."
+        },
+        {
+            "user": "cevich",
+            "body": "Okay, I think this should work (and support running other tests rootless in the future, if needed):\n\n```diff\ndiff --git a/contrib/cirrus/runner.sh b/contrib/cirrus/runner.sh\nindex 507d22e13..f52e107cc 100755\n--- a/contrib/cirrus/runner.sh\n+++ b/contrib/cirrus/runner.sh\n@@ -288,18 +288,6 @@ dotest() {\n         exec_container  # does not return\n     fi;\n\n-    # shellcheck disable=SC2154\n-    if [[ \"$PRIV_NAME\" == \"rootless\" ]] && [[ \"$UID\" -eq 0 ]]; then\n-        req_env_vars ROOTLESS_USER\n-        msg \"Re-executing runner through ssh as user '$ROOTLESS_USER'\"\n-        msg \"************************************************************\"\n-        set -x\n-        exec ssh $ROOTLESS_USER@localhost \\\n-                -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no \\\n-                -o CheckHostIP=no $GOSRC/$SCRIPT_BASE/runner.sh\n-        # does not return\n-    fi\n-\n     # containers/automation sets this to 0 for its dbg() function\n     # but the e2e integration tests are also sensitive to it.\n     unset DEBUG\n@@ -340,6 +328,19 @@ msg \"************************************************************\"\n ((${SETUP_ENVIRONMENT:-0})) || \\\n     die \"Expecting setup_environment.sh to have completed successfully\"\n\n+# shellcheck disable=SC2154\n+if [[ \"$PRIV_NAME\" == \"rootless\" ]] && [[ \"$UID\" -eq 0 ]]; then\n+    req_env_vars ROOTLESS_USER\n+    msg \"Re-executing runner through ssh as user '$ROOTLESS_USER'\"\n+    msg \"************************************************************\"\n+    set -x\n+    exec ssh $ROOTLESS_USER@localhost \\\n+            -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no \\\n+            -o CheckHostIP=no $GOSRC/$SCRIPT_BASE/runner.sh\n+    # Does not return!\n+fi\n+# else: not running rootless, do nothing special\n+\n cd \"${GOSRC}/\"\n\n handler=\"_run_${TEST_FLAVOR}\"\n```"
+        },
+        {
+            "user": "openshift-ci-robot",
+            "body": "[APPROVALNOTIFIER] This PR is **APPROVED**\n\nThis pull-request has been approved by: *<a href=\"https://github.com/containers/podman/pull/9423#pullrequestreview-626254496\" title=\"Approved\">cevich</a>*, *<a href=\"https://github.com/containers/podman/pull/9423#\" title=\"Author self-approved\">Luap99</a>*\n\nThe full list of commands accepted by this bot can be found [here](https://go.k8s.io/bot-commands?repo=containers%2Fpodman).\n\nThe pull request process is described [here](https://git.k8s.io/community/contributors/guide/owners.md#the-code-review-process)\n\n<details >\nNeeds approval from an approver in each of these files:\n\n- ~~[OWNERS](https://github.com/containers/podman/blob/master/OWNERS)~~ [Luap99]\n\nApprovers can indicate their approval by writing `/approve` in a comment\nApprovers can cancel approval by writing `/approve cancel` in a comment\n</details>\n<!-- META={\"approvers\":[]} -->"
+        },
+        {
+            "user": "Luap99",
+            "body": "Well the new test failed. Most likely a flake.\nI applied your diff @cevich."
+        },
+        {
+            "user": "baude",
+            "body": "LGTM as in looks GREAT to me!  well done "
+        },
+        {
+            "user": "cevich",
+            "body": "/lgtm"
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 8910
+        },
+        {
+            "organization": "cri-o",
+            "repository": "ocicni",
+            "number": 84
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 9508
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 9169
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 8709
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 9708
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 9818
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 9905
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 9946
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 10052
+        }
+    ]
+}

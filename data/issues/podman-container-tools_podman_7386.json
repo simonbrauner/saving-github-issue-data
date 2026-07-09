@@ -1,0 +1,104 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 7386,
+    "type": "pull_request",
+    "title": "fix podman load oci-archive's tar with name",
+    "state": "closed",
+    "labels": [
+        "approved",
+        "locked - please file new issue/PR"
+    ],
+    "user": "zhangguanzhang",
+    "body": "Fixes: https://github.com/containers/podman/issues/7337\nfixes this problem:\n```\n$ podman pull alpine\n$ podman save --format oci-archive alpine:latest > /tmp/FOO.tar\n$ podman load -i /tmp/FOO.tar foo\nError: error pulling \"foo\": unable to pull dir:/tmp/FOO.tar: error determining pull goal for image \"dir:/tmp/FOO.tar\": error parsing dest reference name \"localhost/tmp/FOO.tar\": error parsing named reference \"localhost/tmp/FOO.tar\": invalid reference format: repository name must be lowercase\n```\nSigned-off-by: zhangguanzhang <zhangguanzhang@qq.com>",
+    "comments": [
+        {
+            "user": "rhatdan",
+            "body": "@mtrmac @vrothberg PTAL\n"
+        },
+        {
+            "user": "zhangguanzhang",
+            "body": "ci has some errors, I will try to fix it"
+        },
+        {
+            "user": "edsantiago",
+            "body": ">I really don’t understand what this is fixing and how. This is the third PR with, what seems to me, wildly different approach to supposedly the same problem\n\n@mtrmac there is strong precedent for the following to just work:\n```console\n# podman load -i FOO.tar myname\n# podman load -i FOO.tar myname:mytag\n```\n[ref: existing tests](https://github.com/containers/podman/blob/d254fa4c35d81992084ddad300adf487239808db/test/system/120-load.bats#L99).\n\nThis is currently broken when `FOO.tar` is an oci-archive. As a podman user, I do not wish to care what format a tarball is in, I just want `podman load` to work as it has always worked. And I don't want to have to worry about upper-case vs lower-case tar file names. Does that address your concern?"
+        },
+        {
+            "user": "mtrmac",
+            "body": "- No-one has actually written down how that fails internally. The quoted error code mentioning `dir:` is of course unrelated, it’s just the one `LoadImage` happens to report. How does it _actually_ fail, what are we fixing?\n- If this is related to use of capital letters in file names, and that failing substantially similarly as the `dir:` case on creating a storage reference with capital letters (is that the case??), AFAICS that just doesn’t really match what the PRs are doing. Nothing in the existing code is using the file name in a Docker-reference context (in particular as the second parameter to `getSinglePullRefPairGoal`) already.\n- The PRs somehow hint at ignoring the user-specified name (“myname” above), and using data from the archive instead, but “myname” does not use capital letters.\n\nI’m not disputing that things are broken, and it’s entirely fair to say that I should do my own research; I’m afraid I can’t spend that time this week; and looking at how all over the place the previous PRs have been, I’d like the PR author to show the analysis that has already been done.\n\n(It’s also quite possible I’ve just been an idiot and I’ve been overlooking an entirely obvious problem, and rejecting the clearly correct way to solve it. In that case, showing the existing analysis should hopefully also help.)"
+        },
+        {
+            "user": "zhangguanzhang",
+            "body": "> * No-one has actually written down how that fails internally. The quoted error code mentioning `dir:` is of course unrelated, it’s just the one `LoadImage` happens to report. How does it _actually_ fail, what are we fixing?\n> * If this is related to use of capital letters in file names, and that failing substantially similarly as the `dir:` case on creating a storage reference with capital letters (is that the case??), AFAICS that just doesn’t really match what the PRs are doing. Nothing in the existing code is using the file name in a Docker-reference context (in particular as the second parameter to `getSinglePullRefPairGoal`) already.\n> * The PRs somehow hint at ignoring the user-specified name (“myname” above), and using data from the archive instead, but “myname” does not use capital letters.\n> \n> I’m not disputing that things are broken, and it’s entirely fair to say that I should do my own research; I’m afraid I can’t spend that time this week; and looking at how all over the place the previous PRs have been, I’d like the PR author to show the analysis that has already been done.\n> \n> (It’s also quite possible I’ve just been an idiot and I’ve been overlooking an entirely obvious problem, and rejecting the clearly correct way to solve it. In that case, showing the existing analysis should hopefully also help.)\n\nhttps://github.com/containers/podman/blob/516196f09677819b72d03e068fb8094b28e273aa/libpod/runtime_img.go#L285-L318\nWhen importing images, these methods will be tried from front to back\nIn fact, when we import the oci-archive format and use name coverage， neither the second method nor the third method passed normally, so the error message is the e thrown by the last method.\n\nWhen the passed image name is not empty, the final method returns an error\nhttps://github.com/containers/image/blob/22129f19a77890293540e67843f28860f5a77895/oci/layout/oci_transport.go#L180-L215\nso this case will return a error\nhttps://github.com/containers/podman/blob/master/libpod/image/pull.go#L178"
+        },
+        {
+            "user": "zhangguanzhang",
+            "body": "and the title of the https://github.com/containers/podman/issues/7337 is wrong，Actually fix this problem:\n```\n$ podman pull alpine\n$ podman save --format oci-archive alpine:latest > /tmp/FOO.tar\n$ podman load -i /tmp/FOO.tar foo\nError: error pulling \"foo\": unable to pull dir:/tmp/FOO.tar: error determining pull goal for image \"dir:/tmp/FOO.tar\": error parsing dest reference name \"localhost/tmp/FOO.tar\": error parsing named reference \"localhost/tmp/FOO.tar\": invalid reference format: repository name must be lowercase\n```"
+        },
+        {
+            "user": "mtrmac",
+            "body": "> When the passed image name is not empty, the final method returns an error\n> https://github.com/containers/image/blob/22129f19a77890293540e67843f28860f5a77895/oci/layout/oci_transport.go#L180-L215\n\nYes… and what’s _wrong_ about that? The `ref.image` in `ociReference` was not found in the manifest, and so the load reports an error. Is the error just “`foo` not found in `FOO.tar`”?\n\nAre we just back at https://github.com/containers/podman/pull/6811#discussion_r473009515 ?\n> Either the `name` parameter indicates what to pull, and in that case it should do so for `docker-archive:`, or it doesn’t, and in that case it should be dropped from this function, changing behavior of all the other transports.\n\nEven hypothetically granting the status quo of different transports behaving in different ways, and as a more limited case: either the `name` parameter to `Runtime.LoadImage` _for `oci-archive:` images_ specifies what image inside the archive to use (and in that case it should be used for _all_ OCI archives, whether single-image or multi-image), or it doesn’t (and in that case it should be ignored for _all_ OCI archives, whether single-image or multi-image. It makes no sense to me to have a parameter that means different things for single-image and multi-image archives , when most of the call stack has no idea which one it is."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@zhangguanzhang Are you still working on this one?"
+        },
+        {
+            "user": "zhangguanzhang",
+            "body": "> @zhangguanzhang Are you still working on this one?\nYou can discuss this with @QiWang19 , I'm going on vacation\n"
+        },
+        {
+            "user": "rhatdan",
+            "body": "@zhangguanzhang Thanks enjoy your vacation, I just returned."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@zhangguanzhang What is going on with this?"
+        },
+        {
+            "user": "zhangguanzhang",
+            "body": "> @zhangguanzhang What is going on with this?\n\n@QiWang19 Is there any progress on your side regarding this matter recently?"
+        },
+        {
+            "user": "rhatdan",
+            "body": "/approve\n"
+        },
+        {
+            "user": "openshift-ci-robot",
+            "body": "[APPROVALNOTIFIER] This PR is **APPROVED**\n\nThis pull-request has been approved by: *<a href=\"https://github.com/containers/podman/pull/7386#issuecomment-703244434\" title=\"Approved\">rhatdan</a>*, *<a href=\"https://github.com/containers/podman/pull/7386#\" title=\"Author self-approved\">zhangguanzhang</a>*\n\nThe full list of commands accepted by this bot can be found [here](https://go.k8s.io/bot-commands?repo=containers%2Fpodman).\n\nThe pull request process is described [here](https://git.k8s.io/community/contributors/guide/owners.md#the-code-review-process)\n\n<details >\nNeeds approval from an approver in each of these files:\n\n- ~~[OWNERS](https://github.com/containers/podman/blob/master/OWNERS)~~ [rhatdan]\n\nApprovers can indicate their approval by writing `/approve` in a comment\nApprovers can cancel approval by writing `/approve cancel` in a comment\n</details>\n<!-- META={\"approvers\":[]} -->"
+        },
+        {
+            "user": "zhangguanzhang",
+            "body": "> > Even hypothetically granting the status quo of different transports behaving in different ways, and as a more limited case: either the `name` parameter to `Runtime.LoadImage` _for `oci-archive:` images_ specifies what image inside the archive to use (and in that case it should be used for _all_ OCI archives, whether single-image or multi-image), or it doesn’t (and in that case it should be ignored for _all_ OCI archives, whether single-image or multi-image. It makes no sense to me to have a parameter that means different things for single-image and multi-image archives , when most of the call stack has no idea which one it is.\n> \n> Please make a clear record for the future:\n> \n> * As a part of the _code base_:\n>   \n>   * End-user documentation: what is the goal / intended behavior of the feature\n>   * Programmer documentation: What is the semantics of the involved functions / data structures.\n>   * (If it is not obvious, which should not be the case after the above:) How the implementation works and matches the function contracts.\n> * As part of this PR / process:\n>   \n>   * What is failing. Was the previous goal of the code incorrect? Or just incorrectly developed?\n>     \n>     * (#7337 only lists an error reported by the `dir:` transport. If this is focusing on `oci-archive:`, please write down what is the problem encountered when using `oci-archive:` that this is supposed to be fixing. So far I’m just guessing based on the the very different PRs and I can’t see any connection to upper-case file names.)\n>   * How is this PR fixing this\n\nIs this feature needed or not planned to support this feature?"
+        },
+        {
+            "user": "mtrmac",
+            "body": "> Is this feature needed or not planned to support this feature?\n\n_Which_ “this”?"
+        },
+        {
+            "user": "zhangguanzhang",
+            "body": "> > Is this feature needed or not planned to support this feature?\n> \n> _Which_ “this”?\n\npodman load -i /tmp/FOO.tar foo:testTag"
+        },
+        {
+            "user": "QiWang19",
+            "body": "#7337 seems not caused by Path-With-Caps. The issue can be regenerated even with a path using lower cases.\n@zhangguanzhang Are you trying to fix the [name:tag]` inconsistencies problem #7387? From the comments there the optional argument is going to be dropped in Podman v3.0. I have no idea what is a good fix for now.\n@mtrmac @vrothberg WDTY?"
+        },
+        {
+            "user": "mtrmac",
+            "body": "> @zhangguanzhang Are you trying to fix the [name:tag]` inconsistencies problem #7387? From the comments there the optional argument is going to be dropped in Podman v3.0. I have no idea what is a good fix for now.\n> @mtrmac @vrothberg WDTY?\n\nFor the name inconsistencies, I guess if no-one makes an executive decision one way or the other to use one of the semantics and possibly break users, we can always at least document the current behavior (both for the API and the CLI), and document both the behavior _and_ that it is deprecated. In general I don’t think that changing small aspects of the inconsistent behavior would be materially better, as long as an inconsistency remains.\n\nOTOH… doesn’t some of the API come directly from Docker? At least that one should have clearer semantics, giving us a specific target that _must_ work. That might involve actually implementing that in a reliable way (a `nameToSearchForInArchive` / `nameToTagTheResultWithLocally` parameter that does exactly what the API means), and we could preserve the current mess for CLI users (`legacyNameParameterWithConfusingSemantics`) — or it might be just enough to push us to implement only the Docker API-compatible behavior and break the other one."
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "containers",
+            "repository": "image",
+            "number": 1029
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 8112
+        }
+    ]
+}

@@ -1,0 +1,168 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 3240,
+    "type": "pull_request",
+    "title": "When you change the storage driver we ignore the storage-options",
+    "state": "closed",
+    "labels": [
+        "lgtm",
+        "approved",
+        "locked - please file new issue/PR"
+    ],
+    "user": "rhatdan",
+    "body": "The storage driver and the storage options in storage.conf should\nmatch, but if you change the storage driver via the command line\nthen we need to nil out the default storage options from storage.conf.\n\nIf the user wants to change the storage driver and use storage options,\nthey need to specify them on the command line.\n\nSigned-off-by: Daniel J Walsh <dwalsh@redhat.com>",
+    "comments": [
+        {
+            "user": "openshift-ci-robot",
+            "body": "[APPROVALNOTIFIER] This PR is **APPROVED**\n\nThis pull-request has been approved by: *<a href=\"https://github.com/containers/libpod/pull/3240#\" title=\"Author self-approved\">rhatdan</a>*\n\nThe full list of commands accepted by this bot can be found [here](https://go.k8s.io/bot-commands?repo=containers%2Flibpod).\n\nThe pull request process is described [here](https://git.k8s.io/community/contributors/guide/owners.md#the-code-review-process)\n\n<details >\nNeeds approval from an approver in each of these files:\n\n- ~~[OWNERS](https://github.com/containers/libpod/blob/master/OWNERS)~~ [rhatdan]\n\nApprovers can indicate their approval by writing `/approve` in a comment\nApprovers can cancel approval by writing `/approve cancel` in a comment\n</details>\n<!-- META={\"approvers\":[]} -->"
+        },
+        {
+            "user": "edsantiago",
+            "body": "Check with @mheon; there was some discussion earlier today about using per-driver opts using sections, e.g. `[storage.options.vfs]`, `[storage.options.overlay]`, etc; but it needs coordination with containers/storage."
+        },
+        {
+            "user": "rhatdan",
+            "body": "I would rather not complicate those matters,  It would become a ADMIN nightmare, unless we support multiple drivers simultaneously.   I think this fixes the issue until we decide to support multi drivers."
+        },
+        {
+            "user": "cevich",
+            "body": "@mheon @rhatdan With this applied, I'm still seeing [failures in F30 when running rootless](https://cirrus-ci.com/task/5609254338166784). The error message is the same as before this PR, bit I'm not sure if cause is the same:  `vfs driver does not support mount options`."
+        },
+        {
+            "user": "edsantiago",
+            "body": "If you look one line up from the error you'll see\n```\n[+0381s] Running: .../podman --storage-opt vfs.imagestore=/tmp/podman/imagecachedir [...] --storage-driver vfs\n```\nFrom a quick look this appears to be `test/utils/utils.go:77`, last touched by f610a485c by @baude. \n\nDoes anyone know when exactly the vfs driver started griping about options? It sounds like that's new."
+        },
+        {
+            "user": "cevich",
+            "body": "Good catch Ed.\n\n@baude perhaps when running rootless, those tests need to set `nocache=true`?  Though a simpler option may be to just not use the image cache when running rootless (I'm not sure what the de-optimization penalty is)."
+        },
+        {
+            "user": "cevich",
+            "body": "Related, I also get [failures on normal, root-run F30 tests](https://cirrus-ci.com/task/5974003529809920).  Though perhaps worse, some give no error message relates to the storage driver :confused: "
+        },
+        {
+            "user": "rhatdan",
+            "body": "@mheon @baude @cevich @edsantiago @TomSweeneyRedHat @giuseppe @vrothberg I don't see why this should not be merged?  \nCan I get some LGTM. Or do we still need more changes?"
+        },
+        {
+            "user": "cevich",
+            "body": "@rhatdan it seems to not  fix problem in Fedora 30...or we're interpreting the test results incorrectly.  I'll rebase #3078 against this PR and run again just to be double-sure..."
+        },
+        {
+            "user": "edsantiago",
+            "body": "@rhatdan I think there's something else going on that I can't figure out. Basically, no matter what I do, I cannot reproduce the failure by using the `--storage-opt` command-line option:\n```\n# podman --storage-driver=vfs info\n[all ok]\n```\nIt's only when I hand-edit `/etc/containers/storage.conf`, change driver to \"vfs\", but leave `mountopt=` untouched, that's when I get the \"vfs driver does not support mount options\" error.\n\nI would prefer to have a solid understanding of the problem before we merge this. (I'm also concerned about the approach you take here, because I'm not sure if it would clobber command-line `--storage-opts`)"
+        },
+        {
+            "user": "edsantiago",
+            "body": "More weirdness:\n```\n# grep ^driver /etc/containers/storage.conf\ndriver = \"vfs\"                   ! hand-edited\n# rm -rf /var/lib/containers;podman --storage-driver=overlay info\nError: could not get runtime: overlay: Unknown option vfs.mountopt\n```\nI obviously do not understand the `--storage-driver` option."
+        },
+        {
+            "user": "edsantiago",
+            "body": "Continuing weirdness. This is not behaving as I expect it. I think this needs a good regression test suite.\n```\n# rm -rf /tmp/ttt;podman --storage-driver=vfs --storage-opt=dsf --root=/tmp/ttt info|grep -1 Graph\n    number: 0\n  GraphDriverName: vfs\n  GraphOptions:\n  - dsf          <------ I would not expect to see options when vfs is used\n  GraphRoot: /tmp/ttt\n  GraphStatus: {}\n  ImageStore:\n```"
+        },
+        {
+            "user": "baude",
+            "body": "/hold"
+        },
+        {
+            "user": "baude",
+            "body": "do not merge this yet"
+        },
+        {
+            "user": "rhatdan",
+            "body": "@edsantiago If you edit storage.conf, it is expected you leave it in a consistent state.  So editing it to change driver to vfs but leaving the mount-options, then should cause an error.\nwhich is why\n```\n# grep ^driver /etc/containers/storage.conf\ndriver = \"vfs\"                   ! hand-edited\n# rm -rf /var/lib/containers;podman --storage-driver=overlay info\nError: could not get runtime: overlay: Unknown option vfs.mountopt\n```\nfails.\n\nWe have documented that overriding the storage-driver from the command line with --storage-driver, should cause the storage-options to be ignored as defined in storage.conf.\n\nLooks like \n```\n# rm -rf /tmp/ttt;podman --storage-driver=vfs --storage-opt=dsf --root=/tmp/ttt info|grep -1 Graph\n    number: 0\n  GraphDriverName: vfs\n  GraphOptions:\n  - dsf          <------ I would not expect to see options when vfs is used\n  GraphRoot: /tmp/ttt\n  GraphStatus: {}\n  ImageStore:\n```\nIs because vfs driver only looks for specific mount options, and ignores others.\n```\n\tfor _, option := range options {\n\t\tif strings.HasPrefix(option, \"vfs.imagestore=\") {\n\t\t\td.homes = append(d.homes, strings.Split(option[15:], \",\")...)\n\t\t\tcontinue\n\t\t}\n\t\tif strings.HasPrefix(option, \".imagestore=\") {\n\t\t\td.homes = append(d.homes, strings.Split(option[12:], \",\")...)\n\t\t\tcontinue\n\t\t}\n\t\tif strings.HasPrefix(option, \"vfs.ostree_repo=\") {\n\t\t\tif !ostree.OstreeSupport() {\n\t\t\t\treturn nil, fmt.Errorf(\"vfs: ostree_repo specified but support for ostree is missing\")\n\t\t\t}\n\t\t\td.ostreeRepo = option[16:]\n\t\t}\n\t\tif strings.HasPrefix(option, \".ostree_repo=\") {\n\t\t\tif !ostree.OstreeSupport() {\n\t\t\t\treturn nil, fmt.Errorf(\"vfs: ostree_repo specified but support for ostree is missing\")\n\t\t\t}\n\t\t\td.ostreeRepo = option[13:]\n\t\t}\n\t\tif strings.HasPrefix(option, \"vfs.mountopt=\") {\n\t\t\treturn nil, fmt.Errorf(\"vfs driver does not support mount options\")\n\t\t}\n\t}\n```"
+        },
+        {
+            "user": "rhatdan",
+            "body": "So my patch should fix any use case other then when you make the storage.conf file inconsistent."
+        },
+        {
+            "user": "edsantiago",
+            "body": "@rhatdan thanks, I now understand the `--storage-opt` option better; but I still don't see what this patch accomplishes. `--storage-driver=vfs` does not seem to generate errors no matter what I try; only if I hand-edit storage.conf"
+        },
+        {
+            "user": "baude",
+            "body": "im hoping to get root cause here, i have frozen the ci vm that does this testing so i can poke around when it finishes."
+        },
+        {
+            "user": "baude",
+            "body": "also, @rhatdan this appears to throw away --storage-opts provided by the user on the command line"
+        },
+        {
+            "user": "rhatdan",
+            "body": "@baude works for me\n\n```\n ./bin/podman --storage-opt=abcd --storage-driver=vfs --storage-opt=1234 --root=/tmp/ttt info \n...\n  GraphDriverName: vfs\n  GraphOptions:\n  - abcd\n  - \"1234\"\n  GraphRoot: /tmp/ttt\n  GraphStatus: {}\n```"
+        },
+        {
+            "user": "edsantiago",
+            "body": "@rhatdan now try that *without* your patch..."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@edsantiago Without this patch we get\n```\n  GraphDriverName: vfs\n  GraphOptions:\n  - overlay.mountopt=nodev,metacopy=on\n```\nWhich does not cause an issue, but is still wrong according to the documention and could cause issues in the future."
+        },
+        {
+            "user": "rhatdan",
+            "body": "Without my patch specifying the graphdriver-options seems to override the storage.conf, which I am not sure is expected.\n\n```\n  GraphDriverName: vfs\n  GraphOptions:\n  - abcd\n  - \"1234\"\n```\n"
+        },
+        {
+            "user": "rhatdan",
+            "body": "This behaviour matches the documentation.\n\n```       --storage-opt=value\n\n       Storage driver option, Default storage driver options are configured in\n       /etc/containers/storage.conf ($HOME/.config/containers/storage.conf in\n       rootless mode). The STORAGE_OPTS environment variable overrides the\n       default. The --storage-opt specified options overrides all.\n```\nSo I would say this is correct.\n"
+        },
+        {
+            "user": "rhatdan",
+            "body": "@edsantiago Please test this out, to see if it fixes your --storage-driver=vfs --privileged problem?"
+        },
+        {
+            "user": "edsantiago",
+            "body": "Addresses the problem as described, with reproducer, in #3263.\n\nOne behavior surprises me:\n```\n# ./bin/podman --conmon $CONMON_BINARY --root=/tmp/ttt --storage-driver=vfs --storage-opt=vfs.metacopy=on run --privileged alpine date\n```\nWith the command-line `--storage-opt` override I was expecting to see the `does not support mount options` error; but the above works perfectly fine. LGTM either way, but I find this odd."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@edsantiago we document that setting the --storage-driver overrules the storage-options set in the storage.conf file. So it ignores those settings, which is why it does not give any errors.\n\n@edsantiago @mheon @baude @giuseppe @TomSweeneyRedHat I believe this is ready to merge."
+        },
+        {
+            "user": "mheon",
+            "body": "LGTM"
+        },
+        {
+            "user": "edsantiago",
+            "body": "/lgtm"
+        },
+        {
+            "user": "TomSweeneyRedHat",
+            "body": "All green, @mheon should we cancel @baude's hold on this?"
+        },
+        {
+            "user": "mheon",
+            "body": "/hold cancel"
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 3239
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 3078
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 3263
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "buildah",
+            "number": 1848
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "buildah",
+            "number": 1945
+        }
+    ]
+}

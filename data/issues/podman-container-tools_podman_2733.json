@@ -1,0 +1,204 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 2733,
+    "type": "issue",
+    "title": "test-race: podman pod rm -a doesn't remove a running container",
+    "state": "closed",
+    "labels": [
+        "kind/bug",
+        "locked - please file new issue/PR"
+    ],
+    "user": "cevich",
+    "body": "/kind bug\n\n**Description**\n\nTest occasionally in CI fails, when running as a user (rootless testing).  \n\n**Steps to reproduce the issue:**\n\n1. Re-run tests until it fails :frowning_face: \n\n**Describe the results you received:**\n\n``Error: pod 15d...74f contains containers and cannot be removed: container already exists``\n\n**Describe the results you expected:**\n\nTest consistently passes\n\n**Additional information you deem important (e.g. issue happens only occasionally):**\n\nCode is: ``test/e2e/pod_rm_test.go`` line 97\n\n**Output of `podman version`:**\n\nHappening on master, ``v1.1.2-269-gb83d0572``\n\n**Additional environment details (AWS, VirtualBox, physical, etc.):**\n\nTwo examples:\n\n* https://cirrus-ci.com/build/6328612444700672\n* https://cirrus-ci.com/task/5367713881915392\n",
+    "comments": [
+        {
+            "user": "rhatdan",
+            "body": "That is expected.\n```\nman podman pod rm \n...\n  -f, --force    Force removal of a running pod by first stopping all containers, then removing all containers in the pod.  The default is false\n```"
+        },
+        {
+            "user": "cevich",
+            "body": "Correction: It's line 119 that fails.\n\n@rhatdan That's what the test appears to be exercising: Confirm that rm -a fails.  This part is passing, it's the final check that fails, and only when running as a user (works fine when run as root):\n\n```golang\n    ...cut...\n        // one pod should have been deleted\n        result = podmanTest.Podman([]string{\"pod\", \"ps\", \"-q\"})\n        result.WaitWithDefaultTimeout()\n        Expect(len(result.OutputToStringArray())).To(Equal(1))\n```\n\n*sigh* so this rings some bells...it fails whenever there is NOT exactly one line of output :cry:\n\nThis is the worst setup to debug since we have NO idea what the multiple lines of output contain :confounded:   Maybe the first step in fixing this is to add some helpful output..."
+        },
+        {
+            "user": "cevich",
+            "body": "Ha! I think I caught it.  This is the ps output when the test is expecting ***1*** pod:\n\n```POD ID         NAME              STATUS    CREATED        # OF CONTAINERS   INFRA ID\ne67b1480769c   cool_jones        Created   1 second ago   0                 \nd78c9ca2baf9   elastic_hermann   Running   1 second ago   1\n```\n\nSo...since we're running tests in parallel, I think maybe this is another one for  #2649 ?"
+        },
+        {
+            "user": "cevich",
+            "body": "This can't be  #2649 because separate ``--root and --runroot`` guarantee separation.  Therefor the unexpected pod must be coming from somewhere else."
+        },
+        {
+            "user": "mheon",
+            "body": "So on my initial look, this test seems to make two pods, only one running, and then do an `rm -a` to remove only the not-running pod.\n\nInitial diagnosis: the not-running pod is either not being deleted at all (really bad) or we're racing and it's still there when we do a `ps` (more likely, not as bad)"
+        },
+        {
+            "user": "cevich",
+            "body": "@mheon That's helpful, thanks.  I believe this is a race, sometimes it passes.  Sounds like the rm -a is exiting before the pod is actually removed.  Okay, I'll see if I can reproduce that manually (as a user)."
+        },
+        {
+            "user": "cevich",
+            "body": "@mheon Okay I'm with you now, having run the commands manually.  I agree your second theory seems more probable.  [I used a ``defer()`` to produce the output above](https://github.com/containers/libpod/pull/2737/files#diff-763d32052d18ee5114bb2af368392a2bR109).  So I think that means there really were two pods still existing after the 'rm -a' happened (at least briefly).\n\nCan you confirm that the 'rm -a' *can* return before all removals are complete?  If so, then all we need here is a retry/timeout loop on the final check.  I may even be able to manage writing one (or at least copying one) :grinning: "
+        },
+        {
+            "user": "mheon",
+            "body": "I don't think that should be possible... Part of `rm` that always happens before return is wiping the pod(s) in question from the database, so we should never see them again."
+        },
+        {
+            "user": "cevich",
+            "body": "@mheon dang, well, it's def. happening or my eyeballs are lying to me.  I'll double-check, but I'm pretty sure the `defer()` I added ran a `podman pod ps -a` AFTER the test failed (count 2)..."
+        },
+        {
+            "user": "cevich",
+            "body": "...Yep, sure'nuff, from [the run with the `defer(podman pod ps -a)` the failure came from line 126](https://cirrus-ci.com/task/5760077825835008) (the final check).  Here's the full output of the test:\n\n```\n\nRunning: /var/tmp/go/src/github.com/containers/libpod/bin/podman --root /tmp/podman_test083479571/crio --runroot /tmp/podman_test083479571/crio-run --runtime /usr/bin/runc --conmon /usr/libexec/podman/conmon --cni-config-dir /etc/cni/net.d --cgroup-manager cgroupfs --tmpdir /tmp/podman_test083479571 --storage-driver vfs pod ps -q\ne67b1480769c\nd78c9ca2baf9\noutput: e67b1480769c d78c9ca2baf9\nRunning: /var/tmp/go/src/github.com/containers/libpod/bin/podman --root /tmp/podman_test083479571/crio --runroot /tmp/podman_test083479571/crio-run --runtime /usr/bin/runc --conmon /usr/libexec/podman/conmon --cni-config-dir /etc/cni/net.d --cgroup-manager cgroupfs --tmpdir /tmp/podman_test083479571 --storage-driver vfs pod ps\nPOD ID         NAME              STATUS    CREATED        # OF CONTAINERS   INFRA ID\ne67b1480769c   cool_jones        Created   1 second ago   0                 \nd78c9ca2baf9   elastic_hermann   Running   1 second ago   1                 \noutput: POD ID NAME STATUS CREATED # OF CONTAINERS INFRA ID e67b1480769c cool_jones Created 1 second ago 0 d78c9ca2baf9 elastic_hermann Running 1 second ago 1\npodman pod ps: \nPOD ID NAME STATUS CREATED # OF CONTAINERS INFRA ID e67b1480769c cool_jones Created 1 second ago 0 d78c9ca2baf9 elastic_hermann Running 1 second ago 1\n[AfterEach] Podman pod rm\n  /var/tmp/go/src/github.com/containers/libpod/test/e2e/pod_rm_test.go:31\nRunning: /var/tmp/go/src/github.com/containers/libpod/bin/podman --root /tmp/podman_test083479571/crio --runroot /tmp/podman_test083479571/crio-run --runtime /usr/bin/runc --conmon /usr/libexec/podman/conmon --cni-config-dir /etc/cni/net.d --cgroup-manager cgroupfs --tmpdir /tmp/podman_test083479571 --storage-driver vfs pod rm -fa\nd78c9ca2baf993c0ed3924c6c04c8f3d18479a3c4f34d41f2dfa25ed83f29237\ne67b1480769c431af35354e9be331df95ecdfd6b55a077d16f0abab384a21b2f\n• Failure [4.302 seconds]\nPodman pod rm\n/var/tmp/go/src/github.com/containers/libpod/test/e2e/pod_rm_test.go:14\n  podman pod rm -a doesn't remove a running container [It]\n  /var/tmp/go/src/github.com/containers/libpod/test/e2e/pod_rm_test.go:98\n  Expected\n      <int>: 2\n  to equal\n      <int>: 1\n  /var/tmp/go/src/github.com/containers/libpod/test/e2e/pod_rm_test.go:126\n  Full Stack Trace\n```\n\nThere was def. a \"created\" pod and a \"running\" pod :frowning_face: \n\nI'll attempt to add a retry/timeout loop..."
+        },
+        {
+            "user": "mheon",
+            "body": "So we still have 2 pods here, after `rm` finished. Alright, that's properly wierd."
+        },
+        {
+            "user": "cevich",
+            "body": "@mheon yeah, and I'm assuming this test owns both of them. i.e. we're NOT seeing a pod from another, parallel test, or a leftover from prior test.  I'm also assuming my understanding of the output is correct (i.e. it may not be) :grin: "
+        },
+        {
+            "user": "mheon",
+            "body": "It looks like they're the same pods the test is trying to remove, so that sounds accurate"
+        },
+        {
+            "user": "cevich",
+            "body": "@mheon [Eww, a retry-loop doesn't fix this either](https://cirrus-ci.com/task/4834354567053312) - also the ginkgo test fails...but somehow gets marked as a pass??? (ignoring this for now).  Remember: This is the rootless test (running this as root works fine).  What other data can I grab that would be helpful debugging this?\n\nMaybe @giuseppe do you have any ideas here, how a user's ``podman pod rm -a`` would _sometimes_ return before removing an empty pod?\n\n```\n...cut...\nRetry 10, pods 2Running: /var/tmp/go/src/github.com/containers/libpod/bin/podman --root /tmp/podman_test430270252/crio --runroot /tmp/podman_test430270252/crio-run --runtime /usr/bin/runc --conmon /usr/libexec/podman/conmon --cni-config-dir /etc/cni/net.d --cgroup-manager cgroupfs --tmpdir /tmp/podman_test430270252 --storage-driver vfs pod ps -q\nda42f5236eb8\n73f729419d1c\noutput: da42f5236eb8 73f729419d1c\n...cut...\nRetry 1, pods 2Running: /var/tmp/go/src/github.com/containers/libpod/bin/podman --root /tmp/podman_test430270252/crio --runroot /tmp/podman_test430270252/crio-run --runtime /usr/bin/runc --conmon /usr/libexec/podman/conmon --cni-config-dir /etc/cni/net.d --cgroup-manager cgroupfs --tmpdir /tmp/podman_test430270252 --storage-driver vfs pod ps -q\nda42f5236eb8\n73f729419d1c\noutput: da42f5236eb8 73f729419d1c\n[AfterEach] Podman pod rm\n  /var/tmp/go/src/github.com/containers/libpod/test/e2e/pod_rm_test.go:32\nRunning: /var/tmp/go/src/github.com/containers/libpod/bin/podman --root /tmp/podman_test430270252/crio --runroot /tmp/podman_test430270252/crio-run --runtime /usr/bin/runc --conmon /usr/libexec/podman/conmon --cni-config-dir /etc/cni/net.d --cgroup-manager cgroupfs --tmpdir /tmp/podman_test430270252 --storage-driver vfs pod rm -fa\n73f729419d1ce60e6a53f4f0d772022cdb6a9ac0de84e8a87df77937b1a06798\nda42f5236eb8e7ce302d6a827b29bf5ddb80c350f3c0c4c2a5e0d3b06569ff66\n• Failure [60.155 seconds]\nPodman pod rm\n/var/tmp/go/src/github.com/containers/libpod/test/e2e/pod_rm_test.go:15\n  podman pod rm -a doesn't remove a running container [It]\n  /var/tmp/go/src/github.com/containers/libpod/test/e2e/pod_rm_test.go:99\n  Expected\n      <int>: 2\n  to equal\n      <int>: 1\n  /var/tmp/go/src/github.com/containers/libpod/test/e2e/pod_rm_test.go:130\n  Full Stack Trace\n```"
+        },
+        {
+            "user": "cevich",
+            "body": "OOOOOHHH! [I see how the test is passing](https://cirrus-ci.com/task/5911203162357760):\n\n```\nSUCCESS! -- 1 Passed | 0 Failed | 1 Flaked | 0 Pending | 632 Skipped\n```\n\nGinkgo is retrying it, so maybe something about the setup or cleanup is causing the problem then fixing it?"
+        },
+        {
+            "user": "cevich",
+            "body": "@mheon @baude Okay, [adding this line at the beginning of the test](https://github.com/containers/libpod/pull/2737/files#diff-763d32052d18ee5114bb2af368392a2bR100) appears to help.  I need to do a few more re-runs to be sure though.  So, to recap this seems to be the behavior:\n\n1. As root, all tests pass normally.\n2. As a user, [this line ***SOMETIMES*** fails.](https://github.com/containers/libpod/blob/master/test/e2e/pod_rm_test.go#L119)\n3. When it fails, ``podman pod rm -a`` exits 0, but ``podman pod ps`` always shows the same two pods that were started\n4. Adding the timeout/retry loop doesn't alter the behavior, ``ps`` shows the empty pod never gets removed.\n5. Ginkgo attempts to to re-run it up to 3 more times.   Presumably [calling cleanup after each.](https://github.com/containers/libpod/blob/master/test/e2e/pod_rm_test.go#L31).\n6. Sometimes this works, sometimes not.\n7. Adding a call at the start of the test to ``podmanTest.CleanupPod()`` appears to help, though one run isn't enough to be sure.\n\n**Questions:**\n1. How is it possible to have a race with ``podman pod rm -a`` which would ***SOMETIMES*** not remove empty pods but still exit 0.\n2. Assuming step 7 (above) pattern persists, does that suggest ``CleanupPod()`` is removing or resetting some state which is shared, and should not be?\n3. Is it possible multiple tests are using the same ``/tmp/blah`` directory?\n4. What other resources could be mistakenly shared across multiple tests, that could explain this behavior?"
+        },
+        {
+            "user": "cevich",
+            "body": "**update:** Ugg, nope, step 7 doesn't affect behavior.  It just failed on the first run w/ ``CleanupPod()`` at the start.  So it's still demonstrating Step 3 (above) randomly :confounded: "
+        },
+        {
+            "user": "cevich",
+            "body": "@mheon is there any way I can instrument the test to give us more info on what's happening?  e.g. if the test detects this condition, how can I confirm the database matches reality (the removed pod exists or doesn't).?"
+        },
+        {
+            "user": "mheon",
+            "body": "@cevich I think you might want to try debug logging on `podman pod rm -a` first - see if it actually sees the pods and tries to remove them"
+        },
+        {
+            "user": "cevich",
+            "body": "@mheon dangit...shoulda seen this coming:  Adding debug seems to prevent the race:   As many races are...timing-dependent :face_with_head_bandage:    So, we'll have to do this somewhat blind, but maybe not completely.  The condition does seem to persist once it occurs.  I s'pose we don't yet know if this is a problem with the `rm` or with the `podman pod ps`.  Let me try just removing the `--log-level=debug` from the `rm` and see if it reproduces with only having it on the `ps`."
+        },
+        {
+            "user": "cevich",
+            "body": "[Confirmed in this run](https://cirrus-ci.com/task/4921309183082496) the problem reproduces without the debug on the ``podman pod rm -a``  and with it on the ``podman pod ps``.  @mheon I don't see anything incriminating in the output from the two failed run (a flake re-run was successful).\n\nSince debugging the rm masks the problem, is there some easy-ish way to verify the directory structure and/or database contents are correct?  Basically, make sure this is a 'pod rm' problem and not a 'pod ps' problem."
+        },
+        {
+            "user": "mheon",
+            "body": "If it still shows up in `ps` and `rm` did not error I think it's safe to assume that `rm` never fired on the pod in question - if we had DB issues subsequent commands would be blowing up."
+        },
+        {
+            "user": "mheon",
+            "body": "If we throw a, say, 1 second sleep before the `rm -a`, does it resolve the race? I'm thinking we have some sort of race where `rm` doesn't see the pods and doesn't try to remove them"
+        },
+        {
+            "user": "cevich",
+            "body": "Ahh yes, we can see that in the logs:\n\n```\n  /var/tmp/go/src/github.com/containers/libpod/test/e2e/pod_rm_test.go:99\nRunning: /var/tmp/go/src/github.com/containers/libpod/bin/podman --root /tmp/podman_test703242098/crio --runroot /tmp/podman_test703242098/crio-run --runtime /usr/bin/runc --conmon /usr/libexec/podman/conmon --cni-config-dir /etc/cni/net.d --cgroup-manager cgroupfs --tmpdir /tmp/podman_test703242098 --storage-driver vfs pod rm -fa\nRunning: /var/tmp/go/src/github.com/containers/libpod/bin/podman --root /tmp/podman_test703242098/crio --runroot /tmp/podman_test703242098/crio-run --runtime /usr/bin/runc --conmon /usr/libexec/podman/conmon --cni-config-dir /etc/cni/net.d --cgroup-manager cgroupfs --tmpdir /tmp/podman_test703242098 --storage-driver vfs --log-level=debug pod ps -q\n```\n\nIt does NOT show the expected normal `Error: pod 783ea2e51f5da239b65201d5aacf0bf29bb6a29bcc486f804438c3fcde067554 contains containers and cannot be removed: container already exists`\n\nIn fact, that's something the test can look for (also).  Thanks @mheon I'll try adding the delay."
+        },
+        {
+            "user": "cevich",
+            "body": "@mheon okay, 2-out-of-3 re-runs passed, [the third one failed as before but after sleeping](https://cirrus-ci.com/task/5197969367236608) :cry:   Since that really sucks, I'm going to do a few more re-runs to see if I can make it happen again..."
+        },
+        {
+            "user": "cevich",
+            "body": "@mheon sigh...[second occurrence (after 2-3 more re-runs)](https://cirrus-ci.com/task/4786868519436288).  So adding the sleep ***did not*** change the behavior substantially, it still [flakes ***AFTER*** also emitting the expected error message](https://github.com/containers/libpod/pull/2737/files#diff-763d32052d18ee5114bb2af368392a2bR136) :frowning: "
+        },
+        {
+            "user": "cevich",
+            "body": "trying with the ``podman pod rm -a`` inside a retry loop.  Perhaps re-running it multiple times will force eventual consistency.  *note:* I don't see this as a fix, just another debugging step.  At this point the race seems likely  to be in ``podman pod rm -a`` (somehow, possibly specific to CI)..."
+        },
+        {
+            "user": "mheon",
+            "body": "We're getting the error message, but are we printing the ID of the other container? If we found the running pod but not the stopped pod that could explain things."
+        },
+        {
+            "user": "cevich",
+            "body": "@mheon Here's [a run where it got 10 retries at the removal and listing](https://cirrus-ci.com/task/5704056705122304).  I also added ``pod ps`` printouts for each retry.  The pod ids are the same, and remain consistent for all attempts.  Same for the pod state, they remain `Created` and `Running`, nothing changes :confused: \n\nI can try sticking the ``--log-level=debug`` back onto the `pod rm -a`, but last time that prevented the race from occurring.  Any other ideas?  (remember, this is reproducing only when running rootless)"
+        },
+        {
+            "user": "mheon",
+            "body": "There's absolutely no output regarding the other pod. It's not even trying to remove it.\n@cevich If we retry, does it always go to 10? Or does the number of failures vary? I have some ideas about the cause now..."
+        },
+        {
+            "user": "cevich",
+            "body": "@mheon It only took 2 attempts to get it to fail.  My guess is that it always retries 10-times, but I will let you know if I see anything different in a re-run."
+        },
+        {
+            "user": "mheon",
+            "body": "Wait a goddamn... I know what this is"
+        },
+        {
+            "user": "mheon",
+            "body": "Rootless Podman cannot remove multiple pods at the same time. For some reason it's not throwing an error when we try to do this."
+        },
+        {
+            "user": "mheon",
+            "body": "How does this test even pass?\n@giuseppe we're only joining one pod's userns, but somehow, sometimes, it successfully removes both pods?"
+        },
+        {
+            "user": "cevich",
+            "body": "[Here's a run with debugging enabled on the rm and a 10-try test failure.](https://cirrus-ci.com/task/5665000050917376)\n\n@mheon it ***DOES*** print the 'can't remove pod' error message.  I added a check for this.  Yet still doesn't actually remove the pod."
+        },
+        {
+            "user": "cevich",
+            "body": "Re: **How does it pass:**  maybe this is the race, perhaps (somehow) the pod which is suppose to be removed, removes itself coincidentally with the rm command.  That would represent a false-positive condition this test would miss."
+        },
+        {
+            "user": "mheon",
+            "body": "@cevich The error message is 100% expected. This test expects one pod to fail.\n\nThe issue is that pod 2, the not-running pod, is not even touched. We're not even attempting to remove it."
+        },
+        {
+            "user": "mheon",
+            "body": "I think it has to be an ordering thing in the DB - one of the pods will be returned first by the iterator. I think we succeed if the one that's not running is returned first... maybe because we don't need to join its userns because not running?"
+        },
+        {
+            "user": "mheon",
+            "body": "(Iteration order is based on ID, so there's our randomness - if the pod that is not running has a lower ID, we succeed, else we fail...)"
+        },
+        {
+            "user": "cevich",
+            "body": "Ohhh okay, I follow.  That explains why retrying the removal fails also.  So is the only thing special in rootless-vs-root, somehow when running as root, the IDs always are the \"correct\" way around?\n\n(It's possible this problem is happening when run as root, I'm just not seeing it - I also didn't look super closely)"
+        },
+        {
+            "user": "mheon",
+            "body": "The multiple-pod-removal restriction is rootless only - root pods work as advertised."
+        },
+        {
+            "user": "cevich",
+            "body": "Excellent, so it sounds like the problems are fully-known here then.  Whew! What a ride!\n\nIs there anything I can do to help fix this and/or should I just close #2737 then?"
+        },
+        {
+            "user": "cevich",
+            "body": "Should be fixed by: #2706"
+        },
+        {
+            "user": "rhatdan",
+            "body": "Looks like this is fixed."
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 2737
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 2842
+        }
+    ]
+}

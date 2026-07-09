@@ -1,0 +1,103 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 26277,
+    "type": "pull_request",
+    "title": "HyperV machine should reuse hvsock registry entries when possible",
+    "state": "closed",
+    "labels": [
+        "lgtm",
+        "approved",
+        "machine",
+        "release-note",
+        "locked - please file new issue/PR"
+    ],
+    "user": "lstocchi",
+    "body": "This is a proposal based on ideas shared on https://github.com/containers/podman/issues/25723 and https://github.com/containers/podman/issues/25038 to, eventually, run podman on hyperv without being admin.\n\nInstead of creating new Registry entries at each `podman machine init` execution, podman should try to reuse existing entries.\nThis can be done because a user can only start a machine at a time.\n\nA summary of what it does...\n1. Podman does not need to be run as Admin on HyperV if the hvsock entries already exist in the Registry (in a follow-up PR we could \"copy\" how podman works with WSL. Podman could always be start as a normal user and if we have to write on the Registry we can re-execute the command in elevated privileges)\n2. when executing `init`, it checks if there is a hvsock entry/port we could reuse (based on the purpose), otherwise if the user is admin it will create a new one (as it happens now)\n3. for this reason the hvsock entries do not have the machine name as a property anymore and they are not deleted when a machine is removed. \n\n\n#### Does this PR introduce a user-facing change?\n\nAfter the first machine init when the Registry gets populated, users could run podman on hyperv without being admin (if they are member of the hyperv admin group)\n\n```release-note\nStarting and stopping Hyper-V machines doesn't require administrator privileges anymore.\n```\n",
+    "comments": [
+        {
+            "user": "packit-as-a-service[bot]",
+            "body": "[NON-BLOCKING] Packit jobs failed. @containers/packit-build please check. Everyone else, feel free to ignore."
+        },
+        {
+            "user": "baude",
+            "body": "how are migrations handled?"
+        },
+        {
+            "user": "lstocchi",
+            "body": "> how are migrations handled?\n\nit is transparent to the user. The existing machines works the same as before. The new ones will not add any new entry in the Registry and will reuse the existing hvsock.\n\n"
+        },
+        {
+            "user": "lstocchi",
+            "body": "My only doubt is about the cleaning of the Registry. This implementation leverages the `RemoveAndCleanMachines` func to clean it and this func gets called when you execute the `podman system reset` command. However i've the feeling this command has been deprecated but i cannot find any issue that talks about it. Is it still in use? "
+        },
+        {
+            "user": "l0rd",
+            "body": "@lstocchi, the build is failing because `HasAdminRights()` called in `pkg/machine/wsl/stubber.go` isn't defined (because it has been moved to pkg \"github.com/containers/podman/v5/pkg/machine/windows\").\n"
+        },
+        {
+            "user": "l0rd",
+            "body": "@lstocchi, I have tested various scenarios, and in general, the approach is correct. Nice job 👍 \n\nI have some observations, please have a look:\n\n**Error messages**\nWhen a user runs the command as a non admin the error message is still \"Error: Hyper-V machines require admin rights to run. Please run Podman as an administrator\". Considering that you have updated the behavior, we may want to update the message too:\n- if the hvsock reg entries don't exist (it's the first time the command is executed): \"Error: The first time Podman initializes an Hyper-V machine, it requires admin rights. Please run Podman as an administrator\"\n- if the hvsock reg entries already exist (the init has already been executed by an admin at least once): \"Error: Hyper-V machines require Hyper-V admin rights to be created. Please add the current user to the Hyper-V Administrators group or run Podman as an administrator\"\n\n**Reg keys not closed (this is probably a pre-existing issue)**\nIn `loadHVSockRegistryEntries`, when iterating over subkeys, subkey is open but not closed when the purpose matches.\nThat looks ok because a pointer to the key is saved in the allEntries struct. But it seems the `key` field of HVSockRegistryEntry isn't used anywhere, and we can close it, and things should work ok anyway.\n\n**Risk of loading a reg key used by another tool**\nWhen looking for an existing reg key (`LoadHVSockRegistryEntryByPurpose`), the reg keys are filtered by the field `purpose`, but not `toolname`. This should be a problem because the vsock may be used by an application other than Podman.\n\n**Registry entries aren't cleaned up**\nEven after podman machine reset. That's not right. I would prefer if the reg entries get removed when the user deletes the last machine. Of course, admin priv will be required again when a new machine is created. But when we implement the relaunch of `machine init` with UAC, the UX will be better anyway. \n\n**Failing e2e tets**\nThe machine e2e is failing in CI (and locally for me too). I suspect that's related to the last two problems above.\n```log\n  > Enter [It] init should create hvsock entries if they do not exist, otherwise should reuse existing ones - C:/Users/Administrator/AppData/Local/cirrus-ci-build/repo/pkg/machine/e2e/init_windows_test.go:131 @ 10/23/25 15:17:19.748\n  [FAILED] Expected\n      <[]*vsock.HVSockRegistryEntry | len:1, cap:1>: [\n          {\n              KeyName: \"0000C33C-FACB-11E6-BD58-64006A7986D3\",\n              Purpose: 0,\n              Port: 49980,\n              MachineName: \"\",\n              ToolName: \"\",\n              Key: 0xb94,\n          },\n      ]\n  to be empty\n```\n"
+        },
+        {
+            "user": "lstocchi",
+            "body": "> **Error messages** When a user runs the command as a non admin the error message is still \"Error: Hyper-V machines require admin rights to run. Please run Podman as an administrator\". Considering that you have updated the behavior, we may want to update the message too:\n \nupdated. I see 3 different cases. Have a look and let me know.\n \n > **Risk of loading a reg key used by another tool** When looking for an existing reg key (`LoadHVSockRegistryEntryByPurpose`), the reg keys are filtered by the field `purpose`, but not `toolname`. This should be a problem because the vsock may be used by an application other than Podman.\n\nthis is true and i agree but it was made on purpose to work with the existing machine users have as toolname is introduced by this PR. Should we add a filter now or postpone in further releases?  \nAnother thing to think about is if we need to add another field and filter by it as well. What if 2 users on the same machine init a hyperv VM, should each one have his own registry entry? Maybe we can keep it as it is now and then enhance the filtering in further PR? \n\n> **Failing e2e tets** The machine e2e is failing in CI (and locally for me too). I suspect that's related to the last two problems above.\n\nJust tried and it works for me. Do you have any existing VM locally? I'll try to investigate more\n\n"
+        },
+        {
+            "user": "l0rd",
+            "body": "> updated. I see three different cases. Have a look and let me know.\n\nMakes sense. I like it 👍 \n\n> this is true and i agree but it was made on purpose to work with the existing machine users have as toolname is introduced by this PR. Should we add a filter now or postpone in further releases? Another thing to think about is if we need to add another field and filter by it as well. What if 2 users on the same machine init a hyperv VM, should each one have his own registry entry? Maybe we can keep it as it is now and then enhance the filtering in further PR?\n\nWhat about not reusing the registry keys of existing, legacy machines (i.e., registry keys that don't have the `toolname`)? Only load registry keys of new machines. \n\n> Just tried and it works for me. Do you have any existing VM locally? I'll try to investigate more\n\nThe PR check CI runs on a clean system. But I guess that the new test (`init should create hvsock entries if they do not exist...`) isn't the first test in execution order. When it's executed, the command `podman machine init` has already been run by another test, and a vsock registry key is already present.\n\n"
+        },
+        {
+            "user": "lstocchi",
+            "body": "> What about not reusing the registry keys of existing, legacy machines (i.e., registry keys that don't have the `toolname`)? Only load registry keys of new machines.\n\nDone, i added the filter for the toolname field. \nThe last commit also adds a func that removes legacy entries to try to clean the Registry when an old machine gets deleted. Most probably it will fail if the user starts running podman as non-admin so not sure if it's worth keeping it. Atleast we try to do our best.\n\n> The PR check CI runs on a clean system. But I guess that the new test (`init should create hvsock entries if they do not exist...`) isn't the first test in execution order. When it's executed, the command `podman machine init` has already been run by another test, and a vsock registry key is already present.\n\nUpdated the test by removing the assumption that we start from a cleaned env. It should work now\n\n"
+        },
+        {
+            "user": "l0rd",
+            "body": "@lstocchi the code LGTM now. Thank you. \n\nI wanted to try to `start`, `stop` and `rm` on a machine created with an earlier version of podman, but for some reason, machine creation hangs on my laptop right now. Have you tested that?\n\nApart from that, the next step is to make all tests green (I have triggered failed tests), and then we should be ready to merge."
+        },
+        {
+            "user": "l0rd",
+            "body": "@lstocchi tests are still failing for reasons that don't seem related to your PR. Can you please rebase on top of the current main branch?"
+        },
+        {
+            "user": "l0rd",
+            "body": "Thank you @lstocchi, I have done some more tests and things work fine 🎉 \n/approve\n/lgtm"
+        },
+        {
+            "user": "openshift-ci[bot]",
+            "body": "[APPROVALNOTIFIER] This PR is **APPROVED**\n\nThis pull-request has been approved by: *<a href=\"https://github.com/containers/podman/pull/26277#issuecomment-3562617726\" title=\"LGTM\">l0rd</a>*, *<a href=\"https://github.com/containers/podman/pull/26277#\" title=\"Author self-approved\">lstocchi</a>*\n\nThe full list of commands accepted by this bot can be found [here](https://go.k8s.io/bot-commands?repo=containers%2Fpodman).\n\nThe pull request process is described [here](https://git.k8s.io/community/contributors/guide/owners.md#the-code-review-process)\n\n<details >\nNeeds approval from an approver in each of these files:\n\n- ~~[OWNERS](https://github.com/containers/podman/blob/main/OWNERS)~~ [l0rd]\n\nApprovers can indicate their approval by writing `/approve` in a comment\nApprovers can cancel approval by writing `/approve cancel` in a comment\n</details>\n<!-- META={\"approvers\":[]} -->"
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 25723
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 27614
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 27615
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 23578
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 27650
+        },
+        {
+            "organization": "containers",
+            "repository": "libhvee",
+            "number": 258
+        }
+    ]
+}

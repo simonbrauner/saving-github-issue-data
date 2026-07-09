@@ -1,0 +1,61 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 23766,
+    "type": "pull_request",
+    "title": "fix races in the HTTP attach API",
+    "state": "closed",
+    "labels": [
+        "lgtm",
+        "approved",
+        "release-note",
+        "kind/api-change",
+        "locked - please file new issue/PR",
+        "No New Tests"
+    ],
+    "user": "Luap99",
+    "body": "This is very similar to commit 3280da0500, we cannot check the state then unlock to then lock again and do the action. Everything must happen under one lock. To fix this move the code into the HTTPAttach function in libpod. Th elocking here is a bit weird because attach blocks for the lifetime of attach which can be very long so we must unlock before performing the attach.\n\nFixes #23757\n\n<!--\nThanks for sending a pull request!\n\nPlease make sure you've read our contributing guidelines and how to submit a pull request (https://github.com/containers/podman/blob/main/CONTRIBUTING.md#submitting-pull-requests).\n\nFinally, be sure to sign commits with your real name. Since by opening\na PR you already have commits, you can add signatures if needed with\nsomething like `git commit -s --amend`.\n-->\n\n#### Does this PR introduce a user-facing change?\n\n<!--\nIf no, just write `None` in the release-note block below. If yes, a release note\nis required: Enter your extended release note in the block below. If the PR\nrequires additional action from users switching to the new release, include the\nstring \"action required\".\n\nFor more information on release notes, please follow the Kubernetes model:\nhttps://git.k8s.io/community/contributors/guide/release-notes.md\n-->\n\n```release-note\nFixed a race condition in the remote HTTP attach API that may cause it to fail\n```\n",
+    "comments": [
+        {
+            "user": "openshift-ci[bot]",
+            "body": "[APPROVALNOTIFIER] This PR is **APPROVED**\n\nThis pull-request has been approved by: *<a href=\"https://github.com/containers/podman/pull/23766#\" title=\"Author self-approved\">Luap99</a>*\n\nThe full list of commands accepted by this bot can be found [here](https://go.k8s.io/bot-commands?repo=containers%2Fpodman).\n\nThe pull request process is described [here](https://git.k8s.io/community/contributors/guide/owners.md#the-code-review-process)\n\n<details >\nNeeds approval from an approver in each of these files:\n\n- ~~[OWNERS](https://github.com/containers/podman/blob/main/OWNERS)~~ [Luap99]\n\nApprovers can indicate their approval by writing `/approve` in a comment\nApprovers can cancel approval by writing `/approve cancel` in a comment\n</details>\n<!-- META={\"approvers\":[]} -->"
+        },
+        {
+            "user": "Luap99",
+            "body": "cc @edsantiago "
+        },
+        {
+            "user": "Luap99",
+            "body": "/hold \n\nIt is still racy but it doesn't error anymore\n```\n# podman-remote [options] start -a ctr-with-oom-score\n           0\n           # podman-remote [options] start -a ctr-with-oom-score\n\n           [FAILED] Expected\n               <string>: \n           to equal\n               <string>: 0\n           In [It] at: /var/tmp/go/src/github.com[/containers/podman/test/e2e/run_test.go:738](https://github.com/containers/podman/blob/2cbb053819e815090e5cb0f86a1a4d68fe6abd19/test/e2e/run_test.go#L738) @ 08/27/24 05:15:08.325\n```\nhttps://api.cirrus-ci.com/v1/artifact/task/6557228600131584/html/int-remote-fedora-40-root-host-sqlite.log.html#t--Podman-run-podman-run-limits-test--1"
+        },
+        {
+            "user": "Luap99",
+            "body": "Ok very easy to reproduce with this patch\n```diff\ndiff --git a/cmd/podman/containers/cleanup.go b/cmd/podman/containers/cleanup.go\nindex db15c6d834..42140fb713 100644\n--- a/cmd/podman/containers/cleanup.go\n+++ b/cmd/podman/containers/cleanup.go\n@@ -3,6 +3,7 @@ package containers\n import (\n        \"errors\"\n        \"fmt\"\n+       \"time\"\n \n        \"github.com/containers/common/pkg/completion\"\n        \"github.com/containers/podman/v5/cmd/podman/common\"\n@@ -71,6 +72,7 @@ func cleanup(cmd *cobra.Command, args []string) error {\n                        return errors.New(\"--exec and --rmi cannot be set together\")\n                }\n        }\n+       time.Sleep(5 * time.Second)\n \n        responses, err := registry.ContainerEngine().ContainerCleanup(registry.GetContext(), args, cleanupOptions)\n        if err != nil {\ndiff --git a/pkg/domain/infra/tunnel/containers.go b/pkg/domain/infra/tunnel/containers.go\nindex 6e8c6fea44..2e4b53f652 100644\n--- a/pkg/domain/infra/tunnel/containers.go\n+++ b/pkg/domain/infra/tunnel/containers.go\n@@ -677,6 +677,7 @@ func startAndAttach(ic *ContainerEngine, name string, detachKeys *string, sigPro\n                if dk := detachKeys; dk != nil {\n                        startOptions.WithDetachKeys(*dk)\n                }\n+               time.Sleep(10 * time.Second)\n                if err := containers.Start(ic.ClientCtx, name, startOptions); err != nil {\n                        return err\n                }\n```\n```\n$ bin/podman-remote create --name test quay.io/libpod/testimage:20240123 echo hi\n$ bin/podman-remote start -a test && echo second && bin/podman-remote start -a test\nhi\nsecond\n```\n\n\nWhat happens is that we init + attach the second time before the podman container cleanup runs but then as attach is unlocked the cleanup commands runs now ending the attach session again before the remote client did the start command.\nBecause attach and start are two different endpoint there is no way to do both at once.\n\nSo to fix this we either add a new API to do both at once or figure out a way to make the cleanup process behave correctly and not cleanup after the ctr was init again..., given the API works like docker we should do the later I think because other API callers will not take advantage of it.\n\ncc @mheon \n\nAnd @edsantiago this is likely the cause for https://github.com/containers/podman/issues/23754 as well\n"
+        },
+        {
+            "user": "mheon",
+            "body": "Making cleanup (or, at least, cleanup as it is invoked automatically) only work on Stopped containers sounds like the right call. If the container is in any state but Stopped by the time the cleanup process gets to it someone else was there first."
+        },
+        {
+            "user": "Luap99",
+            "body": "> Making cleanup (or, at least, cleanup as it is invoked automatically) only work on Stopped containers sounds like the right call. If the container is in any state but Stopped by the time the cleanup process gets to it someone else was there first.\n\nSounds good to me, this should easy to implement as well. "
+        },
+        {
+            "user": "Luap99",
+            "body": "/hold cancel\nVerified locally with my sleep patch above the new version seems to work there correctly"
+        },
+        {
+            "user": "Luap99",
+            "body": "@containers/podman-maintainers PTAL, this is fixing active flakes on main"
+        },
+        {
+            "user": "edsantiago",
+            "body": "LGTM. I cherrypicked (yesterday) on #23275. That does not run `int` tests, but anyhow, I've seen no new harm from this."
+        },
+        {
+            "user": "rhatdan",
+            "body": "/lgtm"
+        }
+    ],
+    "cross_references": []
+}

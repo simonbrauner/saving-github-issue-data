@@ -1,0 +1,90 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 24228,
+    "type": "pull_request",
+    "title": "podman: do not set rlimits to the default value",
+    "state": "closed",
+    "labels": [
+        "lgtm",
+        "approved",
+        "bloat_approved",
+        "release-note-none",
+        "locked - please file new issue/PR"
+    ],
+    "user": "giuseppe",
+    "body": "since the effect would be to lower the rlimits when their definition is higher than the default value.\n\nThe test doesn't fail on the previous version, unless the system is configured with a nofile ulimit higher than the default value.\n\nCloses: https://bugzilla.redhat.com/show_bug.cgi?id=2317721\n\n<!--\nThanks for sending a pull request!\n\nPlease make sure you've read our contributing guidelines and how to submit a pull request (https://github.com/containers/podman/blob/main/CONTRIBUTING.md#submitting-pull-requests).\n\nFinally, be sure to sign commits with your real name. Since by opening\na PR you already have commits, you can add signatures if needed with\nsomething like `git commit -s --amend`.\n-->\n\n#### Does this PR introduce a user-facing change?\n\n<!--\nIf no, just write `None` in the release-note block below. If yes, a release note\nis required: Enter your extended release note in the block below. If the PR\nrequires additional action from users switching to the new release, include the\nstring \"action required\".\n\nFor more information on release notes, please follow the Kubernetes model:\nhttps://git.k8s.io/community/contributors/guide/release-notes.md\n-->\n\n```release-note\nNone\n```\n",
+    "comments": [
+        {
+            "user": "edsantiago",
+            "body": "This fails as root under old-podman, passes root+rootless with new-podman:\n```bash\n# #24228: podman used to set this to hardcoded value, ignoring current settings\n# bats test_tags=ci:parallel\n@test \"podman run - can use maximum ulimit value\" {\n    skip_if_remote \"cannot check local ulimits with podman remote\"\n    run -0 ulimit -n -H\n    max=$output\n    oldmax=$max\n\n    # This test is more meaningful when root\n    if ! is_rootless; then\n        max=$((max + $RANDOM))\n        ulimit -n -H $max\n    fi\n    run_podman run --rm $IMAGE sh -c 'ulimit -n -H'\n    assert \"$output\" = \"$max\" \"podman inherits parent ulimit\"\n    ulimit -n -H $oldmax\n}\n```\nI removed the command-line `--ulimit` because (unless I read things very very wrong) that is entirely against the purpose of this PR. Again, I may be wrong. \n\nI also noticed that, on my f40 system, this *reduces* the default root setting for podman: \n```console\n$ for i in /usr/bin/podman bin/podman; do sudo $i run --rm quay.io/libpod/testimage:20241010 sh -c 'ulimit -n -H';done\n1048576\n524288\n```\nCould that be considered a breaking change?"
+        },
+        {
+            "user": "Luap99",
+            "body": "> I removed the command-line --ulimit because (unless I read things very very wrong) that is entirely against the purpose of this PR. Again, I may be wrong.\n\nThe --ulimit is needed here, the point is podman has a default limit that it sets for rootless containers (up to 1048576) even when the host allows more. So the point here is that if your host has more than that --ulimit must be able to set that value and should not be capped at 1048576 (default). This did not work because the podman init code capped the limit at 1048576 thus the bug report. And this only fails as rootless with limit higher than 1048576 because rootful has CAP_SYS_RESOURCE and can increase the limit higher all it wants.\n\nWe would need to bump the ulimit for our rootless CI user > 1048576 in order for this to even be testable.\n\nWhat I do not get is a we do not document this rootless default and rootful seems to inherit and not use the 1048576 number but I am not sure why?\n"
+        },
+        {
+            "user": "giuseppe",
+            "body": "> This fails as root under old-podman, passes root+rootless with new-podman:\n> \n> ```shell\n> # #24228: podman used to set this to hardcoded value, ignoring current settings\n> # bats test_tags=ci:parallel\n> @test \"podman run - can use maximum ulimit value\" {\n>     skip_if_remote \"cannot check local ulimits with podman remote\"\n>     run -0 ulimit -n -H\n>     max=$output\n>     oldmax=$max\n> \n>     # This test is more meaningful when root\n>     if ! is_rootless; then\n>         max=$((max + $RANDOM))\n>         ulimit -n -H $max\n>     fi\n>     run_podman run --rm $IMAGE sh -c 'ulimit -n -H'\n>     assert \"$output\" = \"$max\" \"podman inherits parent ulimit\"\n>     ulimit -n -H $oldmax\n> }\n> ```\n> \n> I removed the command-line `--ulimit` because (unless I read things very very wrong) that is entirely against the purpose of this PR. Again, I may be wrong.\n> \n> I also noticed that, on my f40 system, this _reduces_ the default root setting for podman:\n> \n> ```\n> $ for i in /usr/bin/podman bin/podman; do sudo $i run --rm quay.io/libpod/testimage:20241010 sh -c 'ulimit -n -H';done\n> 1048576\n> 524288\n> ```\n> \n> Could that be considered a breaking change?\n\nThanks for noticing it.  Yes, I think this should not happen.\n\nI'll take a look"
+        },
+        {
+            "user": "giuseppe",
+            "body": "/hold"
+        },
+        {
+            "user": "edsantiago",
+            "body": "Okay, I have a 1mt with\n```\n/etc/security/limits.conf:*             hard    nofile          12345678\n```\nand:\n```console\n# ulimit -n -H\n12345678\n# for i in /usr/bin/podman bin/podman; do $i run --rm quay.io/libpod/testimage:20241010 sh -c 'ulimit -n -H';done\n1048576     <<< expected\n12345678    <<< expected\n\n$ ulimit -n -H\n12345678\n$ for i in /usr/bin/podman bin/podman; do $i run --rm quay.io/libpod/testimage:20241010 sh -c 'ulimit -n -H';done\n1048576     <<< expected\n1048576     <<< UNEXPECTED but that's probably because Ed is clueless\n```\nWith the command-line option, your PR seems to do the right thing:\n```console\n$ for i in /usr/bin/podman bin/podman; do $i run --rm --ulimit=nofile=12345678:12345678 quay.io/libpod/testimage:20241010 sh -c 'ulimit -n -H';done\nError: crun: setrlimit `RLIMIT_NOFILE`: Operation not permitted: OCI permission denied\n12345678\n```"
+        },
+        {
+            "user": "giuseppe",
+            "body": "> ```\n> # ulimit -n -H\n> 12345678\n> # for i in /usr/bin/podman bin/podman; do $i run --rm quay.io/libpod/testimage:20241010 sh -c 'ulimit -n -H';done\n> 1048576     <<< expected\n> 12345678    <<< expected\n> ```\n\nThe first version of this PR was not correct, and this is wrong.  It must be 1048576 in both cases to honor what the default is.\n\n\nI've changed the behaviour of Podman in the last version to honor the default settings also with root."
+        },
+        {
+            "user": "Luap99",
+            "body": "Please also document in the man page the the default nofile and nproc is 1048576 under the --ulimit option if we now also do this as root."
+        },
+        {
+            "user": "giuseppe",
+            "body": "> Please also document in the man page the the default nofile and nproc is 1048576 under the --ulimit option if we now also do this as root.\n\nthanks.  I've added a note to the documentation but I prefer to not specify their value (if you really want them I can change it again) to not have to worry about them getting out of sync"
+        },
+        {
+            "user": "mheon",
+            "body": "LGTM"
+        },
+        {
+            "user": "Luap99",
+            "body": "> > Please also document in the man page the the default nofile and nproc is 1048576 under the --ulimit option if we now also do this as root.\n> \n> thanks. I've added a note to the documentation but I prefer to not specify their value (if you really want them I can change it again) to not have to worry about them getting out of sync\n\n\nI think it somewhat important, it is not like we randomly will change the values. Saying look in containers.conf but then thee is nothing in the containers.conf docs is confusing. I think most users really want to know the defaults and we document them in most cases but I am fine with not blocking over this and to merge without it"
+        },
+        {
+            "user": "damaestro",
+            "body": "It would have been nice to have this default documented when I was working through figuring out what was going on here."
+        },
+        {
+            "user": "giuseppe",
+            "body": "fine so I'll add it to the documentation.\n\nBefore that though, we need https://github.com/containers/common/pull/2199\n\nNot sure why we do that, but it is just wrong IMO: we set it to the maximum value possible, and we change the limits from a library"
+        },
+        {
+            "user": "giuseppe",
+            "body": "vendored the change in c/common and pushed a new version :arrow_up: "
+        },
+        {
+            "user": "giuseppe",
+            "body": "/hold cancel\n\n@containers/podman-maintainers PTAL"
+        },
+        {
+            "user": "openshift-ci[bot]",
+            "body": "[APPROVALNOTIFIER] This PR is **APPROVED**\n\nThis pull-request has been approved by: *<a href=\"https://github.com/containers/podman/pull/24228#\" title=\"Author self-approved\">giuseppe</a>*, *<a href=\"https://github.com/containers/podman/pull/24228#pullrequestreview-2368893738\" title=\"Approved\">lsm5</a>*, *<a href=\"https://github.com/containers/podman/pull/24228#pullrequestreview-2365797095\" title=\"Approved\">Luap99</a>*\n\nThe full list of commands accepted by this bot can be found [here](https://go.k8s.io/bot-commands?repo=containers%2Fpodman).\n\nThe pull request process is described [here](https://git.k8s.io/community/contributors/guide/owners.md#the-code-review-process)\n\n<details >\nNeeds approval from an approver in each of these files:\n\n- ~~[OWNERS](https://github.com/containers/podman/blob/main/OWNERS)~~ [Luap99,giuseppe,lsm5]\n\nApprovers can indicate their approval by writing `/approve` in a comment\nApprovers can cancel approval by writing `/approve cancel` in a comment\n</details>\n<!-- META={\"approvers\":[]} -->"
+        },
+        {
+            "user": "rhatdan",
+            "body": "/lgtm"
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 24243
+        }
+    ]
+}

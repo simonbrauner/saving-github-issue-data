@@ -1,0 +1,109 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 26321,
+    "type": "issue",
+    "title": "Podman-Remote needs api to do `local` artifact creation or builds.",
+    "state": "closed",
+    "labels": [
+        "kind/feature",
+        "locked - please file new issue/PR",
+        "jira",
+        "triaged"
+    ],
+    "user": "rhatdan",
+    "body": "### Feature request description\n\nCurrently when doing a build on a local system like MAC or Windows, users often already have the home directory mounted into the VM.  When we do a podman artifact add or a podman build, the artifact or context directory is added to a tar ball and sent to the remote service, where it is untarred and processed. Most of the time this is an unnecessary step since the file or context directory is already available in the VM via the overlayfs file system.\n\n\n\n### Suggest potential solution\n\nAdding a libpod api to do a `local` artifact add or build context, would allow podman-remote to optimize these steps and should speed up the process. \n\nPodman remote then could either figure out if the local file/context directory is available in the VM or fail over the the `remote` API when the `local` API fails.\n\n### Have you considered any alternatives?\n\nGoing with the current method works, but this is an optimization.\n\n### Additional context\n\nThis would give us a serious speed advantage to Docker.",
+    "comments": [
+        {
+            "user": "afbjorklund",
+            "body": "BuildKit has some features that allows it to not send the whole build context, but negotiate over gRPC.\n\nIt can be tested with `docker-buildx` program, with buildkit running in a container provided by podman."
+        },
+        {
+            "user": "baude",
+            "body": "i think there is general agreement that something like this, implementation not withstanding, is a good idea.  we will work on a design @rhatdan and circle back during review.\n\nalso cc @ninja-quokka something to noodle on."
+        },
+        {
+            "user": "ninja-quokka",
+            "body": "I was just checking on this, I would have assumed the connection between host and VM was faster but:\n```\n$ scp -P 62798 -i ~/.local/share/containers/podman/machine/machine dummy_1gb_file.bin core@127.0.0.1:/var/home/core/\ndummy_1gb_file.bin           100% 1024MB  98.3MB/s   00:10\n$ scp -P 62798 -i ~/.local/share/containers/podman/machine/machine dummy_10gb_file.bin core@127.0.0.1:/var/home/core/\ndummy_10gb_file.bin         100%   10GB  97.1MB/s   01:45\n```\n\nSo I think this improvement would be really great considering we're trying to be mindful of large artifacts. "
+        },
+        {
+            "user": "Luap99",
+            "body": "virtofs ultimately still has to copy the full file as well, of course it is more optimized so it makes sense to me that this can be faster compared to the podman connection which uses ssh which means it will need to use a fair amount of cpu encrypting/decrypting the stream.\n\nFor builds this would be a very obvious win because most files never end up being copied and the endpoint writes the full context dir each time. For artifacts we designed the endpoint to be streaming so we already avoid unnecessary copies there which means we would need to check how much of a difference this would make actually.\n\nOne of the issues here is that podman is really just a remote client uses the connection as configured, special caseing machine could bring us down a path where we fail to optimize for actual remote clients and will increase our maintenance work significantly since the operations now have two different code paths that needs to be tested and documented.\n\nImplementation wise we already store if a connection is a machine so it is possible to do that but then we need to know which machine, if the current connection is rootless/rootful and then which volumes are mounted and compare that against the input args of said command to see if we can use the \"local\" command over ssh or not. This to me could end up quite messy and likely has a lot of corner cases (symlinks?) where we would have to be sure that this is not causing new regressions."
+        },
+        {
+            "user": "rhatdan",
+            "body": "Not sure if there would be that much complexity for the truly remote case,  The API Server is just going to check a path, if the path does not exist, return an error.\n\nNothing for the remote command to do other then call the API.\n\nIf the remote side wants to fall over to the truly remove API at that point, then it works as we currently design."
+        },
+        {
+            "user": "rhatdan",
+            "body": "podman-remote is going to send over /users/danwalsh/PATHTO/AIModel If this path does not exist within the server, then fail.\n\nThe risk would be if the paths exist but are different.\n\nWe could do some check-summing but this would be slower and would be difficult on contextdir.\n"
+        },
+        {
+            "user": "Luap99",
+            "body": "It is not that simple, we are never sending the paths to the server so the server could not perform such check.\n\nSo you would ask for an entire different API that could ask for the server paths which then again would need client changes to make use of it. And at that point I think it would make much more sense to handle everything client side."
+        },
+        {
+            "user": "rhatdan",
+            "body": "Yes I am talking about a brand new API.  I don't think this should be handled client side, without a huge increase in space.  If the client sends a path to the server to do a build, then it should be able to easily handle it.  I think moving podman build or podman artifact  handling to the client is overkill."
+        },
+        {
+            "user": "cgwalters",
+            "body": "> Most of the time this is an unnecessary step since the file or context directory is already available in the VM via the overlayfs file system.\n\nNote today this also acts as a \"snapshot\" - i.e. I can do a `podman build` and watch it run and then continue editing files in my editor and know that won't possibly break the build. Any optimizations we do here probably need to preserve that property, right?\n\nAnd if that's the case, it has a lot of implications on the design - indeed we can't just send file paths around. The most obvious thing here is to do a reflink copy into a temporary place. In the simple/ideal case where the context directory is on the same physical filesystem as the container storage, it seems most obvious to treat the context as a volume whose contents get populated via that reflink copy.\n\nWhen the context directory is on a different physical filesystem, it gets tricky where to put these reflink copies in the general case.\n\nFor filesystems without reflinks I think there's no decent option other than falling back to a physical copy, and that may as well be via the same tar logic as exists today.\n\n"
+        },
+        {
+            "user": "rhatdan",
+            "body": "Why complicate this, if I am on a linux box and do a podman build and am editing a file, then I have the same problem as you talk about above. I don't see a reason to complicate this, more then just handle the path.  We currently do volume mounts from the host into containers relying on matching paths, I don't think we need to complicate it.\n\nI am fine with adding an option to containers.conf to maintain current behavior if the user wants it, but the optimization of not copying files around would be a cool feature."
+        },
+        {
+            "user": "Honny1",
+            "body": "Optimizing image loading was a prerequisite for implementing the local API for build and artifact load."
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 23433
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 26660
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 26877
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 26911
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 27059
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 27426
+        },
+        {
+            "organization": "Homebrew",
+            "repository": "homebrew-core",
+            "number": 254030
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 27803
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 27804
+        }
+    ]
+}

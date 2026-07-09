@@ -1,0 +1,73 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 5239,
+    "type": "issue",
+    "title": "Problem mounting cifs-share as volume into container",
+    "state": "closed",
+    "labels": [
+        "kind/bug",
+        "locked - please file new issue/PR"
+    ],
+    "user": "kommulu",
+    "body": "Hi,\nI hope this is the right place to ask a question regarding Podman.\nSo, I want to migrate my containers from Docker to Podman, to be able to run them rootless easily.\nMy biggest roadblock is the following:\nOn my container-host (CentOS 8, Podman 1.6.4) I have a cifs-share mounted. The share is mounted with uid and gid 8000 and the context set to \"system_u:object_r:container_file_t:s0\".\n\nIn one of my containers I have an application running that gets started with uid and gid 8000, so it can write to the share, which is mapped into the container as a volume.\nIf I run this container as root with Podman everything is fine. The application starts as uid 8000 and the share also is owned by uid/gid 8000.\n\nBut if I run that container as some other unprivileged user, the share suddenly is owned by root:root inside the container, which of course prevents the application from writing to that share.\n\nI feel like I am missing something extremely obvious to solve that problem.\nCan somebody maybe point me in the right direction or give me a hint?\nThanks in advance.",
+    "comments": [
+        {
+            "user": "mheon",
+            "body": "Firstly, you will *only* be able to write to that share from users that have access to UID and/or GID 8000. Rootless Podman runs with the same privileged that the user running it has; if that user does not have permission to access that UID and GID, we won't either. Furthermore, rootless Podman uses a user namespace to grant the user who ran it access to more than 1 UID and GID. This means that the view of the system that rootless Podman has is different; the user that ran the container will be UID/GID 0, and other users/groups specified in subuid and subgid will be added as 1-65536. These will not match the users and groups on the host for those numbers.\n\nIf you were to run a rootless container as UID/GID 8000 with `--userns=keep-id` then the UID and GID would be preserved in the container; UID/GID 8000 in the container and host would be the same users, so you could write to the share as you'd expect. Alternatively, if you ran the rootless container as UID/GID 8000 without `--userns=keep-id` and ran your app in the container as root, it would be able to access the share, as root in the container is mapped to the user and group that ran the container.\n\nThis is somewhat confusing, but it's one of the sacrifices we make for security in rootless. Root has the ability to ignore permissions checks, but without root we can't do that without massive security implications."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@kommulu Could you show the command you are using to run the container.  Bottom line, you need UID 8000 mapped into the user namespace if this is the only UID allowed to write to the container.\nIn the non root users entry in /etc/subuild, you need to add a mapping something like 8000:8000:1"
+        },
+        {
+            "user": "kommulu",
+            "body": "Hi @mheon ,\n\nthank you for your idea, but sadly it does not work.\nIf I start the container like this:\n`podman run -d --name iot_test -p 8081:8080 -v iot-data:/datadir -v /path/to/cifsshare:/files -e UID=8000 -e GID=8000 --userns=keep-id iot:latest`\n\nThe container fails to start with:\n`Updating UID / GID... \nusermod: cannot lock /etc/passwd; try again later.`\n\n@rhatdan the normal command to start my container would be:\n`podman run -d --name iot_test -p 8081:8080 -v iot-data:/datadir -v /path/to/cifsshare:/files -e UID=8000 -e GID=8000 iot:latest`\nHow would I add that mapping? Am still kinda new to rootless containers."
+        },
+        {
+            "user": "rhatdan",
+            "body": "Sadly that is not what I meant.\nI was talking about adding \n8000:8000:1 to /etc/subuid for the user. Although I don't think that would work correctly either.\n\n@giuseppe Would podman handle multiple entries in /etc/subuid and /etc/subgid?"
+        },
+        {
+            "user": "rhatdan",
+            "body": "No this will not work.\nI was attemting to do.\ndwalsh:100000:8000\ndwalsh:8000:1\ndwalsh:108001:5753\n\nBut this ends up mapping, UID 8000 on the host to UID 1 inside of the container.  I think we would need to do some special code in podman to be able to handle this.  Like --keep-uid\n\n$ podman unshare cat /proc/self/uid_map\n         0       3267          1\n         1       8000          1\n         2     100000       8000\n      8002     108001      57536\n\n"
+        },
+        {
+            "user": "giuseppe",
+            "body": "The additional IDs are mapped sequentially.  So your user becomes root, then the first additional block starts at 1, the second one starts at len(first_block)...\n\nIf you want a specific user mapped you need to create an inner user namespace.  If you want user 8000 to be mapped to 0, then you'll need something like `--uidmap 0:1:1 --uidmap 1:0:1 --uidmap 2:2: 8000`\n"
+        },
+        {
+            "user": "rhatdan",
+            "body": "I wonder if we should add some way for a normal user to be able to do this."
+        },
+        {
+            "user": "mheon",
+            "body": "`sudo podman system configure-uidmap $username` that allows us to map host UID/GIDs into that user?\n\nThe problem is that this is for all rootless containers, not just one (though I suppose we can alter the mappings in more containers to omit the added UIDs/GIDs... but that's also pretty awkward)."
+        },
+        {
+            "user": "kommulu",
+            "body": "So,\nI tried it like @giuseppe suggested:\n`podman run -d --name iot_test -p 8081:8080 -v iot-data:/datadir -v /path/to/cifsshare:/files -e UID=8000 -e GID=8000 --uidmap 0:1:1 --uidmap 1:0:1 --uidmap 2:2: 8000 iot:latest`\n\nThat alsmost did it, but the cifs-share was then owned by uid/gid 1 inside the container.\nI tinkered around with the last --uidmap, but had no luck, but I also do not yet understand the uid-mapping."
+        },
+        {
+            "user": "kommulu",
+            "body": "After thinking about the whole thing some more, is there any possibility at the moment to get this to work in a rootless environment?\nThe alternative for me would be: start the container as root, application starts with uid/gid 8000, cifs-share gets mapped correctly.\nOnly benefit here would be to ditch Docker.\nSELinux is active on the container-host and works like a charm with podman, so I still have that as a security measurement.\n\nBut, could I start the container as root and still give it a new user-ns, so that a potential attacker is confined in a user-ns without root-access if they manage to break out of the container?\nDoes that make sense? If so, how would I do it?"
+        },
+        {
+            "user": "rhatdan",
+            "body": "If you want that you could do it with \n```\n# podman --uidmap 0:500000:8000 --uidmap 8000:8000:1 --user 8000 ...\n```"
+        },
+        {
+            "user": "kommulu",
+            "body": "Hi @rhatdan ,\nI think I wrote this the wrong way.\nWith rootless podman, as far as I know, when I create a container as a normal user, the application inside gets started as user root. But, this is done inside a new usernamespace. So in the container it runs as uid 0, but on the host it is e.g. 13456.\n\nNow, the problem seems to be, if I start my container as a non-privileged user, the mapping of my cifs-share does not work as expected. My application is not started as root anyways, I can set that via environment variables and it works fine.\nSo, it seems like I have to run the container as root on my host, to be able to use that cifs-share.\nBut I still would like to run the container as some random uid on my host., so that the following command does not look like it does:\n`podman top --latest user huser`\n`USER      HUSER`\n`root      root`\n\nIs that possible? To run as root inside the container, but have a different uid on the host?\n"
+        },
+        {
+            "user": "rhatdan",
+            "body": "The issue is whether or not the UID that owns the cifs-share is available within the User namespace that the user has access too.  \n\nIf the CIFS share is owned by UID 98765, and is only writeable by user 98765 then all the rootless users has to have 98765 mapped into their User Namespaces.  We do not handle this well at this time.\n\nBut another option would be to user default user groups.  If the Group 98765 is required to write to the CIFS share, then you could add non root users to the CIFS group.  Then user could execute a rootless podman container and leak the user groups into the container.  Note this requires the crun runtime, not runc.\n\n```\nman podman-run\n...\n       Note: if the user only has access rights via a group then accessing the\n       device from inside a rootless container will  fail.  The  crun  runtime\n       offers  a  workaround  for  this  by  adding  the  option  --annotation\n       io.crun.keep_original_groups=1.\n```\n\nThis should work on all non RHEL systems that have crun available, using an recent version of podman."
+        },
+        {
+            "user": "kommulu",
+            "body": "Thanks for the additional idea, but all the servers are RHEL-based.\nAnyways, I will try and get this to work in some way.\nThanks everybody for your help."
+        }
+    ],
+    "cross_references": []
+}

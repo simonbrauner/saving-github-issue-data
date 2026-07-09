@@ -1,0 +1,93 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 12315,
+    "type": "pull_request",
+    "title": "Download image when starting a container using the compat API",
+    "state": "closed",
+    "labels": [
+        "locked - please file new issue/PR"
+    ],
+    "user": "mscherer",
+    "body": "Docker/moby will automatically pull images when using the API (or the CLI, for\nthat matter) to create a container, but podman don't. This break the compatibility with\nsome software.\n\nI tested that using woddpecker CI, and when I use docker on F35 as the backend, it doesn't fail. Using podman-docker fail, with \"image uknown\".\n\n#### What this PR does / why we need it:\n\nAlign the compatibility API with moby.\n\n#### How to verify it\n\nThere is a attached test case. Otherwise, deploying woodpecker and using podman-docker is the way to go, or do a call the \n/v1.33/containers/xxxx/start API with a image not already downloaded (eg, one not in the output of podman images) and see it fail.\n\n#### Which issue(s) this PR fixes:\n\nNone\n\n#### Special notes for your reviewer:\n\nI am not 100% happy with the code, especially with the fact the call to LookupImage is duplicated. I am however not fluent enough in go to write something more idiomatic. \n\n",
+    "comments": [
+        {
+            "user": "openshift-ci[bot]",
+            "body": "[APPROVALNOTIFIER] This PR is **NOT APPROVED**\n\nThis pull-request has been approved by: *<a href=\"https://github.com/containers/podman/pull/12315#\" title=\"Author self-approved\">mscherer</a>*\nTo complete the [pull request process](https://git.k8s.io/community/contributors/guide/owners.md#the-code-review-process), please assign **tomsweeneyredhat** after the PR has been reviewed.\nYou can assign the PR to them by writing `/assign @tomsweeneyredhat` in a comment when ready.\n\nThe full list of commands accepted by this bot can be found [here](https://go.k8s.io/bot-commands?repo=containers%2Fpodman).\n\n<details open>\nNeeds approval from an approver in each of these files:\n\n- **[OWNERS](https://github.com/containers/podman/blob/main/OWNERS)**\n\nApprovers can indicate their approval by writing `/approve` in a comment\nApprovers can cancel approval by writing `/approve cancel` in a comment\n</details>\n<!-- META={\"approvers\":[\"tomsweeneyredhat\"]} -->"
+        },
+        {
+            "user": "mheon",
+            "body": "Are we absolutely sure that this is what Docker does? Because Docker definitely documents that they return a 404 from the create endpoint when the image isn't present.\n\nI'd be more inclined to believe our error response is slightly wrong and it's not triggering a conditional that would normally pull the image?"
+        },
+        {
+            "user": "mheon",
+            "body": "I went digging in the Moby source, and I can confirm that they do *not* do this - it's definitely a 404 on image not existing when Create is hit."
+        },
+        {
+            "user": "vrothberg",
+            "body": "Thank you for checking, @mheon!  Are the Python bindings doing the pull?  Just guessing."
+        },
+        {
+            "user": "mheon",
+            "body": "Possible? Didn't check around there.\nI know that some Docker clients do a blind `/containers/create` call, and checks the HTTP return with a *string comparison* (despite having a dedicated HTTP return code, 404, for \"no such image\") on the returned error, and from there attempt a pull if they think it's a missing image. My suspicion is that is what is happening and our error might not match precisely enough for this to work."
+        },
+        {
+            "user": "mscherer",
+            "body": "Ok, I will check woodpecker code. I just tested with docker and podman (with and without the patch), and indeed, it worked with docker, but I should have searched further rather than just jump in coding. "
+        },
+        {
+            "user": "mscherer",
+            "body": "Ok so indeed, here is what is returned by docker (along a 404):\n```\n{\"message\":\"No such image: a6543/test_git_plugin:latest\"}\n```\n\nand so woodpecker do \"POST /v1.33/images/create?fromImage=a6543%2Ftest_git_plugin&tag=latest\"\n\nI will compare with the same trace from podman."
+        },
+        {
+            "user": "mscherer",
+            "body": "And what podman HEAD answer:\n```\n{\"cause\":\"image not known\",\"message\":\"docker.io/a6543/test_git_plugin:latest: image not known\",\"response\":404}\n```\n"
+        },
+        {
+            "user": "mscherer",
+            "body": "Ok so indeed, the retry is on woodpecker side on https://github.com/woodpecker-ci/woodpecker/blob/master/pipeline/backend/docker/docker.go#L91-L92\n\n```\n        _, err := e.client.ContainerCreate(ctx, config, hostConfig, nil, nil, proc.Name)\n        if client.IsErrNotFound(err) {\n```\nClient is from github.com/moby/moby/client, https://github.com/moby/moby/blob/master/client/errors.go#L43 \n\nSo the issue is not just \"some client\", but anything that use the official binding. I will close that PR, try to fix, and reopen a new one once I found it. "
+        },
+        {
+            "user": "rhatdan",
+            "body": "Would this have fixed the problem:\n```\ndiff --git a/pkg/api/handlers/utils/errors.go b/pkg/api/handlers/utils/errors.go\nindex 4a8005bfd..22894d414 100644\n--- a/pkg/api/handlers/utils/errors.go\n+++ b/pkg/api/handlers/utils/errors.go\n@@ -26,7 +26,7 @@ func Error(w http.ResponseWriter, apiMessage string, code int, err error) {\n        // Log detailed message of what happened to machine running podman service\n        log.Infof(\"Request Failed(%s): %s\", http.StatusText(code), err.Error())\n        em := errorhandling.ErrorModel{\n-               Because:      (errors.Cause(err)).Error(),\n+               Because:      strings.ReplaceAll((errors.Cause(err)).Error(), \"image not known\", \"No such image\"),\n                Message:      err.Error(),\n                ResponseCode: code,\n        }\n```"
+        },
+        {
+            "user": "mscherer",
+            "body": "Nope. It still say \"image not known\""
+        },
+        {
+            "user": "mscherer",
+            "body": "Or rather, the json returned is:\n```\n{\"cause\":\"No such image\",\"message\":\"docker.io/a6543/test_git_plugin:latest: image not known\",\"response\":404}\n```\n\nSo it change \"cause\", but not \"message\"."
+        },
+        {
+            "user": "mscherer",
+            "body": "```\ndiff --git a/pkg/api/handlers/utils/errors.go b/pkg/api/handlers/utils/errors.go\nindex 4a8005bfd..438dce399 100644\n--- a/pkg/api/handlers/utils/errors.go\n+++ b/pkg/api/handlers/utils/errors.go\n@@ -3,7 +3,7 @@ package utils\n import (\n        \"fmt\"\n        \"net/http\"\n-\n+\"strings\"\n        \"github.com/containers/podman/v3/libpod/define\"\n        \"github.com/containers/podman/v3/pkg/errorhandling\"\n        \"github.com/containers/storage\"\n@@ -26,8 +26,8 @@ func Error(w http.ResponseWriter, apiMessage string, code int, err error) {\n        // Log detailed message of what happened to machine running podman service\n        log.Infof(\"Request Failed(%s): %s\", http.StatusText(code), err.Error())\n        em := errorhandling.ErrorModel{\n-               Because:      (errors.Cause(err)).Error(),\n-               Message:      err.Error(),\n+               Because:      strings.ReplaceAll((errors.Cause(err)).Error(), \"image not known\", \"No such image\"),\n+               Message:      strings.ReplaceAll(err.Error(), \"image not known\", \"No such image\"),\n                ResponseCode: code,\n        }\n        WriteJSON(w, code, em)\n```\n\nseems to work (or rather, seems to complain about \"Error response from daemon: failed to resolve image name: short-name resolution enforced but cannot prompt without a TTY\" (which is weird, because this is not a short-name)"
+        },
+        {
+            "user": "mscherer",
+            "body": "ok so the short-name issue is on woodpecker side. \n\nJust changing the message is enough to fix the logic from moby client."
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "woodpecker-ci",
+            "repository": "woodpecker",
+            "number": 85
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 12317
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 12318
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 12320
+        }
+    ]
+}

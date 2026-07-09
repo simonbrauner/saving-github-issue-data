@@ -1,0 +1,93 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 3218,
+    "type": "issue",
+    "title": "podman cp does not change ownership of files (sometimes)",
+    "state": "closed",
+    "labels": [
+        "kind/bug",
+        "locked - please file new issue/PR"
+    ],
+    "user": "maflcko",
+    "body": "/kind bug\n\nUnfortunately I can not reproduce this with a minimal example, so feel free to close this issue.\n\nAccording to the documentation, the ownership should be set to the user that ran `podman cp` (see https://docs.docker.com/engine/reference/commandline/cp/#extended-description).\nHowever, sometimes `podman cp` will change the owner, and sometimes it does not.\n\n**Steps to reproduce the issue:**\n\n*Working* example:\n\n```\n$ podman exec jolly_goodall touch           /tmp/new_file\n$ podman exec jolly_goodall chown 1888:1888 /tmp/new_file\n$ podman exec jolly_goodall ls -l           /tmp/new_file\n-rw-r--r--. 1 1888 1888 0 May 28 21:29 /tmp/new_file\n$ podman cp   jolly_goodall:/tmp/new_file /tmp/f_2\n$ ll /tmp/f_2\n-rw-r--r--. 1 marco marco 0 May 28 17:29 /tmp/f_2\n```\n\n*Broken* example:\n\n```\n$ cat base-bionic-amd64.Dockerfile \nFROM ubuntu:bionic\n\nENV DEBIAN_FRONTEND=noninteractive\nRUN apt-get update && apt-get --no-install-recommends -y install pciutils build-essential git subversion language-pack-en wget lsb-release linux-image-generic grub-pc openssh-server\n\nRUN useradd -ms /bin/bash -U ubuntu\nUSER ubuntu:ubuntu\nWORKDIR /home/ubuntu\n\nCMD [\"sleep\", \"infinity\"]\n$ podman build --pull -f base-bionic-amd64.Dockerfile -t test_002 .\n$ podman run -d --name run_002 test_002:latest\n$ podman exec -u ubuntu -i run_002 bash -c \"echo > /home/ubuntu/test_file\"\n$ podman cp run_002:/home/ubuntu/test_file /tmp/test_002\n$ ls -l /tmp/test_002/\ntotal 4\n-rw-r--r--. 1 100999 100999 1 Jun 25 09:52 test_file\n```\n\n(See that `ls -l` displays different owners)\n\n**Output of `podman version`:**\n\n```\npodman version 1.3.1\n```",
+    "comments": [
+        {
+            "user": "mheon",
+            "body": "I think this is actually expected behavior - 100999 looks like the correct UID for the first user to be created in that rootless container. Inside the container `ubuntu` is probably UID 1000, so that's mapping to `100999` outside the container. `podman cp` retained the original UID here - this isn't a bug, it's just how rootless containers work.\n\nWe could potentially consider a flag for rootless containers that would squash UIDs for rootless containers down to only the UID of the user that ran the container."
+        },
+        {
+            "user": "QiWang19",
+            "body": "@mheon  why there's different  UID/GID result when the issues was reported https://github.com/containers/libpod/issues/3218#issue-449488229 ?"
+        },
+        {
+            "user": "maflcko",
+            "body": "The first example (\"working\") uses the default user and does a `chown`. The second example uses a dockerfile with `useradd` and `USER ubuntu:ubuntu`."
+        },
+        {
+            "user": "mheon",
+            "body": "That one also looks like a user running in the container"
+        },
+        {
+            "user": "mheon",
+            "body": "Alternatively... a `chown` to another user in the rootless container would do the same. Anything that's not root (or your own UID if `--userns=preserve-id` is given) is going to come out of a rootless container with distorted UIDs.\n\nYou can use `podman unshare` to chown them to your UID."
+        },
+        {
+            "user": "maflcko",
+            "body": "Is there documentation available for `podman unshare`? The help doesn't tell me how to unshare the file in the running container `run_002:/home/ubuntu/test_file`.\n\n```\n$ podman help unshare\nRun a command in a modified user namespace\n\nDescription:\n  Runs a command in a modified user namespace.\n\nUsage:\n  podman unshare [flags] [COMMAND [ARG]]\n\nExamples:\n  podman unshare id\n  podman unshare cat /proc/self/uid_map,\n  podman unshare podman-script.sh\n\n```\n\n```\n$ podman unshare run_002:/home/ubuntu/test_file \nError: fork/exec run_002:/home/ubuntu/test_file: no such file or directory\n"
+        },
+        {
+            "user": "mheon",
+            "body": "Unshare without arguments will get you a shell with the same user mappings as the rootless container - within that shell you can run podman cp to extract the file, and chown it to UID 0 (your user outside the container).\n\nGiven the complexity here, I am thinking that a flag for `cp` to squash UIDs is definitely a good idea."
+        },
+        {
+            "user": "maflcko",
+            "body": "So I will have to call any future command that reads the file from the `podman unshare` shell?\n\nSee also:\n\n```\n$ podman unshare\n# podman cp run_002:/home/ubuntu/test_file /tmp/test_004\n# ls -l /tmp/test_004/\ntotal 4\n-rw-r--r--. 1 marco marco 1 Jun 25 09:52 test_file\n# exit\n$ ls -l /tmp/test_004/\ntotal 4\n-rw-r--r--. 1 100999 100999 1 Jun 25 09:52 test_file\n"
+        },
+        {
+            "user": "maflcko",
+            "body": "Would be nice if `podman cp` behaved identical to `docker cp` with regard to ownership.\n\n> Ownership is set to the user and primary group at the destination. For example, [...] Files copied to the local machine are created with the UID:GID of the user which invoked the docker cp command. \n\nhttps://docs.docker.com/engine/reference/commandline/cp/#extended-description"
+        },
+        {
+            "user": "rhatdan",
+            "body": "From the docs, it looks like podman cp should be creating files inside of the container as \"root\" inside of the container, if we are not, then that is a bug."
+        },
+        {
+            "user": "maflcko",
+            "body": "As a workaround I use `tar` to pipe the folder to stdout on the container and `tar` to receive it from stdin on the host."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@QiWang19 Can you confirm that we are doing the right thing, and can close this issue?"
+        },
+        {
+            "user": "QiWang19",
+            "body": "I checked this issue, we are not doing the right thing(not the same result as docker), but I have no idea how to fix this"
+        },
+        {
+            "user": "rhatdan",
+            "body": "Lets talk about this on Wednesday in the office."
+        },
+        {
+            "user": "joeyhub",
+            "body": "Is it possible you accidentally applied this to tar files as well?\n\nI have a set of build and deploy scripts that have always worked with docker.\n\nThey also worked with podman when installing the docker wrapper as a drop in replacement.\n\nHowever I recently updated it (which fixes the image ls locking up problem and it taking ages) and now have a bunch of permission issues when deploying containers.\n\nYour fix is for the cp command on a direct file but I suspect you also may have inadvertently changed the behaviour of this:\n\n`ADD path/application.tgz /application`\n\nWhen I look at an image before updating podman it has the right owners from the tar file but when I check it after everything is root."
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "devrandom",
+            "repository": "gitian-builder",
+            "number": 220
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 3767
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 8064
+        }
+    ]
+}

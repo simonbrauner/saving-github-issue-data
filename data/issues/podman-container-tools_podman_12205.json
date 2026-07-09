@@ -1,0 +1,159 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 12205,
+    "type": "issue",
+    "title": "Podman + runc: Cannot mount read-only filesystem on host as a volume",
+    "state": "closed",
+    "labels": [
+        "rootless",
+        "kind/bug",
+        "locked - please file new issue/PR"
+    ],
+    "user": "afbjorklund",
+    "body": "**Is this a BUG REPORT or FEATURE REQUEST? (leave only one on its own line)**\n\n/kind bug\n\n**Description**\n\nTrying to use rootless containers on ubuntu 21.10 with podman 3.2.1 using the default \"runc\" fails.\n\nInstalling \"crun\" makes it work again, with runc the volume mounts are failing (OCI permission denied)\n\n**Steps to reproduce the issue:**\n\n1. `limactl start examples/podman.yaml`\n\n2. `export CONTAINER_HOST=unix://$HOME/podman.sock`\n\n3. `podman --remote run -it -v $PWD/hello:/hello docker.io/busybox cat /hello/world`\n\n**Describe the results you received:**\n\n`Error: error preparing container e552b677afd051af9dccb902ea038e527445a5daa1d08d59623364907700d497 for attach: container_linux.go:380: starting container process caused: process_linux.go:545: container init caused: rootfs_linux.go:76: mounting \"/home/anders/lima/hello\" to rootfs at \"/hello\" caused: operation not permitted: OCI permission denied`\n\n**Describe the results you expected:**\n\n`Hello, World!`\n\n**Additional information you deem important (e.g. issue happens only occasionally):**\n\nIt works after installing `crun`, it fails with only `runc` (which is the apt default)\n\n```\nlimactl shell podman sudo apt install -y crun\n```\n\n**Output of `podman version`:**\n\n```\nWARN[0000] The cgroupv2 manager is set to systemd but there is no systemd user session available \nWARN[0000] For using systemd, you may need to login using an user session \nWARN[0000] Alternatively, you can enable lingering with: `loginctl enable-linger 1000` (possibly as root) \nWARN[0000] Falling back to --cgroup-manager=cgroupfs    \nVersion:      3.2.1\nAPI Version:  3.2.1\nGo Version:   go1.16.7\nBuilt:        Thu Jan  1 00:00:00 1970\nOS/Arch:      linux/amd64\n```\n\n**Output of `podman info --debug`:**\n\n```\n(paste your output here)\n```\n\n**Package info (e.g. output of `rpm -q podman` or `apt list podman`):**\n\n```\npodman/impish,now 3.2.1+ds1-2ubuntu3 amd64 [installed]\n```\n\n**Have you tested with the latest version of Podman and have you checked the Podman Troubleshooting Guide? (https://github.com/containers/podman/blob/master/troubleshooting.md)**\n\n\nYes\n\n**Additional environment details (AWS, VirtualBox, physical, etc.):**\n\nUbuntu 21.10\n\n```\nrunc version 1.0.1-0ubuntu2\nspec: 1.0.2-dev\ngo: go1.16.5\nlibseccomp: 2.5.1\n```\n\nhttps://packages.ubuntu.com/impish/podman\n\nhttps://packages.ubuntu.com/impish/runc",
+    "comments": [
+        {
+            "user": "mheon",
+            "body": "I recall seeing similar things on RHEL, which turned out to be a too-old `runc` - newer version fixed it."
+        },
+        {
+            "user": "afbjorklund",
+            "body": "Could be a bug in the podman packaging then, currently it says \"`runc (>= 1.0.0~rc92~) | crun`\"\n\nAnd if course runc is a system package, so that means that it is stuck on OS (currently runc 1.0.1)\n\nBut I will try uninstall `crun`, and install 1.0.2 from binary\n\nEDIT: Nope, same issue also with runc 1.0.2 (latest) ?"
+        },
+        {
+            "user": "rhatdan",
+            "body": "If this is a runc issue, it should be opened over their. If this is a runc version issue, then Podman upstream can not fix.  Is there anything upstream Podman can do to fix this, then we need to close the issue. (We are in bugfix mode and need to get our issues under 200.)  :^)"
+        },
+        {
+            "user": "afbjorklund",
+            "body": "It's possible to use docker with runc, and podman with crun. Just not podman with runc, which might be expected ?\n\nSomething about the fuse-mounted directory, that makes it fail the mount when podman tries to make the OCI do it.\n\n```\nTARGET       SOURCE        FSTYPE     OPTIONS\n/home/anders :/home/anders fuse.sshfs ro,nosuid,nodev,relatime,user_id=1000,group_id=1000,allow_other\n```\n\nThis was rootless containers under cgroups v2, it did work if you used `sudo podman`."
+        },
+        {
+            "user": "mheon",
+            "body": "Update: I still think this is a `runc` issue, but on examining the original issue I thought it was, it is not (that bug was specific to `--pid=host`).\n\nWould be interesting to see an OCI spec from Docker/Containerd vs one from Podman. Fix is probably still in runc but knowing that exactly is causing it to blow up would help a lot."
+        },
+        {
+            "user": "afbjorklund",
+            "body": "You should be able to duplicate this on your own machine, by using the \"docker\" and \"podman\" example files.\n\nhttps://github.com/lima-vm/lima/tree/master/examples"
+        },
+        {
+            "user": "afbjorklund",
+            "body": "@mheon : It turned out to be very simple, podman was trying to mount the read-only file system as rw\n\npodman\n```json\n    {\n      \"destination\": \"/hello\",\n      \"type\": \"bind\",\n      \"source\": \"/home/anders/lima/hello\",\n      \"options\": [\n        \"rw\",\n        \"rprivate\",\n        \"nosuid\",\n        \"nodev\",\n        \"rbind\"\n      ]\n    },\n```\n\ndocker\n```json\n    {\n      \"destination\": \"/hello\",\n      \"type\": \"bind\",\n      \"source\": \"/home/anders/lima/hello\",\n      \"options\": [\n        \"rbind\",\n        \"rprivate\",\n        \"nosuid\",\n        \"ro\",\n        \"nodev\"\n      ]\n    },\n```\n\nChanging the volume mapping to `:ro` makes it work, but it should probably be able to detect this ?"
+        },
+        {
+            "user": "mheon",
+            "body": "That definitely seems like a bug - concur we should detect this. I'll rename the issue."
+        },
+        {
+            "user": "afbjorklund",
+            "body": "`crun`happily accepts the OCI spec with read-write - and then goes on to mount it read-only (like the original fs).\n\n`runc` tries to run the OCI spec with the read-write, so that is why docker changes the spec so that it doesn't fail\n\n---\n\nit works for root:\n\n`21658 mount(\"/home/anders/lima/hello\", \"/proc/self/fd/7\", 0xc0000c07d6, MS_NOSUID|MS_NODEV|MS_REMOUNT|MS_BIND|MS_REC, NULL) = 0`\n\nbut not for user:\n\n`21868 mount(\"/home/anders/lima/hello\", \"/proc/self/fd/7\", 0xc0000c67c6, MS_NOSUID|MS_NODEV|MS_REMOUNT|MS_BIND|MS_REC, NULL) = -1 EPERM (Operation not permitted)`\n"
+        },
+        {
+            "user": "giuseppe",
+            "body": "The way crun implemented it is to first try the mount, and if it fails then check the mount options for the source and attempt again with `ro` if it is present there.\n\nHow to check it beforehand?   Does docker adds `ro` anytime the source is mounted as read only?\n"
+        },
+        {
+            "user": "kolyshkin",
+            "body": "@afbjorklund does it work if you run it as `podman --remote run -it -v $PWD/hello:/hello:ro docker.io/busybox cat /hello/world` (e.g. add `ro` flag)?"
+        },
+        {
+            "user": "afbjorklund",
+            "body": "Adding an explicit `:ro` to the mount made it work also with runc, but would require modifying every command line and specification and would be very intrusive. It would be better if this modification was done by podman, in that case.\n\nRunning with root also \"worked\"."
+        },
+        {
+            "user": "afbjorklund",
+            "body": "> Does docker adds `ro` anytime the source is mounted as read only?\n\nThat is my understanding:\n\n```go\n                        if !m.Writable {\n                                opts = append(opts, \"ro\")\n                        }\n```\n\nhttps://github.com/moby/moby/blob/20.10/daemon/oci_linux.go#L640\n\n\n"
+        },
+        {
+            "user": "afbjorklund",
+            "body": "Anyway, switched over to `crun` in lima since it seems that `runc` is not tested as much.\nYou might want to do the same in the ubuntu packaging too, or perhaps flip the order ?\n\n```sh\n      export DEBIAN_FRONTEND=noninteractive\n      apt-get update\n      apt-get install -y podman crun\n```\n\nFrom the comments above, it seems like podman _could_ add the \"ro\" instead of \"crun\".\nThat would make it work with any runtime, even if it doesn't implement the retry itself ?\n\n\nHere was the crun only fix:\n* https://github.com/containers/podman/issues/4061"
+        },
+        {
+            "user": "mheon",
+            "body": "We're not using crun as the default in Ubuntu already? That's news to me."
+        },
+        {
+            "user": "afbjorklund",
+            "body": "> We're not using crun as the default in Ubuntu already? That's news to me.\n\nThe depends line in deb is: `runc (>= 1.0.0~rc92~) | crun`\n\nDefault: runc\n\nThe requires line in rpm is: `oci-runtime` (i.e. crun or runc)\n\n```\npackage: containers-common-4:1-30.fc35.noarch\n  dependency: oci-runtime\n   provider: runc-2:1.0.2-2.fc35.x86_64\n   provider: crun-1.3-1.fc35.x86_64\n```\n\nDefault: crun\n\nIf you want \"the other\", you have to add it to the installation:\n\n`apt install podman crun`\n\n`dnf install podman runc`"
+        },
+        {
+            "user": "kolyshkin",
+            "body": "Tried to repro this with `runc` and a read-only mount.\n\nWas able to reproduce with fuse-sshfs.\n\nWas **not** able to reproduce with \n1. a directory read-only bind-mounted to itself;\n2. a read-only tmpfs mount;\n3. a read-only ext2 mount on a loop device.\n\nSo, for some reason, this is really specific to fuse. Maybe a bug in fuse?"
+        },
+        {
+            "user": "afbjorklund",
+            "body": "It was seen when running podman under lima. It mounts the home directory read-only (reverse sshfs) by default.\n\nIt has been \"fixed\", by changing from runc to crun. Leaving the other one to be used only with nerdctl and docker."
+        },
+        {
+            "user": "afbjorklund",
+            "body": "> So, for some reason, this is really specific to fuse. Maybe a bug in fuse?\n\nOn the command line we use `fusermount` rather than `mount`, maybe something similar is needed for this remount ?"
+        },
+        {
+            "user": "kolyshkin",
+            "body": "> On the command line we use `fusermount` rather than `mount`, maybe something similar is needed for this remount ?\n\nWhat runtime does is a bind mount, so it does not really matter if this is a fuse mount or not.\n\nAnyway, I am fixing this in runc (and the most complicated part is writing a test case)."
+        },
+        {
+            "user": "kolyshkin",
+            "body": "@afbjorklund can you test the fix? https://github.com/opencontainers/runc/pull/3283\n\n(You can get the static binary by navigating to Checks -> validate, when at the very bottom of the page under \"Artifacts\" you'll find \"release-NNNNN\" file which contains pre-built binaries)."
+        },
+        {
+            "user": "cmoulliard",
+            "body": "I also suffer from a similar issue when I try to mount volumes between my mac machine and the podman vm\n\n```\n podman --remote --log-level=debug --remote run -it -v $PWD/workspace:/workspace:ro -v $PWD/cahche:/cache:rw -it kaniko-app\nINFO[0000] podman filtering at log level debug          \nDEBU[0000] Called run.PersistentPreRunE(podman --remote --log-level=debug --remote run -it -v /Users/cmoullia/code/redhat-buildpacks/poc/kaniko/workspace:/workspace:ro -v /Users/cmoullia/code/redhat-buildpacks/poc/kaniko/cahche:/cache:rw -it kaniko-app) \nDEBU[0000] SSH Ident Key \"/Users/cmoullia/.ssh/macvm\" SHA256:lWpZxjgjPZVaziq2Tkiz+YUkJzs5QeWBVWaTrFOFb18 ssh-ed25519 \nDEBU[0000] Found SSH_AUTH_SOCK \"/private/tmp/com.apple.launchd.WoPNlEeF4F/Listeners\", ssh-agent signer(s) enabled \nDEBU[0000] DoRequest Method: GET URI: http://d/v3.4.2/libpod/_ping \nDEBU[0000] Loading registries configuration \"/etc/containers/registries.conf\" \nDEBU[0000] No credentials for registry.tanzu.vmware.com found \nDEBU[0000] No credentials for quay.io found             \nDEBU[0000] No credentials for registry.local:5000 found \nDEBU[0000] No credentials for https://index.docker.io/v1/ found \nDEBU[0000] No credentials for registry.pivotal.io found \nDEBU[0000] No credentials for localhost:5000 found      \nDEBU[0000] No credentials for 95.217.159.244:32500 found \nDEBU[0000] No credentials for dev.registry.pivotal.io found \nDEBU[0000] DoRequest Method: POST URI: http://d/v3.4.2/libpod/images/pull \nDEBU[0000] User mount /Users/cmoullia/code/redhat-buildpacks/poc/kaniko/workspace:/workspace options [ro] \nDEBU[0000] User mount /Users/cmoullia/code/redhat-buildpacks/poc/kaniko/cahche:/cache options [rw] \nDEBU[0000] DoRequest Method: POST URI: http://d/v3.4.2/libpod/containers/create \nError: statfs /Users/cmoullia/code/redhat-buildpacks/poc/kaniko/workspace: no such file or directory\n...\n\nls -la /Users/cmoullia/code/redhat-buildpacks/poc/kaniko/workspace\ntotal 16\ndrwxr-xr-x   4 cmoullia  staff  128 Nov 18 15:39 .\ndrwxr-xr-x  10 cmoullia  staff  320 Nov 18 16:51 ..\n-rw-r--r--   1 cmoullia  staff   63 Nov 18 15:39 Dockerfile\n-rw-r--r--   1 cmoullia  staff   18 Nov 18 15:02 hello.txt\n```\n@kolyshkin \n"
+        },
+        {
+            "user": "kolyshkin",
+            "body": "@cmoulliard this issue is about podman + runc inability to bind-mount a read-only fuse mount to a container (because podman do es not add `ro` flag to the runtime spec, and runc does not retry with ro).\n\nWhat you see is a different and most probably unrelated issue; please feel free to file a separate bug."
+        },
+        {
+            "user": "afbjorklund",
+            "body": "@cmoulliard Note that the containers mount files **on the VM**, so you need to have some remote filesystem (like 9p or sshfs) mounted if you want to access files on your host. You can check the available files with `podman machine ssh ls /`\n\n* Issue #8016\n\nDue to a limitation in CoreOS (i.e. read-only), it is not possible to mount at the path `/Users`."
+        },
+        {
+            "user": "afbjorklund",
+            "body": "@kolyshkin : I can confirm that this new `runc` binary fixes the issue, where the old `runc` still shows it.\n\nhttps://github.com/opencontainers/runc/commit/d7846bc19a51b21b46803b4fd6a68b7ca31c33af (actual commit, as per PR)\n\nhttps://github.com/opencontainers/runc/commit/ecf09297 (merge commit, per binary)\n\nworking:\n```\nrunc version 1.0.0+dev\ncommit: v1.0.0-379-gecf09297\nspec: 1.0.2-dev\ngo: go1.17.3\nlibseccomp: 2.5.2\n```\n\nubuntu: (not working)\n```\nrunc version 1.0.1-0ubuntu2\nspec: 1.0.2-dev\ngo: go1.16.5\nlibseccomp: 2.5.1\n```\n\nValidated by creating a lima VM with podman.yaml, and then installing and selecting \"runc\" as the engine in the config\n\n```\nanders@lima-podman:/home/anders/lima$ more /etc/containers/containers.conf \n[engine]\nruntime = \"runc\"\n```"
+        },
+        {
+            "user": "rhatdan",
+            "body": "So is this fixed in upstream runc?  Or is this something we need to fix in Podman, or can I close this issue?"
+        },
+        {
+            "user": "afbjorklund",
+            "body": "Once the new runc has been released, it will work with the current Podman and the `rw` volumes on a read-only sshfs disk.\n\nUntil then, one _has_ to use crun since the current runc only works with Docker and its `ro` volumes (when disk is read-only).\n\n----\n\nCurrently this mostly affected lima users, but an update has been pushed there...\n\nUnless some other project (including Podman Machine) also starts using sshfs volumes ?"
+        },
+        {
+            "user": "rhatdan",
+            "body": "Ok I am going to close this issue, since it is not a issue that Podman can fix.  Although I guess we could update the spec file to require the latest runc once it is released."
+        },
+        {
+            "user": "afbjorklund",
+            "body": "Current ETA is runc 1.1.0"
+        },
+        {
+            "user": "kolyshkin",
+            "body": "> Current ETA is runc 1.1.0\n\nI did a backport for runc 1.0.3, too, which might come before 1.1.0."
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "lima-vm",
+            "repository": "lima",
+            "number": 398
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 8016
+        },
+        {
+            "organization": "opencontainers",
+            "repository": "runc",
+            "number": 3283
+        },
+        {
+            "organization": "opencontainers",
+            "repository": "runc",
+            "number": 3292
+        }
+    ]
+}

@@ -1,0 +1,122 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 20177,
+    "type": "pull_request",
+    "title": "Podman machine hyperv",
+    "state": "closed",
+    "labels": [
+        "lgtm",
+        "approved",
+        "release-note-none",
+        "locked - please file new issue/PR"
+    ],
+    "user": "cevich",
+    "body": "<!--\nThanks for sending a pull request!\n\nPlease make sure you've read our contributing guidelines and how to submit a pull request (https://github.com/containers/podman/blob/main/CONTRIBUTING.md#submitting-pull-requests).\n\nIn case you're only changing docs, make sure to prefix the pull-request title with \"[CI:DOCS]\". That will prevent functional tests from running and save time and energy.\n\nFinally, be sure to sign commits with your real name. Since by opening\na PR you already have commits, you can add signatures if needed with\nsomething like `git commit -s --amend`.\n-->\n\n#### Does this PR introduce a user-facing change?\n\n<!--\nIf no, just write `None` in the release-note block below. If yes, a release note\nis required: Enter your extended release note in the block below. If the PR\nrequires additional action from users switching to the new release, include the\nstring \"action required\".\n\nFor more information on release notes, please follow the Kubernetes model:\nhttps://git.k8s.io/community/contributors/guide/release-notes.md\n-->\n\n```release-note\nNone\n```\n",
+    "comments": [
+        {
+            "user": "cevich",
+            "body": "Oof, @n1hility when you get a chance I could use your wisdom.  I tried [de-duplicating `Run-Command()` like we chatted about](https://github.com/containers/podman/pull/20177/commits/30048f060437c1192dc2fc86aee8dae70e0d63c0#diff-257adcd43d9360edebc0c5f6c6a8396753e5c19f47c099867791a20fd306e7a4) in a few places and (surprise!) it's not \"just working\".  Specifically it's leading to false-positives [like when running curl for example](https://cirrus-ci.com/task/4928315648114688?logs=main#L9-L11).  \n\nIs the `Exit $result` not transitive (bubbling up through all the scripts in the stack)?\n\nDo I need to quote the whole command parameter maybe?  Like: `Run-Command 'curl.exe -L -o repo.tbz2 \"$url\"'`.\n\nDid I do a complete FUBAR and I should just back away slowly?"
+        },
+        {
+            "user": "n1hility",
+            "body": "> Oof, @n1hility when you get a chance I could use your wisdom. \n\nsure!\n\n> Is the `Exit $result` not transitive (bubbling up through all the scripts in the stack)?\n\nIn this case Exit will hard exit the entire execution (its transitive as you say). Although if you wanted to behave more like a standard cmdlet (normal powershell function which lets you change exit preferences), you could do something like this:\n\n```powershell\nfunction Run-Command {\n   [CmdletBinding()]\n   param(\n       [string] $command\n   )\n\n   Invoke-Expression $command\n   $result = $LASTEXITCODE\n   if ($result -ne 0) {\n       Write-Error \"Command failed (exit: $result)\"\n   }\n}\n```\n\nThen if for example a command is harmless you can do `Run-Command $harmless -ErrorAction Continue`, and if error action is not specified ErrorActionPreference=Stop is respected and the failure terminates the script.\n\n> \n> Do I need to quote the whole command parameter maybe? Like: `Run-Command 'curl.exe -L -o repo.tbz2 \"$url\"'`.\n\nYes the way the function is written it needs a quoted single quoted command. An alternative form could be written to take a varargs param to support the syntax you are showing although care would need to be taken in how it's quoted, since it would need to correctly requote what was passed. It's probably easier to just leave the whole thing a string  as it is.\n\n> Did I do a complete FUBAR and I should just back away slowly?\n\nNo the concept is reasonable. The one thing to look out for when converting to using a function like this is quoting issues (e.g. spaces in paths), since this is all passed to invoke-expression it needs to be correct spaced as a powershell script itself. As an example if you use a variable (say $path) that comes from a windows path with a space in it in the command then you would need Run-Command \"foo \\`\"$path\\`\"\". If $path is itself already quoted then you might get failures. So anything that calls this function needs to take some care.  The previous CheckExit approach avoids all of these issues but it is a lot more redundant. \n"
+        },
+        {
+            "user": "packit-as-a-service[bot]",
+            "body": "Ephemeral COPR build failed. @containers/packit-build please check."
+        },
+        {
+            "user": "cevich",
+            "body": "> In this case Exit will hard exit the entire execution (its transitive as you say).\n\nGreat, no I think this is exactly what we want.  Hard exit on unexpected failure.\n\n> Yes the way the function is written it needs a quoted single quoted command. An alternative form could be written to take a varargs param to support the syntax you are showing although care would need to be taken in how it's quoted, since it would need to correctly requote what was passed. It's probably easier to just leave the whole thing a string as it is.\n\nDarn, was hoping it could do varargs similar to the magic `\"$@\"` in bash (which properly handles all quoting).  Good to know it's not so simple here though, I can put that in a comment to warn others.  Thanks for the tip.\n\n> As an example if you use a variable (say $path) that comes from a windows path with a space in it in the command then you would need Run-Command \"foo `\"$path`\"\".\n\nI'm assuming the \"`\" (backtick) is used as an escape?  \n\n> If $path is itself already quoted then you might get failures.\n\nJust to clarify, you mean if there are quotes embedded in `$path`?\n\nOh, another related vars curiosity:  I see difference reference and definition syntax being used in (seemingly) random places.  Sometimes it's `$foo=bar` (definition), `$foo` (reference), or `$env:foo=bar` (definition) or `$env:foo` (reference).  Sometimes (seemingly) a combination of these for the same var name.  Is this some kind of scoping syntax (like global vs local), a mistake, or is there a preferred format?\n\nThanks in advance Jason."
+        },
+        {
+            "user": "n1hility",
+            "body": "\n> > Yes the way the function is written it needs a quoted single quoted command. An alternative form could be written to take a varargs param to support the syntax you are showing although care would need to be taken in how it's quoted, since it would need to correctly requote what was passed. It's probably easier to just leave the whole thing a string as it is.\n> \n> Darn, was hoping it could do varargs similar to the magic `\"$@\"` in bash (which properly handles all quoting). Good to know it's not so simple here though, I can put that in a comment to warn others. Thanks for the tip.\n\nHmm actually, after thinking about we could use Start-Process instead of Invoke-Expression and pass the varargs through as an argument list array, which would behave more like bash and solve the quoting issues. Normally Start-Process is used to open processes concurrently in another window, but we can override the behavior. Since it passes the argument array in a sandard exec style fashion we avoid the problem of a double interpretation.\n\n```powershell\n\n\nfunction Run-Command {\n   [CmdletBinding()]\n   param(\n       [string] $command,\n       [Parameter(ValueFromRemainingArguments=$true)][string[]] $args\n   )\n\n   $process = Start-Process $command -PassThru -Wait -NoNewWindow -ArgumentList $args\n\n   $result = $process.ExitCode\n   if ($result -ne 0) {\n       Write-Error \"Command failed (exit: $result)\"\n   }\n}\n\n```\n\n> > As an example if you use a variable (say $path) that comes from a windows path with a space in it in the command then you would need Run-Command \"foo `\"$path`\"\".\n> \n> I'm assuming the \"`\" (backtick) is used as an escape?\n\nThat's right they use backtick as an escape and also for printf style control chars e.g. \\`n == newline\n\n> \n> > If $path is itself already quoted then you might get failures.\n> \n> Just to clarify, you mean if there are quotes embedded in `$path`?\n\nThats right so the problem with the invoke-expression approach and varargs is that you get this double nested interpretation, so if path contained the value `\"c:\\directory with space\\\"` and then the function tried to be clever and requite the varargs you would end up with: `\"\"C:\\directory with space\"\"`, which would be interpreted 3 arguments [`C:\\directory`, `with`, `space`]\n\nAlthough we can sidestep this whole thing with the above Start-Process\n\n> \n> Oh, another related vars curiosity: I see difference reference and definition syntax being used in (seemingly) random places. Sometimes it's `$foo=bar` (definition), `$foo` (reference), or `$env:foo=bar` (definition) or `$env:foo` (reference). Sometimes (seemingly) a combination of these for the same var name. Is this some kind of scoping syntax (like global vs local), a mistake, or is there a preferred format?\n\nYes so in powershell $ is used both in definition and referencing, $foo is a variable in your script scope. There are other scopes, and ENV is a special one, $env is the process environment represented as a hash table, and foo (of $env:foo) is the key under that hash object.  Environment variables aren't automatically a variable in powershell like in bash, they have to be referenced through $env much like you would in python or perl. So for reading and writing you would use $env:foo vs $foo\n\n> \n> Thanks in advance Jason.\n\nsure np!"
+        },
+        {
+            "user": "packit-as-a-service[bot]",
+            "body": "Cockpit tests failed for commit d78d0b7884ccbe17d6c928eade3e8c0f68e2fd18. @martinpitt, @jelly, @mvollmer please check."
+        },
+        {
+            "user": "n1hility",
+            "body": "Actually I spoke too soon, grabbed a few seconds to test it and it turns out they implement Start-Process by joining instead of passing to an exec, so varargs have to be quoted sadly:\n\n```powershell\nfunction Run-Command {\n   [CmdletBinding()]\n   param(\n       [Parameter(ValueFromRemainingArguments=$true)][string[]] $args\n   )\n   $flags = @{}\n   if ($args.Length -eq 0) {\n       Write-Error \"No command specified\"\n       return\n   }\n\n   $command = $args[0]\n\n   if ($args.Length -gt 1) {\n       # Quote all parameters since argument list is turned into a flat string\n       for ($i = 1; $i -lt $args.Length; $i++) {\n           $args[$i] = \"`\"\" + $args[$i] + \"`\"\"\n       }\n       # Start-Process won't accept empty args, must be unspecified for noargs\n       $flags[\"ArgumentList\"] = $args[1..$args.Length]\n   }\n\n   $process = Start-Process $command -PassThru -NoNewWindow @flags\n   Wait-Process -InputObject $process\n\n   $result = $process.ExitCode\n   if ($result -ne 0) {\n       Write-Error \"Command failed (exit: $result)\"\n   }\n}\n```"
+        },
+        {
+            "user": "cevich",
+            "body": ">  so varargs have to be quoted sadly\n\nThanks for figuring that out.  Okay I'll run with the simplistic `Run-Command` from Ashley's `winmake` then.  Easier to just document that quoting is necessary than ask anyone to understand further intricacies/complexities for \"run a thing and fail if it breaks\".  Thanks again, I don't know what we'd do without your help."
+        },
+        {
+            "user": "packit-as-a-service[bot]",
+            "body": "Ephemeral COPR build failed. @containers/packit-build please check."
+        },
+        {
+            "user": "cevich",
+            "body": "@baude got to a major milestone here (it's been a very slow crawl - powershell is EXTREMELY fragile).  I'm now [blocked on a compile error](https://cirrus-ci.com/task/5877349485379584) I have no way of making progress past:\n\n```\n./test/tools/build/ginkgo.exe -vv  --tags \"remote exclude_graphdriver_btrfs btrfs_noversion exclude_graphdriver_devicemapper containers_image_openpgp\" -timeout=90m --trace --no-color  pkg/machine/e2e/. \nFailed to compile e2e:\n# github.com/containers/podman/v4/pkg/machine/e2e.test\nC:\\Program Files\\Go\\pkg\\tool\\windows_amd64\\link.exe: running gcc failed: exit status 1\nC:/ProgramData/chocolatey/lib/mingw/tools/install/mingw64/bin/../lib/gcc/x86_64-w64-mingw32/12.2.0/../../../../x86_64-w64-mingw32/bin/ld.exe: C:\\Users\\ADMINI~1\\AppData\\Local\\Temp\\go-link-3246910414\\000006.o: in function `_cgo_preinit_init':\n\\\\_\\_\\runtime\\cgo/gcc_libinit_windows.c:40: undefined reference to `__imp___iob_func'\nC:/ProgramData/chocolatey/lib/mingw/tools/install/mingw64/bin/../lib/gcc/x86_64-w64-mingw32/12.2.0/../../../../x86_64-w64-mingw32/bin/ld.exe: C:\\Users\\ADMINI~1\\AppData\\Local\\Temp\\go-link-3246910414\\000006.o: in function `x_cgo_notify_runtime_init_done':\n\\\\_\\_\\runtime\\cgo/gcc_libinit_windows.c:105: undefined reference to `__imp___iob_func'\nC:/ProgramData/chocolatey/lib/mingw/tools/install/mingw64/bin/../lib/gcc/x86_64-w64-mingw32/12.2.0/../../../../x86_64-w64-mingw32/bin/ld.exe: C:\\Users\\ADMINI~1\\AppData\\Local\\Temp\\go-link-3246910414\\000006.o: in function `_cgo_beginthread':\n\\\\_\\_\\runtime\\cgo/gcc_libinit_windows.c:149: undefined reference to `__imp___iob_func'\nC:/ProgramData/chocolatey/lib/mingw/tools/install/mingw64/bin/../lib/gcc/x86_64-w64-mingw32/12.2.0/../../../../x86_64-w64-mingw32/bin/ld.exe: C:\\Users\\ADMINI~1\\AppData\\Local\\Temp\\go-link-3246910414\\000007.o: in function `x_cgo_thread_start':\n\\\\_\\_\\runtime\\cgo/gcc_util.c:18: undefined reference to `__imp___iob_func'\ncollect2.exe: error: ld returned 1 exit status\n```\n\nNote: There was a warning from Jason that may be relevant here.  Something along the lines of: \"mingw version 11.2, later versions may be incompatible with CGO on some versions of golang\".\n\nI believe these images are using golang 1.19.2.  I'm working on updating that to \"latest stable\" over in https://github.com/containers/automation_images/pull/309 but I'm running into some more powershell fragility-related problems on that front."
+        },
+        {
+            "user": "cevich",
+            "body": "Ahh, maybe google to the rescue.  Found this possibly related issue: `https://github.com/golang/go/issues/51007#issuecomment-1369090750`.  Says it's fixed in 1.20, so hopefully that includes 1.21 (building images with that now)."
+        },
+        {
+            "user": "n1hility",
+            "body": "> Ahh, maybe google to the rescue. Found this possibly related issue: `https://github.com/golang/go/issues/51007#issuecomment-1369090750`. Says it's fixed in 1.20, so hopefully that includes 1.21 (building images with that now).\n\nThat's right you need mingw 11.2 with go 1.19, and later versions of mingw should work with an updated golang. This dependency is only needed when CGO is used. \n\nBTW when it comes to changing packages on the win images, you do not need wixtoolset for standard go applications, this dep is only needed for builds of the windows installer which is a bit more specialized. "
+        },
+        {
+            "user": "cevich",
+            "body": "> That's right you need mingw 11.2 with go 1.19, and later versions of mingw should work with an updated golang. This dependency is only needed when CGO is used.\n\nYa, trouble is CGO is needed everywhere for windows.  Fortunately since everywhere else in CI is pretty much on golang-stable (1.21), it makes sense to run with the latest.\n\n> BTW when it comes to changing packages on the win images, you do not need wixtoolset for standard go applications, this dep is only needed for builds of the windows installer which is a bit more specialized.\n\nI think (not 100% yet) I want the installer-test to be a dependency of the podman-machine tests.  IMHO for Windows-users especially, a functioning installer is pretty damn important. \n So I think it makes sense to fail early if the installer breaks.  Also in general, I've found it best for CI-reliability/developer productivity to not install stuff at run-time.\n\nAnyway, thanks for chiming in.  I was worried for a second `__imp___iob_func` was some horrible terrible sticky issue :fearful: "
+        },
+        {
+            "user": "cevich",
+            "body": "@edsantiago I know you're not an expert in windows stuff, but you are an expert in helpful comments and organizational stuff.  Would you mind giving this a quick once-over (even if it's merged by the time you get to look)?"
+        },
+        {
+            "user": "cevich",
+            "body": "@containers/podman-maintainers PTAL.  This is \"basically\" ready.  I'm leaving it as a draft for now because I've just started the first full run of all the tests and something may explode.  Also I think @n1hility made a good suggestion about leaving the simple \"smoke\" test running for now.\n\n***NOTE:*** I've set Cirrus to ignore failure of the new tests.  There are still some kinks to work out in them and/or the Windows VM images.  This PR is just about getting them to run, and it was an incredible brain-hurty exercise.  So please be kind :sweat: "
+        },
+        {
+            "user": "cevich",
+            "body": "Force-push: [Address Ashley's concerns](https://github.com/containers/podman/pull/20177#discussion_r1346561992) and [implement Jason's `Check-Exit()` advice](https://github.com/containers/podman/pull/20177#discussion_r1346554161)."
+        },
+        {
+            "user": "cevich",
+            "body": "Shortcuts to new tasks:\n\n* [machine-hyperv podman windows rootless host](https://cirrus-ci.com/task/4937126182125568)\n* [machine-wsl podman windows rootless host](https://cirrus-ci.com/task/6344501065678848)\n\nNote: Both new ginkgo-based machine e2e tests fail, but the [status is ignored in `.cirrus.yml`](https://github.com/containers/podman/pull/20177/files#diff-62587956f943bb2503db7bc6dd27d0d888074a1c0ecaab3f570ad611aff0f7bbR773-R775).\n\nIntended followup items:\n\n* Add back in a \"smoke\" type test at the end of the installer-test.  Verify what was installed actually runs to some minimal degree.\n* Me/Someone needs to migrate the `podman-remote-release-windows_amd64.zip` Makefile target and [windows-cross task](https://github.com/cevich/podman/blob/106abd13be31f0184a0fc16594cbb00cde0b4f6d/contrib/cirrus/runner.sh#L277-L279) over to the new `winmake.ps1`.\n* Open issue to have \"wsl\" used as a key value in `CONTAINERS_MACHINE_PROVIDER` [instead of an empty-string](https://github.com/containers/podman/pull/20177/files#diff-5b31db4f9436cf50bdad665a00cd91d9185eb22325d5cf25711576f3a6045b04R12-R16).  This could easily burn somebody badly.\n* Resolve todo WRT `allow_failures: $CI == $CI` once the ginkgo-based tests are reliably passing."
+        },
+        {
+            "user": "n1hility",
+            "body": "> * Me/Someone needs to migrate the `podman-remote-release-windows_amd64.zip` Makefile target and [windows-cross task](https://github.com/cevich/podman/blob/106abd13be31f0184a0fc16594cbb00cde0b4f6d/contrib/cirrus/runner.sh#L277-L279) over to the new `winmake.ps1`.\n\nJust a note that I think it’s still useful to be able to cross build a windows zip. It’s handy for example to be able to be coding on Linux or Mac and then build and copy over a test archive. If your thinking is that the task calls the powershell script to remove duplication that’s fine it’s not a huge deal to require powershell be installed, but we might need some slight adjustments to make sure those portions stay portable."
+        },
+        {
+            "user": "cevich",
+            "body": "> If your thinking is that the task calls the powershell script to remove duplication\n\nYeah, I'm not certain on all the details yet, you mentioned some of them.  I was half thinking we'd replace the Makefile driven flow, but you're right, that might be handy."
+        },
+        {
+            "user": "ashley-cui",
+            "body": "LGTM as far as my windows knowledge goes :) "
+        },
+        {
+            "user": "rhatdan",
+            "body": "@cevich @n1hility Ready to merge?"
+        },
+        {
+            "user": "openshift-ci[bot]",
+            "body": "[APPROVALNOTIFIER] This PR is **APPROVED**\n\nThis pull-request has been approved by: *<a href=\"https://github.com/containers/podman/pull/20177#pullrequestreview-1671298521\" title=\"Approved\">baude</a>*, *<a href=\"https://github.com/containers/podman/pull/20177#\" title=\"Author self-approved\">cevich</a>*\n\nThe full list of commands accepted by this bot can be found [here](https://go.k8s.io/bot-commands?repo=containers%2Fpodman).\n\nThe pull request process is described [here](https://git.k8s.io/community/contributors/guide/owners.md#the-code-review-process)\n\n<details >\nNeeds approval from an approver in each of these files:\n\n- ~~[OWNERS](https://github.com/containers/podman/blob/main/OWNERS)~~ [baude]\n\nApprovers can indicate their approval by writing `/approve` in a comment\nApprovers can cancel approval by writing `/approve cancel` in a comment\n</details>\n<!-- META={\"approvers\":[]} -->"
+        },
+        {
+            "user": "baude",
+            "body": "/lgtm"
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "containers",
+            "repository": "automation_images",
+            "number": 309
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 20548
+        }
+    ]
+}

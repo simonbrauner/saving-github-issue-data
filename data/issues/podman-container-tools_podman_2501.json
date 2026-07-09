@@ -1,0 +1,126 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 2501,
+    "type": "pull_request",
+    "title": "RFC: Make hooks sort order locale-independent",
+    "state": "closed",
+    "labels": [
+        "size/XXL",
+        "lgtm",
+        "approved",
+        "locked - please file new issue/PR"
+    ],
+    "user": "mtrmac",
+    "body": "**NOTE:** This is a potentially breaking change.\n\nDon't sort OCI hooks using the locale collation order; it does not make sense for the same system-wide directory to be interpreted differently depending on the user's `LC_COLLATE` setting, and the language-specific collation order can even change over time.\n    \nBesides, the current collation order determination code has never worked with the most common `LC_COLLATE` values like `en_US.UTF-8`.\n\nIdeally, we would like to just order based on Unicode code points to be reliably stable, but the existing implementation is case-insensitive, so we are forced to rely on the unicode case mapping tables at least.\n    \n(This gives up on canonicalization and width-insensitivity, potentially breaking users who rely on these previously documented properties.)\n\nFixes #2494.\n\nAlternatively, we could keep the current implementation and just hard-code the `und-u-va-posix` value to be always used.\n\n**NOTE:** CRI-O contains very similar code, and should be updated similarly if this approach is accepted.",
+    "comments": [
+        {
+            "user": "mtrmac",
+            "body": "@mheon PTAL"
+        },
+        {
+            "user": "mheon",
+            "body": "I recall a discussion in the original PR about why we could do this, but I can't recall any details; I'll look it up and see what our eventual reason for it was.\n\nCode LGTM, though."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@wking Did you put the sort order in originally?"
+        },
+        {
+            "user": "wking",
+            "body": "> @wking Did you put the sort order in originally?\n\nYeah, previous discussion starting [here][1].\n\n[1]: https://github.com/containers/libpod/pull/686#issuecomment-387910975"
+        },
+        {
+            "user": "wking",
+            "body": "> Besides, the current collation order determination code has never worked with the most common LC_COLLATE values like en_US.UTF-8.\n\nI'd mentioned the difference between languages and locales in golang/go#25340, but haven't followed up beyond that."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@wking Do you disagree with @mtrmac?"
+        },
+        {
+            "user": "wking",
+            "body": "> Don't sort OCI hooks using the locale collation order; it does not make sense for the same system-wide directory to be interpreted differently depending on the user's `LC_COLLATE` setting, and the language-specific collation order can even change over time.\n\nIf you set `LC_COLLATE` (or set `LANG` and leave `LC_COLLATE` unset), you're saying that you want collation to happen in that order.  If you point yourself at a system-wide hook directory where the admin expected a given collation order but you chose another one that sorted the hooks differently, then I'm fine running the hooks in a different order for you.  Conservative admins can use digit prefixes (`00-my-first-hook.yaml`, etc.) that are stable across most (all?) collation locales.  Conservative non-admins can set `--hooks-dir` to point at a hook directory they maintain.  So I'm fine with this aspect of how we currently do things.\n\nWe chose locale-based sorting to [avoid byte-for-byte comparison of possibly-unormalized UTF-8][1] (more on normalization [here][2]).  I think avoiding that sort of surprise still makes sense.  It's also low-probability, but I'd rather explain \"you set `LC_COLLATE`, so we gave you this order\" than explain \"ah, you used a combining sequence, while this other hook is using the single, combined character\".\n\n> Alternatively, we could keep the current implementation and just hard-code the `und-u-va-posix` value to be always used.\n\nThis is effectively what we have now, for any locales that don't parse as languages, right?  I'm ok moving in this direction (it resolves both the \"I didn't realize I have a different collation locale\" and \"I didn't realize Unicode gives you several byte-array implementations for a single semantic string\" issues).  But I'm not wild about ignoring the configured collation for users who do intentionally prefer a particular collation.\n\nSo I'm not a maintainer, but personally, I'd rather stay away from byte-based sorts and use either the current master code or a hard-coded `und-u-va-posix` that ignores the users preferred collation locale.\n\n[1]: https://github.com/containers/libpod/pull/686#issuecomment-387914358\n[2]: http://www.unicode.org/reports/tr15/"
+        },
+        {
+            "user": "mtrmac",
+            "body": "> > Don't sort OCI hooks using the locale collation order; it does not make sense for the same system-wide directory to be interpreted differently depending on the user's `LC_COLLATE` setting, and the language-specific collation order can even change over time.\n> \n> If you set `LC_COLLATE` (or set `LANG` and leave `LC_COLLATE` unset), you're saying that you want collation to happen in that order.\n\nYes, for _ordinary human text_ like dictionaries and address books. It is not trivially applicable to software APIs, just like `LC_NUMERIC` is rarely used to choose between decimal dot/comma in data storage/transports formats (and if it is used, it is almost always an oversight.)\n\nA hooks directory, where ordering has functional impact, is much closer to an API than to a dictionary.\n\n> If you point yourself at a system-wide hook directory where the admin expected a given collation order but you chose another one that sorted the hooks differently, then I'm fine running the hooks in a different order for you.\n\nEven if it _seems to be_ “we are doing the right thing to support different languages and cultures”, this is _in effect_ “we have designed the system so that it breaks because you want your address book sorted correctly for your language, and your system administrator uses a different language”. If ostensibly doing the right thing gets us exactly the opposite result, the assumptions must be challenged.\n\n> Conservative admins can use digit prefixes (`00-my-first-hook.yaml`, etc.) that are stable across most (all?) collation locales.\n\nYes, quite; but when that’s the _only_ reasonable way to do things, we should just recommend (or enforce?) it instead of (pretending to) support subtly-break-my-system alternatives.\n\n> Conservative non-admins can set `--hooks-dir` to point at a hook directory they maintain.\n\nThat’s true, but being forced to maintain an independent configuration just because the software makes it hard to use the system-wide one is not optimal.\n\n> We chose locale-based sorting to [avoid byte-for-byte comparison of possibly-unormalized UTF-8](https://github.com/containers/libpod/pull/686#issuecomment-387914358)\n\nAh, OK; the original PR talked _only_ about byte-for-byte comparison of the UTF-8 form (which is fine), it did not mention normalization.\n\n> I think avoiding that sort of surprise still makes sense. It's also low-probability, but I'd rather explain \"you set `LC_COLLATE`, so we gave you this order\" than explain \"ah, you used a combining sequence, while this other hook is using the single, combined character\".\n\nHonestly my take on _either_ is “you did not start the names with numbers and relied on corner cases, don’t try to be too cute and clever if order matters”, and “we are not including 76k lines of tables in the software product to enable this failure”.\n\n> > Alternatively, we could keep the current implementation and just hard-code the `und-u-va-posix` value to be always used.\n> \n> This is effectively what we have now, for any locales that don't parse as languages, right?\n\nI think so, modulo the warnings on every execution :)\n\n> So I'm not a maintainer, but personally, I'd rather stay away from byte-based sorts and use either the current master code or a hard-coded `und-u-va-posix` that ignores the users preferred collation locale.\n\nBTW, what _is_ the definition of that order? I haven’t found anything definitive; meanwhile the POSIX definition of `LC_COLLATE=POSIX` per http://pubs.opengroup.org/onlinepubs/9699919799/basedefs/V1_chap07.html#tag_07_03_02_06 , and its definition of “character” as “multi-byte character” (which in UTF-8 ends up meaning a single Unicode code point) explicitly forbids making collation normalization-aware, because every code point has its own unique primary weight and that’s that. (Curiously enough, the only references to `und-u-va-posix` that Google finds are all related to this repo and/or conversation.)"
+        },
+        {
+            "user": "wking",
+            "body": "> Even if it seems to be “we are doing the right thing to support different languages and cultures”, this is in effect “we have designed the system so that it breaks because you want your address book sorted correctly for your language, and your system administrator uses a different language”.\n\n... and the admin and user decided to use the same hook directories (high probability) and the admin decided to lead with characters that sort differently in different locales (low probability).  I think that last mitigation is important.\n\n> > Conservative admins can use digit prefixes (`00-my-first-hook.yaml`, etc.) that are stable across most (all?) collation locales.\n>\n> Yes, quite; but when that’s the *only* reasonable way to do things, we should just recommend (or enforce?)...\n\nDigit prefixes are a reasonable admin approach on multi-user systems with a divergence of preferred collation locales.  That's a ways from \"only\", so I see no need to enfore.  I'm fine adding recommendations for digit prefixes though.\n\n> ... it instead of (pretending to) support subtly-break-my-system alternatives.\n\nI'm in favor of splitting on strings to get `en_US.UTF-8` -> `en_US` (which does parse correctly) and similar.  I don't think we need to give up on this approach entirely based on that current issue.\n\n> > Conservative non-admins can set `--hooks-dir` to point at a hook directory they maintain.\n>\n> That’s true, but being forced to maintain an independent configuration just because the software makes it hard to use the system-wide one is not optimal.\n\nImplicit hook directories were [already deprecated in favor of `--hooks-dir`][1] (#1920) before this discussion.  So I don't see this as a big loss.\n\n> ... “we are not including 76k lines of tables in the software product to enable this failure”.\n\nThis is also a fair point.  It's not strong enough to tip me over to prefer byte-for-byte comparison though, and I [remain][2] on the fence between the two approaches that depend on the library ;).\n\n> I haven’t found anything definitive; meanwhile the POSIX definition of LC_COLLATE=POSIX per http://pubs.opengroup.org/onlinepubs/9699919799/basedefs/V1_chap07.html#tag_07_03_02_06 ...\n\nI think that is the definitive definition, with everything outside of that table being unspecified.  Not something you'd want to mix with most characters outside of US-ASCII.  I think the `und-u-va-posix` name was invented by Go as part of their mad scheme to conflate language and locale golang/go#25340 ;).\n\n[1]: https://github.com/containers/libpod/blame/v1.1.2/docs/podman.1.md#L46\n[2]: https://github.com/containers/libpod/pull/2501#issuecomment-469903974"
+        },
+        {
+            "user": "mtrmac",
+            "body": "> > Even if it seems to be “we are doing the right thing to support different languages and cultures”, this is in effect “we have designed the system so that it breaks because you want your address book sorted correctly for your language, and your system administrator uses a different language”.\n> \n> ... and the admin and user decided to use the same hook directories (high probability)\n> and the admin decided to lead with characters that sort differently in different locales (low probability). I think that last mitigation is important.\n\nSure, this is all very much a corner case of the design, but the total effect is that we are doing so much extra work to get the corner case of the design _wrong_. Why would we? There’s really no benefit at all to imposing human collating preferences on the filenames, which are mostly comments on the _contents_ of those files; sorting comments on data in a list is not really something anyone ever asks for.\n\n(English is not my native language; supporting Czech sorting in a directory named `hooks.d` is just… bizarre. Sure, there could well be systems where names are someone’s native language if at all possible… but we put `oci-register-machine.json` in there by default.)\n\n\nOTOH, I do acknowledge that a fair amount of older shell scripts doing something like `for file in config.d/*; do …` would end up being `LC_COLLATE`-dependent, arguably without the authors ever realizing this.\n\n> > ... it instead of (pretending to) support subtly-break-my-system alternatives.\n> \n> I'm in favor of splitting on strings to get `en_US.UTF-8` -> `en_US` (which does parse correctly) and similar.\n\nThat’s even more code to get the corner case designed wrong. Not all that attractive to me.\n\n\n> > That’s true, but being forced to maintain an independent configuration just because the software makes it hard to use the system-wide one is not optimal.\n> \n> Implicit hook directories were [already deprecated in favor of `--hooks-dir`](https://github.com/containers/libpod/blame/v1.1.2/docs/podman.1.md#L46) (#1920) before this discussion. So I don't see this as a big loss.\n\nYes, it is a corner case. I know it is a corner case and most people will know to steer away from it.\n\n> > I haven’t found anything definitive; meanwhile the POSIX definition of LC_COLLATE=POSIX per http://pubs.opengroup.org/onlinepubs/9699919799/basedefs/V1_chap07.html#tag_07_03_02_06 ...\n> \n> I think that is the definitive definition, with everything outside of that table being unspecified.\n\nThe one thing it _does_ specify is that normalization must not be performed, so…\n\n… I guess I’ll be testing that if I am ever that bored?"
+        },
+        {
+            "user": "wking",
+            "body": "> OTOH, I do acknowledge that a fair amount of older shell scripts doing something like for file in `config.d/*; do …` would end up being `LC_COLLATE`-dependent, arguably without the authors ever realizing this.\n\nAh, good point.  So to pull the Czech example from [here][1]:\n\n```console\n$ LC_COLLATE=cs_CZ.UTF-8 ls\nbaa  baá  báa  bab  báb  bac  bác  bač  báč\n$ LC_COLLATE=en_US.UTF-8 ls\nbaa  báa  baá  bab  báb  bac  bác  bač  báč\n```\n\nGive those all `.json` suffixes and hook content, and, with the bugfix from #2550, `podman` will sort hooks in the same order as `ls`, which is good for low-surprise.  And as we keep affirming to each other, this probably doesn't matter anyway, because a hook directory full of `baá.json`, `báa.json`, etc., where locale matters is unlikely.  And again, I'm still fine with either respecting the user's configured collation locate or hard-coding `und-u-va-posix`.  I just prefer some kind of Unicode comparison over byte-for-byte comparison.\n\n[1]: https://en.wikipedia.org/wiki/Alphabetical_order#Language-specific_conventions"
+        },
+        {
+            "user": "rh-atomic-bot",
+            "body": ":umbrella: The latest upstream changes (presumably #2550) made this pull request unmergeable. Please resolve the merge conflicts."
+        },
+        {
+            "user": "mtrmac",
+            "body": "> Give those all `.json` suffixes and hook content, and, with the bugfix from #2550, `podman` will sort hooks in the same order as `ls`, which is good for low-surprise.\n\nYet again, most C code is likely to use `strcmp` (or something similar to get ASCIIbetic order) and not `strcoll`, certainly all C code dealing with `*.d` that I’ve seen (notably https://github.com/systemd/systemd/blob/faab72d16b310c17be4b908cfe15eca122d16ae4/src/basic/conf-files.c#L175 ). And most of the shell consumers of `*.d`-like directories, like Fedora `initscripts`, have already been mostly phased out."
+        },
+        {
+            "user": "wking",
+            "body": "> Yet again, most C code is likely to use `strcmp`...\n\nI still think it would be a bug to use byte-by-byte sorting that ignored [Unicode normalization][1].  We should not sort differently for combining characters vs. composites.  And I'm still agnostic on `LC_COLLATE` vs. hard-coding `und-u-va-posix`.  And I'm still not a maintainer ;).\n\n[1]: http://www.unicode.org/reports/tr15/"
+        },
+        {
+            "user": "rhatdan",
+            "body": "@mtrmac @wking Whats the skoop on this one.  Have you guys settled on the best outcome?"
+        },
+        {
+            "user": "wking",
+            "body": "I'm still at my previous position.  @mtrmac, are you still committed to byte-sorting without Unicode normalization?"
+        },
+        {
+            "user": "mtrmac",
+            "body": "Most importantly, after #2550, we are no longer polluting the output with warnings. So, if no-one cares, just close this.\n- I remain very convinced that using users’ locale to sort hooks is just bad design. At best, the argument for doing that is https://github.com/containers/libpod/pull/2501#issuecomment-469903974 , more or less (I’ve been trying go be fair but may have failed) “your configuration after the default install contains an explicit language setting, and that setting being present gives us the license to behave inconsistently, here is the inconsistent behavior you ‘asked for’”.\n- Similarly (but weaker), using _any_ human collation order (i.e. one that can change with a software update) seems the wrong tradeoff WRT software testability and stability\n- Once the language/collation order is decided, I don’t _really_ care about doing/not doing the Unicode normalization. It just seems pointless to me (nothing else in the codebase accounts for Unicode normalization, why would we do that only for hooks?), and rather expensive (in a quick comparison, this costs us 2.08 MiB in unstripped file size, or 1.65 MiB per `size(1)`."
+        },
+        {
+            "user": "mtrmac",
+            "body": "> > > I haven’t found anything definitive; meanwhile the POSIX definition of LC_COLLATE=POSIX per http://pubs.opengroup.org/onlinepubs/9699919799/basedefs/V1_chap07.html#tag_07_03_02_06 ...\n> > \n> > \n> > I think that is the definitive definition, with everything outside of that table being unspecified.\n> \n> The one thing it _does_ specify is that normalization must not be performed, so…\n> \n> … I guess I’ll be testing that if I am ever that bored?\n\n\\*sigh\\* For the record, `und-u-va-posix` _is_ normalization aware, which makes it explicitly different from `LC_COLLATE=POSIX` (which ignore normalization, both on macOS and Linux).\n\n```go\npackage main\n\n// #include <locale.h>\n// #include <stdlib.h>\n// #include <string.h>\nimport \"C\"\n\nimport (\n\t\"fmt\"\n\t\"sort\"\n\t\"strings\"\n\t\"unsafe\"\n\n\t\"golang.org/x/text/collate\"\n\t\"golang.org/x/text/language\"\n\t\"golang.org/x/text/unicode/norm\"\n)\n\nvar inputStrings = []string{\n\t\"baa\",\n\t\"baá\",\n\t\"báa\",\n\t\"bab\",\n\t\"báb\",\n\t\"bac\",\n\t\"bác\",\n\t\"bač\",\n\t\"báč\",\n}\n\ntype input struct {\n\tvalue string\n\tnorm  norm.Form\n}\n\nfunc newInput(s string, norm norm.Form) input {\n\treturn input{\n\t\tvalue: norm.String(s),\n\t\tnorm:  norm,\n\t}\n}\n\nvar formName = map[norm.Form]string{\n\tnorm.NFC: \"NFC\",\n\tnorm.NFD: \"NFD\",\n}\n\nfunc printResults(name string, vals []input) {\n\tfmt.Printf(\"%s\\n\", name)\n\tfmt.Printf(\"%s\\n\", strings.Repeat(\"=\", len(name)))\n\tfmt.Printf(\"%s\\t%s\\t%-14s\\t%-14s\\t%s\\n\", \"Text\", \"Norm\", \"Raw\", \"NFC\", \"NFD\")\n\tfor _, v := range vals {\n\t\tfmt.Printf(\"%s\\t%s\\t%-14x\\t%-14x\\t%x\\n\", v.value, formName[v.norm], []byte(v.value), norm.NFC.Bytes([]byte(v.value)), norm.NFD.Bytes([]byte(v.value)))\n\t}\n\n}\n\ntype inputsLister []input\n\nfunc (il inputsLister) Len() int {\n\treturn len(il)\n}\n\nfunc (il inputsLister) Swap(i, j int) {\n\til[i], il[j] = il[j], il[i]\n}\n\nfunc (il inputsLister) Bytes(i int) []byte {\n\treturn []byte(il[i].value)\n}\n\nfunc strcoll(a, b string) int {\n\tca := C.CString(a)\n\tdefer C.free(unsafe.Pointer(ca))\n\tcb := C.CString(b)\n\tdefer C.free(unsafe.Pointer(cb))\n\n\treturn int(C.strcoll(ca, cb))\n}\n\nfunc main() {\n\tvals := []input{}\n\tfor _, s := range inputStrings {\n\t\tvals = append(vals, newInput(s, norm.NFC), newInput(s, norm.NFD))\n\t}\n\n\tsort.Slice(vals, func(i, j int) bool { return strings.ToLower(vals[i].value) < strings.ToLower(vals[j].value) })\n\tprintResults(\"string < on strings.ToLower\", vals)\n\n\tlang, err := language.Parse(\"und-u-va-posix\")\n\tif err != nil {\n\t\tpanic(err.Error())\n\t}\n\tcollator := collate.New(lang, collate.IgnoreCase, collate.IgnoreWidth)\n\tcollator.Sort(inputsLister(vals))\n\tprintResults(\"collate(und-u-va-posix, IgnoreCase)\", vals)\n\n\tempty := C.CString(\"\")\n\tC.setlocale(C.LC_ALL, empty)\n\tcheck := C.setlocale(C.LC_ALL, nil)\n\tsort.Slice(vals, func(i, j int) bool { return strcoll(vals[i].value, vals[j].value) < 0 })\n\tprintResults(\"strcoll \"+C.GoString(check), vals)\n}\n```"
+        },
+        {
+            "user": "rhatdan",
+            "body": "Ok I am leaning towards agreeing with @mtrmac "
+        },
+        {
+            "user": "TomSweeneyRedHat",
+            "body": "@mtrmac still some test issues here.  Might not hurt to rebase."
+        },
+        {
+            "user": "mtrmac",
+            "body": "Rebased, tests pass."
+        },
+        {
+            "user": "rhatdan",
+            "body": "/lgtm"
+        },
+        {
+            "user": "rhatdan",
+            "body": "/approve"
+        },
+        {
+            "user": "openshift-ci-robot",
+            "body": "[APPROVALNOTIFIER] This PR is **APPROVED**\n\nThis pull-request has been approved by: *<a href=\"https://github.com/containers/libpod/pull/2501#\" title=\"Author self-approved\">mtrmac</a>*, *<a href=\"https://github.com/containers/libpod/pull/2501#issuecomment-482939810\" title=\"Approved\">rhatdan</a>*\n\nThe full list of commands accepted by this bot can be found [here](https://go.k8s.io/bot-commands?repo=containers%2Flibpod).\n\nThe pull request process is described [here](https://git.k8s.io/community/contributors/guide/owners.md#the-code-review-process)\n\n<details >\nNeeds approval from an approver in each of these files:\n\n- ~~[OWNERS](https://github.com/containers/libpod/blob/master/OWNERS)~~ [rhatdan]\n\nApprovers can indicate their approval by writing `/approve` in a comment\nApprovers can cancel approval by writing `/approve cancel` in a comment\n</details>\n<!-- META={\"approvers\":[]} -->"
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 2494
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 2550
+        }
+    ]
+}

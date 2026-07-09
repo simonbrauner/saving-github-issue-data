@@ -1,0 +1,264 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 6688,
+    "type": "issue",
+    "title": "systemd sd-notify freezes podman",
+    "state": "closed",
+    "labels": [
+        "kind/bug",
+        "stale-issue",
+        "locked - please file new issue/PR"
+    ],
+    "user": "goochjj",
+    "body": "**Is this a BUG REPORT or FEATURE REQUEST? (leave only one on its own line)**\n\n/kind bug\n\n**Description**\n\nCreating a service using Type=notify freezes everything until the container is ready.\n\nSetting a service as Type=notify sets the NOTIFY_SOCKET, which gets passed through podman properly.  Runc and Crun then proxy that NOTIFY_SOCKET through to the container, indicating the container will signal when ready.  The whole idea being that starting a container does not equal \"a container is ready\", this initialization could take seconds, 10's of seconds, or minutes.  And it shouldn't matter how long it takes..\n\nThe problem is while it's in \"starting\" status, podman is frozen completely. `podman ps` doesn't return, `podman exec` doesn't work, even `podman info` won't return.  One partially initialized container shouldn't freeze everything, and the lack of exec makes it hard to diagnose what's going on inside the container to resolve the sd-notify issue. `podman stop` and `podman kill` appear to work, but the container is still stuck.\n\nIn addition, the MAINPID isn't set right - but we'll come back to that.\n\n**Steps to reproduce the issue:**\n\n1. Create a systemd service. Change type from Type=forking to Type=notify, and remove the \nPIDFile.  Add NotifyAccess=all.\nSSCE\n```\n[Unit]\nDescription=NotifyTesting\nWants=network.target\nAfter=network-online.target\n\n[Service]\nEnvironment=PODMAN_SYSTEMD_UNIT=%n\nSyslogIdentifier=%N\nExecStartPre=-/usr/bin/podman stop %N\nExecStartPre=-/usr/bin/podman rm %N\nLogExtraFields=CONTAINER_NAME=%N\nExecStart=/usr/bin/podman --log-level=debug run \\\n  -d --log-driver=journald \\\n  --init \\\n  --cgroups no-conmon \\\n  --net=host \\\n  --name %N \\\n  alpine sleep infinity\nExecStop=/usr/bin/podman stop -t 20 %N\nType=notify\nNotifyAccess=all\nRestart=on-failure\n#Restart=always\nRestartSec=30s\nTimeoutStartSec=20\nTimeoutStopSec=25\n#KillMode=none\n#Type=forking\n#PIDFile=/run/podman-pid-%n\nDelegate=yes\nSlice=machine.slice\n\n[Install]\nWantedBy=multi-user.target default.target\n```\n\n2. Run the service.\n\n3. Note the status:\n```\nnotifytest[8595]: time=\"2020-06-19T13:22:38Z\" level=debug msg=\"Starting container e6043f58bcd610d1e448739f2120447f2880c9b498c65fc3c181e1f453a48ef7 with command\n```\nIt never gets to started (as expected)\n\nStatus:\n```\n Main PID: 12003 (podman)\n    Tasks: 22 (limit: 4915)\n   Memory: 27.9M\n   CGroup: /machine.slice/notifytest.service\n           ├─12003 /usr/share/gocode/src/github.com/containers/libpod/bin/podman --log-level=debug run -d --log-driver=journald --init --cgroups no-conmon --net=host --name notifytest alpine sleep infinity\n           ├─12065 /usr/libexec/podman/conmon --api-version 1 -c a3e79ea772bdcca69020eca158f059718ff0f4b34dd1c8f8af5e77c6840e60f0 -u a3e79ea772bdcca69020eca158f059718ff0f4b34dd1c8f8af5e77c6840e60f0 -r /usr/bin/runc -b /va>\n           └─12084 /usr/bin/runc start a3e79ea772bdcca69020eca158f059718ff0f4b34dd1c8f8af5e77c6840e60f0\n```\n4. Try podman ps, podman exec -it -l sh, or podman info\n\n5. Freezes.\n\n6. Release the container\n`for i in /run/crun/*/notify/notify /run/runc/*/notify/notify.sock; do env NOTIFY_SOCKET=$i systemd-notify --ready; done`\n\n7. Everything releases, but the service STILL fails, because it didn't find MAINPID=conmon's pid.\n\n**Output of `podman version`:**\n\n```\nVersion:      2.0.0-dev\nAPI Version:  1\nGo Version:   go1.13.3\nGit Commit:   b27df834c18b08bb68172fa5bd5fd12a5cd54633\nBuilt:        Thu Jun 18 12:19:01 2020\nOS/Arch:      linux/amd64\n```\n\n**Output of `podman info --debug`:**\n\n```\nhost:\n  arch: amd64\n  buildahVersion: 1.15.0\n  cgroupVersion: v1\n  conmon:\n    package: Unknown\n    path: /usr/libexec/podman/conmon\n    version: 'conmon version 2.0.18-dev, commit: 954b05a7908c0aeeff007ebd19ff662e20e5f46f'\n  cpus: 4\n  distribution:\n    distribution: photon\n    version: \"3.0\"\n  eventLogger: file\n  hostname: photon-machine\n  idMappings:\n    gidmap: null\n    uidmap: null\n  kernel: 4.19.115-6.ph3-esx\n  linkmode: dynamic\n  memFree: 5536968704\n  memTotal: 8359960576\n  ociRuntime:\n    name: runc\n    package: runc-1.0.0.rc9-2.ph3.x86_64\n    path: /usr/bin/runc\n    version: |-\n      runc version 1.0.0-rc10+dev\n      commit: 2a0466958d9af23af2ad12bd79d06ed0af4091e2\n      spec: 1.0.2-dev\n  os: linux\n  remoteSocket:\n    path: /run/podman/podman.sock\n  rootless: false\n  slirp4netns:\n    executable: \"\"\n    package: \"\"\n    version: \"\"\n  swapFree: 0\n  swapTotal: 0\n  uptime: 25h 9m 27.25s (Approximately 1.04 days)\nregistries:\n  search:\n  - docker.io\n  - registry.fedoraproject.org\n  - registry.access.redhat.com\nstore:\n  configFile: /etc/containers/storage.conf\n  containerStore:\n    number: 4\n    paused: 0\n    running: 0\n    stopped: 4\n  graphDriverName: overlay\n  graphOptions:\n    overlay.mountopt: nodev,metacopy=on\n  graphRoot: /var/lib/containers/storage\n  graphStatus:\n    Backing Filesystem: extfs\n    Native Overlay Diff: \"false\"\n    Supports d_type: \"true\"\n    Using metacopy: \"true\"\n  imageStore:\n    number: 16\n  runRoot: /var/run/containers/storage\n  volumePath: /var/lib/containers/storage/volumes\nversion:\n  APIVersion: 1\n  Built: 1592482741\n  BuiltTime: Thu Jun 18 12:19:01 2020\n  GitCommit: b27df834c18b08bb68172fa5bd5fd12a5cd54633\n  GoVersion: go1.13.3\n  OsArch: linux/amd64\n  Version: 2.0.0-dev\n```\n\n**Package info (e.g. output of `rpm -q podman` or `apt list podman`):**\n\nCompiled from source.\n\n**Additional environment details (AWS, VirtualBox, physical, etc.):**\n",
+    "comments": [
+        {
+            "user": "mheon",
+            "body": "I'm fairly certain this is because `runc`/`crun` themselves basically freeze midway through container creation until they are notified by SD_NOTIFY. Podman is waiting for final confirmation from the runtime that the container has been successfully created, and it holding the container lock for the container in question while doing so. Changing that may be possible (it would unblock some things like `podman ps`) but the container is not considered running until the runtime finishes up, so we won't be able to `podman exec` into the container until after the notify issue has sorted itself."
+        },
+        {
+            "user": "goochjj",
+            "body": "First fix #6689 - Advertise MAINPID via sd-notify, this eliminates the need for a PIDFile.\n\nIn addition, I think there should be a new option to podman run, something like:\n```\n--sdnotify conmon-only|container\n```\n\nWith conmon-only, we send the MAINPID, and clear the NOTIFY_SOCKET so the OCI runtime doesn't pass it into the container.  We could also advertise \"ready\" when the OCI runtime finishes to advertise the service as ready.\n\nWith container, we send the MAINPID, and leave the NOTIFY_SOCKET so the OCI runtime passes it into the container for initialization, and let the container advertise further metadata.\n\n\nThis removes the need for hardcoded CID and PID files in the command line, and the PIDFile directive, as the pid is advertised directly through sd-notify.\n\n\n"
+        },
+        {
+            "user": "goochjj",
+            "body": "> I'm fairly certain this is because `runc`/`crun` themselves basically freeze midway through container creation until they are notified by SD_NOTIFY. Podman is waiting for final confirmation from the runtime that the container has been successfully created, and it holding the container lock for the container in question while doing so. Changing that may be possible (it would unblock some things like `podman ps`) but the container is not considered running until the runtime finishes up, so we won't be able to `podman exec` into the container until after the notify issue has sorted itself.\n\nI'm less concerned with operations on the container in question (i.e. exec into the actual container) than I am things completely unrelated like `podman info`.  Could always use nsenter to poke around the container and troubleshoot.\n"
+        },
+        {
+            "user": "goochjj",
+            "body": "@vrothberg @giuseppe  see --sdnotify proposal above\n\nI did MAINPID only since I thought that was least intrusive.  With the above, \"Container\" would be the default as that's what it does now.\n\nWe could add \"none\" as well, to tell podman not to do anything with the NOTIFY_SOCKET. I just didn't see how systemd would get the correct PID from the container itself... Looks like runc attempts to send a MAINPID, and if it overrides us there's nothing we can do about it anyway...  but with testing, whatever runc is sending doesn't work.\n\n\n"
+        },
+        {
+            "user": "vrothberg",
+            "body": "Thanks for the ping, @goochjj!\n\n@giuseppe knows these details of the runtimes and I guess he will know what to do :)"
+        },
+        {
+            "user": "giuseppe",
+            "body": "> I'm fairly certain this is because `runc`/`crun` themselves basically freeze midway through container creation until they are notified by SD_NOTIFY. Podman is waiting for final confirmation from the runtime that the container has been successfully created, and it holding the container lock for the container in question while doing so. Changing that may be possible (it would unblock some things like `podman ps`) but the container is not considered running until the runtime finishes up, so we won't be able to `podman exec` into the container until after the notify issue has sorted itself.\n\nyes I confirm that.  Both crun/runc stops on \"$RUNTIME start\" until the container notifies them.\n\nWhy does the container take so long to be ready?  Does it actually send any `READY=1` notification?"
+        },
+        {
+            "user": "giuseppe",
+            "body": "and also, any other info sent by the container is ignored, e.g. `MAINPID`.  The only notification accepted by the runtimes is `READY=1`"
+        },
+        {
+            "user": "goochjj",
+            "body": "No, I'm purposely delaying it to test behavior.  I don't think we can count on the container init being quick.\n\nFor instance, if I were to use this for my tomcat based web apps, it may take 30s-2min to initialize, and then I'd run health checks... I wouldn't want all of podman to be locked while that's happening.\n\n"
+        },
+        {
+            "user": "goochjj",
+            "body": "> and also, any other info sent by the container is ignored, e.g. `MAINPID`. The only notification accepted by the runtimes is `READY=1`\n\n@giuseppe   Am I reading this wrong? It looks like at line 166 runc itself is sending the MAINPID.\nhttps://github.com/opencontainers/runc/blob/9748b48742fad065666bcded00f2db5ded7e44c1/notify_socket.go#L140-L170\n\n\n\n\n"
+        },
+        {
+            "user": "goochjj",
+            "body": "If runc does send it, it's not making it to systemd, or systemd is throwing it out - at least in my testing.\n"
+        },
+        {
+            "user": "giuseppe",
+            "body": "> > ``\n> \n> @giuseppe Am I reading this wrong? It looks like at line 166 runc itself is sending the MAINPID.\n> https://github.com/opencontainers/runc/blob/9748b48742fad065666bcded00f2db5ded7e44c1/notify_socket.go#L140-L170\n\nyes correct, runc is sending the MAINPID.  The MAINPID sent by runc is the pid for the container"
+        },
+        {
+            "user": "giuseppe",
+            "body": "> For instance, if I were to use this for my tomcat based web apps, it may take 30s-2min to initialize, and then I'd run health checks... I wouldn't want all of podman to be locked while that's happening.\n\nthe assumption is that the container is not ready until it notifies to be so.  We should probably fix the healthchecks to raise an error immediately if the container is not running."
+        },
+        {
+            "user": "goochjj",
+            "body": "> > > ``\n> > \n> > \n> > @giuseppe Am I reading this wrong? It looks like at line 166 runc itself is sending the MAINPID.\n> > https://github.com/opencontainers/runc/blob/9748b48742fad065666bcded00f2db5ded7e44c1/notify_socket.go#L140-L170\n> \n> yes correct, runc is sending the MAINPID. The MAINPID sent by runc is the pid for the container\n\nExcept it doesn't seem to be....\n\n```\nrunc --version\nrunc version 1.0.0-rc10+dev\ncommit: 2a0466958d9af23af2ad12bd79d06ed0af4091e2\nspec: 1.0.2-dev\n```\nOne screen: `socat unix-recvfrom:/run/nottest,fork -`\nAnother screen: \n`env NOTIFY_SOCKET=/run/nottest podman --log-level debug run --rm -it alpine sh`\n\nAnother screen `for i in /run/crun/*/notify/notify /run/runc/*/notify/notify.sock; do env NOTIFY_SOCKET=$i systemd-notify --ready; done`\n\nAll that socat shows is \"READY=1\"\n\nI don't know what the tinker.C part means, maybe it's a spec option or a command line option?\n\n\nIt appears that systemd DOES accept MAINPID multiple times.  Each time MAINPID is sent it switches, throwing a cgroups warning if need be.  (runc start is apparently forked off, not surprisingly)\n\nI'm fine sending MAINPID at conmon launch, and again after runc start succeeds to reset it if the OCI runtime played tricks on us.\n\n\n\n\n"
+        },
+        {
+            "user": "goochjj",
+            "body": "> > For instance, if I were to use this for my tomcat based web apps, it may take 30s-2min to initialize, and then I'd run health checks... I wouldn't want all of podman to be locked while that's happening.\n> \n> the assumption is that the container is not ready until it notifies to be so. We should probably fix the healthchecks to raise an error immediately if the container is not running.\n\nI 100% agree with that.  I also don't care if podman exec -it container_in_question blocks (except that ctrl-c doesn't work - that should probably be fixed).  I DO have an issue with podman info blocking, and podman ps.  Wasn't the point of this architecture vs. docker that containers were more independent and less susceptible to this sort of coupling between containers...\n\n"
+        },
+        {
+            "user": "mheon",
+            "body": "We take and hold a lock on the container in question for all major operations. This provides strong safety against races (two `podman start` on the same container launched at the same time will not be an issue). `podman ps` also grabs the lock (to get the current status of the container) and it looks like info does the same? Normally this isn't a problem, because every one of the locked operations takes less than a second, and then the lock releases and goes to another process. Unfortunately, the decision by the OCI runtime to not exit until SD_NOTIFY has succeeded means that `podman start` can hang for a very long time in that case. I'm still of the opinion that this is an OCI runtime issue, but it doesn't seem like one that `runc` has any intention of addressing."
+        },
+        {
+            "user": "goochjj",
+            "body": "@mheon If you don't like how runc handles it, then it could be taken out of the OCI runtime's responsibility.\n\n1) Have podman mask out NOTIFY_SOCKET from the OCI runtime, but pass it to conmon\n2) Have conmon create a notify socket, intercept READY and pass it on to the host's notify socket, like runc/crun do now.  \n3) Have podman inject the bind mount to the socket conmon is proxying, and set NOTIFY_SOCKET properly in the container's env (not the runtime's env)\n\nI imagine that would do the trick... But it seems hacky to implement behavior in podman because the OCI runtime doesn't do what we want.\n\nIt depends on what you think should happen - when you do a podman start, and the container isn't READY, has it started?  I'd say yes.  Because sd-notify is specifically meant to talk to SYSTEMD, not oci runtimes.  The container started.\n\nIf you want to verify it's READY, you should use systemctl status to verify it's ready.  Or, monitor the unix datagram yourself.  IMHO the runtime and podman shouldn't block waiting for READY=1.\n\n\n\n"
+        },
+        {
+            "user": "mheon",
+            "body": "That is quite tempting, for more than one reason - we've had occasional problems with the implementation in `runc` having bugs and upstream not merging fixes for said bugs, so entirely removing this from the runtime lets us do this in a more sensible, nonblocking way and circumvent buggy runtimes.\n\nI am a bit concerned about the complexity this would bring to conmon, and the difficulty of modifying the environment of the running container (going to be difficult doing that in a portable fashion)."
+        },
+        {
+            "user": "goochjj",
+            "body": "> That is quite tempting, for more than one reason - we've had occasional problems with the implementation in `runc` having bugs and upstream not merging fixes for said bugs, so entirely removing this from the runtime lets us do this in a more sensible, nonblocking way and circumvent buggy runtimes.\n> \n> I am a bit concerned about the complexity this would bring to conmon, and the difficulty of modifying the environment of the running container (going to be difficult doing that in a portable fashion).\n\n\nI imagine it would end up in specgen somewhere - injecting into the container's ENV and Mounts.  This is very similar to what I was playing with w.r.t. syslog proxying.\n\nhttps://github.com/containers/conmon/pull/177/files\n\nIt was much longer than I thought it should be mainly because it's C and it's glib and it's nonblocking... And everything in conmon so far was based on stream sockets.  If conmon gained the ability to do dgram sockets, it could do specific proxying for NOTIFY_SOCKET and generic proxying for things like /dev/log.\n\nUltimately I replaced it with an OCI hook shell script that was about 20 lines long, which seemed less complex. \n\nI have less understanding of how best to inject mounts and env in libpod - perhaps in specgen somewhere...  It would just be another bind mount that libpod handles (/etc/hosts, /etc/resolv.conf, /run/.containerenv, /run/notify)  and it would bind to the exact same directory - userdata.  It could even always be /run/notify in the container.\n\n\n"
+        },
+        {
+            "user": "mheon",
+            "body": "Huh. I was under the impression that the OCI runtime automatically hijacked SD_NOTIFY when it found it - if that's not the case, and we can do it ourselves, that's not bad at all. My main fear was that we'd have to trick the runtime into thinking there was no socket."
+        },
+        {
+            "user": "goochjj",
+            "body": "Well, let's test. We all know what happens when runc and crun receives NOTIFY_SOCKET in its own environment.  If runc and crun also intercepted the spec's environment... then this wouldn't happen:\n\n```\npodman run --rm -it -e NOTIFY_SOCKET=/tmp/notify alpine sh\n/ # printenv NOTIFY_SOCKET\n/tmp/notify\n/ # ls -l /tmp\ntotal 0\n```\n\nWhich means I can do things myself with my own bind mount....\n\n```\nsocat unix-recvfrom:/tmp/notify - &\n# podman run --rm -it -e NOTIFY_SOCKET=/tmp/notify -v /tmp/notify:/tmp/notify fedora sh\nsh-5.0# systemd-notify --ready\nREADY=1sh-5.0#\n```\n\nThat's runc...\n\n\nCrun:\n```\n# podman --runtime /opt/podman/bin/crun run --rm -it -e NOTIFY_SOCKET=/tmp/notify alpine sh\n/ # ls -l /tmp\ntotal 0\n/ # printenv NOTIFY_SOCKET\n/tmp/notify\n/ #\n```\n\n```\n# podman --runtime /opt/podman/bin/crun run --rm -it -e NOTIFY_SOCKET=/tmp/notify -v /tmp/notify:/tmp/notify fedora sh\nsh-5.0# systemd-notify --ready\nREADY=1sh-5.0# exit\n```\n\nAlso runc and crun only ever pass READY=1, but I don't see any reason why we couldn't also pass STATUS,RELOADING, STOPPING, ERRNO, or WATCHDOG items.. I assume they're not passed now just because they aren't frequently implemented. I think we'd just need to decide which variables conmon owns (MAINPID being the obvious one.  conmon could block MAINPID from the container and only ever send its own).  Does it make sense for conmon to set up the watchdog for itself?  etc.\n\nI can work up a PoC and we can go from there - probably the first task would be to just get the 3 modes I did in the PR working without the OCI runtime doing any proxying, and only dealing with MAINPID and READY=1.  Future expansion could build off of that.  Doing it that way should solve the podman locking \"problem\" introduced by the OCI runtime.\n\n\n\n"
+        },
+        {
+            "user": "goochjj",
+            "body": "@mheon  Given https://github.com/containers/conmon/pull/182, the only changes to libpod are https://github.com/goochjj/libpod/pull/1 to handle SD-NOTIFY ourselves\n\n\n"
+        },
+        {
+            "user": "goochjj",
+            "body": "(assuming the other sd-notify work as a baseline)\n"
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@goochjj @mheon @giuseppe Is this still an issue?"
+        },
+        {
+            "user": "goochjj",
+            "body": "Yes, it is still an issue. The OCI runtime blocks when using sd-notify (container), and podman freezes because the starting container holds the lock.\n\nI've provided a solution.\n  containers/conmon#182\n  goochjj#1\n"
+        },
+        {
+            "user": "giuseppe",
+            "body": "> @goochjj @mheon @giuseppe Is this still an issue?\n\nI don't think it is an issue.  Podman and the OCI runtime wait for the container to be ready.  If the container doesn't support SD_NOTIFY, then the user must not set it."
+        },
+        {
+            "user": "goochjj",
+            "body": "And if the OCI runtime waits for 3-5 minutes for the container to start, and podman is completely unusable during that time, even for OTHER containers, you don't consider than an issue? `podman ps` and `podman info` and `podman exec` should all just freeze in place?\n\n\n"
+        },
+        {
+            "user": "goochjj",
+            "body": "What's the design? What's the guiding principles?\n\nIn my mind:\n1) One container should never influence operations on another container.\n2) One container's startup should never freeze podman.  Especially for non-container-specific operations like `podman info`\n\nIf these principles are incorrect, please let me know.\nIf these principles are correct, then the current SD_NOTIFY support violates both.  And I HAVE provided a solution.  So the only questions are\n1) Is my solution the right direction?\n2) Are you going to merge them?\n\n\n"
+        },
+        {
+            "user": "mheon",
+            "body": "Making `podman info` query container status was a mistake in retrospect - makes it too vulnerable to these sorts of lock contention issues, and we need it to function for debugging. We could go in and add a timeout on retrieving status, return without it if it takes too long - but that's really a separate issue.\n\nWhen we originally wrote Podman, one of the core assumptions was that the OCI runtime would exit quickly. As such, every core operation on containers that involves it holds the container lock for the full duration - which is much safer (ensures that `podman start` and `podman stop` on the same container can never race). Unfortunately, this assumption blows up the moment sd-notify comes into play, as the OCI runtime decides that hanging for several minutes without returning is a quite acceptable thing and Podman is stuck holding locks and hoping the container actually starts successfully.\n\nI would really rather solve this outside of the OCI runtime (the Conmon patches from @goochjj seem like a good fit) and preserve our existing semantics, than trying to patch around an OCI runtime that doesn't tell me if a container started successfully for several minutes."
+        },
+        {
+            "user": "mheon",
+            "body": "@giuseppe Do you have any objection to us supporting a separate, Conmon-based path? The OCI runtime approach is probably fine for other users but I don't think it's a good fit for Podman's architecture."
+        },
+        {
+            "user": "giuseppe",
+            "body": "if we don't care for the oci runtime to start, couldn't we just run the \"start\" in the background?\n\nI'd say we should not keep any lock during `start`.   What kind of issues could that introduce?  Could a new state \"starting\" solve them?"
+        },
+        {
+            "user": "mheon",
+            "body": "I'm really reluctant to do that - what if the OCI runtime fails to start (less likely on runc/crun admittedly, but I could easily see Kata or similar blowing up at start even if create succeeded earlier). We'd stick the container into an awkward \"starting\" state where it could potentially be removed from under us while the OCI runtime is trying to start it and hope that start succeeds in a halfway-reasonable time, while `podman start` is stuck and giving no output on the command line."
+        },
+        {
+            "user": "mheon",
+            "body": "I think we've agreed to move forward with the conmon-based approach, with the option to use a flag to retain the existing behavior.\n\nWhich means we need to finally get that Conmon patch merged - sorry for the delay there."
+        },
+        {
+            "user": "rhatdan",
+            "body": "Any progress on this @goochjj ?"
+        },
+        {
+            "user": "goochjj",
+            "body": "It's all in #7607 - which was pending conmon's changes making it into the test environments.\n"
+        },
+        {
+            "user": "rhatdan",
+            "body": "Any idea if the new conmon is there now?"
+        },
+        {
+            "user": "rhatdan",
+            "body": "Still waiting for this to get merged."
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "rhatdan",
+            "body": "Still waiting on this one."
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "rhatdan",
+            "body": "Since Conmon is merged, I am going to assume this is fixed.  Reopen if I am mistaken."
+        },
+        {
+            "user": "flyingflo",
+            "body": "Are you sure this is fixed with conmon, only? Don't we need #8508 too?\nI'm asking, because I still see this behaviour on F34 with\n- podman 3.2.2\n- conmon 2.0.27\n- crun 0.20.1\n\nI'm trying to get a sd_notify aware service in a podman container to play nicely as a `Type=notify` systemd unit, preferably with watchdog and status text. I would love this kind of \"perfect\" integration."
+        },
+        {
+            "user": "rhatdan",
+            "body": "Do you have a easy reproducer?  We need an example of a program that uses sd-notify that we could try."
+        },
+        {
+            "user": "flyingflo",
+            "body": "I just threw my unpolished experiment into a repo: https://github.com/flyingflo/podman_sdnotify\nIt also works with a bash script calling `systemd-notify`, but I used python later, because the PID stays the same."
+        },
+        {
+            "user": "rhatdan",
+            "body": "I am not sure how this is supposed to work, but the first example I tried got connection refused, with container, then I changed to conmon type and I get.\n\n\n```\n× sdnotify_py.service - Podman container-sdnotify_py_ctr.service\n     Loaded: loaded (/usr/lib/systemd/system/sdnotify_py.service; disabled; vendor preset: disabled)\n     Active: failed (Result: exit-code) since Fri 2021-07-16 08:57:12 EDT; 28s ago\n       Docs: man:podman-generate-systemd(1)\n    Process: 186726 ExecStartPre=/bin/rm -f /run/container-sdnotify_py_ctr.pid /run/container-sdnotify_py_ctr.ctr-id (code=exited, status=0/SUCCESS)\n    Process: 186897 ExecStart=/usr/bin/podman run --conmon-pidfile /run/container-sdnotify_py_ctr.pid --cidfile /run/container-sdnotify_py_ctr.ctr-id --cgroups=split --sdnotify=conmon -d --replace -a stderr -a stdout --log-driver=journal>\n    Process: 187055 ExecStopPost=/usr/bin/podman rm --ignore -f --cidfile /run/container-sdnotify_py_ctr.ctr-id (code=exited, status=219/CGROUP)\n   Main PID: 186897 (code=exited, status=1/FAILURE)\n        CPU: 566ms\n\nJul 16 08:57:12 localhost.localdomain conmon[186897]:   File \"/app/sdnotify_py.py\", line 15, in <module>\nJul 16 08:57:12 localhost.localdomain conmon[186897]:     n = sdnotify.SystemdNotifier(debug=True)\nJul 16 08:57:12 localhost.localdomain conmon[186897]:   File \"/usr/local/lib/python3.9/site-packages/sdnotify/__init__.py\", line 37, in __init__\nJul 16 08:57:12 localhost.localdomain conmon[186897]:     if addr[0] == '@':\nJul 16 08:57:12 localhost.localdomain conmon[186897]: TypeError: 'NoneType' object is not subscriptable\nJul 16 08:57:12 localhost.localdomain podman[186926]: 2021-07-16 08:57:12.67782836 -0400 EDT m=+0.058939985 container died ceee2ce16ccfd607d76ad7eecfcb487ed3cb84a990dbe5f2a04232b49ddf535c (image=localhost/sdnotify_py:latest, name=sdnotif>\nJul 16 08:57:12 localhost.localdomain podman[186926]: 2021-07-16 08:57:12.771301398 -0400 EDT m=+0.152413006 container cleanup ceee2ce16ccfd607d76ad7eecfcb487ed3cb84a990dbe5f2a04232b49ddf535c (image=localhost/sdnotify_py:latest, name=sdn>\nJul 16 08:57:12 localhost.localdomain systemd[1]: sdnotify_py.service: Main process exited, code=exited, status=1/FAILURE\nJul 16 08:57:12 localhost.localdomain systemd[1]: sdnotify_py.service: Control process exited, code=exited, status=219/CGROUP\nJul 16 08:57:12 localhost.localdomain systemd[1]: sdnotify_py.service: Failed with result 'exit-code'.\n```"
+        },
+        {
+            "user": "rhatdan",
+            "body": "@haircommander Any idea what is going on here.  It looks like conmon is not listening on the notify socket?"
+        },
+        {
+            "user": "haircommander",
+            "body": "gonna be honest, I do not understand the sd notify code haha\n\n@flyingflo are you able to test using that PR? the phrasing \"blocked by oci runtime\" in the PR implies there is a missing link that we may need..."
+        },
+        {
+            "user": "rhatdan",
+            "body": "Actually @flyingflo your example is working for me.  Although you python script is failing after the first sdnotify.\n\n```\n# Inform systemd that we've finished our startup sequence...\nn = sdnotify.SystemdNotifier(debug=True)\nn.notify(\"READY=1\\nSTATUS=Started\")\n```\nThis looks successful, then systemd or conmon drops the connection\n```\ncount = 1\nwhile True:\n    print(\"Running... {}\".format(count))\n    try:\n        n.notify(\"STATUS=Count is {}\".format(count))\n```\nThis notify fails, because systemd or conmon has dropped the connection.\n\nDoes this test work differently if you don't run it in a container.  Is conmon dropping the connection when it should not?"
+        },
+        {
+            "user": "flyingflo",
+            "body": "With my test, I can clearly observe the behaviour in this actual issue.\nThe crun process sticks around (observed with `systemctl status`) until the python script sends READY after 10s.\nDuring this time podman is blocked completely (e.g. `podman ps`), which is what this issue is about, if I understood.\n\nThe second observation is that all writes to the socket fail, after the first write with `READY=1`, after which crun terminates.\nI believe this is because what I see is crun proxying the socket, not conmon. \nThe intention of @goochjj in #8508 and  https://github.com/containers/conmon/pull/182 is that conmon proxies the socket and that the OCI runtime is circumvented. \nI'm not sure if that is correct, because I'm looking into this the first time, but I think we need #8508 before https://github.com/containers/conmon/pull/182 is in effect with podman, because it prepares the environments for conmon and the OCI runtime appropriately."
+        },
+        {
+            "user": "mheon",
+            "body": "Wait - #8508 isn't merged yet?\n\n@vrothberg Didn't we just swap `generate systemd` to use notify by default? If so, and #8508 is not merged, I think we need an immediate revert of that. The behavior of sdnotify when the OCI runtime is used is not sane."
+        },
+        {
+            "user": "flyingflo",
+            "body": "I just assumed it is not merged because of the #8508 's state, no further investigation.\n\nFor me Type=notify works with podman's `--sdnotify=container` but only for the READY message, because all others don't get through after the runtime goes away, and `--sdnotify=conmon` works too, but there is no NOTIFY_SOCKET set in the container (I guess that is what it should do)."
+        },
+        {
+            "user": "rhatdan",
+            "body": "I just updated an pushed it.  This PR has been floundering for a while, I guess I will need to pay more attention to it."
+        },
+        {
+            "user": "flyingflo",
+            "body": "> Jul 16 08:57:12 localhost.localdomain conmon[186897]:   File \"/app/sdnotify_py.py\", line 15, in <module>\n> Jul 16 08:57:12 localhost.localdomain conmon[186897]:     n = sdnotify.SystemdNotifier(debug=True)\n> Jul 16 08:57:12 localhost.localdomain conmon[186897]:   File \"/usr/local/lib/python3.9/site-packages/sdnotify/__init__.py\", line 37, in __init__\n> Jul 16 08:57:12 localhost.localdomain conmon[186897]:     if addr[0] == '@':\n> Jul 16 08:57:12 localhost.localdomain conmon[186897]: TypeError: 'NoneType' object is not subscriptable\n\n@rhatdan this is what you get if the env var NOTIFY_SOCKET is not set in the container. Which is the case with `--sdnotify=conmon`."
+        },
+        {
+            "user": "vrothberg",
+            "body": "> Wait - #8508 isn't merged yet?\n> \n> @vrothberg Didn't we just swap `generate systemd` to use notify by default? If so, and #8508 is not merged, I think we need an immediate revert of that. The behavior of sdnotify when the OCI runtime is used is not sane.\n\nBy default, it's setting --sdnotify=conmon where everything's handled on the Podman-side of things."
+        },
+        {
+            "user": "mheon",
+            "body": "OK Good. We're set then."
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 6693
+        },
+        {
+            "organization": "containers",
+            "repository": "conmon",
+            "number": 182
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 6160
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 7316
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 7607
+        }
+    ]
+}

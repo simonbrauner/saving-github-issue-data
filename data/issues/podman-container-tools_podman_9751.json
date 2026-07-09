@@ -1,0 +1,82 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 9751,
+    "type": "issue",
+    "title": "remote: podman kill: loses exit code",
+    "state": "closed",
+    "labels": [
+        "flakes",
+        "kind/bug",
+        "remote",
+        "locked - please file new issue/PR"
+    ],
+    "user": "edsantiago",
+    "body": "New flake. Only three instances in two months, but that's enough to make me worry:\n```\n[+0104s] not ok 51 podman stop - unlock while waiting for timeout\n(from function `is' in file test/system/helpers.bash, line 406,\n in test file test/system/050-stop.bats, line 95)\n  `is \"$output\" \"137\" \"Exit code of killed container\"' failed\n# podman-remote rm --all --force\n# podman-remote ps --all --external --format {{.ID}} {{.Names}}\n# podman-remote images --all --format {{.Repository}}:{{.Tag}} {{.ID}}\nquay.io/libpod/testimage:20200929 766ff5a3a7e4\n# podman-remote run --name stopme -d quay.io/libpod/testimage:20200929 sh -c trap 'echo Received SIGTERM, ignoring' SIGTERM; echo READY; while :; do sleep 1; done\n2da656948070442ce2585b9f2a83d003b0a1c44ea5a67b47a3b7b4a9d1f4bc9d\n# podman-remote ps -a\nCONTAINER ID  IMAGE                              COMMAND               CREATED                 STATUS                     PORTS   NAMES\n2da656948070  quay.io/libpod/testimage:20200929  sh -c trap 'echo ...  Less than a second ago  Up Less than a second ago          stopme\n# podman-remote inspect --format {{.State.Status}} stopme\nstopping\n# podman-remote kill stopme\n2da656948070442ce2585b9f2a83d003b0a1c44ea5a67b47a3b7b4a9d1f4bc9d\n# podman-remote inspect --format {{.State.ExitCode}} stopme\n0\n#/vvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv\n#|     FAIL: Exit code of killed container\n#| expected: '137'\n#|   actual: '0'\n#\\^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n```\n## sys: podman stop - unlock while waiting for timeout\n* gce_instance:prior-fedora : sys remote fedora-32 root host\n  * PR #9732\n    * [03-17 11:05](https://storage.googleapis.com/cirrus-ci-6707778565701632-fcae48/artifacts/containers/podman/5446092654379008/html/sys-remote-fedora-32-root-host.log.html)\n  * PR #9133\n    * [01-27 21:30](https://storage.googleapis.com/cirrus-ci-6707778565701632-fcae48/artifacts/containers/podman/5129080547835904/html/sys-remote-fedora-32-root-host.log.html)\n  * PR #9070\n    * [01-25 19:37](https://storage.googleapis.com/cirrus-ci-6707778565701632-fcae48/artifacts/containers/podman/6007062325886976/html/sys-remote-fedora-32-root-host.log.html)\n\nIt's possible that the bug is in the test itself. ",
+    "comments": [
+        {
+            "user": "edsantiago",
+            "body": "I just saw it again, f33:\n```\n ✗ podman stop - unlock while waiting for timeout\n   (from function `is' in file /usr/share/podman/test/system/helpers.bash, line 411,\n    in test file /usr/share/podman/test/system/050-stop.bats, line 138)\n     `is \"$output\" \"137\" \"Exit code of killed container\"' failed\n   # /usr/bin/podman-remote rm --all --force\n   # /usr/bin/podman-remote ps --all --external --format {{.ID}} {{.Names}}\n   # /usr/bin/podman-remote images --all --format {{.Repository}}:{{.Tag}} {{.ID}}\n   quay.io/libpod/testimage:20210223 4abe85964f5c\n   # /usr/bin/podman-remote run --name stopme -d quay.io/libpod/testimage:20210223 sh -c trap 'echo Received SIGTERM, ignoring' SIGTERM; echo READY; while :; do sleep 1; done\n   cd52dbb101531433498ca372ffd9db273684ecac76a1e091e078261a396084ac\n   # /usr/bin/podman-remote ps -a\n   CONTAINER ID  IMAGE                              COMMAND               CREATED                 STATUS    PORTS   NAMES\n   cd52dbb10153  quay.io/libpod/testimage:20210223  sh -c trap 'echo ...  Less than a second ago  stopping          stopme\n   # /usr/bin/podman-remote inspect --format {{.State.Status}} stopme\n   stopping\n   # /usr/bin/podman-remote kill stopme\n   stopme\n   # /usr/bin/podman-remote inspect --format {{.State.ExitCode}} stopme\n   0\n   #/vvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv\n   #|     FAIL: Exit code of killed container\n   #| expected: '137'\n   #|   actual: '0'\n   #\\^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n```"
+        },
+        {
+            "user": "edsantiago",
+            "body": "I'm starting to think there's a more general race in podman-remote exit-status handling:\n\n* gce_instance:prior-ubuntu : sys remote ubuntu-2004 root host\n  * PR #9920\n    * [04-01 15:13](https://storage.googleapis.com/cirrus-ci-6707778565701632-fcae48/artifacts/containers/podman/4629503390515200/html/sys-remote-ubuntu-2004-root-host.log.html)\n\nTrivial reproducer (assumes `podman system service` running elsewhere):\n```console\n$ cat Containerfile\nFROM quay.io/libpod/nosuchimage:nosuchtag\nRUN echo hi\n$ while :;do ../bin/podman-remote build -t build_test --pull-never . && break;done\n...runs for a minute or two, then\n\nSTEP 1: FROM quay.io/libpod/nosuchimage:nosuchtag\nError: error creating build container: pull policy is \"never\" but \"quay.io/libpod/nosuchimage:nosuchtag\" could not be found locally\n\nSTEP 1: FROM quay.io/libpod/nosuchimage:nosuchtag\n$ <--- back to prompt, with exit status 0. This should never happen.\n```\nMy interpretation: the `FROM`, running on the server, is failing. The server aborts, the client aborts, but the client somehow doesn't get the error message nor exit status. The above is, so far, a 100% reliable reproducer, root and rootless."
+        },
+        {
+            "user": "edsantiago",
+            "body": "Another one in `kill`\n## sys: podman stop - unlock while waiting for timeout\n* instance:GCEInstance : sys remote ubuntu-2004 root host\n  * PR #9554\n    * [04-07 16:26](https://storage.googleapis.com/cirrus-ci-6707778565701632-fcae48/artifacts/containers/podman/6464958201331712/html/sys-remote-ubuntu-2004-root-host.log.html)\n"
+        },
+        {
+            "user": "zhangguanzhang",
+            "body": "https://storage.googleapis.com/cirrus-ci-6707778565701632-fcae48/artifacts/containers/podman/6676193349992448/html/sys-remote-ubuntu-2004-root-host.log.html\nonce agin"
+        },
+        {
+            "user": "edsantiago",
+            "body": "And a few more:\n## sys: podman stop - unlock while waiting for timeout\n* instance:GCEInstance : sys remote ubuntu-2004 root host\n  * PR #9977\n    * [04-08 17:51](https://storage.googleapis.com/cirrus-ci-6707778565701632-fcae48/artifacts/containers/podman/5946568802041856/html/sys-remote-ubuntu-2004-root-host.log.html)\n  * PR #10014\n    * [04-13 19:16](https://storage.googleapis.com/cirrus-ci-6707778565701632-fcae48/artifacts/containers/podman/5527830227320832/html/sys-remote-ubuntu-2004-root-host.log.html)\n* instance:GCEInstance : sys remote ubuntu-2010 root host\n  * PR #9969\n    * [04-09 15:06](https://storage.googleapis.com/cirrus-ci-6707778565701632-fcae48/artifacts/containers/podman/5451737566806016/html/sys-remote-ubuntu-2010-root-host.log.html)\n  * PR #9381\n    * [04-12 11:23](https://storage.googleapis.com/cirrus-ci-6707778565701632-fcae48/artifacts/containers/podman/5388275130040320/html/sys-remote-ubuntu-2010-root-host.log.html)\n\nI'm having trouble keeping track of which ones I've already posted, so I may have missed some"
+        },
+        {
+            "user": "rhatdan",
+            "body": "This is very strange, since podman  and podman-remote kill are using the same code path for kill.  One would think this is a race condition between kill and inspect, but it should be faster with local execution then remote. It could be the kill kills the process inside of the container but the cleanup call does not happen until after the inspect.  I would figure this would be the same race on local versus remote.\n\n@mheon WDYT?"
+        },
+        {
+            "user": "rhatdan",
+            "body": "We do have this code for Docker, we could do the same for libpod, not sure why we would not want to.\n\n```\n\t// Docker waits for the container to stop if the signal is 0 or\n\t// SIGKILL.\n\tif !utils.IsLibpodRequest(r) {\n\t\tsig, err := signal.ParseSignalNameOrNumber(query.Signal)\n\t\tif err != nil {\n\t\t\tutils.InternalServerError(w, err)\n\t\t\treturn\n\t\t}\n\t\tif sig == 0 || syscall.Signal(sig) == syscall.SIGKILL {\n\t\t\topts := entities.WaitOptions{\n\t\t\t\tCondition: []define.ContainerStatus{define.ContainerStateExited, define.ContainerStateStopped},\n\t\t\t\tInterval:  time.Millisecond * 250,\n\t\t\t}\n\t\t\tif _, err := containerEngine.ContainerWait(r.Context(), []string{name}, opts); err != nil {\n\t\t\t\tutils.Error(w, \"Something went wrong.\", http.StatusInternalServerError, err)\n\t\t\t\treturn\n\t\t\t}\n\t\t}\n\t}\n```"
+        },
+        {
+            "user": "mheon",
+            "body": "The test as written is inherently racy. `podman kill` does not and has never made a promise that it waits until the container is dead. As such, once `podman-remote kill` exits, the signal has been sent, and the kernel will process it when it next wakes up the container. So the race here is if the container gets scheduled before Podman gets past the initial state check for the container. I imagine the container being a child of podman-remote somewhat reduces its priority to run, as it's backgrounded?\n\nThe test should be rewritten to use `podman stop` to remove races."
+        },
+        {
+            "user": "mheon",
+            "body": "Alternatively, it needs something to force `inspect` to run after the container has stopped. Maybe a loop to check container state?"
+        },
+        {
+            "user": "edsantiago",
+            "body": "@mheon this is more than just `podman-remote kill`; or perhaps there's another different bug? Search in-page for 9920, that one manifests as `podman-remote build`."
+        },
+        {
+            "user": "mheon",
+            "body": "That sounds like a separate bug? From where I stand, the original issue here with `podman kill` is definitely a race in the code. `podman build` may also be a race but since the commands are different it sounds distinct."
+        },
+        {
+            "user": "rhatdan",
+            "body": "If we changed the test to do \n\npodman kill\npodman wait\npodman inspect\n\nThe issue probably goes away correct?"
+        },
+        {
+            "user": "edsantiago",
+            "body": "I'll submit a PR for that. (And will file the build problem as a new issue)"
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 10028
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 10029
+        }
+    ]
+}

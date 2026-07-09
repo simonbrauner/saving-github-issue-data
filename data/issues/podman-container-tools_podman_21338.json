@@ -1,0 +1,79 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 21338,
+    "type": "issue",
+    "title": "podman farm and registries with insecure ports",
+    "state": "closed",
+    "labels": [
+        "kind/bug",
+        "locked - please file new issue/PR"
+    ],
+    "user": "afbjorklund",
+    "body": "### Issue Description\n\nIt seems like the new `podman farm` doesn't support local registries, such as docker distribution?\n\n### Steps to reproduce the issue\n\nSteps to reproduce the issue\n1. farm build --local=false --format=docker testbuild --tag localhost:5000/testbuild\n2.\n3.\n\n\n### Describe the results you received\n\nError: build: building: 1 error occurred:\n\t* pushing image {\"063b93b4f7a0c41748e4a457d56b73afc8226682d7fe57a2ee0fbb3fc7e1fea6\" \"docker-archive\"} to registry: Invalid image name \"localhost:5000/testbuild@@unknown-digest@@\", unknown transport \"localhost\"\n\n\n### Describe the results you expected\n\nIt was expected to be able to parse host:port\n\n### podman info output\n\n```yaml\nIf you are unable to run podman info for any reason, please provide the podman version, operating system and its version and the architecture you are running.\n```\n\nClient: v4.9.0\nServer: v4.8.3, \"Fedora Linux 39 (Cloud Edition)\", amd64\n\n### Podman in a container\n\nNo\n\n### Privileged Or Rootless\n\nRootless\n\n### Upstream Latest Release\n\nYes\n\n### Additional environment details\n\nAdditional environment details\n\n### Additional information\n\nAdditional information like issue happens only occasionally or issue happens with a particular architecture or on a particular setting",
+    "comments": [
+        {
+            "user": "rhatdan",
+            "body": "@umohnani8 PTAL"
+        },
+        {
+            "user": "umohnani8",
+            "body": "Yes that is because you are running your registry on your local machine and it is not something that is accessible by the farm machine on localhost. To be able to push to your local registry from your farm node, you will have to make the registry accessible to other machines. I believe steps for that are to expose the registry port and use the local machine's ip address, but I haven't tested that out.\n\nAlso was your build successful? It looks like it is trying to do a premature push and I am not able to reproduce your error. "
+        },
+        {
+            "user": "afbjorklund",
+            "body": "The issue was with the parsing, not with the actual setup of the registry. The real details can be found here:\n\n* https://github.com/containers/podman-desktop/issues/5565#issuecomment-1906754980\n\nThe build goes fine, and `podman push` works. But not through `podman farm`.\n\nI still have my old deployment, but I think that registry now moved from Docker to CNCF (much like Compose):\n\nhttps://docs.docker.com/registry/ (v2 was called \"distribution\") -> https://distribution.github.io/distribution/\n\nIt might need an example on how to set it up, since it seems to be a requirement\n\n----\n\nError: cannot create manifest list without a name, value for --tag is required\n\nError: \"testbuild\" is not a full image reference name\n\nAs far as I can tell, the farm build defaults to multi-arch and manifests and thus requires a registry to push to?\n\nIt doesn't seem to be able to do a single host build, like building on a remote server and copying back to local."
+        },
+        {
+            "user": "afbjorklund",
+            "body": "Something like this, to run the registry on localhost (i.e. 0.0.0.0):\n\n`podman run -d -p 5000:5000 --name registry docker.io/registry:2`\n\nAnd to mimic the default docker settings, where localhost is HTTP:\n\nregistries.conf\n```toml\n[[registry]]\nlocation = \"localhost:5000\"\ninsecure = true\n```\n\n----\n\nEDIT: Note, \"localhost\" is just an example - could be any local host."
+        },
+        {
+            "user": "umohnani8",
+            "body": "I think I know why you are hitting that error, what version of podman are you running on your farm machine? The version there also needs to be v4.9.0, as we updated the push semantics to support the farm build work. Can you please update that and try again.\n\nYes, the farm requires a registry to push to for all build. Even if you build on a single machine, it will create a manifest list and push that as well. There is no restriction on how many architectures you can build for, you can build for one to a many as you would like but we will always push the built images to a registry, create a manifest list with the digests of the images pushed to the registry and then finally push that manifest list to the registry as well.\n\nCurrently there is no way to pull the images back to local. For that you will have to do a `podman pull reg/image` to pull the image of your architecture back."
+        },
+        {
+            "user": "afbjorklund",
+            "body": "Ah, OK. Didn't know that it needed a newer server as well. (It was `podman-4.8.3-1.fc39.x86_64`)\n\nI figured it would work with the older server version, since Fedora CoreOS isn't synched afaik\n\n----\n\nIt seems to work much better with the parsing, after upgrading the remote version to match\n\n`[anders@lima-podman anders]$ sudo dnf install -y https://kojipkgs.fedoraproject.org/packages/podman/4.9.0/1.fc39/x86_64/podman-4.9.0-1.fc39.x86_64.rpm`\n\nBut I am not sure that is reading the registries.conf, since it doesn't find the \"insecure\" flag:\n\n```\nError: build: building: 1 error occurred:\n\t* pushing image {\"e1d07964853a0fce53101f3e7fbbd99820a856ca7ed04f403e7d8b4d6d4f80ee\" \"docker-archive\"} to registry: trying to reuse blob sha256:2e112031b4b923a873c8b3d685d48037e4d5ccd967b658743d93a6e56c3064b9 at destination: pinging container registry localhost:5000: Get \"https://localhost:5000/v2/\": http: server gave HTTP response to HTTPS client\n````"
+        },
+        {
+            "user": "umohnani8",
+            "body": "Can you try with the `--tls-verify=false` flag? \n\nWe are sending authentication information from the local machine, but I think we are not sending the registries.conf information. I will add that to my todo."
+        },
+        {
+            "user": "afbjorklund",
+            "body": "Now it worked better, got some error output at the end but the image got uploaded.\n\n```\nfinished build for [{linux amd64 }] at \"lima-podman\": built e1d07964853a0fce53101f3e7fbbd99820a856ca7ed04f403e7d8b4d6d4f80ee\nGetting image source signatures\nCopying blob sha256:2e112031b4b923a873c8b3d685d48037e4d5ccd967b658743d93a6e56c3064b9\nCopying blob sha256:3d3ad2865b7903887ed0ec784985ec3720e06f19f01916cb072da827494e97b7\nCopying config sha256:e1d07964853a0fce53101f3e7fbbd99820a856ca7ed04f403e7d8b4d6d4f80ee\nWriting manifest to image destination\nError: build: error clearing list \"localhost:5000/testbuild\"\n```\n\nEDIT: Probably a result of earlier testing, and trying to overwrite an image with a manifest?\n\n```\nWriting manifest to image destination\nINFO[0005] pushed image 408dae5cebc3b7755d4e36a34b794dd9c651e0c7ef108da0dce8dd57b5e0d308 \nDEBU[0005] DoRequest Method: PUT URI: http://d/v4.9.1/libpod/manifests/localhost:5000%2Ftestbuild \nDEBU[0005] DoRequest Method: POST URI: http://d/v4.9.1/libpod/manifests/localhost:5000%2Ftestbuild/registry/localhost:5000%2Ftestbuild \nGetting image list signatures\nCopying 0 images generated from 1 images in list\nWriting manifest list to image destination\nStoring list signatures\nSaved list to \"localhost:5000/testbuild\"\nINFO[0005] build: ok                                    \nDEBU[0005] Called build.PersistentPostRunE(./bin/podman-remote --log-level=debug --connection lima-podman farm build --format=docker --local=false testbuild --tag localhost:5000/testbuild --tls-verify=false) \nDEBU[0005] Shutting down engines                        \n```"
+        },
+        {
+            "user": "afbjorklund",
+            "body": "The workaround is good enough for now, can create a separate issue for tracking the registries.conf feature."
+        },
+        {
+            "user": "umohnani8",
+            "body": "@afbjorklund awesome! Thank you for testing this out!\n\nYes the error you saw is from your earlier testing that failed and we detected an image/list with an existing name and failed to clear it. I will look into making that error make more sense.\n\nAnd another issue on the registries.conf part will be great, thank you! Please assign it to me. \nI think we can close this issue now with the workaround."
+        },
+        {
+            "user": "afbjorklund",
+            "body": "Will test with two Lima, one for each arch, and then I think we can close it. (+ open a backlog issue)\n\nIt doesn't work for Podman Machine, since you can only start one machine at a time (i.e. since 4.5)."
+        },
+        {
+            "user": "umohnani8",
+            "body": "Yeah the plan is to ensure that farm build works with multiple podman machines once we are able to have multiple of them running in parallel."
+        },
+        {
+            "user": "afbjorklund",
+            "body": "Wow, running Fedora in emulation is slooow. The selinux bootup actually made cloud-init time out, for the first boot...\nI think that it really wants an external server, if you for some reason can't run qemu-user but have to use qemu-system\n\nhttps://lima-vm.io/docs/config/multi-arch/\n\nStarting amd64: 20 seconds\n\n```\nStartup finished in 1.005s (kernel) + 1.013s (initrd) + 9.007s (userspace) = 11.026s \nmulti-user.target reached after 5.173s in userspace.\n```\n\nStarting arm64: 6 minutes (!)\n\n```\nStartup finished in 4.474s (kernel) + 54.944s (initrd) + 5min 28.050s (userspace) = 6min 27.470s \nmulti-user.target reached after 3min 23.722s in userspace.\n```\n\nBut at least the feature seems to be working:\n\n```\nNAME             STATUS     SSH                VMTYPE    ARCH       CPUS    MEMORY    DISK      DIR\npodman-amd64     Running    127.0.0.1:33687    qemu      x86_64     2       2GiB      100GiB    ~/.lima/podman-amd64\npodman-arm64     Running    127.0.0.1:40861    qemu      aarch64    2       2GiB      100GiB    ~/.lima/podman-arm64\n```\n\n```\nConnecting to \"lima-podman-arm64\"\nConnecting to \"lima-podman-amd64\"\nBuilder \"lima-podman-arm64\" ready\nBuilder \"lima-podman-amd64\" ready\nFarm \"lima\" ready\nStarting build for [{linux arm64 v8}] at \"lima-podman-arm64\"\nStarting build for [{linux amd64 }] at \"lima-podman-amd64\"\n[linux/amd64@lima-podman-amd64] STEP 1/2: FROM busybox\n[linux/arm64/v8@lima-podman-arm64] STEP 1/2: FROM busybox\n[linux/amd64@lima-podman-amd64] STEP 2/2: RUN true\n[linux/amd64@lima-podman-amd64] --> Using cache 39a4c75616b2b790fc823ee1f7f88d2d0194099c97be12a29cca6b69ce49d999\n[linux/amd64@lima-podman-amd64] --> 39a4c75616b2\n[linux/amd64@lima-podman-amd64] 39a4c75616b2b790fc823ee1f7f88d2d0194099c97be12a29cca6b69ce49d999\nfinished build for [{linux amd64 }] at \"lima-podman-amd64\": built 39a4c75616b2b790fc823ee1f7f88d2d0194099c97be12a29cca6b69ce49d999\n[linux/arm64/v8@lima-podman-arm64] STEP 2/2: RUN true\n[linux/arm64/v8@lima-podman-arm64] --> Using cache 55fcadcce9849075f3186134d7560e025fb4243c7adf19cf9c89961222b8d549\n[linux/arm64/v8@lima-podman-arm64] --> 55fcadcce984\n[linux/arm64/v8@lima-podman-arm64] 55fcadcce9849075f3186134d7560e025fb4243c7adf19cf9c89961222b8d549\nfinished build for [{linux arm64 v8}] at \"lima-podman-arm64\": built 55fcadcce9849075f3186134d7560e025fb4243c7adf19cf9c89961222b8d549\nGetting image source signatures\nCopying blob sha256:28c83c9a0efd99200b55456e7e7e0919583996fec8240fbed0c974cfee609ca2\nCopying blob sha256:2e112031b4b923a873c8b3d685d48037e4d5ccd967b658743d93a6e56c3064b9\nCopying config sha256:39a4c75616b2b790fc823ee1f7f88d2d0194099c97be12a29cca6b69ce49d999\nWriting manifest to image destination\nGetting image source signatures\nCopying blob sha256:47defa2824f38e7317c07de3d8b3752f11198c4e958ea48dde8b4ba1635e46ac\nCopying blob sha256:cd322088bcfba290bcfa064b77165d73708a0a77209146be150b29b7fec4c366\nCopying config sha256:55fcadcce9849075f3186134d7560e025fb4243c7adf19cf9c89961222b8d549\nWriting manifest to image destination\nGetting image list signatures\nCopying 0 images generated from 2 images in list\nWriting manifest list to image destination\nStoring list signatures\nSaved list to \"host.lima.internal:5000/testbuild\"\n```\n\nNow the build is available on the host, from localhost:5000/testbuild.\n\n```console\n$ podman-remote-static --version\npodman-remote-static version 4.9.0\n\n$ limactl shell podman-amd64 podman --version\npodman version 4.9.0\n$ limactl shell podman-amd64 rpm -q podman\npodman-4.9.0-1.fc39.x86_64\n$ limactl shell podman-arm64 podman --version\npodman version 4.9.0\n$ limactl shell podman-arm64 rpm -q podman\npodman-4.9.0-1.fc39.aarch64\n```\n\nThere are some issues around it, though.\n\n1) For some reason, `podman-remote-static farm` tries to always connect to a local podman socket first ?\nEven with --local=false, it is not possible to do things like `list` without specifying a v4.9.0 connection\n\nWorkaround: --connection=lima-podman-amd64 (or run local)\n\n2) And of course, there was some kind of SELinux issue that prevented building on the aarch64 machine.\n`/bin/sh: error while loading shared libraries: libm.so.6: cannot change memory protections`\n\nWorkaround: limactl shell podman-arm64 sudo setenforce 0"
+        },
+        {
+            "user": "afbjorklund",
+            "body": "So the issue here was:\n\n1) Both client and server needs to be 4.9.0 to use podman farm, it is not enough with just the new podman-remote\n\n2) Using insecure registries currently does not work out-of-the-box, needs an explicit `--tls-verify=false` build flag\n\nSome other takeaways:\n\n1) The feature needs to use [external servers](https://github.com/lima-vm/lima/issues/2109), so that the build can happen natively instead of running in emulation\n\n2) If you can use --platform and qemu-user, that is much faster than running virtual machines with qemu-system\n\n"
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 21352
+        }
+    ]
+}

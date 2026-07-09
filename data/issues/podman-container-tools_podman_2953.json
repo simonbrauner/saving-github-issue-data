@@ -1,0 +1,75 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 2953,
+    "type": "pull_request",
+    "title": "Add `NewRuntimeFromRuntimeConfig` libpod API",
+    "state": "closed",
+    "labels": [
+        "needs-ok-to-test",
+        "locked - please file new issue/PR"
+    ],
+    "user": "saschagrunert",
+    "body": "Hey, please see this PR as part of a proposal in *how to use libpod within cri-o*.\n\nThe commit introduces a new libpod API function to be able to initialize the runtime from a non-file-based configuration. Projects like CRI-O will now have the possibility to reuse their existing config within libpod.\n\nMy plan would be to add a `*libpod.Runtime` to the CRI-O server, to directly use it for operations like pulling images. This is the completely other way around approach than migrating from the lowest possible level like [libpod/libpod/storage.go](https://github.com/containers/libpod/blob/7141f972700ed454438d8539dd0bec79c0b61cf4/libpod/storage.go). WDYT?\n\n/cc @mrunalp @rhatdan @vrothberg \n\nRelates to #2791",
+    "comments": [
+        {
+            "user": "openshift-ci-robot",
+            "body": "[APPROVALNOTIFIER] This PR is **NOT APPROVED**\n\nThis pull-request has been approved by: *<a href=\"https://github.com/containers/libpod/pull/2953#\" title=\"Author self-approved\">saschagrunert</a>*\nTo fully approve this pull request, please assign additional approvers.\nWe suggest the following additional approver: **giuseppe**\n\nIf they are not already assigned, you can assign the PR to them by writing `/assign @giuseppe` in a comment when ready.\n\nThe full list of commands accepted by this bot can be found [here](https://go.k8s.io/bot-commands?repo=containers%2Flibpod).\n\nThe pull request process is described [here](https://git.k8s.io/community/contributors/guide/owners.md#the-code-review-process)\n\n<details open>\nNeeds approval from an approver in each of these files:\n\n- **[OWNERS](https://github.com/containers/libpod/blob/master/OWNERS)**\n\nApprovers can indicate their approval by writing `/approve` in a comment\nApprovers can cancel approval by writing `/approve cancel` in a comment\n</details>\n<!-- META={\"approvers\":[\"giuseppe\"]} -->"
+        },
+        {
+            "user": "openshift-ci-robot",
+            "body": "Hi @saschagrunert. Thanks for your PR.\n\nI'm waiting for a [containers](https://github.com/orgs/containers/people) or [openshift](https://github.com/orgs/openshift/people) member to verify that this patch is reasonable to test. If it is, they should reply with `/ok-to-test` on its own line. Until that is done, I will not automatically test new commits in this PR, but the usual testing commands by org members will still work. Regular contributors should [join the org](https://github.com/orgs/openshift/people) to skip this step.\n\nOnce the patch is verified, the new status will be reflected by the `ok-to-test` label.\n\nI understand the commands that are listed [here](https://go.k8s.io/bot-commands?repo=containers%2Flibpod).\n\n<details>\n\nInstructions for interacting with me using PR comments are available [here](https://git.k8s.io/community/contributors/guide/pull-requests.md).  If you have questions or suggestions related to my behavior, please file an issue against the [kubernetes/test-infra](https://github.com/kubernetes/test-infra/issues/new?title=Prow%20issue:) repository.\n</details>\n"
+        },
+        {
+            "user": "vrothberg",
+            "body": "Hi @saschagrunert, thanks for kicking off a discussion.\n\nAt the very moment, I would object attempts increasing the coupling between libpod and cri-o. Note, this is only my take, and others might think differently.\n\nThe reason why I object is that libpod is still subject to changes, just a c/storage and c/image, buildah (and cri-o). This leads to (very) frequent issues when updating the dependencies. I think that `go modules` will help in the sense that it automates many previously manual tasks. It also forces us to think about how the different libraries and repos play together. However, at the moment, it is already challenging enough to keep all of the projects in sync, so a coupling of cri-o on libpod on that level does not seem maintainable to me.\n\nBefore performing any changes, I would like to formalize the requirements from cri-o on libpod. What does cri-o need? Do the APIs (and semantics) actually fit the needs? Once that's done, we can come up with roadmap and sync on that. Once the roadmap is there, we need to find solutions for testing, CI, and how we do release engineering? Will CRI-O only vendor stable versions of libpod? How can we test PRs from c/image, storage, buildah and libpod (with potentially incompatible API changes etc.)?\n\nIn other words. IMHO we would run into serious maintenance issues if we would couple the projects on that level now. We should first collect the requirements, then come up with a roadmap, and before performing the changes, make sure that a) all automation is in place and b) that there is a clear policy for what needs to be vendored when and in which order and priority."
+        },
+        {
+            "user": "mheon",
+            "body": "My initial thought was to use the existing configuration API to translate (take the CRI-O config fields, pass them all in individually via WithStorageConfig() and etc), but I'm not really opposed to this.\n\nThe complexity is mostly going to be ensuring identical behavior in places where the options enforce defaults - for example, when configuring storage, we automatically adjust the Libpod static directory based on the configured storage root, and to maintain compatability with Podman we'd need to make certain this behavior is maintained by default on the CRI-O side."
+        },
+        {
+            "user": "saschagrunert",
+            "body": "Thanks for the detailed explanations!\n\n> Before performing any changes, I would like to formalize the requirements from cri-o on libpod. \n\nI would love to see a roadmap for CRI-O and for the containers/* ecosystem, I definitely support this point.\n\n"
+        },
+        {
+            "user": "mheon",
+            "body": "@vrothberg 100% agree that we need to nail down requirements for the move to CRI-O. This is going to be a major effort, almost amounting to a wholesale rewrite (we can do parts of the migration incrementally, moving, say, containers, then images, then pods), but for each stage, we have to start using all the Libpod APIs at once - we can't just move half the container functions over, and leave the other half on the CRI-O legacy APIs. That's going to be very painful, especially to get the E2E tests passing (and ensure performance stays comparable).\n\nOn the API side, we have three big concerns, I think.\n* Exec. Podman exec calls straight out to the OCI runtime, without involving Conmon. We need Conmon changes to make this change (and, coincidentally, I believe it's also hindering @jwhonce now).\n* Pods. The Pods API isn't where it needs to be to support CRI-O yet. We're missing a lot of the optimizations around infra containers they can do. CRI-O infra containers all share storage, for example - no mount/unmount for each, makes things a fair bit faster.\n* Rootless. This isn't really a concern that our APIs are lacking for CRI-O, but more of a stability one. The rootless APIs are changing frequently, and are not centralized in Libpod."
+        },
+        {
+            "user": "saschagrunert",
+            "body": "Okay, sounds good. I will close this since I guess this PR is now obsolete.\n\nIs there any way how to support the pre-planning phase?"
+        },
+        {
+            "user": "vrothberg",
+            "body": "> Is there any way how to support the pre-planning phase?\n\nStarting to collect the requirements would be a huge step in the right direction. \n\nFor instance, CRI-O seems to implement some kind of CIDR matching when pulling. Please don't nail me to it, I never took the time to study this code in detail. However, I am not actually sure if it would make sense to call a libpod API for pulling and pushing. Parts of the consideration could be test coverage, deduplication of code, flexibility to add specific features to meet specific requirements etc.\n\nBut as @mheon pointed out, the lower level APIs for managing PODs and containers are likely to be the tricky parts."
+        },
+        {
+            "user": "saschagrunert",
+            "body": "> > Is there any way how to support the pre-planning phase?\n> \n> Starting to collect the requirements would be a huge step in the right direction.\n\nI share your opinion and would like to support there. :+1: Usually I would go for declaring this topic as EPIC, define the basic acceptance criteria and collect the requirements. I don't want to clash with your processes so I have to ask further: Do you already have a planning board (like GitHub project) which provides an overview about ongoing topics in the view of containers/*, cri-o, and so on? I guess this would be the right place for this here, right?"
+        },
+        {
+            "user": "vrothberg",
+            "body": "> Usually I would go for declaring this topic as EPIC, define the basic acceptance criteria and collect the requirements. I don't want to clash with your processes so I have to ask further: Do you already have a planning board (like GitHub project) which provides an overview about ongoing topics in the view of containers/*, cri-o, and so on? I guess this would be the right place for this here, right?\n\nWe don't really have a board spanning over all containers/* projects. GitHub issues and cross-referencing them has worked out so far.\n\nFor collecting requirements, I created a Google doc (https://docs.google.com/document/d/1GKub_NvdGCo7veR8XXf5w3PaEpIwzU6TnTMKNDcErEA/edit?usp=sharing) and gave you edit rights. The document is public and interested parties can ping me anytime, if they want to contribute."
+        },
+        {
+            "user": "vrothberg",
+            "body": "@mrunalp @umohnani8 @giuseppe @haircommander @rhatdan FYI ^^^"
+        },
+        {
+            "user": "vrothberg",
+            "body": "@saschagrunert, btw, if you have questions about libpod internals, feel welcome to join #podman on freenode."
+        },
+        {
+            "user": "saschagrunert",
+            "body": "> For collecting requirements, I created a Google doc (https://docs.google.com/document/d/1GKub_NvdGCo7veR8XXf5w3PaEpIwzU6TnTMKNDcErEA/edit?usp=sharing) and gave you edit rights. The document is public and interested parties can ping me anytime, if they want to contribute.\n\nYeah thanks, that's a good place to start. :+1: \n\n> @saschagrunert, btw, if you have questions about libpod internals, feel welcome to join #podman on freenode.\n\nThat's nice, thank you! :)"
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 2791
+        }
+    ]
+}

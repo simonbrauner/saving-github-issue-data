@@ -1,0 +1,122 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 17833,
+    "type": "issue",
+    "title": "Support device mapping in kube play similar do Kubernetes device plugins",
+    "state": "closed",
+    "labels": [
+        "Good First Issue",
+        "volunteers-wanted",
+        "kube",
+        "locked - please file new issue/PR"
+    ],
+    "user": "rhatdan",
+    "body": "### Discussed in https://github.com/containers/podman/discussions/14934\n\n<div type='discussions-op-text'>\n\n<sup>Originally posted by **bachp** July 14, 2022</sup>\nKubernetes provides ways to map devices into pods and containers.\n\nOne way is to map devices into containers via [volumes](https://stackoverflow.com/questions/42697985/kubernetes-node-device-port-usb-mapping-to-pod-or-swarm-service-device-mapp) but this requires privileged containers.\n\nThe more flexible way to add devices tvia [Kubernetes Device Plugins](https://kubernetes.io/docs/concepts/extend-kubernetes/compute-storage-net/device-plugins/)\n\nIt abstracts the provisioning and mapping of devices to containers. So when specifying a Pod it's only needed to add an abstract name of the hardware, e.g. `hardware-vendor.example/foo` and the amount of it. The device plugin will then take care of making this available to containers. In YAML this will look like:\n\n```\nresources:\n        limits:\n          hardware-vendor.example/foo: 2\n```\n\nFor `podman kube play` it would be useful to also support this `resources.limits` to map devices. As this would allow to deploy the same pod spec on both Kubernetes and podman and it would be transparent to the user.\n\nHowever I don't think it makes sense to implement the full device plugin interface as it assumes a daemon (kubelet) running.\n\nSo for podman I think a better option is to implement a kind of hook mechanism that would get `resource.limits` and outputs the required `--devices` parameters, that would be applied before the pod is run.</div>",
+    "comments": [
+        {
+            "user": "rhatdan",
+            "body": "@umohnani8 PTAL"
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "andrew-kennedy",
+            "body": "just want to note that this support would be welcomed, I ran into this issue as noted here: https://github.com/containers/podman/issues/18266"
+        },
+        {
+            "user": "fpoirotte",
+            "body": "Hello,\n\nI would like to voice support in favor of this feature as well.\n\n(damn, I wish I knew enough about Go and podman's codebase to implement this :cry:)"
+        },
+        {
+            "user": "rhatdan",
+            "body": "@ygalblum @umohnani8 Anyone else PTAL\n@fpoirotte interested in opening a PR?"
+        },
+        {
+            "user": "bblenard",
+            "body": "I'm trying to understand this issue to see if I would be up to the task and I have a few questions and I want to also make sure I understand what is going on here. Basically we want to make `podman kube play ....` sensitive to the `spec.containers[*].resources.limits` entry in a Podspec and automatically apply the devices listed there in the same way that running `podman run --device ....` would?\n\nOne point of confusion I have is that in the original comment it says:\n> One way is to map devices into containers via [volumes](https://stackoverflow.com/questions/42697985/kubernetes-node-device-port-usb-mapping-to-pod-or-swarm-service-device-mapp) but this requires privileged containers.\n\n\nIs this accurate or does it actually depend on the device itself and whether or not elevated permissions are required to interact with it. When tracing through the code I wasn't really seeing that the `--device` option was handled much differently than a normal `--volume`. In fact unless I'm mistaken `--device` is really just a prebaked `--volume` with some default options specified for the user (based off of `pkg/specgen/generate/config_linux.go`)"
+        },
+        {
+            "user": "rhatdan",
+            "body": "--device works much differently in rootless and rootful containers.  In rootful containers, it actually creates the device within the containers mountspace with the correct major/minor number and labels the new device with the correct SELinux label. This requires CAP_SYS_MKNOD so it only available to rootful containers.\n\nIn rootless containers we just bind mount the device from the host into the container, which is all we can.  In some cases the device has an SELinux label, that would prevent it from being used in the container, so you need to disable SELinux use of the device. So in rootless mode there is little different from `--device /dev/foobar` and `--volume /dev/foobar;/dev/foobar`\n\nIn certain cases the UID/GID access to the device is not available to processes inside of the container.  For example if you have group access based on being in the `eng` group.  A container will not be in the `eng` group, since in rootless mode, there is a user namespace that does not include `eng`.  In this case you can leak the `eng` group access into the container using the `--group-add keep-groups` flag."
+        },
+        {
+            "user": "bblenard",
+            "body": "Okay I see. Here is how I understand this issue so far and I'm still tracing through the code so let me know if I am missing something as I explain my thoughts.\n\nIt seems to me that for this change I wouldn't actually need to worry too much about how the devices are setup by the underlying runtimes and instead the task mostly just consists of:\n\n1) Update how Podman understands the K8s [PodSpec.Containers[*].Resources.Limits](https://github.com/containers/podman/blob/main/pkg/k8s.io/api/core/v1/types.go#L3465) so that a k8s device plugin like name can be recognized\n2) When handling handling the various K8s play stuff (Pods, Deployments, Daemonsets) make sure the Device resources in the updated PodSpec get passed into the [SpecGen](https://github.com/containers/podman/blob/main/pkg/domain/infra/abi/play.go#L882) code before it is passed to the underlying runtime / generate.MakeContainer\n\nAs long as the information correctly makes it into the SpecGen I think all of the privileged/nonprivileged dev mapping magic is all taken care of for me already\n\nMy next question would be since the K8s device plugins work by registering a name to kubelet and there is the whole notion of kubelet + the rpc plugin provider that podman does not have:\n\n* How should the limits specified in the podspec be matched to devices on the system? It looks like the [generic-device-plugin](https://github.com/squat/generic-device-plugin) seems to run with some CLI flags so maybe we provide a similar configuration in one of the podman config files?"
+        },
+        {
+            "user": "bblenard",
+            "body": "I started to try to implement this but I do think I need some clarification on my last question. Without that information I feel that it will be hard to modify the [ResourceLimits](https://github.com/containers/podman/blob/main/pkg/k8s.io/api/core/v1/types.go#L3465) in a way that makes sense.\n\nIn order to hit the\n\n> For podman kube play it would be useful to also support this resources.limits to map devices. As this would allow to deploy the same pod spec on both Kubernetes and podman and it would be transparent to the user.\n\npart of this issue the resource limit type, specifically the resource name part, will need to carry extra meaning so that something like\n\n`hardware-vendor.nvidia/gpus: 2`\n\ngives the podman runtime enough information when generating the container spec to resolve the name to devices on the system. My thought would be to allow the podman user to define a device map of some sort in the system podman configuration so that `hardware-vendor.nvidia/gpus -> /dev/nvidia*` (maybe video cards aren't a great example but...)\n\nAlso from what I understand podman's configuration files are parsed with code from other repositories (https://github.com/containers/podman/blob/9c954739e9555c0940238f71ba3cc205deaa0e5e/docs/tutorials/rootless_tutorial.md?plain=1#L139C58-L139C94) so that to me means that in order to add the extra device mapping information to podman the configuration file structure would have to be modified in those other repos first\n\n\nMaybe I'm way off here but thats why I'm seeking clarification :)"
+        },
+        {
+            "user": "bachp",
+            "body": "@bblenard I think the [CDI](https://github.com/cncf-tags/container-device-interface) configuration would contain the necessary info to map the name to the device.\n\nSo for example, if we use CDI support from [Nvidia](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/cdi-support.html)\n```\nresources:\n  limits:\n    nvidia.com/gpu=0:1\n```\n\nWhat's not yet entirely clear to me is how the CDI devices are reflected in the `limits:` section. As there seems to be an indirection via the device plugin. At least this is how I understand [KEP-4009: Add CDI devices to device plugin API](https://github.com/kubernetes/enhancements/tree/master/keps/sig-node/4009-add-cdi-devices-to-device-plugin-api).\nSo I think the CDI name is not directly given but the kublet does a request for a a device type, e.g. `nvidia.com/gpu: 2` and the device plugin would then return two unique CDI devices (e.g. `nvidia.com/gpu=0` and `nvidia.com/gpu=1`).\n\nIf we say that we allow to directly specify the unique name, as in the example above, we can map it 1:1 to the `--device` parameter. I'm not sure if this leads to compatibility problems with Kubernetes tough."
+        },
+        {
+            "user": "bblenard",
+            "body": "@bachp -- I need to familiarize myself with the things you referenced, just letting you know that I saw your message ( finally ;) )"
+        },
+        {
+            "user": "bblenard",
+            "body": "Okay so update with what I currently understand about how these things relate. As @bachp pointed out the [CDI](https://github.com/cncf-tags/container-device-interface) seemingly contains all the information the runtime would need to take a CDI kind(?) and map it to a device path on the system. I also think I see what @bachp is saying with it not quite fitting into the limits section.\n\nI could be wrong but it looks like podman's type for [PodSpec.Containers[*].Resources](https://github.com/containers/podman/blob/main/pkg/k8s.io/api/core/v1/types.go#L1083) has diverged from Kubernetes' [Container.Resources](https://github.com/kubernetes/kubernetes/blob/master/pkg/apis/core/types.go#L2366) type. Kubernetes' [ResourceClaim](https://github.com/kubernetes/kubernetes/blob/master/pkg/apis/core/types.go#L2385) has an addition field that seems to contain the \"name\" described in the KEP-4009 referenced above.\n\nI've tried to confirm my understanding by tracing how [I believe Kubernetes handles](https://github.com/kubernetes/kubernetes/blob/master/pkg/kubelet/cm/dra/manager.go#L256) the `CDIDevice` message that eventually gets passed to the container runtime.\n\nSo currently I would potentially purpose re-syncing Podman's `container.resources` type to match Kubernetes and then pass that down to the podspec similar to how I mentioned it earlier. Hopefully that makes sense :)\n\nI'm not sure if additional support needs to be added so podman can handle CDI things (parsing the config under `/etc/cdi/` / `/var/run/cdi`) but the Nvidia documentation @bachp linked indicates that podman can handle it.\n\n\nphew... with all that being said I'd love some input on all that"
+        },
+        {
+            "user": "bachp",
+            "body": "@bblenard Podman already supports CDI device. You can pass a CDI device name via the `--device` command line flag. I tested this with both the nvidia and my own CDI passing in a TTY device.\n\nIt also works in podman-compose via the `devices` section:\n\n```\ndevices:\n  - nvidia.com/gpu=all\n ```"
+        },
+        {
+            "user": "bblenard",
+            "body": "I'm gonna at @rhatdan b/c he is one of the Containers folks that had some activity on this issue previously. Before I dig in and start on this issue properly I just want to make sure someone official is able to add their 2 cents.\n\nNow that we've sorted out the podman support side and the major question (as I see it) is just how implement this into the Podman Resource Spec. Assuming I understand everything correctly I figure we can either:\n\n1) Grab just the fields we need from the K8s ResourceClaim data structure and mirror it in the Podman version (probably the easiest unless we have good test coverage in that part of the codebase)\n2) Update the entire Resource data structure to match up with the current K8s version of it (more \"unrelated\" work but potentially the right way to do it... I'm not sure)"
+        },
+        {
+            "user": "rhatdan",
+            "body": "This SGTM."
+        },
+        {
+            "user": "bblenard",
+            "body": "Okay I have a way forward I think. I'll give this feature my best shot :)"
+        },
+        {
+            "user": "bblenard",
+            "body": "Update:\n\nStill working on this just have been busy lately :)\n\nI have code that I think works in a way that makes sense, I want to clean it up a bit though. Once its in a halfway decent state I'll probably push it up to my fork of podman."
+        },
+        {
+            "user": "bachp",
+            "body": "@bblenard If you like to push something early I would love to review and give some feedback."
+        },
+        {
+            "user": "bblenard",
+            "body": "@bachp -- I added some code here: https://github.com/bblenard/podman/tree/issues-17833-draft\n\nThe bulk of the code I wrote is here: `pkg/k8s.io/api/resource/dynamic_resources_podman_types.go`\n\nMy idea was to make the `podman kube play` feel like what I understand Kubernetes will be doing with dynamic device stuff based on [KEP-4009](https://github.com/kubernetes/enhancements/tree/master/keps/sig-node/4009-add-cdi-devices-to-device-plugin-api) and [KEP-3063](https://github.com/kubernetes/enhancements/tree/master/keps/sig-node/3063-dynamic-resource-allocation). Obviously the differences here are that Kubernetes has a whole controller ecosystem that would typically handle the details when K8s ingests those types whereas Podman does not.\n\nMy \"work around\" to this was to add an additional argument to the `playKube*` functions (dynamicDeviceManager), this type is defined in `pkg/k8s.io/api/resource/dynamic_resources_podman_types.go` and is basically a bare bones struct that can tie these K8s types together that would normally be tracked by a resource controller. Other than that once the ResourceClaims are resolved to either a simple device path `/dev/....` or a cdi device `nvidia.com/gpu=1` those devices are just injected into the specGen.Devices field where podman handles them how it does with any other `--device` argument (unless I made some mistake ;) )\n\nLet me know what you think. I was finding it hard to keep things straight in my mind while reviewing `KEP-3063` especially following the YAML examples.\n\nPS: One big thing I have to do still is write tests but I have to figure that out still"
+        },
+        {
+            "user": "CircuitCipher",
+            "body": "Any planned movement on this?  I recently started down the path of setting up a JellyFin server with HW acceleration (via nvidia and CDI) and prefer the descriptiveness of the kube files for my deployments.  Interesting that `--device` is easily accessible via run commands but functionality is missing in kube.  Anywhere extra hands can used?  Or are we just waiting to hear on some form of direction?"
+        },
+        {
+            "user": "robertgzr",
+            "body": "@bblenard i just took a look at your code and rebased it onto [main](https://github.com/containers/podman/commits?ref=main&until=2024-11-19) feel free to just take the commits from here: https://github.com/robertgzr/podman/tree/issues-17833-draft--main\n\nif i understand correctly, you implemented support for DRA as documented here: https://kubernetes.io/docs/concepts/scheduling-eviction/dynamic-resource-allocation/, which looks like this when expressed in YAML:\n\n```yaml\napiVersion: simpledevice.resource.podman.io/v1\nkind: ResourceClaimParameters\nmetadata:\n  name: kmsg-parameters\nspec:\n  hostpath: /dev/kmsg  \n---\napiVersion: resource.k8s.io/v1alpha2\nkind: ResourceClaimTemplate\nmetadata:\n  name: kmsg-template\nspec:\n  resourceClassName: PodmanResourceClass\n  parametersRef: kmsg-parameters\n---\napiVersion: v1\nkind: Pod\n[...]\nresources:\n  claims:\n  - name: kmsg\nresourceClaims:\n- name: kmsg\n  resourceClaimTemplateName: kmsg-template\n```\n\nThat is quite verbose compared to what I imagined (using a podman-specific CDI string):\n```yaml\nresources:\n  limits:\n    io.podman.device/kmsg: 1\n```\n\nthe bits that support the configuration as shared by @bachp https://github.com/containers/podman/issues/17833#issuecomment-1866325061 are also still missing, correct?"
+        },
+        {
+            "user": "bachp",
+            "body": "As a workaround for this and future similar cases, would it be acceptable to have a podman specific annotation that would allow to specify argument directly to podman? Basically, an annotation that could be set and allows to set parameters like `--device` directly.\n\nThis would provide an escape hatch until features are properly implemented in the yaml."
+        },
+        {
+            "user": "robertgzr",
+            "body": "@rhatdan @bachp i gave this another shot. my pr tries to be more pragmatic and omits the `resourceClaim` implementation in favor of relying on the existing support for handling CDI names. ptal :)\n\nhttps://github.com/containers/podman/pull/25010"
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 18266
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 25010
+        }
+    ]
+}

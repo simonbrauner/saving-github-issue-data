@@ -1,0 +1,126 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 15910,
+    "type": "pull_request",
+    "title": "Proof of concept: nightly dependency treadmill",
+    "state": "closed",
+    "labels": [
+        "lgtm",
+        "approved",
+        "release-note-none",
+        "locked - please file new issue/PR"
+    ],
+    "user": "edsantiago",
+    "body": "As discussed in f2f: this is the cleanest, simplest mechanism\nI can think of to auto-test the Big Three dependencies: simply\nrun go mod edit immediately after git checkout, then run the\nentire CI test suite.\n\nIf this approach works, we can set up a new CIRRUS_CRON=treadmill\njob. I'm expecting it not to work, because Murphy, but want to\nsee what the unexpected gotchas are.\n\nThis differs significantly from the buildah treadmill, in that\nbuildah is almost impossible to re-vendor without manual intervention.\n(In practice, so are these, but let's dream of a world in which\nthis will run and pass every night). (I want a pony too).\n\nSigned-off-by: Ed Santiago <santiago@redhat.com>\n```release-note\nNone\n```",
+    "comments": [
+        {
+            "user": "openshift-ci[bot]",
+            "body": "[APPROVALNOTIFIER] This PR is **APPROVED**\n\nThis pull-request has been approved by: *<a href=\"https://github.com/containers/podman/pull/15910#\" title=\"Author self-approved\">edsantiago</a>*\n\nThe full list of commands accepted by this bot can be found [here](https://go.k8s.io/bot-commands?repo=containers%2Fpodman).\n\nThe pull request process is described [here](https://git.k8s.io/community/contributors/guide/owners.md#the-code-review-process)\n\n<details >\nNeeds approval from an approver in each of these files:\n\n- ~~[OWNERS](https://github.com/containers/podman/blob/main/OWNERS)~~ [edsantiago]\n\nApprovers can indicate their approval by writing `/approve` in a comment\nApprovers can cancel approval by writing `/approve cancel` in a comment\n</details>\n<!-- META={\"approvers\":[]} -->"
+        },
+        {
+            "user": "edsantiago",
+            "body": "This is kind of weird: it compiles, and almost all the `int` tests have passed! (one flake, the FD one which I still haven't filed an issue for). I'm actually kind of worried that maybe I'm NOP'ing, and this is not testing an actual revendor. Is there a way to look at test logs and see which `containers/foo` versions got picked up in the built binary?\n\nAnyhow, gotta go. Thoughts welcome on this approach."
+        },
+        {
+            "user": "rhatdan",
+            "body": "I would figure the validate tests would fail on this with unvendored content?"
+        },
+        {
+            "user": "edsantiago",
+            "body": "That's what the `git add vendor` is for."
+        },
+        {
+            "user": "rhatdan",
+            "body": "We need to commit a breaking change to make sure this fails.  :^)"
+        },
+        {
+            "user": "edsantiago",
+            "body": "Re-pushed on 40e8bcb84, passed again. (With two flakes, both of them nasty ones, but I'll follow up on Monday)."
+        },
+        {
+            "user": "edsantiago",
+            "body": "@containers/podman-maintainers hi! I re-pushed during scrum, and, lo, it's failing:\n```\n[+0008s]   >$ ./bin/podman pull -q quay.io/libpod/alpine_labels:latest\n[+0008s]   >Error: writing blob: adding layer with blob \"sha256:59bf1c3509f33515622619af21ed55bbe26d24913cedbca106468a5fb37a50c3\": processing tar file(time=\"2022-09-26T10:55:31-05:00\" level=error msg=\"stat /home/some9968dude/.config/containers/storage.conf: no such file or directory\"\n```\nalso\n```\n[+0045s] #  ERROR: for nginx  Cannot create container for service nginx: no such image: docker.io/library/alpine: image not known\n```\nVendor diffs [here](https://cirrus-ci.com/task/5571886741454848?logs=clone#L241).\n\nI restarted each one, failed the same way. Does not seem to be a flake."
+        },
+        {
+            "user": "edsantiago",
+            "body": "Another failure, in `int` tests now:\n```\n         $ podman [options] pull quay.io/libpod/cirros:latest\n         time=\"2022-09-26T10:56:57-05:00\" level=error msg=\"stat containers/storage.conf: no such file or directory\"\n```"
+        },
+        {
+            "user": "edsantiago",
+            "body": "culprit (for at least one of the failures, haven't checked the others) seems to be https://github.com/containers/storage/pull/1357"
+        },
+        {
+            "user": "rhatdan",
+            "body": "Do the tests have XDG_CONFIG_HOME set and no storage.conf defined?"
+        },
+        {
+            "user": "edsantiago",
+            "body": "I'm guessing you don't need an answer, because you submitted https://github.com/containers/storage/pull/1363 11 minutes after this question, but: using `view-source` on [one result](https://api.cirrus-ci.com/v1/artifact/task/5044121160122368/html/int-podman-ubuntu-2204-rootless-host.log.html) shows `$XDG_RUNTIME_DIR` set but no `$XDG_CONFIG_ANYTHING`."
+        },
+        {
+            "user": "rhatdan",
+            "body": "Weird that XDG_CONFIG_HOME is now showing it is set.  Will see if updated PR to storage fixes the problem.\nI guess your nightly treadmill is already paying off."
+        },
+        {
+            "user": "edsantiago",
+            "body": "And it's not even nightly yet!\n\nP.S. does this help? https://github.com/containers/podman/blob/aaeabb0e8cc4aca1c621677f9c73f1757df300c4/libpod/runtime.go#L123-L163"
+        },
+        {
+            "user": "rhatdan",
+            "body": "So it is self inflicted."
+        },
+        {
+            "user": "edsantiago",
+            "body": "ISTR a very very good reason for adding that. tig blame dates it to #3466, August 2019. "
+        },
+        {
+            "user": "nalind",
+            "body": "> Do the tests have XDG_CONFIG_HOME set and no storage.conf defined?\n\n`         time=\"2022-09-26T10:56:57-05:00\" level=error msg=\"stat containers/storage.conf: no such file or directory\"`\nsuggests that the path name passed to stat() was just \"containers/storage.conf\", as though XDG_CONFIG_HOME (and the path that was combined with \"containers\" and \"storage.conf\") was an empty value.\n"
+        },
+        {
+            "user": "edsantiago",
+            "body": "This is ready for review, and to merge as soon as CI passes (which it will, because the `$CIRRUS_CRON` conditional will not trigger).  I have NOT added a Cirrus cron job, because I don't seem to have enough Cirrus privs."
+        },
+        {
+            "user": "rhatdan",
+            "body": "LGTM"
+        },
+        {
+            "user": "edsantiago",
+            "body": "There's one problem with this, that I haven't been able to figure out: immediately after a vendor-everything-into-podman PR, this nightly cron job is going to fail, because I (deliberately) did not add `--allow-empty` to the `git commit`. I'm now reevaluating that decision:\n* As it is, the nightly cron job will fail, and will force me to look at it and see \"oh, no problem, it's just because nothing has changed\".\n* With `--allow-empty`, the check will pass, and will run the rest of CI even though it's a waste of cycles.\n\nI was trying to save the planet. Now I'm thinking it's more important to save human time. Thoughts?"
+        },
+        {
+            "user": "vrothberg",
+            "body": "We're doomed, one way or another.  So I think you should have a good time and not be bothered by false positives."
+        },
+        {
+            "user": "rhatdan",
+            "body": "Agreed.  Humans should be primary."
+        },
+        {
+            "user": "edsantiago",
+            "body": "So done. Rebased & repushed with `--allow-empty`."
+        },
+        {
+            "user": "edsantiago",
+            "body": "This has been [working well in buildah](https://cirrus-ci.com/build/6350385232216064). Apart from, sigh, flakes."
+        },
+        {
+            "user": "baude",
+            "body": "/lgtm"
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "containers",
+            "repository": "storage",
+            "number": 1363
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 16076
+        }
+    ]
+}

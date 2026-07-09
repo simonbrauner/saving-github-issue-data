@@ -1,0 +1,156 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 19586,
+    "type": "pull_request",
+    "title": "Fix output of podman --remote top",
+    "state": "closed",
+    "labels": [
+        "lgtm",
+        "approved",
+        "release-note",
+        "kind/api-change",
+        "locked - please file new issue/PR"
+    ],
+    "user": "rhatdan",
+    "body": "Fixes: https://github.com/containers/podman/issues/19176\n\n<!--\nThanks for sending a pull request!\n\nPlease make sure you've read our contributing guidelines and how to submit a pull request (https://github.com/containers/podman/blob/main/CONTRIBUTING.md#submitting-pull-requests).\n\nIn case you're only changing docs, make sure to prefix the pull-request title with \"[CI:DOCS]\". That will prevent functional tests from running and save time and energy.\n\nFinally, be sure to sign commits with your real name. Since by opening\na PR you already have commits, you can add signatures if needed with\nsomething like `git commit -s --amend`.\n-->\n\n#### Does this PR introduce a user-facing change?\n\n<!--\nIf no, just write `None` in the release-note block below. If yes, a release note\nis required: Enter your extended release note in the block below. If the PR\nrequires additional action from users switching to the new release, include the\nstring \"action required\".\n\nFor more information on release notes, please follow the Kubernetes model:\nhttps://git.k8s.io/community/contributors/guide/release-notes.md\n-->\n\n```release-note\nCorrected parsing of top ps options on podman-remote.\n```\n",
+    "comments": [
+        {
+            "user": "rhatdan",
+            "body": "That would be a breaking change. This fixes the existing issue, and matches the local output."
+        },
+        {
+            "user": "Luap99",
+            "body": "It is not really a breaking change, current query looks like `?ps_args=aux` while an array could look like  `?ps_args=a&ps_args=ux`, this is the only way to ensure we have a proper array from the remote client. Joining via space can and will cause corner cases, our internal data types all already use an array so there is no reason not to send an actual array via api as well. \n\nThe more I test the more broken I find our argument parsing, i.e. `-o \"pid comm\"` is a valid argument but already breaks on the local podman so there is definitely more to unwrap here.\n"
+        },
+        {
+            "user": "rhatdan",
+            "body": "Take a look at the current patch, I got the API tests to work again, and now the passing of options works mostly the same.\n"
+        },
+        {
+            "user": "rhatdan",
+            "body": " -o \"pid comm\"\n\nLooks like a cobra failure?\n\n./bin/podman top dan -eo \"pid comm\"\nDAN [dan -eo pid comm]\n\nShould have been\nDAN [dan -eo \"pid comm\"]"
+        },
+        {
+            "user": "rhatdan",
+            "body": "Never mind cobra is correct."
+        },
+        {
+            "user": "Luap99",
+            "body": "No it's not a cobra problem, arrays are just printed like that. You can print each single element to see it. I think the issue is that shlex.Split() is used in Top() function. There seems to be a difference between what docker API wants and want we are doing. So I think this needs more investigation on what the expect behaviour should be when using these special formats."
+        },
+        {
+            "user": "rhatdan",
+            "body": "Yes, @vrothberg The shlex code was your fix.  Do you have any idea what is going on. \nI believe my code is correct fixing this issue we are seeing, but podman top -eo \"pid comm\" is very broken because of the shlex.Split."
+        },
+        {
+            "user": "vrothberg",
+            "body": ">  Do you have any idea what is going on.\n\nNo, sorry.  The shlex'ing was added to fix #12452\n but that is a long time ago and the top code is hairy since Podman does things differently.\n\nI _think_ that the compat endpoint should use a different code path than the libpod one and ignore `psgo` entirely.  That may help untangle the code and parsing."
+        },
+        {
+            "user": "vrothberg",
+            "body": "It may be worth looking at the `docker top` integration tests at this point."
+        },
+        {
+            "user": "Luap99",
+            "body": "seems like docker doesn't care and just does the same thing Dan does here:\nhttps://github.com/moby/moby/blob/e0da5cb9291982a4c7b3c6b0642eeced4ba9f8ac/client/container_top.go#L16-L18\n\nSo overall I would assume if we only get a single ps_args param that we need to `shlex.Split()` which is a bit better than `strings.Split(arg, \" \")`. However our remote client should still send an array from the client so when get more than one ps_args arg we can just use the array as is for the ps call. That way we can actually pass down the real args like they were given on the cli.\n"
+        },
+        {
+            "user": "rhatdan",
+            "body": "Ok I cleaned it up and now I believe I am doing the right thing.  The code in the bindings section could be nicer, suggestions welcome."
+        },
+        {
+            "user": "rhatdan",
+            "body": "Now back to PTO."
+        },
+        {
+            "user": "TomSweeneyRedHat",
+            "body": "WHen you get back from PTO, the red tests will be waiting."
+        },
+        {
+            "user": "rhatdan",
+            "body": "I can remove the shelex from the c.Top altogether and force both callers to do it themselves."
+        },
+        {
+            "user": "vrothberg",
+            "body": "> I can remove the shelex from the c.Top altogether and force both callers to do it themselves.\n\nAs mentioned above, I think that the compat endpoint should not attempt on using `psgo` at all and call `ps` directly.  Wouldn't that address the issue?"
+        },
+        {
+            "user": "rhatdan",
+            "body": "We can dumb down the Compat endpoint if you want, but that does not solve the problem.  The current code handles all of the test cases, if you have other test cases that fail, please present them and I will fix them.  The only \"breakage\" I see here was a case where we were passing a invalid command to ps, and parsing it out to a valid command, while we were breaking valid commands.\n\n```\nps \"ax -o args\"\nerror: unsupported option (BSD syntax)\n\nUsage:\n ps [options]\n\n Try 'ps --help <simple|list|output|threads|misc|all>'\n  or 'ps --help <s|l|o|t|m|a>'\n for additional help text.\n\nFor more details see ps(1).\n\n$ ps \"ax -o args\"\nerror: unsupported option (BSD syntax)\n\nUsage:\n ps [options]\n\n Try 'ps --help <simple|list|output|threads|misc|all>'\n  or 'ps --help <s|l|o|t|m|a>'\n for additional help text.\n\nFor more details see ps(1).\n\n$ ps ax -o \"pid args\"\n    PID COMMAND\n      1 /usr/lib/systemd/systemd --switched-root --system --deserialize=35 rhgb\n      2 [kthreadd]\n```\nPrevious podman top succeeded and failed opposite of the ps command.\n```\n $ podman top dan \"ax -o args\"\nCOMMAND\nsleep inf\nbluechi (rpm) $ podman top dan ax -o \"pid, args\"\nError: ps(1) failed with exit code 1: error: conflicting format options\n\nUsage:\n ps [options]\n\n Try 'ps --help <simple|list|output|threads|misc|all>'\n  or 'ps --help <s|l|o|t|m|a>'\n for additional help text.\n\nFor more details see ps(1).\n\n $ podman top dan \"ax -o args\"\nCOMMAND\nsleep inf\n```\nThis PR Fixes the local client and the remote client.\n\n\n"
+        },
+        {
+            "user": "rhatdan",
+            "body": "@baude @Luap99 @vrothberg @giuseppe Can we get this in and then look at removing functionality from compatibility endpoint, if that is desired."
+        },
+        {
+            "user": "vrothberg",
+            "body": "`ax -o pid,args` does not work across client/server versions anymore"
+        },
+        {
+            "user": "rhatdan",
+            "body": "Works for me.\n\n```\n$ ./bin/podman --remote top 2772a9463cab ax -o pid,args\nPID         COMMAND\n1           sleep       infinity\n```\n"
+        },
+        {
+            "user": "rhatdan",
+            "body": "If you wrap it in quotes it does not work, but this is not valid ps syntax.\n```\n $ ./bin/podman --remote top 2772a9463cab \"ax -o pid,args\"\nError: ps(1) failed with exit code 1: error: unsupported option (BSD syntax)\n\nUsage:\n ps [options]\n\n Try 'ps --help <simple|list|output|threads|misc|all>'\n  or 'ps --help <s|l|o|t|m|a>'\n for additional help text.\n\nFor more details see ps(1).\n```\n\n```\n$ ps \"ax -o pid,args\"\nerror: unsupported option (BSD syntax)\n\nUsage:\n ps [options]\n\n Try 'ps --help <simple|list|output|threads|misc|all>'\n  or 'ps --help <s|l|o|t|m|a>'\n for additional help text.\n\nFor more details see ps(1).\n```\n"
+        },
+        {
+            "user": "vrothberg",
+            "body": "> Works for me.\n\nTry it where either client or server are not from this commit."
+        },
+        {
+            "user": "rhatdan",
+            "body": "Don't see how we can fix the problems, without changing the client and server."
+        },
+        {
+            "user": "vrothberg",
+            "body": "> Don't see how we can fix the problems, without changing the client and server.\n\nSplit the compat from the libpod code.  If the libpod endpoint needs a new format for the parameter, we can add a new parameter."
+        },
+        {
+            "user": "rhatdan",
+            "body": "Your just confusing callers then and going to cause long term dept, for broken interfaces."
+        },
+        {
+            "user": "vrothberg",
+            "body": "> Your just confusing callers then and going to cause long term dept, for broken interfaces.\n\nThat's SWE best practices.  The other alternative to break existing users. I picked the example from #12452 which was fixed by adding shlex-ing.  With this PR, we would regress exactly on that."
+        },
+        {
+            "user": "rhatdan",
+            "body": "In this case I would argue that Docker is broken since it accepts broken syntax and does not accept correct syntax from a ps sense.\n\n\"ax -o pid,args\" works with docker, which does not with ps\nax -o \"pid args\" does not work with docker, which does work with ps."
+        },
+        {
+            "user": "vrothberg",
+            "body": "`top` would be so easy if it was using `psgo` exclusively :cry: \n\nI am not sure how to proceed. In its current form, we would regress (as mentioned above) which is bad."
+        },
+        {
+            "user": "rhatdan",
+            "body": "If I leave the old format for Docker, it should continue to work.  and support older clients, and then newer clients should fix the issue."
+        },
+        {
+            "user": "Luap99",
+            "body": "Compatibility between different client and server version is important, this is basically the default for podman machines as we do not control client and server machine.\n\nI still think the best way is to treat a single argument as we have to use shelx and if we got more than one we use the array as it. \n\nI was thinking something like this:\n\n```diff\ndiff --git a/libpod/container_top_linux.go b/libpod/container_top_linux.go\nindex 0f3e92a54..41002eb52 100644\n--- a/libpod/container_top_linux.go\n+++ b/libpod/container_top_linux.go\n@@ -214,10 +214,11 @@ func (c *Container) Top(descriptors []string) ([]string, error) {\n                return nil, psgoErr\n        }\n \n-       // Note that the descriptors to ps(1) must be shlexed (see #12452).\n-       psDescriptors := []string{}\n-       for _, d := range descriptors {\n-               shSplit, err := shlex.Split(d)\n+       psDescriptors := descriptors\n+       if len(descriptors) == 1 {\n+               // Note that the descriptors to ps(1) must be shlexed (see #12452).\n+               psDescriptors = make([]string, 0, len(descriptors))\n+               shSplit, err := shlex.Split(descriptors[0])\n                if err != nil {\n                        return nil, fmt.Errorf(\"parsing ps args: %w\", err)\n                }\ndiff --git a/pkg/api/handlers/compat/containers_top.go b/pkg/api/handlers/compat/containers_top.go\nindex b6edd51b4..81eee6760 100644\n--- a/pkg/api/handlers/compat/containers_top.go\n+++ b/pkg/api/handlers/compat/containers_top.go\n@@ -18,14 +18,14 @@ func TopContainer(w http.ResponseWriter, r *http.Request) {\n        runtime := r.Context().Value(api.RuntimeKey).(*libpod.Runtime)\n        decoder := utils.GetDecoder(r)\n \n-       psArgs := \"-ef\"\n-       if utils.IsLibpodRequest(r) {\n-               psArgs = \"\"\n+       var psArgs []string\n+       if !utils.IsLibpodRequest(r) {\n+               psArgs = []string{\"-ef\"}\n        }\n        query := struct {\n-               Delay  int    `schema:\"delay\"`\n-               PsArgs string `schema:\"ps_args\"`\n-               Stream bool   `schema:\"stream\"`\n+               Delay  int      `schema:\"delay\"`\n+               PsArgs []string `schema:\"ps_args\"`\n+               Stream bool     `schema:\"stream\"`\n        }{\n                Delay:  5,\n                PsArgs: psArgs,\n@@ -52,13 +52,19 @@ func TopContainer(w http.ResponseWriter, r *http.Request) {\n \n        encoder := json.NewEncoder(w)\n \n+       args := query.PsArgs\n+       if len(args) == 1 {\n+               // Ugly workaround for older clients which used to send arguments comma separated.\n+               args = strings.Split(args[0], \",\")\n+       }\n+\n loop: // break out of for/select infinite` loop\n        for {\n                select {\n                case <-r.Context().Done():\n                        break loop\n                default:\n-                       output, err := c.Top(strings.Split(query.PsArgs, \",\"))\n+                       output, err := c.Top(args)\n                        if err != nil {\n                                if !statusWritten {\n                                        utils.InternalServerError(w, err)\ndiff --git a/pkg/api/server/register_containers.go b/pkg/api/server/register_containers.go\nindex 630da119c..d0f15e747 100644\n--- a/pkg/api/server/register_containers.go\n+++ b/pkg/api/server/register_containers.go\n@@ -1173,8 +1173,9 @@ func (s *APIServer) registerContainersHandlers(r *mux.Router) error {\n        //    default: 5\n        //  - in: query\n        //    name: ps_args\n-       //    type: string\n-       //    default:\n+       //    type: array\n+       //    items:\n+       //       type: string\n        //    description: |\n        //      arguments to pass to ps such as aux.\n        // produces:\ndiff --git a/pkg/bindings/containers/containers.go b/pkg/bindings/containers/containers.go\nindex e776a6092..0ca579a6c 100644\n--- a/pkg/bindings/containers/containers.go\n+++ b/pkg/bindings/containers/containers.go\n@@ -290,8 +290,10 @@ func Top(ctx context.Context, nameOrID string, options *TopOptions) ([]string, e\n        }\n        params := url.Values{}\n        if options.Changed(\"Descriptors\") {\n-               psArgs := strings.Join(options.GetDescriptors(), \",\")\n-               params.Add(\"ps_args\", psArgs)\n+               psArgs := options.GetDescriptors()\n+               for _, arg := range psArgs {\n+                       params.Add(\"ps_args\", arg)\n+               }\n        }\n        response, err := conn.DoRequest(ctx, nil, http.MethodGet, \"/containers/%s/top\", params, nil, nameOrID)\n        if err != nil {\n```\nThis doesn't address the case new client old server so we would need some version check on client for better compatibility. And likely the split on comma isn't right either as it breaks some arguments.\n\nAlso this does not even touch the total mess of output which is send on the api. It is already broken but I don't think this PR makes it better."
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this PR had no activity for 30 days."
+        },
+        {
+            "user": "packit-as-a-service[bot]",
+            "body": "Cockpit tests failed for commit 82ebb9063d1cb69e177b31174adeff4fc8aa0d67. @martinpitt, @jelly, @mvollmer please check."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@Luap99 PTAL"
+        },
+        {
+            "user": "openshift-ci[bot]",
+            "body": "[APPROVALNOTIFIER] This PR is **APPROVED**\n\nThis pull-request has been approved by: *<a href=\"https://github.com/containers/podman/pull/19586#pullrequestreview-1681780529\" title=\"Approved\">Luap99</a>*, *<a href=\"https://github.com/containers/podman/pull/19586#\" title=\"Author self-approved\">rhatdan</a>*\n\nThe full list of commands accepted by this bot can be found [here](https://go.k8s.io/bot-commands?repo=containers%2Fpodman).\n\nThe pull request process is described [here](https://git.k8s.io/community/contributors/guide/owners.md#the-code-review-process)\n\n<details >\nNeeds approval from an approver in each of these files:\n\n- ~~[OWNERS](https://github.com/containers/podman/blob/main/OWNERS)~~ [Luap99,rhatdan]\n\nApprovers can indicate their approval by writing `/approve` in a comment\nApprovers can cancel approval by writing `/approve cancel` in a comment\n</details>\n<!-- META={\"approvers\":[]} -->"
+        },
+        {
+            "user": "baude",
+            "body": "/lgtm\n"
+        }
+    ],
+    "cross_references": []
+}

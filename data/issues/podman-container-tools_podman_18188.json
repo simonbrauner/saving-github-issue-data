@@ -1,0 +1,93 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 18188,
+    "type": "issue",
+    "title": "Epic: ginkgo: ExitWithError() considered harmful",
+    "state": "closed",
+    "labels": [
+        "locked - please file new issue/PR"
+    ],
+    "user": "edsantiago",
+    "body": "Deep-diving into fixing `logformatter` so it handles ginkgo v2, I found a log that included our number-one flake :\n```\n# podman-remote [options] exec -it test ip addr show eth0\nError: container create failed (no logs from conmon): .....\n```\n...but the test in question passed! TL;DR the root cause is: https://github.com/containers/podman/blob/5e6c0647c0c9e14e2d9f9a45868bce8b21fdf7da/test/e2e/network_connect_disconnect_test.go#L426-L428\n\nThis is one of my pet peeves. All of you have heard me rant angrily about that, but I'm going to repeat it here anyway: please, please do not just check that \"some error occured\"! Everywhere possible—and it's usually possible—tests should:\n* Check for a **PRECISE EXIT CODE**; and\n* Check for an **ERROR MESSAGE**.\n\nI count over 200 instances of `ExitWithError` under `tests/e2e`. Those need to be fixed. I'll tackle some of them over the next few weeks/months/years, but please, everyone, when writing new tests, please please please be more careful.",
+    "comments": [
+        {
+            "user": "vrothberg",
+            "body": "Fair to rephrase that just checking `exit code != 0` will hide flakes of some entirely different error?\n\nI also count 239 but will refrain from changing until @Luap99's PR migrating to v2 has merged."
+        },
+        {
+            "user": "Luap99",
+            "body": "Given that podman mostly exits 125 anyway I see little problems with `ExitWithError()`, the big thing here is, as you said, that they do not check error messages which is a big problem.\n\nThe e2e test have unique advantage to the systems test they we get individual stdout/err streams. So if a test checks `Expect(output).To(Equal(\"foo\"))` it will likely work in most cases even when there are unexpected logrus warnings/errors logged on stderr.\n\nWhat each test should do is also `Expect(syderr).To(Equal(\"\"))`. And then in cases where expects an error match it correctly."
+        },
+        {
+            "user": "edsantiago",
+            "body": "I'm just going to leave this here: https://github.com/containers/podman/blob/5c70641e4fcfa89691fdab79c260cc22df43372d/test/e2e/prune_test.go#L527-L532\n\nThe test passes. This is the kind of stuff that I'm always terrified will make its way into our code base."
+        },
+        {
+            "user": "edsantiago",
+            "body": "Here's a beautiful example of what I'm talking about: [machine e2e tests](https://api.cirrus-ci.com/v1/artifact/task/5564667850915840/html/machine-podman-fedora-38-aarch64-rootless-host-boltdb.log.html). There is one failure, at the start: timeout waiting for machine. *No other tests fail!* A human reader can see error after error, but the tests don't actually check output, so la la la la. All those tests need major surgery to add message checking; I started doing that just now but it's too much to do in a day."
+        },
+        {
+            "user": "Luap99",
+            "body": "Yeah there is a lot of nasty stuff in there. I am currently going through most problems I encountered while working on ginkgo v2. Will report an issue in the next few days. Poorly written tests are definitely at the top of that list."
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@edsantiago @Luap99 Is this still an issue?"
+        },
+        {
+            "user": "edsantiago",
+            "body": "Very much so."
+        },
+        {
+            "user": "Luap99",
+            "body": "@edsantiago Can this be closed with since you added all these stderr checks?"
+        },
+        {
+            "user": "edsantiago",
+            "body": "No, this is completely different and unrelated. (The stderr checks I added were only for `Exit(0)`).\n\nThe purpose of this epic is:\n```diff\n-    Expect(ExitWithError)\n+    Expect(ExactExitStatusNotJustSomeVagueErrorCode)\n+    Expect(ExactErrorMessageOrAtLeastADistinctiveSubstring)\n```"
+        },
+        {
+            "user": "Luap99",
+            "body": "ok, agreed somehow I thought you added many of them while you did your other changes.\n"
+        },
+        {
+            "user": "edsantiago",
+            "body": "These are hard, and I'm lazy. For every individual `ExitWithError()` I need to manually find a test log, guess the exit code, identify the error message, see if it differs between root/rootless/remote, and add an `ExpectSubstring()` that matches all cases (or, yuk, a conditional). \n\nWhat I'm thinking about now is a commit hook that prevents new `ExitWithError`. To at least prevent the problem from getting worse."
+        },
+        {
+            "user": "Luap99",
+            "body": "> These are hard, and I'm lazy. For every individual ExitWithError() I need to manually find a test log, guess the exit code, identify the error message, see if it differs between root/rootless/remote, and add an ExpectSubstring() that matches all cases (or, yuk, a conditional).\n\nI wonder if this could be automated. We already have the logs and know the stderr output, so technically it would juts need to be captured then matched for common substrings and then added as check in the right place. IF there are enough of them I think it may be worth to automate this. Of course we still need review the results to make sure the error messages are actually the ones that should be happening in the tests.\n\n> What I'm thinking about now is a commit hook that prevents new ExitWithError. To at least prevent the problem from getting worse.\n\nThis sounds like a good first step. "
+        },
+        {
+            "user": "edsantiago",
+            "body": "`ExitWithError()` now requires two args: exit status and error substring. I can't (automatically) enforce that new test code test for meaningful substrings, we will all have to be diligent in writing and reviewing new tests.\n\nThere's still the `Expect(Should(Exit(N)))` pattern. There's no way to block that, because it is sometimes impossible to use `ExitWithError()`. Again, we'll try to flag those in review and allow them only if nothing else will work.\n\nCurrent list of exceptions that I can't clean up:\n```console\n$ ack '\\(Exit\\([^0]' test/e2e\ntest/e2e/containers_conf_test.go:606:\t\tEventually(session, DefaultWaitTimeout).Should(Exit(125), description)\ntest/e2e/images_test.go:301:\t\t\tExpect(session).Should(Exit(result))\ntest/e2e/info_test.go:43:\t\t\tExpect(session).Should(Exit(tt.exitCode), desc)\ntest/e2e/play_kube_test.go:2093:\t\tExpect(kube).Should(Exit(-1))\ntest/e2e/play_kube_test.go:2105:\t\tExpect(exec).Should(Exit(-1))\ntest/e2e/quadlet_test.go:638:\t\t\tExpect(session).Should(Exit(exitCode))\ntest/e2e/quadlet_test.go:708:\t\t\tExpect(session).Should(Exit(1))\ntest/e2e/systemd_activate_test.go:137:\t\tExpect(activateSession).To(Exit(125))\ntest/e2e/version_test.go:59:\t\t\tExpect(session).Should(Exit(tt.exitCode), desc)\n```\nI consider this closed. This was an interesting challenge."
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 17831
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 18540
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 18931
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 22270
+        }
+    ]
+}

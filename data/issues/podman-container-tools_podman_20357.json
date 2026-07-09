@@ -1,0 +1,106 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 20357,
+    "type": "pull_request",
+    "title": "Add TERM iff TERM not defined in container when podman exec -t",
+    "state": "closed",
+    "labels": [
+        "lgtm",
+        "approved",
+        "release-note",
+        "kind/api-change",
+        "locked - please file new issue/PR"
+    ],
+    "user": "rhatdan",
+    "body": "Fixes: https://github.com/containers/podman/issues/20334\n\n<!--\nThanks for sending a pull request!\n\nPlease make sure you've read our contributing guidelines and how to submit a pull request (https://github.com/containers/podman/blob/main/CONTRIBUTING.md#submitting-pull-requests).\n\nIn case you're only changing docs, make sure to prefix the pull-request title with \"[CI:DOCS]\". That will prevent functional tests from running and save time and energy.\n\nFinally, be sure to sign commits with your real name. Since by opening\na PR you already have commits, you can add signatures if needed with\nsomething like `git commit -s --amend`.\n-->\n\n#### Does this PR introduce a user-facing change?\n\n<!--\nIf no, just write `None` in the release-note block below. If yes, a release note\nis required: Enter your extended release note in the block below. If the PR\nrequires additional action from users switching to the new release, include the\nstring \"action required\".\n\nFor more information on release notes, please follow the Kubernetes model:\nhttps://git.k8s.io/community/contributors/guide/release-notes.md\n-->\n\n```release-note\nPodman exec -t will define TERM environment variable even if container is not running with a terminal.\n```\n",
+    "comments": [
+        {
+            "user": "rhatdan",
+            "body": "@edsantiago Not sure what is going on, but the out put of env from inside of container seems to have a ^M associated with it, not sure how to remove it nicely."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@edsantiago it is blowing up with an unexpected terminal name `dumb`?"
+        },
+        {
+            "user": "edsantiago",
+            "body": "Argh! I can reproduce via `env -u TERM hack/bats --rootless 075:tty </dev/null`. (I had only tested via `TERM= hack/bats`, which is obviously not the same). Now looking for a fix."
+        },
+        {
+            "user": "edsantiago",
+            "body": "This fixes the tests..... but only for local podman. For remote, `podman run (no opts)` with `exec -t` gets the podman-system-service `$TERM`, not the invoking client's. My gut tells me that's wrong, but it's too late in my day right now for me to fully think it through.\n```diff\ndiff --git a/test/system/075-exec.bats b/test/system/075-exec.bats\nindex ec7d59536..324c9bbfe 100644\n--- a/test/system/075-exec.bats\n+++ b/test/system/075-exec.bats\n@@ -177,3 +177,3 @@ load helpers\n             fi\n-            run_podman run -d $run_opt_t $run_opt_env --name test $IMAGE top\n+            TERM=run-term run_podman run -d $run_opt_t $run_opt_env --name test $IMAGE top\n \n@@ -184,5 +184,5 @@ load helpers\n                     local expected=\n-                    # \"exec -t\" defaults to current $TERM\n+                    # \"exec -t\" defaults to the process TERM\n                     if [[ -n \"$exec_opt_t\" ]]; then\n-                        expected=\"$TERM\"\n+                        expected=\"exec-term\"\n                     fi\n@@ -203,3 +203,3 @@ load helpers\n \n-                    run_podman exec $exec_opt_t $exec_opt_env test sh -c 'echo -n $TERM'\n+                    TERM=exec-term run_podman exec $exec_opt_t $exec_opt_env test sh -c 'echo -n $TERM'\n                     assert \"$output\" = \"$expected\" \"run $run_opt_t $run_opt_env, exec $exec_opt_t $exec_opt_env\"\n```\nNote that this does not test the `env -u TERM run_podman` case, because we can't do that. Can't do `env` with `run_podman`. This keep getting trickier. I'm sorry to have introduced so much hassle, but am slightly glad that we're giving attention to the corner cases."
+        },
+        {
+            "user": "edsantiago",
+            "body": "@rhatdan this is going to fail. I guess I wasn't clear in my comments, sorry.\n\nThe podman-remote case uses `$TERM` on the server. I think this is wrong:\n```console\n$ TERM=sdfsdf bin/podman system service --timeout=0\n```\n```\n$ bin/podman-remote run -d --name foo quay.io/libpod/testimage:20221018 top\n<sha>\n$ bin/podman-remote exec -t foo printenv TERM\nsdfsdf\n```\nNote that `podman-remote run -t` shows `xterm`, not `sdf`.\n\nAnyhow, tests will fail until this is resolved. Either skip part of the tests under remote, or fix the underlying code, and I would prefer to fix the underlying code. I think `podman-remote exec` should use client TERM, not server. But I may be wrong."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@edsantiago I changed the `podman run -t` behavior to do a Getenv(\"TERM\") before failing over to \"xterm\"\nNow it should work on --remote."
+        },
+        {
+            "user": "edsantiago",
+            "body": "I'm not sure this is better? It still fails remote (no change), and now I think the `exec` behavior is worse: `exec -t`, on a container with `run -t`, now gets the **run** TERM, not the exec one. I think that's a step in the opposite direction than we want?\n\nAnyhow, this is going to fail all system tests, not just remote.\n"
+        },
+        {
+            "user": "edsantiago",
+            "body": "My bad. This is actually a very small net gain (`run -t` now honors TERM) but I still think that `exec -t` should win. This patch makes it work under podman-local:\n```diff\ndiff --git a/test/system/075-exec.bats b/test/system/075-exec.bats\nindex 324c9bbfe..14f965063 100644\n--- a/test/system/075-exec.bats\n+++ b/test/system/075-exec.bats\n@@ -188,5 +188,5 @@ load helpers\n                     fi\n-                    # ...unless \"run -t\", which forces xterm (always xterm)\n+                    # ...unless \"run -t\", which forces the run-process TERM\n                     if [[ -n \"$run_opt_t\" ]]; then\n-                        expected=\"xterm\"\n+                        expected=\"run-term\"\n                     fi\n```\n...but remote is still 100% broken and I still lean toward thinking that it should be fixed in the code, not the tests.\n\nWhat I _can_ do, though, is kludge up the tests so they pass under remote, then sweep the podman-remote-exec problem under the rug for another bug week. Should I do that?"
+        },
+        {
+            "user": "edsantiago",
+            "body": "copy-paste this, it will work under local and remote. I've made the warning messages very obnoxious as an incentive to getting that bug fixed (or at least getting the issue resolved one way or another).\n```bash\n@test \"podman exec --tty\" {\n    # Outer loops: different variations on the RUN container\n    for run_opt_t in \"\" \"-t\"; do\n        for run_term_env in \"\" \"explicit_RUN_term\"; do\n            local run_opt_env=\n            if [[ -n \"$run_term_env\" ]]; then\n                run_opt_env=\"--env=TERM=$run_term_env\"\n            fi\n            TERM=run-term run_podman run -d $run_opt_t $run_opt_env --name test $IMAGE top\n\n            # Inner loops: different variations on EXEC\n            for exec_opt_t in \"\" \"-t\"; do\n                for exec_term_env in \"\" \"explicit_EXEC_term\"; do\n                    # What to expect.\n                    local expected=\n                    # \"exec -t\" defaults to the process TERM\n                    if [[ -n \"$exec_opt_t\" ]]; then\n                        expected=\"exec-term\"\n                    fi\n                    # ...unless \"run -t\", which forces the run-process TERM\n                    if [[ -n \"$run_opt_t\" ]]; then\n                        expected=\"run-term\"\n                    fi\n                    # ...unless overridden by explicit --env\n                    if [[ -n \"$run_term_env$exec_term_env\" ]]; then\n                        # (exec overrides run)\n                        expected=\"${exec_term_env:-$run_term_env}\"\n                    fi\n\n                    local exec_opt_env=\n                    if [[ -n \"$exec_term_env\" ]]; then\n                        exec_opt_env=\"--env=TERM=$exec_term_env\"\n                    fi\n\n                    local desc=\"run $run_opt_t $run_opt_env, exec $exec_opt_t $exec_opt_env\"\n                    TERM=exec-term run_podman exec $exec_opt_t $exec_opt_env test sh -c 'echo -n $TERM'\n                    # FIXME FIXME FIXME! #xxxxx: podman-remote run/exec -t use server TERM, not client\n                    if is_remote && [[ -n \"$run_opt_t$exec_opt_t\" ]] && [[ -z \"$run_term_env$exec_term_env\" ]]; then\n                        echo \"# [[ FIXME: podman-remote -t uses server TERM, not client : $desc ]]\" >&3\n                    else\n                        # The normal case\n                        assert \"$output\" = \"$expected\" \"$desc\"\n                    fi\n                done\n            done\n\n            run_podman rm -f -t0 test\n        done\n    done\n}\n```"
+        },
+        {
+            "user": "rhatdan",
+            "body": "Switching to TERM on the client side is a potential breaking change, but might make the most sense.\n\nUp til now, exec used TERM from the Container, the change that triggered this PR was that podman run --tty=false, no longer sets a TERM environment variable.  This was causing podman exec --tty=true to said terminals to not work correctly without a TERM set.\n\nThis PR still takes the TERM from the container if it is set, and then takes if from the client, when it is not set.\n\nChanging to always take TERM from the client for podman exec, might make the most sense, although in the server case, you could have a TERM on the client side that is not understood on the server side.  Perhaps a TERM from a Mac or Windows is not understood in linux.  (The current code is susceptible to the same issue).\n\n@vrothberg @Luap99 @edsantiago @baude Thoughts?"
+        },
+        {
+            "user": "Luap99",
+            "body": "Why are we looking up the TERM from the host environment exactly? This seems to be a new change made by this PR so I don't see how this effects any kind of backwards compatibility. More the other way around using the TERM env from the environment might be breaking (although I don't see how but I don't really understand how $TERM is used by applications so I wouldn't really comment on that)\n\nI don't see why we should make such change, nobody seems to have asked for that. The old logic is use `--env TERM` when set otherwise default to `xterm`. I see no reason to switch the behavior right now, the bug is about `exec -t `not setting TERM so I don't see why we should just do the same thing as done by podman run right now.\n\n\n"
+        },
+        {
+            "user": "Luap99",
+            "body": "Also worth pointing out before committing to such changes we should verify what docker does. If docker doesn't read from the environment neither should we IMO. "
+        },
+        {
+            "user": "edsantiago",
+            "body": ">Why are we looking up the TERM from the host environment exactly?\n\nMy fault: I got sick of all the churn on this, and added tests, and my new test found what I consider to be weird behavior. But yeah, I guess we should figure out what docker does and copy it."
+        },
+        {
+            "user": "rhatdan",
+            "body": "Basically docker sets the TERM=xterm if it not defined in the container image on docker run.\nDocker sets the TERM=xterm if TERM is not defined in the container on docker exec."
+        },
+        {
+            "user": "edsantiago",
+            "body": "Something changed in `defaultenv`, `xterm` vs `xterm-256color`. \n\nAnd, I'm ultra-concerned that we have a brand-new test, `exec leak something` added in #20394, that is failing hard (not flaking) on podman-remote."
+        },
+        {
+            "user": "edsantiago",
+            "body": "[exec something leak](https://api.cirrus-ci.com/v1/artifact/task/6610353904156672/html/sys-remote-rawhide-root-host-sqlite.log.html#t--00233), @giuseppe PTAL"
+        },
+        {
+            "user": "edsantiago",
+            "body": "20404 (CI fix) is merged. You can now rebase. Please do fix the issues I reported above."
+        },
+        {
+            "user": "openshift-ci[bot]",
+            "body": "[APPROVALNOTIFIER] This PR is **APPROVED**\n\nThis pull-request has been approved by: *<a href=\"https://github.com/containers/podman/pull/20357#pullrequestreview-1686204845\" title=\"Approved\">edsantiago</a>*, *<a href=\"https://github.com/containers/podman/pull/20357#\" title=\"Author self-approved\">rhatdan</a>*, *<a href=\"https://github.com/containers/podman/pull/20357#pullrequestreview-1685269860\" title=\"Approved\">vrothberg</a>*\n\nThe full list of commands accepted by this bot can be found [here](https://go.k8s.io/bot-commands?repo=containers%2Fpodman).\n\nThe pull request process is described [here](https://git.k8s.io/community/contributors/guide/owners.md#the-code-review-process)\n\n<details >\nNeeds approval from an approver in each of these files:\n\n- ~~[OWNERS](https://github.com/containers/podman/blob/main/OWNERS)~~ [edsantiago,rhatdan,vrothberg]\n\nApprovers can indicate their approval by writing `/approve` in a comment\nApprovers can cancel approval by writing `/approve cancel` in a comment\n</details>\n<!-- META={\"approvers\":[]} -->"
+        },
+        {
+            "user": "edsantiago",
+            "body": "Flake is new to me. Restarted.\n\n/lgtm\n/hold\n\nThis has been quite the ordeal. Thank you @rhatdan for your patience with my obnoxious insistence on testing."
+        },
+        {
+            "user": "edsantiago",
+            "body": "/hold cancel"
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 18501
+        }
+    ]
+}

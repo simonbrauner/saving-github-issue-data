@@ -1,0 +1,61 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 29053,
+    "type": "issue",
+    "title": "podman machine init fails on Hyper-V hosts without WSL installed — cross-provider existence check runs wsl -l --quiet (6.0 regression)",
+    "state": "closed",
+    "labels": [
+        "kind/bug",
+        "machine",
+        "windows",
+        "regression",
+        "6.0",
+        "triaged"
+    ],
+    "user": "MWurzinger",
+    "body": "### Issue Description\n\nOn Windows with the hyperv provider configured and WSL not installed, podman machine init aborts before doing any work. Even though the selected provider is correctly resolved as hyperv, init performs a cross-provider name-collision check that enumerates all providers, including WSL. The WSL enumeration shells out to wsl -l --quiet, which exits non-zero on a host where WSL is not installed, and that error is propagated as a hard failure that aborts the entire init.\n\nThis is a regression in 6.0.0. In 5.8.x, init only consulted the configured provider, so a Hyper-V-only host (no WSL) was never probed for WSL during init.\n\nThis blocks podman machine init entirely on a common enterprise configuration: the Hyper-V provider with WSL deliberately not installed (e.g. WSL disabled by security policy). It also surfaces through Podman Desktop, which drives the CLI.\n\n### Steps to reproduce the issue\n\nSteps to reproduce the issue\n\n1. Windows host with the Hyper-V Windows feature enabled and WSL not installed (neither the Microsoft-Windows-Subsystem-Linux / VirtualMachinePlatform optional components nor the WSL app are present).\n2. Select the Hyper-V provider via any of: CONTAINERS_MACHINE_PROVIDER=hyperv, [machine] provider = \"hyperv\" in containers.conf, or podman machine init --provider hyperv.\n3. Run podman machine init.\n\n### Describe the results you received\n\ninit aborts immediately (log anonymized; German locale):\n\n```\ntime=\"...\" level=debug msg=\"Using Podman machine with `hyperv` virtualization provider\"\ntime=\"...\" level=debug msg=\"socket length for C:\\Users\\<user>\\.config\\containers\\podman\\machine\\wsl is 55\"\ntime=\"...\" level=debug msg=\"socket length for C:\\Users\\<user>\\.local\\share\\containers\\podman\\machine\\wsl is 60\"\n... (socket-length lines are computed for both the wsl and the hyperv machine dirs) ...\ntime=\"...\" level=debug msg=\"socket length for C:\\Users\\<user>\\.config\\containers\\podman\\machine\\hyperv is 58\"\nError: command C:\\WINDOWS\\system32\\wsl.exe [-l --quiet] failed: exit status 1 (Das Windows-Subsystem für Linux ist nicht installiert. Sie können die Installation ausführen, indem Sie \"wsl.exe --install\" ausführen. Weitere Informationen finden Sie unter https://aka.ms/wslinstall)\ntime=\"...\" level=debug msg=\"Shutting down engines\"\n```\n\nThe message is localized — English equivalent: \"The Windows Subsystem for Linux is not installed.\" — but the failure is not locale-dependent; any non-zero exit from wsl -l --quiet aborts init.\n\nNote that the provider is correctly resolved as hyperv. The failing wsl.exe call comes from the WSL provider being included in the cross-provider existence check, not from provider selection. --provider hyperv and CONTAINERS_MACHINE_PROVIDER=hyperv do not avoid it.\n\n### Describe the results you expected\n\npodman machine init should create the Hyper-V machine. When a provider's platform is not installed (here: WSL), the cross-provider existence check should treat that provider as having no machines and continue — not abort with a hard error. WSL not being installed is a normal, supported state on a Hyper-V-only host.\n\n### podman info output\n\n```yaml\n# Client section only (the machine is not created yet). Please replace with your actual `podman info` output.\nversion: 6.0.0\nOs: windows\nOsArch: windows/amd64\nprovider: hyperv\n```\n\n### Podman in a container\n\nNo\n\n### Privileged Or Rootless\n\nNone\n\n### Upstream Latest Release\n\nYes\n\n### Additional environment details\n\n- Windows 10/11 (Microsoft Windows [Version 10.0.26200.8457]) (non-English / German locale in our case), Hyper-V feature enabled, WSL not installed.\n- Provider: hyperv (confirmed in the debug log).\n\n### Additional information\n\nClaude helped me to find this issue and added this information:\n\n**Why this is a 6.0 regression**\nIn v5.8.2, initMachine checked existence against the configured provider only:\n\n`_, exists, err := shim.VMExists(initOpts.Name, []vmconfigs.VMProvider{provider})\n`\nThere was no VMExistsOnHyperVisor call iterating all providers, so a Hyper-V-only host was never probed for WSL during init.\n\nv6.0.0 introduced the all-providers behavior (per the 6.0.0 release notes: all podman machine commands now operate on VMs from all providers, regardless of the configured provider). That change is what adds the unconditional WSL probe to init.\n\n**Suggested fix (maintainers will know best)**\n\nAny of:\n\n1. In VMExistsOnHyperVisor, skip providers whose platform is not installed — e.g. gate the WSL stubber with wutil.IsWSLInstalled() / provider.IsInstalled(define.WSLVirt) and treat \"not installed\" as \"no machines\" (false, nil).\n2. Make getAllWSLDistros / WSLStubber.Exists return (false, nil) when WSL is not installed, reusing the existing not-installed detection in wutil (parseWSLStatus, wslNotInstalledMessages) instead of returning a hard error.\n3. More generally, VMExistsOnHyperVisor should not fail when one provider's enumeration fails solely because that provider is not installed.\n\n**Workarounds (for others hitting this)**\n\n- Enable only the WSL Windows feature, no distro: wsl --install --no-distribution, then reboot. This makes the real wsl -l --quiet exit 0. (Not acceptable where WSL must remain uninstalled.)\n- Put a no-op wsl.exe on PATH ahead of C:\\Windows\\System32 that prints nothing and exits 0; the probe then returns \"no WSL machines\" and init proceeds on Hyper-V. It must be a real .exe (Go's exec resolves wsl via PATH but launches it through CreateProcess, which cannot run a .cmd/.bat). Note this only satisfies the CLI; Podman Desktop's own WSL preflight is separate.",
+    "comments": [
+        {
+            "user": "Luap99",
+            "body": "cc @baude @l0rd"
+        },
+        {
+            "user": "baude",
+            "body": "Seems like a reasonable bug and problem.  I will assign myself but I cannot do anything about it until Monday (maybe?).  If anyone else wants to reproduce and fix, thats fine too."
+        },
+        {
+            "user": "baude",
+            "body": "This is proving more difficult that it would appear.  The versions of windows that I have still leave a \"stub\" file for wsl.exe around for user convenience.  This is even after uninstalling the WSL system components from windows.  And I cannot delete the file even as adminstrator).  I really wanted to replicate your error so I could make this right for you.  @MWurzinger If I were to make a PR and kind guess my way through it, are you in a position to compile it and try the branch? If not, maybe I can attach a compiled binary?"
+        },
+        {
+            "user": "l0rd",
+            "body": "@baude I am able to reproduce the problem after running `wsl --uninstall`. I also have a fix here https://github.com/podman-container-tools/podman/pull/29063 PTAL"
+        },
+        {
+            "user": "MWurzinger",
+            "body": "@baude I can install Go to be able to compile locally, but it is still nessecary with @l0rd's comment ?"
+        },
+        {
+            "user": "l0rd",
+            "body": "@MWurzinger, if you want to help you can still build podman-remote from the PR branch (`.\\winmake.ps1 podman`), replace your podman binary (`cp .\\bin\\windows\\podman $env:LOCALAPPDATA\\Programs\\Podman`) and confirm that `podman machine init` works."
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-desktop",
+            "repository": "podman-desktop",
+            "number": 17595
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 29063
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 29138
+        }
+    ]
+}

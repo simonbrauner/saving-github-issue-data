@@ -1,0 +1,66 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 23482,
+    "type": "issue",
+    "title": "pasta: IPv4 large transfer loopback: socat waitpid no child process",
+    "state": "closed",
+    "labels": [
+        "flakes",
+        "pasta",
+        "locked - please file new issue/PR"
+    ],
+    "user": "edsantiago",
+    "body": "```\n         not ok 187 |505| UDP%2FIPv4 large transfer, loopback in 3178ms\n...\n<+371ms> # $ podman run --rm --name=c-socat-t187-j170t3a5 --net=pasta -p [127.0.0.1]:5298:5298/udp quay.io/libpod/testimage:20240123 sh -c for port in $(seq 5298 5298); do                              socat -u UDP4-LISTEN:${port},bind=[127.0.0.1],null-eof EXEC:md5sum &                          done; wait\n<+2.11s> # 70aef73d20b2fa83e5f3f6b04419c2c6  -\n         # 2024/08/01 17:02:29 socat[3] W waitpid(0, 0x7ffc317a676c, 0): No child process\n         # #/vvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv\n         # #|     FAIL: Mismatch between data sent and received\n         # #| expected: = 70aef73d20b2fa83e5f3f6b04419c2c6  -\n         # #|   actual:   70aef73d20b2fa83e5f3f6b04419c2c6  -\n         # #|         >   2024/08/01 17:02:29 socat\\[3\\] W waitpid\\(0\\, 0x7ffc317a676c\\, 0\\): No child process\n         # #\\^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n```\nOnly in my parallel-systest PR\n\n* fedora-39 : sys podman fedora-39 rootless host boltdb\n  * PR #23275\n    * [08-01 13:03](https://api.cirrus-ci.com/v1/artifact/task/5462253770637312/html/sys-podman-fedora-39-rootless-host-boltdb.log.html#t--00187p) in [sys] |505| UDP%2FIPv4 large transfer, loopback\n* fedora-40 : sys podman fedora-40 rootless host sqlite\n  * PR #23275\n    * [07-29 10:31](https://api.cirrus-ci.com/v1/artifact/task/6300255979831296/html/sys-podman-fedora-40-rootless-host-sqlite.log.html#t--00187) in [sys] |505| UDP%2FIPv4 large transfer, loopback\n\n| x | x | x | x | x | x |\n| ---: | ---: | ---: | ---: | ---: | ---: |\n| sys(2) | podman(2) | fedora-39(1) | rootless(2) | host(2) | boltdb(1) |\n|  |  | fedora-40(1) |  |  | sqlite(1) |\n",
+    "comments": [
+        {
+            "user": "sbrivio-rh",
+            "body": "The test actually succeeds, but we include socat's stderr in the output string. That waitpid() doing nothing appears harmless to me, so I wonder if we should just drop socat's stderr here.\n\nRedirecting socat's stderr to /dev/null is not great, though, because if there's an actual error we would have a hard time finding it.\n\nI wonder if we should use another variable other than run_podman()'s $output, or tweak run_podman() to avoid merging stderr and stdout (my understanding of it is that it does that, at the moment)."
+        },
+        {
+            "user": "Luap99",
+            "body": "the merging of `$output` is done by bats by default although newer bats version have `--separate-stderr` for run that can be used which would need to be added to run_podman\n\nBut in general the question is why do we get this warning in the first place? Is this a bug in socat?"
+        },
+        {
+            "user": "sbrivio-rh",
+            "body": "> But in general the question is why do we get this warning in the first place? Is this a bug in socat?\n\nI didn't reproduce this, so it's all a bit tentative, but I think xioshutdown() (other waitpid() warnings are printed differently) is called \"too late\", once the receiving child process (in the container) already terminated.\n\nWhich is fine, as xioshutdown() just needs to ensure that the child process terminates... but yes, it prints a warning. Perhaps we could fix this in socat by omitting that warning if the error is ECHILD, say:\n\n```\ndiff --git a/xioshutdown.c b/xioshutdown.c\nindex c9fef8d..9290be6 100644\n--- a/xioshutdown.c\n+++ b/xioshutdown.c\n@@ -134,8 +134,10 @@ int xioshutdown(xiofile_t *sock, int how) {\n \t Alarm(1 /*! sock->stream.para.exec.waitdie */);\n #endif /* !HAVE_SETITIMER */\n \t if (Waitpid(sock->stream.para.exec.pid, &status, 0) < 0) {\n-\t    Warn3(\"waitpid(\"F_pid\", %p, 0): %s\",\n-\t\t  sock->stream.para.exec.pid, &status, strerror(errno));\n+\t    if (errno != ECHILD) {\n+\t       Warn3(\"waitpid(\"F_pid\", %p, 0): %s\",\n+\t             sock->stream.para.exec.pid, &status, strerror(errno));\n+            }\n \t }\n \t Alarm(0);\n       }\n```\n\nbut I would need to find out how to reproduce this, before being confident enough that the patch is correct."
+        },
+        {
+            "user": "Luap99",
+            "body": "right but in order to fail with ECHILD it means socat must have called waitpid more often than it has child processes which sounds like the real bug to me. OF course hiding the warning on ECHILD is simple.\n\nAs far as reproducing goes check out PR https://github.com/containers/podman/pull/23275 and run\n`hack/bats --rootless --tag=ci:parallel -T 505`\n\nI see https://github.com/containers/podman/issues/23471 (maybe directly related?) on basically every run locally on my 12 thread laptop. I think I might have seen this issue as well but not in the few runs I tried today so this one might be a bit more difficult to trigger.\n\nAnd @edsantiago I am also seeing a ton of `Failed to bind port 5328 (Address already in use) ` flakes so I don't think the random_free_port logic based on job slot is working...\n"
+        },
+        {
+            "user": "dgibson",
+            "body": "> As far as reproducing goes check out PR #23275 and run `hack/bats --rootless --tag=ci:parallel -T 505`\n> \n> I see #23471 (maybe directly related?) on basically every run locally on my 12 thread laptop. I think I might have seen this issue as well but not in the few runs I tried today so this one might be a bit more difficult to trigger.\n\nTried this (on commit `67ebec1ae19141f56b390df334a2f0b104283b35` specifically), but was not able to reproduce (on my 20 thread laptop).  I did _once_ see what I think is not the original bug from #23471, but the [TCP problem](https://github.com/containers/podman/issues/23471#issuecomment-2268965909) described later.\n\nSo, I don't really enough information to guess what's going wrong here.\n\n@Luap99 any chance you could try to get an `strace -f` of the failing testcase?  There's a pretty high chance that will change the timing enough that it won't reproduce any more, but it's worth a shot.\n"
+        },
+        {
+            "user": "edsantiago",
+            "body": "[Still happening](https://api.cirrus-ci.com/v1/artifact/task/5801107006423040/html/sys-podman-debian-13-rootless-host-sqlite.log.html#t--00350p) with pasta 08-21"
+        },
+        {
+            "user": "Luap99",
+            "body": "Yeah I don't think this has anything to do with the podman or pasta version. To me this sounds like a bug in socat where it tries to reap the child process twice. Looking at the socat code there is both a signal handler for SIGCHLD that reaps childs and then the waitpid call on shutdown for the exec pid which reaps again. Thus I would assume if the handler runs before the waipid call on shutdown we see this warning. So I agree with @sbrivio-rh patch above as this is harmless and we likely should just work around that for now in the tests."
+        },
+        {
+            "user": "Luap99",
+            "body": "There is a work around in place so I close it"
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 23471
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 23561
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 23777
+        }
+    ]
+}

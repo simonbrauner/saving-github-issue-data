@@ -1,0 +1,84 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 4065,
+    "type": "pull_request",
+    "title": "Unconditionally remove conmon files before starting",
+    "state": "closed",
+    "labels": [
+        "lgtm",
+        "approved",
+        "locked - please file new issue/PR"
+    ],
+    "user": "mheon",
+    "body": "We've been seeing a lot of issues (ref: #4061, but there are others) where Podman hiccups on trying to start a container, because some temporary files have been retained and Conmon will not overwrite them.\n\nIf we're calling start() we can safely assume that we really want those files gone so the container starts without error, so invoke the cleanup routine. It's relatively cheap (four file removes) so it shouldn't hurt us that much.\n\nAlso contains a small simplification to the removeConmonFiles logic - we don't need to stat-then-remove when ignoring ENOENT is fine.",
+    "comments": [
+        {
+            "user": "openshift-ci-robot",
+            "body": "[APPROVALNOTIFIER] This PR is **APPROVED**\n\nThis pull-request has been approved by: *<a href=\"https://github.com/containers/libpod/pull/4065#\" title=\"Author self-approved\">mheon</a>*\n\nThe full list of commands accepted by this bot can be found [here](https://go.k8s.io/bot-commands?repo=containers%2Flibpod).\n\nThe pull request process is described [here](https://git.k8s.io/community/contributors/guide/owners.md#the-code-review-process)\n\n<details >\nNeeds approval from an approver in each of these files:\n\n- ~~[OWNERS](https://github.com/containers/libpod/blob/master/OWNERS)~~ [mheon]\n\nApprovers can indicate their approval by writing `/approve` in a comment\nApprovers can cancel approval by writing `/approve cancel` in a comment\n</details>\n<!-- META={\"approvers\":[]} -->"
+        },
+        {
+            "user": "rhatdan",
+            "body": "LGTM\nNice change and cleanup.\n@vrothberg @giuseppe @TomSweeneyRedHat @baude @jwhonce @QiWang19 PTAL"
+        },
+        {
+            "user": "giuseppe",
+            "body": "LGTM"
+        },
+        {
+            "user": "rhatdan",
+            "body": "Testing is not happy  though."
+        },
+        {
+            "user": "debarshiray",
+            "body": "This broke starting containers on my Workstation 29 [where things were somehow working](https://github.com/containers/libpod/issues/4061) regardless of the warning about `crun`.\n```\n$ /opt/bin/podman --log-level debug start fedora-toolbox-29\nERRO[0000] could not get runtime: eventer creation: No support for journald logging\n```"
+        },
+        {
+            "user": "mheon",
+            "body": "Oh, wait, wait, wait. This is happening too late in the process. Needs to be attached to `init()` (when we initially spawn conmon) and not `start()`. This is what I get for working after midnight."
+        },
+        {
+            "user": "debarshiray",
+            "body": "> Oh, wait, wait, wait. This is happening too late in the process. Needs\n> to be attached to `init()` (when we initially spawn conmon) and not `start()`.\n> This is what I get for working after midnight.\n\nOk, so my Workstation 29 is back to being as it used to be. `podman start` works but I continue to see the `crun` warning without bumping the log level.\n```\nWARN[0000] Error initializing configured OCI runtime crun: no valid executable found for OCI runtime crun: invalid argument \n```\n\nLet me now see if it unbreaks `podman start` my Silverblue 30.\n\n"
+        },
+        {
+            "user": "mheon",
+            "body": "Next step on the logs is to get a print statement in stating our default log level, to see if it changed"
+        },
+        {
+            "user": "debarshiray",
+            "body": "`podman start` continues to be broken on my Silverblue 30 with the same spew from `podman start` about not being able to mount `/usr`:\n```\nError: unable to start container \"fedora-toolbox-30\": container_linux.go:346: starting container process caused \"process_linux.go:446: container init caused \\\"rootfs_linux.go:58: mounting \\\\\\\"/usr\\\\\\\" to rootfs \\\\\\\"/var/home/rishi/.local/share/containers/storage/overlay/25d8867e47b79ef5a590bb748eb0feecd6fbdf12de930d1114f531218c0fac45/merged\\\\\\\" at \\\\\\\"/var/home/rishi/.local/share/containers/storage/overlay/25d8867e47b79ef5a590bb748eb0feecd6fbdf12de930d1114f531218c0fac45/merged/run/host/usr\\\\\\\" caused \\\\\\\"operation not permitted\\\\\\\"\\\"\": OCI runtime permission denied error\n```\n\nAs before, the first failed `podman start` doesn't put anything in the journal, but the second attempt puts a slightly different set of logs than before. It's no longer about a failed `mkfifo` but *Failed to create container: exit status 1*:\n```\nSep 20 17:11:31 bollard conmon[8799]: conmon 7f293d9029e04fba2793 <ndebug>: failed to write to /proc/self/oom_score_adj: Permission denied\nSep 20 17:11:31 bollard conmon[8800]: conmon 7f293d9029e04fba2793 <ninfo>: attach sock path: /run/user/1000/libpod/tmp/socket/7f293d9029e04fba27934561472b3293754e5baf22cb4d950b6eafdb87255aac/attach\nSep 20 17:11:31 bollard conmon[8800]: conmon 7f293d9029e04fba2793 <ninfo>: addr{sun_family=AF_UNIX, sun_path=/run/user/1000/libpod/tmp/socket/7f293d9029e04fba27934561472b3293754e5baf22cb4d950b6eafdb87255aac/attach}\nSep 20 17:11:31 bollard conmon[8800]: conmon 7f293d9029e04fba2793 <ninfo>: ctl fifo path: /var/home/rishi/.local/share/containers/storage/overlay-containers/7f293d9029e04fba27934561472b3293754e5baf22cb4d950b6eafdb87255aac/userdata/ctl\nSep 20 17:11:31 bollard conmon[8800]: conmon 7f293d9029e04fba2793 <ninfo>: terminal_ctrl_fd: 12\nSep 20 17:11:31 bollard conmon[8800]: conmon 7f293d9029e04fba2793 <error>: Failed to create container: exit status 1\n```"
+        },
+        {
+            "user": "mheon",
+            "body": "@vrothberg I don't know if this one actually solved the issue, which is why I'm sitting on it - @debarshiray indicates that it didn't, which makes me concerned that I hit a symptom and the underlying problem is unaddressed."
+        },
+        {
+            "user": "vrothberg",
+            "body": "Added a `WIP - ` to make sure we're not accidentally merging it."
+        },
+        {
+            "user": "debarshiray",
+            "body": "> @vrothberg I don't know if this one actually solved the issue, which is why I'm sitting\n> on it - @debarshiray indicates that it didn't, which makes me concerned that I hit a\n> symptom and the underlying problem is unaddressed.\n\nIf you look very closely at https://github.com/containers/libpod/issues/4061 and read between the lines, then it seems that this pull request at least made things move further. `podman start` still fails but with a different error.\n\n"
+        },
+        {
+            "user": "debarshiray",
+            "body": "> > @vrothberg I don't know if this one actually solved the issue, which is why I'm sitting\n> > on it - @debarshiray indicates that it didn't, which makes me concerned that I hit a\n> > symptom and the underlying problem is unaddressed.\n> \n> If you look very closely at #4061 and read between the lines, then it seems that this\n> pull request at least made things move further. `podman start` still fails but with a different\n> error.\n\nOk, I have a better understanding of https://github.com/containers/libpod/issues/4061 now. I don't think we should block this pull request just because it doesn't address https://github.com/containers/libpod/issues/4061 fully. The remaining issue in https://github.com/containers/libpod/issues/4061 is unrelated to this PR in my opinion.\n\n"
+        },
+        {
+            "user": "mheon",
+            "body": "/hold cancel\n@rhatdan @vrothberg @giuseppe @baude Alright, sounds like we're ready to merge, then."
+        },
+        {
+            "user": "jwhonce",
+            "body": "/lgtm"
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 4061
+        }
+    ]
+}

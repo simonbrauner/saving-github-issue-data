@@ -1,0 +1,224 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 10875,
+    "type": "issue",
+    "title": "`podman update` command and `auto-update` without systemd",
+    "state": "closed",
+    "labels": [
+        "kind/feature",
+        "locked - please file new issue/PR"
+    ],
+    "user": "lukasbestle",
+    "body": "<!--\n---------------------------------------------------\nBUG REPORT INFORMATION\n---------------------------------------------------\nUse the commands below to provide key information from your environment:\nYou do NOT have to include this information if this is a FEATURE REQUEST\n\n**NOTE** A large number of issues reported against Podman are often found to already be fixed\nin more current versions of the project.  Before reporting an issue, please verify the\nversion you are running with `podman version` and compare it to the latest release\ndocumented on the top of Podman's [README.md](../README.md).  If they differ, please\nupdate your version of Podman to the latest possible and retry your command before creating\nan issue.\n\nAlso, there is a running list of known issues in the [Podman Troubleshooting Guide](https://github.com/containers/podman/blob/master/troubleshooting.md),\nplease reference that page before opening a new issue.\n\nIf you are filing a bug against `podman build`, please instead file a bug\nagainst Buildah (https://github.com/containers/buildah/issues). Podman build\nexecutes Buildah to perform container builds, and as such the Buildah\nmaintainers are best equipped to handle these bugs.\n-->\n\n/kind feature\n\n**Description**\n\n<!--\nBriefly describe the problem you are having in a few paragraphs.\n-->\n\nLet's say I have a local image like `my-web-server:1.0.0` that is used by one or more containers. Now I build that local image again with a few changes as `my-web-server:1.0.1` and want my existing containers to use this new image.\n\n**Currently needed commands**\n\n```\npodman stop my-container\npodman rm my-container\n\npodman run --name my-container -dt -p 8080:8080 -v $HOME/html:/var/www/html my-web-server:1.0.1\n```\n\n*Disadvantages*:\n\n- All options need to be passed manually again even though Podman already knew about them before the update.\n- Passing the options manually is error-prone and complicates scripting as I now need to manage the options (impossible to build a general script that works for different containers).\n- Also the current process requires three commands when it could be one.\n\n**Suggestion**\n\n```\npodman update my-container --image my-web-server:1.0.1\n```\n\nThis would basically do the exact same things as the commands above, but it would keep all the container options and pass them on to the new container.",
+    "comments": [
+        {
+            "user": "vrothberg",
+            "body": "Thanks for reaching out, @lukasbestle.  Did you have a look at `podman auto-update`?  Containers are required to run in systemd services but it provides the functionality you describe.\n\nStarting with Podman v3.2, auto updates also cover local images. Prior to that, all images had to reside on a registry."
+        },
+        {
+            "user": "lukasbestle",
+            "body": "Thanks @vrothberg for your quick reply.\n\n`podman auto-update` does pretty much what I want now that it supports local images (didn't know that – thanks for pointing it out), but unfortunately the systemd requirement is a deal-breaker for me. I'm using Alpine Linux, which comes with OpenRC instead of systemd, so I can't use `podman auto-update`.\n\nThe only other difference between `auto-update` and my proposal is that `auto-update` always updates to the latest image tag and doesn't allow updating to a specific one. That would be fine for my use-case however.\n\nSo all in all you are right that using `auto-update` would make the most sense. Is there a particular reason why it requires systemd? Would it be possible to support a simple alternative mode that just uses `podman stop` and `podman run -d` instead?"
+        },
+        {
+            "user": "rhatdan",
+            "body": "Why not just script it?"
+        },
+        {
+            "user": "vrothberg",
+            "body": "> The only other difference between auto-update and my proposal is that auto-update always updates to the latest image tag and doesn't allow updating to a specific one. That would be fine for my use-case however.\n\nNote that \"latest image tag\" does not mean using the `:latest` tag.  If a container uses `quay.io/repo/image:mytag`, auto-update will only update if `mytag` has been updated. It won't look for `latest`.\n\nI guess you are aware of that already but some (future) readers may get sidetracked by the meaning of \"latest\".\n\n> So all in all you are right that using auto-update would make the most sense. Is there a particular reason why it requires systemd?\n\nIt greatly simplifies things for Podman.  Recreating a container is very complex and we avoided all that complexity by requiring the container to run in a systemd service, which when being restarted creates the container exactly as before.  It also has the advantage of using restart policies, sophisticated dependency management, etc.\n\nSo far, we have made good experiences with using sytemd and Podman in such a way.  But that won't help Alpine users, unfortunately.\n\n> Would it be possible to support a simple alternative mode that just uses podman stop and podman run -d instead?\n\nThis would entail the same problems as we faced with auto-updates."
+        },
+        {
+            "user": "lukasbestle",
+            "body": "> Why not just script it?\n\nSee my first comment: 🙂\n\n> Passing the options manually is error-prone and complicates scripting as I now need to manage the options (impossible to build a general script that works for different containers).\n\nTo explain it a bit more: I plan to use Rootless Podman so that multiple users on an Alpine server can set up containers from a predefined set of local images that are managed by the server admin. Whenever these images change, the containers should be updated automatically. But since the admin doesn't know which exact options the user used to create that container, they cannot reproduce it 1:1 from an update script.\n\nJust telling Podman to update container X to image Y would be perfect for scripting, but if I need to tell Podman to create a new container X with image Y and options Z, it would make the setup impossible for the mentioned reasons.\n\n---\n\n> It greatly simplifies things for Podman. Recreating a container is very complex and we avoided all that complexity by requiring the container to run in a systemd service, which when being restarted creates the container exactly as before. It also has the advantage of using restart policies, sophisticated dependency management, etc.\n\nIf I understand it correctly, `podman auto-update` currently does something like this:\n\n1. Figure out if the image was updated. If so, `pull` the new image.\n2. `systemctl stop <container>`\n3. `podman rm <container>`\n4. `systemctl start <container>`\n\nSo basically the systemd service handles the recreation of the container with the correct options (which again relies on the options being stored in the service definition). Correct?\n\nI think it makes a lot of sense to do it that way, especially for use cases with complex interactions between containers. Also systemd is definitely used in most distros today, so it makes sense that you went that route.\n\nBut it does limit the use of `auto-update` to systemd setups. Besides my use case of Podman on Alpine Linux, another more relevant use case that comes to my mind is a simple development setup where the container is just started with `podman run -d`. I see this a lot in all kinds of container tutorials, together with the advice to destroy the container and recreate it on each image change. Currently this is necessary, but should it really be? A command to update an existing container by replacing it would be really really helpful here.\n\nI'm thinking whether we can find a solution that allows updating containers even if they are *not* managed by systemd. For many simple use cases without complex restart policies or dependencies this would likely work really well. An idea in separate steps:\n\n1. Is it possible to get the list of command line flags that were used when the container was created? Then it would already be possible to script the update process by getting that list of options, destroying the container and creating a new one in its place with the same options. If that isn't possible so far, this should probably be the first feature to implement.\n2. When it's possible to script updates without systemd, the next step could be a `podman update` command as I proposed it in my first comment. It would do exactly the same as that script built in step 1, but just baked into the core for easier use.\n3. Once `podman update` works, integrating it into `podman auto-update` would be pretty simple. There could be a new flag for `auto-update` that tells it not to use systemd but recreate the containers using `podman update`, just with the added benefit of doing it automatically. So the best of both worlds."
+        },
+        {
+            "user": "mheon",
+            "body": "You can retrieve the command a container was created with using `podman inspect --format '{{ .Config.CreateCommand }}'`.\n\nRegarding the proposed `podman update` command - @vrothberg I do see one potential benefit here, and that would be to finally implement rollback. I think that, now that we have container renaming and we're in a much better place for recreating containers now that specgen exists, we can get rollback working. Proposed flow:\n- Check for new image and exit cleanly if not\n- If update available, pull new image\n- Create new container with old options and new image\n- Stop old container\n- Rename old container and new container to give new container the name of the old container\n- Attempt to start new container. If we fail, abort and roll back by removing new container, renaming old container to original name, and starting it again.\n\nThere's still a lot of complexity here, so it would be a significant time investment to get written."
+        },
+        {
+            "user": "lukasbestle",
+            "body": "Thanks for the pointer on how to get the create command. Now I should actually already be able to script this behavior. I'll try that.\n\nA rollback feature would be awesome indeed! The check could also take the healthiness of the new container into account. So it would be rolled back if it fulfills the rules for being restarted, but hasn't been healthy at least once since it started (which tells Podman that it should rollback instead of restart)."
+        },
+        {
+            "user": "vrothberg",
+            "body": "Regarding rollback:  \n\nThat's pretty easy to implement with systemd services as we have them now.  It hasn't prioritized in the past year but I am currently preparing a number of PRs that will pave the way for it.  If starting the systemd service _after_ an update fails, we'll retag the previous image (we know ID & digest) and start again.  I don't think that  a `container update` command is a hard requirement to get rollbacks for auto-updates.\n\n> There's still a lot of complexity here, so it would be a significant time investment to get written.\n\nI concur.  A `container update` would be great, and we've contemplated that idea in great detail in Jan '20 but concluded that the cost/benefit ratio was too high.\n\n"
+        },
+        {
+            "user": "lukasbestle",
+            "body": "I understand that you want to implement these features with the least amount of complexity possible. I'd do the same if I were you – a simpler implementation and potentially fewer bugs. :)\n\nPlease don't forget about the two use cases I mentioned though:\n1) Use on OSs without systemd (like Alpine, Artix, Gentoo, Hyperbola, Parabola...)\n2) Use on development systems with `podman run -d` (even if systemd is present, it isn't needed in these use cases)\n\nI feel like Podman itself can handle the inherent complexity of the update process much better than external scripts or init systems. So given that the effort to handle this complexity is needed anyway, it's probably better done in the Podman core than in external solutions that are only useful for some but not all applications."
+        },
+        {
+            "user": "vrothberg",
+            "body": "I fully sympathize with the desire of enabling auto-updates on non-systemd systems but the cost/benefit ratio is something we have to be very careful about.  I do not have any data to back my theory but I _think_ that systemd deployments are the absolute majority today; at least of users & customers who fund development. It's hard to balance addressing all possible use cases and getting things done. \n\nNote that I am all in favor of doing a `container update` (it's technically superior to the current solution) but I do not think this will receive a high priority in the foreseeable future. That being said, contributions are always welcome :)"
+        },
+        {
+            "user": "lukasbestle",
+            "body": "Was that last discussion you had in January 2020 in a public GitHub issue somewhere? I'm interested in the previous thoughts on this.\n\nIf you have a link at hand or can tell me what to search for, that would be a huge help."
+        },
+        {
+            "user": "vrothberg",
+            "body": "There is no public record of the conversation when we sat together at https://www.devconf.info/cz/.  The conversation was similar to the one here:\n\n* `container update` would be the best solution but it's challenging and linked to a lot of work\n* Using the `CreateCommand` only works for containers that were created via `podman`.  It doesn't include containers created via the REST API.\n* Hence, we need \"cloning\" mechanism and that's where it's getting tricky. We went through what had to be done in order to get there (I forgot the details but that's \"Create new container with old options and new image\" in @mheon's earlier comment) and concluded that it's (too) expensive and full of pitfalls.\n* Then the idea came up to make running in a systemd service a requirement.  That would boil down to just restarting the service and let systemd handle the rest."
+        },
+        {
+            "user": "lukasbestle",
+            "body": "I see, thanks.\n\nAre containers created via the REST API the only limitation at the moment, or are there other potential pitfalls? I'm asking so I know what I'd get myself into if I started working on this. 😀 \n\nFor containers created via Podman, fetching the `CreateCommand` and reproducing it would work, right?"
+        },
+        {
+            "user": "vrothberg",
+            "body": "I don't think that the `CreateCommand` should be used for `update`; it should be possible to \"update\" all containers, so we had to look at the container configs and see if we can create/clone another from there.\n\n`CreateCommand` was introduced for `generate systemd` where we needed the exacts arguments on the from the CLI.\n\n@mheon is probably able to give the best estimate what needs to be done to clone."
+        },
+        {
+            "user": "mheon",
+            "body": "It's a lot easier since Specgen came around - not trivial by any means, but the core of it (container config -> specgen reverse generation) is probably three days to a week of engineering time. I'd like to get at least a basic form of `podman container clone` done sometime this year, so it is on the horizon, but no firm timeframe yet."
+        },
+        {
+            "user": "lukasbestle",
+            "body": "OK, thanks for the insights.\n\nI think I will go the scripting route then until there's a full solution in Podman. In case I manage to build a working script, I will link it here."
+        },
+        {
+            "user": "vrothberg",
+            "body": "> It's a lot easier since Specgen came around - not trivial by any means, but the core of it (container config -> specgen reverse generation) is probably three days to a week of engineering time. I'd like to get at least a basic form of `podman container clone` done sometime this year, so it is on the horizon, but no firm timeframe yet.\n\nThat is great news, thanks @mheon.\n\nOnce a `container update` is working, it would be fairly easy to update them in `auto-update` _alongside_ the ones running inside a systemd unit."
+        },
+        {
+            "user": "vrothberg",
+            "body": "> I think I will go the scripting route then until there's a full solution in Podman. In case I manage to build a working script, I will link it here.\n\nThank you, @lukasbestle !"
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@lukasbestle Is this still an issue.  @vrothberg Looks like he merged some fixes related to this issue?"
+        },
+        {
+            "user": "vrothberg",
+            "body": "> @lukasbestle Is this still an issue. @vrothberg Looks like he merged some fixes related to this issue?\n\nAuto updates are still tied to systemd.  Once a hypothetical `container update` is done, we can extend `auto-update` to also update containers outside of a systemd unit.\n\nI think that `container update` should take two arguments: 1) container, 2) new image."
+        },
+        {
+            "user": "rhatdan",
+            "body": "Why do you need a new image?  Shouldn't container update, just go to a registry to see if there is a new image?"
+        },
+        {
+            "user": "vrothberg",
+            "body": "> Why do you need a new image? Shouldn't container update, just go to a registry to see if there is a new image?\n\nNo, that would replicate `auto-update`. IMHO the user (or `auto-update`) should tell `container update` which image to use.  Otherwise, we'll reimplement auto-update."
+        },
+        {
+            "user": "rhatdan",
+            "body": "Then I am confused about the use case here.  Why do we need a separate command?"
+        },
+        {
+            "user": "vrothberg",
+            "body": "> Then I am confused about the use case here. Why do we need a separate command?\n\n`podman auto-update` is currently limited to systemd. What we want is a way to lift that limitation and allow for auto updating ordinary containers. To get there, we need a way to clone a container and then make it run on another new image.\n\nThinking about it, I am not whether we want to expose that new functionality to the user or not - or in which way.  But if `auto-update` and `container update` would do effectively the same thing, then I'd wonder why there are two commands.  Maybe a `container rebase $container $image` would make more sense?"
+        },
+        {
+            "user": "lukasbestle",
+            "body": "I like the idea to name the command `rebase`. It would be a lot less confusing next to `auto-update`.\n\nA minor disadvantage of the `rebase` name would be that it wouldn't fit for option changes. E.g. you might want to replace a container with a new one that has slightly different options (in which case Podman would take the old options and override the passed ones).\n\nAnother name idea that would fit both changing the image and options: `podman replace`\n\nIMO both `auto-update` and `rebase`/`replace` have their use case: Auto-updating without systemd is great for the mentioned reasons. `rebase`/`replace` is still useful additionally if you want to update or downgrade a container to a specific tag, e.g. when debugging or developing."
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "lukasbestle",
+            "body": "The issue/idea is still relevant."
+        },
+        {
+            "user": "benridley",
+            "body": "I second this idea. With the recent addition of `podman-restart.service` so that Podman can restart pods on boot (even though systemd is really doing this, its nice that I don't have to care about it), and the ability to use `docker-compose` or `podman play kube` to declaratively define services, systemd is becoming less relevant to me in the Podman ecosystem. Allowing Podman to update/restart containers natively would be a nice way to remove having to generate systemd unit files and such from the equation."
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "lukasbestle",
+            "body": "The issue/idea is still relevant."
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "rhatdan",
+            "body": "It seems that you could fairly easily script this with something like\n```\n#!/bin/sh\ncontainer=$1\nimage=$2\ncmd=$(podman inspect --format '{{ .Config.CreateCommand }}' $container)\nimg=$(podman inspect --format '{{ .ImageName }}' $container)\npodman rm $container\n# You need to peal away the [] around $cmd\necho $cmd\n# Then  you need to replace $img with $image\necho $img\n# finally you would want to execute the original command\n```\n\n\n"
+        },
+        {
+            "user": "rhatdan",
+            "body": "Might be better to do this in language like python.\n\nBut doing this in Podman would probably be alright."
+        },
+        {
+            "user": "rhatdan",
+            "body": "The real question would be whether or not to keep the existing data in the image,  which currently we do not. Only the volumes are preserved the container image is destroyed."
+        },
+        {
+            "user": "lukasbestle",
+            "body": "I don't fully understand the internal workings of the container images, so pardon the question: What makes up the data of an image? The options that were passed during creation like ports to publish, name, memory limit etc.?"
+        },
+        {
+            "user": "vrothberg",
+            "body": "> The real question would be whether or not to keep the existing data in the image, which currently we do not. Only the volumes are preserved the container image is destroyed.\n\nI think that's a fair requirement. Persistent data should be on volumes.\n\nIf runtime data should be preserved, we could explore `checkpoint/restore` and inject the new image during `restore` but that requires root privileges."
+        },
+        {
+            "user": "vrothberg",
+            "body": "> It seems that you could fairly easily script this with something like\n> \n> ```\n> #!/bin/sh\n> container=$1\n> image=$2\n> cmd=$(podman inspect --format '{{ .Config.CreateCommand }}' $container)\n> img=$(podman inspect --format '{{ .ImageName }}' $container)\n> podman rm $container\n> # You need to peal away the [] around $cmd\n> echo $cmd\n> # Then  you need to replace $img with $image\n> echo $img\n> # finally you would want to execute the original command\n> ```\n\nI think that's worth exploring; that's what the systemd units do on a high level as well.  A `container clone` would be better since we could do it in Go without having to re-exec Podman."
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@cdoern Are you working on this?"
+        },
+        {
+            "user": "cdoern",
+            "body": "yes this sounds basically like it is container clone. I can add an option for a new image in the first version to resolve this issue."
+        },
+        {
+            "user": "vrothberg",
+            "body": "I don't think we need a new option. Currently, `pkg/autoupdate` requires containers to be run inside a systemd unit and will error out if they're not. With `container clone` we can clone the container, remove the old one, and start the clone.\n\nSomething to think about: _How could we detect a failed update/start?_  Running inside systemd will wait for the ready message to be sent over DBUS."
+        },
+        {
+            "user": "vrothberg",
+            "body": "Note that I don't want to a new `update` command but integrate `container clone` into `auto update`."
+        },
+        {
+            "user": "vrothberg",
+            "body": "Reopening since `auto update` without systemd is still a TODO."
+        },
+        {
+            "user": "cdoern",
+            "body": "also, rather than `podman container clone` `podman update` now could maybe be retrofitted to handle this usecase..."
+        },
+        {
+            "user": "danishprakash",
+            "body": "@vrothberg is this something a new contributor could pick up?"
+        },
+        {
+            "user": "vrothberg",
+            "body": "> @vrothberg is this something a new contributor could pick up?\n\nThanks, I appreciated you reaching out, @danishprakash!  I think this feature is rather advanced. It's testing is rather complex as well.  So it's not a good fit for new contributors but I suggest having a look at the following labeled issues: https://github.com/containers/podman/issues?q=is%3Aopen+is%3Aissue+label%3A%22Good+First+Issue%22"
+        },
+        {
+            "user": "vrothberg",
+            "body": "I am going to close this issue.\n\nI like the idea but it's too low on the priority list for us to ever work on it.  At the same time, it's too complex for a drive-by contribution.\n\nI understand that Podman+systemd won't work on Alpine but on systemd systems, [Quadlet](https://www.redhat.com/sysadmin/quadlet-podman) makes using Podman in systemd very easy and it supports [auto updates](https://docs.podman.io/en/latest/markdown/podman-systemd.unit.5.html#autoupdate)."
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 5898
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 16879
+        }
+    ]
+}

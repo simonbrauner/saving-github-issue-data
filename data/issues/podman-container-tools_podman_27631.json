@@ -1,0 +1,68 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 27631,
+    "type": "pull_request",
+    "title": "fix: Container with Notify=healthy respect `HealthStartPeriod` larger than `TimeoutStartSec`.",
+    "state": "open",
+    "labels": [
+        "release-note-none"
+    ],
+    "user": "Mujib-Ahasan",
+    "body": "- This logic only run when `HealthStartPeriod > 0`\n- The system now respects the containers `HealthStartPeriod` by sending periodic `EXTEND_TIMEOUT_USEC` messages \n- The code dynamically calculates how much time to extend, only asking for the remaining duration of the `HealthStartPeriod`.\n- The extension logic run in separate goroutine. This implementation adapted the pattern of `copyInternal` function https://github.com/containers/container-libs/blob/a3b0f19c3ea12cb02f0b11788489c52d4fb02e96/common/libimage/copier.go#L392-L421 \nsuggested by maintainers.\n- Would be happy to chat with maintainers if any further improvement is needed!\n\n\ncloses #27290\n<!--\nThanks for sending a pull request!\n\nFor more detailed information, please review our contributing guidelines:\nhttps://github.com/containers/podman/blob/main/CONTRIBUTING.md#submitting-pull-requests\n-->\n\n#### Checklist\n\nEnsure you have completed the following checklist for your pull request to be reviewed:\n<!-- Use [x] to mark as done, or click the checkbox after opening PR -->\n\n- [x] Certify you wrote the patch or otherwise have the right to pass it on as an open-source patch by signing all\ncommits. (`git commit -s`). (If needed, use `git commit -s --amend`).  The author email must match\nthe sign-off email address. See [CONTRIBUTING.md](https://github.com/containers/podman/blob/main/CONTRIBUTING.md#sign-your-prs)\nfor more information.\n- [ ] Referenced issues using `Fixes: #00000` in commit message (if applicable)\n- [ ] [Tests](https://github.com/containers/podman/tree/main/test#readme) have been added/updated (or no tests are needed)\n- [ ] [Documentation](https://github.com/containers/podman/blob/main/docs/README.md) has been updated (or no documentation changes are needed)\n- [ ] All commits pass `make validatepr` (format/lint checks)\n- [ ] [Release note](https://github.com/kubernetes/community/blob/master/contributors/guide/release-notes.md) entered in the section below (or `None` if no user-facing changes)\n\n#### Does this PR introduce a user-facing change?\n\n<!--\nWrite `None` if there are no user-facing changes, otherwise enter your release note below.\nInclude \"action required\" if users need to take action when upgrading.\n-->\n\n```release-note\nNone\n```\n",
+    "comments": [
+        {
+            "user": "openshift-ci[bot]",
+            "body": "[APPROVALNOTIFIER] This PR is **NOT APPROVED**\n\nThis pull-request has been approved by: *<a href=\"https://github.com/containers/podman/pull/27631#\" title=\"Author self-approved\">Mujib-Ahasan</a>*\n**Once this PR has been reviewed and has the lgtm label**, please assign [mheon](https://github.com/mheon) for approval. For more information see [the Code Review Process](https://git.k8s.io/community/contributors/guide/owners.md#the-code-review-process).\n\nThe full list of commands accepted by this bot can be found [here](https://go.k8s.io/bot-commands?repo=containers%2Fpodman).\n\n<details open>\nNeeds approval from an approver in each of these files:\n\n- **[OWNERS](https://github.com/containers/podman/blob/main/OWNERS)**\n\nApprovers can indicate their approval by writing `/approve` in a comment\nApprovers can cancel approval by writing `/approve cancel` in a comment\n</details>\n<!-- META={\"approvers\":[\"mheon\"]} -->"
+        },
+        {
+            "user": "Mujib-Ahasan",
+            "body": "Hey @Honny1, could you please be more specific about the test case?? I simplified the message sending as you mentioned, but confused about the test coverage."
+        },
+        {
+            "user": "packit-as-a-service[bot]",
+            "body": "Cockpit tests failed for commit 08768223a8668aa22142149295efd0171f2522c6. @martinpitt, @jelly, @mvollmer please check."
+        },
+        {
+            "user": "Honny1",
+            "body": "Sure. I mean a test case that reproduces the original issue. It should fail without your fix and pass with it."
+        },
+        {
+            "user": "Mujib-Ahasan",
+            "body": "```\ntype fakeContainer struct {\n\t*Container\n\twaitFunc func(ctx context.Context, waitTimeout time.Duration, conditions ...string) (define.ContainerStatus, error)\n}\n\nfunc (f *fakeContainer) WaitForConditionWithInterval(ctx context.Context, waitTimeout time.Duration, conditions ...string) (define.ContainerStatus, error) {\n\treturn f.waitFunc(ctx, waitTimeout, conditions...)\n}\n\nfunc TestWaitForHealthyExtendsStartupTimeout(t *testing.T) {\n\ttmpDir := t.TempDir()\n\tnotifySock := filepath.Join(tmpDir, \"notify.sock\")\n\n\taddr := &net.UnixAddr{Name: notifySock, Net: \"unixgram\"}\n\tserverConn, err := net.ListenUnixgram(\"unixgram\", addr)\n\tif err != nil {\n\t\tt.Fatalf(\"failed to create fake notify socket: %v\", err)\n\t}\n\tdefer serverConn.Close()\n\n\treceived := make([]string, 0)\n\tdone := make(chan struct{})\n\n\tgo func() {\n\t\tbuf := make([]byte, 2048)\n\t\tfor {\n\t\t\tserverConn.SetReadDeadline(time.Now().Add(1 * time.Second))\n\t\t\tn, _, err := serverConn.ReadFromUnix(buf)\n\t\t\tif err != nil {\n\t\t\t\tclose(done)\n\t\t\t\treturn\n\t\t\t}\n\t\t\treceived = append(received, string(buf[:n]))\n\t\t}\n\t}()\n\n\tctr := &fakeContainer{\n\t\tContainer: &Container{\n\t\t\tconfig: &ContainerConfig{\n\t\t\t\tContainerMiscConfig: ContainerMiscConfig{\n\t\t\t\t\tSdNotifyMode:   \"healthy\",\n\t\t\t\t\tSdNotifySocket: notifySock,\n\t\t\t\t\tHealthCheckConfig: &manifest.Schema2HealthConfig{\n\t\t\t\t\t\tStartPeriod: 20 * time.Minute,\n\t\t\t\t\t},\n\t\t\t\t},\n\t\t\t},\n\t\t},\n\n\t\twaitFunc: func(ctx context.Context, waitTimeout time.Duration, cond ...string) (define.ContainerStatus, error) {\n\t\t\ttime.Sleep(100 * time.Millisecond)\n\t\t\treturn define.HealthCheckHealthy, nil\n\t\t},\n\t}\n\n\tctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)\n\tdefer cancel()\n\n\terr = ctr.waitForHealthy(ctx)\n\tif err != nil {\n\t\tt.Fatalf(\"waitForHealthy returned unexpected error: %v\", err)\n\t}\n\n\t<-done\n\n\tsawExtend := false\n\tsawReady := false\n\n\tfor _, m := range received {\n\t\tif strings.HasPrefix(m, \"EXTEND_TIMEOUT_USEC=\") {\n\t\t\tsawExtend = true\n\t\t}\n\t\tif m == \"READY=1\" {\n\t\t\tsawReady = true\n\t\t}\n\t}\n\n\tif !sawExtend {\n\t\tt.Fatalf(\"expected EXTEND_TIMEOUT_USEC messages but none were sent\")\n\t}\n\tif !sawReady {\n\t\tt.Fatalf(\"expected READY=1 but none were sent\")\n\t}\n}\n```\n\nHey @Honny1, PTAL at the test. I tried to simulate the situation and this is the code I am planning to add. This implementation\n- A `fakeContainer` wraps the real `Container` and overrides only one method `WaitForConditionWithInterval`.\n- The listener goroutine collects all sd_notify packets. After calling waitForHealthy, it asserts that at least one `EXTEND_TIMEOUT_USEC=` message was received. It confirms `READY=1` is sent after the container becomes healthy.\n- The test creates a temporary UNIX datagram socket (unixgram) and listens on it, acting like a fake `systemd` process.\n\n>waitFunc: func(ctx context.Context, waitTimeout time.Duration, cond ...string) (define.ContainerStatus, error) {\n\t\t\ttime.Sleep(100 * time.Millisecond)\n\t\t\treturn define.HealthCheckHealthy, nil\n\t\t},\n\nI am confused what should I return for `WaitForConditionWithInterval`.\nNote: I am not fully familiar with the Podman codebase and still learning.\n\nshould I push it??"
+        },
+        {
+            "user": "Mujib-Ahasan",
+            "body": "Hey @Honny1, could you please give some reviews on the test cases I did?"
+        },
+        {
+            "user": "Honny1",
+            "body": "I apologize for my inactivity. I am currently on vacation and preparing for my final exams. Please contact me again at the end of next week."
+        },
+        {
+            "user": "Honny1",
+            "body": "@Mujib-Ahasan Hey, why was the PR closed? If it was because I missed the review, my apologies, it slipped my mind (feel free to ping me repeatedly next time!). If you just don't have time to finish it, that's fine, just please remove yourself as an assignee."
+        },
+        {
+            "user": "Mujib-Ahasan",
+            "body": "Sorry @Honny1, github has been pushing two mails each day for it to me. I am motivated enough to finish it. Probably in next couple of days I am gonna ping you regarding the changes. I am on it 🙂."
+        },
+        {
+            "user": "Honny1",
+            "body": "@Mujib-Ahasan, can you please rebase on main? Thanks."
+        },
+        {
+            "user": "amo13",
+            "body": "Amazing, thank you all for working on this! The problem you are addressing has kept me looking for the its cause for quite a while. Looking forward to see this merged :)"
+        },
+        {
+            "user": "packit-as-a-service[bot]",
+            "body": "Cockpit tests failed for commit 2f4075ef94c4b076f37102890a57c50deb870da5. @martinpitt, @jelly, @mvollmer please check."
+        },
+        {
+            "user": "Honny1",
+            "body": "GitHub is not feeling good today. Sorry for the duplicate msg."
+        }
+    ],
+    "cross_references": []
+}

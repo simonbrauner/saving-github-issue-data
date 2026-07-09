@@ -1,0 +1,111 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 11784,
+    "type": "issue",
+    "title": "lstat /sys/fs/cgroup/devices/machine.slice/libpod-SHA.scope: ENOENT",
+    "state": "closed",
+    "labels": [
+        "flakes",
+        "locked - please file new issue/PR"
+    ],
+    "user": "edsantiago",
+    "body": "New flake in [f33-root](https://storage.googleapis.com/cirrus-ci-6707778565701632-fcae48/artifacts/containers/podman/6282226900926464/html/sys-podman-fedora-33-root-host.log.html#t--00236):\n```\n[+0920s] not ok 236 podman selinux: shared context in (some) namespaces\n         # (from function `is' in file test/system/helpers.bash, line 508,\n         #  in test file test/system/410-selinux.bats, line 126)\n         #   `is \"$output\" \"$context_c1\" \"new container, run with --pid of existing one \"' failed\n         # # podman rm --all --force\n         # # podman ps --all --external --format {{.ID}} {{.Names}}\n         # # podman images --all --format {{.Repository}}:{{.Tag}} {{.ID}}\n         # quay.io/libpod/testimage:20210610 9f9ec7f2fdef\n         # # podman run -d --name myctr quay.io/libpod/testimage:20210610 top\n         # 1f043d30e46e9f85a55a13e7bd72f16316cfd56534e42e699d656ffd3d20da09\n         # # podman exec myctr cat -v /proc/self/attr/current\n         # system_u:system_r:container_t:s0:c364,c713^@\n         # # podman run --name myctr2 --ipc container:myctr quay.io/libpod/testimage:20210610 cat -v /proc/self/attr/current\n         # system_u:system_r:container_t:s0:c364,c713^@\n         # # podman run --rm --pid container:myctr quay.io/libpod/testimage:20210610 cat -v /proc/self/attr/current\n         # system_u:system_r:container_t:s0:c364,c713^@time=\"2021-09-28T17:08:59-05:00\" level=warning msg=\"lstat /sys/fs/cgroup/devices/machine.slice/libpod-11f69a5b1d699bf9ab9e8b5fa8994e43b3ea7c3d0f0d1e1bc0d5bf33d37cccae.scope: no such file or directory\"\n         # #/vvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv\n         # #|     FAIL: new container, run with --pid of existing one \n         # #| expected: 'system_u:system_r:container_t:s0:c364,c713^@'\n         # #|   actual: 'system_u:system_r:container_t:s0:c364,c713^@time=\"2021-09-28T17:08:59-05:00\" level=warning msg=\"lstat /sys/fs/cgroup/devices/machine.slice/libpod-11f69a5b1d699bf9ab9e8b5fa8994e43b3ea7c3d0f0d1e1bc0d5bf33d37cccae.scope: no such file or directory\"'\n         # #\\^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n```\nThis is not (as of this writing) a flake that will cause a CI failure, because (as of this writing) system tests and integration tests do not check for extra cruft. THIS IS GOING TO CHANGE, at least in system tests.\n\nI cannot reproduce with podman-3.4.0-0.10.rc2.fc33, in 30 minutes of looping, but my `cirrus-flake-grep` tool shows this happening as far back as June (when I started collecting CI logs). All the instances I see are root; none rootless.",
+    "comments": [
+        {
+            "user": "edsantiago",
+            "body": "@giuseppe PTAL"
+        },
+        {
+            "user": "giuseppe",
+            "body": "runc generates that error.\n\nNot sure if it is a regression but it appeared with: https://github.com/opencontainers/runc/commit/cbb0a79322346aa6033b6bbf8985f8e4a5e27d1b\n\nSimple reproducer (as root):\n\n```\n# podman run -d --name foo alpine top\n# podman run --rm --pid container:foo alpine true\nWARN[0000] lstat /sys/fs/cgroup/devices/machine.slice/libpod-f2498bb96e51a783698380494e772b9a13cf3d044fc229cc9e4710e4eb10f811.scope: no such file or directory \n```\n\n@kolyshkin FYI\n\n\n"
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "rhatdan",
+            "body": "Since this is not a Podman issue, should I close this?"
+        },
+        {
+            "user": "edsantiago",
+            "body": "cirrus-flake-grep reports that this is still happening. Only f33, which makes sense if it's a runc bug. Here are two recent examples: [pr 11956](https://storage.googleapis.com/cirrus-ci-6707778565701632-fcae48/artifacts/containers/podman/5848798850187264/html/int-remote-fedora-33-root-host.log.html) and [pr 12107](https://storage.googleapis.com/cirrus-ci-6707778565701632-fcae48/artifacts/containers/podman/6338638024802304/html/int-podman-fedora-33-root-host.log.html), both `f33 root`."
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "edsantiago",
+            "body": "Still happening.\n* Five instances on [November 20](https://storage.googleapis.com/cirrus-ci-6707778565701632-fcae48/artifacts/containers/podman/6669243333738496/html/int-remote-fedora-34-root-host.log.html)\n* Six on [November 23](https://storage.googleapis.com/cirrus-ci-6707778565701632-fcae48/artifacts/containers/podman/6750548943699968/html/int-remote-fedora-34-root-host.log.html)\n\nPlease remember that these do not cause actual CI failures, so my flake logger only catches them if they're present in an actual CI-failure-causing flake. The stats above are probably an underrepresentation."
+        },
+        {
+            "user": "vrothberg",
+            "body": "There's a race condition (see below).  It seems that the freezer state has changed when attempting to freeze (i.e., it shouldn't attempt to freeze afaiks).\n```\ndda8f53a07a7a39771e646e66148bb4b4d3952db44439ea563b8396bb868ac7f                                                                                                                             \n22ff177983d71ff968598f880053a937393b7c9ea3fd14a00ae36ab49db4b851                                                                                                                             \nERRO[0000] STATE: FROZEN                                                                                                                                                                     \nWARN[0000] freezer not supported: openat2 /sys/fs/cgroup/machine.slice/libpod-2f526821ca315a919d32aad899b9817121363405c3829650b03fd512817a3801.scope/cgroup.freeze: no such file or directory\nERRO[0000] STATE: THAWED                                                                                                                                                                     \nWARN[0000] lstat /sys/fs/cgroup/machine.slice/libpod-2f526821ca315a919d32aad899b9817121363405c3829650b03fd512817a3801.scope: no such file or directory                                       \n```\n\nI used the following diff to get the error log:\n```diff\ndiff --git a/libcontainer/cgroups/fs2/freezer.go b/libcontainer/cgroups/fs2/freezer.go\nindex 8917a6411d68..b3ed1626c851 100644                                               \n--- a/libcontainer/cgroups/fs2/freezer.go                                             \n+++ b/libcontainer/cgroups/fs2/freezer.go                                             \n@@ -12,9 +12,11 @@ import (                                                           \n                                                                                      \n        \"github.com/opencontainers/runc/libcontainer/cgroups\"                         \n        \"github.com/opencontainers/runc/libcontainer/configs\"                         \n+       \"github.com/sirupsen/logrus\"                                                  \n )                                                                                    \n                                                                                      \n func setFreezer(dirPath string, state configs.FreezerState) error {                  \n+       logrus.Errorf(\"STATE: %s\", state)                                             \n        var stateStr string                                                           \n        switch state {                                                                \n        case configs.Undefined:                                                       \n```\n\n@kolyshkin @cyphar could you have a look?  I am not familiar with the runc code and think you know where to poke."
+        },
+        {
+            "user": "kolyshkin",
+            "body": "> There's a race condition (see below). It seems that the freezer state has changed when attempting to freeze (i.e., it shouldn't attempt to freeze afaiks).\n\nFrom what I see, this is just two calls to `setFreezer` -- the first one to freeze it, the second one to unfreeze it. No race here.\n\nI will take a closer look later."
+        },
+        {
+            "user": "vrothberg",
+            "body": "Thanks! To elaborate on why I think there's a race. Each time it fails, state is ` != configs.Undefined` which made me believe that the specific path isn't always present or some condition must be waited for/on. But it's just an uninformed guess; I am not familiar with the runc code base."
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@kolyshkin Any progress on this?"
+        },
+        {
+            "user": "kolyshkin",
+            "body": "Had no time to look at it, hopefully later this week (I have a separate browser window opened with this as a reminder 😁 )"
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "kolyshkin",
+            "body": "Not stale"
+        },
+        {
+            "user": "giuseppe",
+            "body": "I think the cgroup could have been cleaned up by systemd while runc is trying to use it.\n\nShould we close this issue?  I don't think there is anything we can do from the Podman side"
+        },
+        {
+            "user": "vrothberg",
+            "body": "I agree."
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 11785
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 11776
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 17047
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 18442
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 19234
+        }
+    ]
+}

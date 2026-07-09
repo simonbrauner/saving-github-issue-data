@@ -1,0 +1,210 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 7139,
+    "type": "issue",
+    "title": "rootless: pods: unlinkat, EBUSY",
+    "state": "closed",
+    "labels": [
+        "flakes",
+        "rootless",
+        "kind/test-flake",
+        "locked - please file new issue/PR"
+    ],
+    "user": "edsantiago",
+    "body": "Are pods supposed to work with podman-remote? There's a race condition somewhere in rootless pods. (There's one in rootful, too, but I'm having a really hard time getting a reproducer).\n\nIn window 1:\n```console\n$ ./bin/podman system service --timeout=0\n```\nIn window 2:\n```console\n$ cat >foo.sh <<EOF\n#!/bin/bash\n\n./bin/podman-remote pod create --infra=true --name=foo\n\ncid=$(./bin/podman-remote run -d   --pod foo alpine sleep 1)\n./bin/podman-remote run --rm --pod foo alpine true\n\nsleep 1\n/bin/time ./bin/podman-remote rm $cid\n\n/bin/time ./bin/podman-remote pod rm foo\nEOF\n\n$ bash -x foo.sh\n+ ./bin/podman-remote pod create --infra=true --name=foo\n4e182754caf7e065917a258a9a5ebc4c29498df1f2381b165c10616c458ebedf\n++ ./bin/podman-remote run -d --pod foo alpine sleep 1\n+ cid=82822d1b6544692162118f553b857a10490a6a18ebd2ae6ecb1c088eec661c37\n+ ./bin/podman-remote run --rm --pod foo alpine true\n+ sleep 1\n+ /bin/time ./bin/podman-remote rm 82822d1b6544692162118f553b857a10490a6a18ebd2ae6ecb1c088eec661c37\nError: error removing container 82822d1b6544692162118f553b857a10490a6a18ebd2ae6ecb1c088eec661c37 root filesystem: 1 error occurred:\n        * unlinkat /home/esm/.local/share/containers/storage/overlay/3ba0c1f06abbda6296b7fd183b776c212bb5cf352100ea1ff6e93bd543204037/merged: device or resource busy\n\n\nCommand exited with non-zero status 125\n0.03user 0.03system 0:10.12elapsed 0%CPU (0avgtext+0avgdata 29276maxresident)k   <--- note: 10s\n0inputs+0outputs (0major+2127minor)pagefaults 0swaps\n+ /bin/time ./bin/podman-remote pod rm foo\nError: error removing container 59f9f424ad65a88f4b55af3873a00259f74eeb8e4ab56e6bf1e01f041e822d84 root filesystem: 1 error occurred:\n        * unlinkat /home/esm/.local/share/containers/storage/overlay/02b1322ceed80312346340312c1068d832727ac30a3683c6c6b2cb22073c40fa/merged: device or resource busy\n\n\nCommand exited with non-zero status 125\n0.04user 0.03system 0:10.29elapsed 0%CPU (0avgtext+0avgdata 29292maxresident)k     <---- note: 10s\n0inputs+0outputs (0major+2240minor)pagefaults 0swaps\n```\nThis leaves droppings behind, the two directories listed above. I can remove them manually:\n```console\n$ /bin/rm -rf ~/.local/share/containers/storage/overlay/3ba*\n$ /bin/rm -rf ~/.local/share/containers/storage/overlay/02b*\n(no errors)\n```\n\nFWIW I can't reproduce by running the commands manually in my shell; only by running the script above.\n\nmaster @ 7f38774ee, rootless only. f32 with crun",
+    "comments": [
+        {
+            "user": "rhatdan",
+            "body": "Yes, pods are supposed to work."
+        },
+        {
+            "user": "rhatdan",
+            "body": "I have not been able to get this to fail on my laptop with master?"
+        },
+        {
+            "user": "edsantiago",
+            "body": "Now I can't either. Worse, I can't even get the reproducer script to fail on 7f38774. I did get `test/system/200-pod.bats` to fail semi-consistently on that checkout, so that reassures me that the problem was real, but on 93d63208b I can't get either test to fail even with two dozen tries. Shall I try bisecting? Shall I submit a PR to reenable `pod.bats` tests in rootless remote, and watch closely for failures?"
+        },
+        {
+            "user": "edsantiago",
+            "body": "If I remove all the `skips` and `if is_remote; then sleep`, it reproduces. Maybe this is a dup of #7119 ?"
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "edsantiago",
+            "body": "Update: this might not be remote-only: this failed [today](https://storage.googleapis.com/cirrus-ci-6707778565701632-fcae48/artifacts/containers/podman/5555471920660480/html/system_test.log.html#t--00019) in #7556 on ubuntu-19\n```\n...'podman run --pull' test passes\n...\n# podman rm -a\n# fae3bcbd349507832fd922a128ad538faa83414b731ff35c351b2a68eef4c24d\n# 9258918e0a37501b9bc1e08cd06a29f8739db8f891d2eab9b11799bdeba9e7c7\n# b4fdf2a9c2d89d8d6a7cdb3bd3d594970784c489e6ef349b4e12381387176d7f\n# Error: error removing container 4e6ff23369e624e9bf13f7a637fa01238766556a8b359e36f998004654cd8944 root filesystem: 1 error occurred:\n# \t* unlinkat /var/lib/containers/storage/overlay/cfc3184e47b43c91be4b13576da46cac3506bc7e019d85f10fa0c16f133a3b41/merged: device or resource busy\n# [ rc=125 (** EXPECTED 0 **) ]\n```"
+        },
+        {
+            "user": "mheon",
+            "body": "I have definitely seen this on non-remote Podman, but it's more of a symptom than a cause. Usually, something blocked Podman from unmounting the container's root filesystem, so we subsequently could not *remove* said root filesystem. Unfortunately, we only see the second bit, so we don't know what actually started the failure."
+        },
+        {
+            "user": "edsantiago",
+            "body": "Another one: PR 7851, [ubuntu root](https://storage.googleapis.com/cirrus-ci-6707778565701632-fcae48/artifacts/containers/podman/6541874393513984/html/system_test.log.html)"
+        },
+        {
+            "user": "edsantiago",
+            "body": "I think this might be the same error, although it's just plain podman-run, no pods: [sys podman fedora-31 rootless host](https://storage.googleapis.com/cirrus-ci-6707778565701632-fcae48/artifacts/containers/podman/5223372348981248/html/sys-podman-fedora-31-rootless-host.log.html#t--00019)\n```\n$ podman rm --all --force\n# 0daf46f689b44322eb963636a39154cdd92d4337e238dade51b844ebbb57d59d\n# 2ccbc8b270c3e1ca148dc27dc81dbf5211eb22bd590cba794f9a6212d20fda43\n# 69d78ab66a3d379eb9ac3b6a953cc5d8c20b98b71f484d95fb1c71d8e24a1677\n# 729e15b19ea6109f1a1df4db183219246f1a5169369e76125c76c6248fc5536b\n# cc527b1117d07d110d482120163f1b6a81dc448d9fe0ee5802f8e1d3bc277dda\n# Error: error removing container ad3656475555979d84ebb98ac7e4dfbf6dca5dd39b4f9445bdb44604de851e34 root filesystem: 1 error occurred:\n# \t* unlinkat /home/some28861dude/.local/share/containers/storage/overlay/1d454de9493f54d1633acb331d56276c8707483e9a0e68d39f02b6d0ff2345a7/merged: device or resource busy\n# [ rc=125 ]\n```"
+        },
+        {
+            "user": "edsantiago",
+            "body": "Another one in [sys podman fedora-31 rootless host](https://storage.googleapis.com/cirrus-ci-6707778565701632-fcae48/artifacts/containers/podman/6176831567036416/html/sys-podman-fedora-31-rootless-host.log.html#t--00095)"
+        },
+        {
+            "user": "edsantiago",
+            "body": "One in [sys podman fedora-32 rootless host](https://storage.googleapis.com/cirrus-ci-6707778565701632-fcae48/artifacts/containers/podman/5450762606084096/html/sys-podman-fedora-32-rootless-host.log.html) (first one I've seen in f32). This and the above are in regular old 'run' tests, nothing to do with `podman pod`."
+        },
+        {
+            "user": "edsantiago",
+            "body": "Another one in [sys podman fedora-32 rootless host](https://storage.googleapis.com/cirrus-ci-6707778565701632-fcae48/artifacts/containers/podman/4855943492009984/html/sys-podman-fedora-32-rootless-host.log.html)"
+        },
+        {
+            "user": "edsantiago",
+            "body": "Another one: [sys podman fedora-33 rootless host](https://storage.googleapis.com/cirrus-ci-6707778565701632-fcae48/artifacts/containers/podman/5159711932678144/html/sys-podman-fedora-33-rootless-host.log.html)"
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@edsantiago still seeing this?"
+        },
+        {
+            "user": "edsantiago",
+            "body": "It is really hard to answer that question, because the problem manifests in many different tests - so I have to examine individual logs to see if this is the cause.\n\nSince my last report on Nov 18, I see the following:\n\n* Nov 27 : PR #8500 : [podman run - basic tests](https://storage.googleapis.com/cirrus-ci-6707778565701632-fcae48/artifacts/containers/podman/5454168397709312/html/sys-podman-fedora-33-rootless-host.log.html)\n* Dec 1 : PR #8541 : [podman run --pull](https://storage.googleapis.com/cirrus-ci-6707778565701632-fcae48/artifacts/containers/podman/4873056185221120/html/sys-podman-fedora-33-rootless-host.log.html)\n* "
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "edsantiago",
+            "body": "## sys: podman run --mount image inspection\n* gce_instance:fedora : sys podman fedora-33 root host\n  * PR #8963\n    * [01-13 16:27](https://storage.googleapis.com/cirrus-ci-6707778565701632-fcae48/artifacts/containers/podman/4847332703338496/html/sys-podman-fedora-33-root-host.log.html)\n\nAgain, this one is hard to keep track of because it does not consistently present in the same subtest."
+        },
+        {
+            "user": "vrothberg",
+            "body": "@giuseppe is usually like drug dog for these kinds of errors.  I recall a call in 2019 where we fixed a similar issue by giving EBUSY multiple tries (50?) when removing layers. Could this help here, @giuseppe ?"
+        },
+        {
+            "user": "edsantiago",
+            "body": "I'm starting to think this is the same as #9026 "
+        },
+        {
+            "user": "giuseppe",
+            "body": "some potential race conditions:\n\n- the container process is still running (even if signaled) and it keeps the directory busy\n- fusermount -u/unmount still didn't take effect when we attempt the rm -rf\n- the cleanup process somehow failed.  There was another report recently about fuse-overlayfs leaking processes, and that is a symptom of such issue.\n\nRetrying on EBUSY would help in the first two cases, so I think it is worth adding such logic.\n\nIf we know where the `unlinkat /var/lib/containers/storage/overlay/$CID/merged: device or resource busy` error is raised, it would be easier to understand what is going on."
+        },
+        {
+            "user": "vrothberg",
+            "body": "Looking at #9026, it happens as root as well which supports the first two. @edsantiago do you have access to `--log-level=debug` logs?"
+        },
+        {
+            "user": "edsantiago",
+            "body": "Sorry, no. The system and integration tests all run plain, without any `--log-level`. You could try the semi-reproducer above? I am OOTO all of today starting in 2 minutes, so I can't try it today, sorry."
+        },
+        {
+            "user": "edsantiago",
+            "body": "FWIW I've tried the reproducer in comment 0, no luck. I do get a lot of these:\n```\n+ ./bin/podman-remote run --rm --pod foo alpine true\nWARN[0000] Container 6c8da57da7d3df0e0051b789ade704a71aa7e1eba432aeaa320aea088cfa754c does not exist: container 6c8da57da7d3df0e0051b789ade704a71aa7e1eba432aeaa320aea088cfa754c does not exist in database: no such container\n```\n...and once in a while one of these:\n```\n+ ./bin/podman-remote run --rm --pod foo alpine true\nERRO[0000] Error removing container 8fa2ef9bb61c85733c6747672338c9a1c350ca6334744a666a9489be73484be1: error looking up container \"8fa2ef9bb61c85733c6747672338c9a1c350ca6334744a666a9489be73484be1\" mounts: layer not known\n```\nbut in about fifteen minutes of retries, have never seen the `unlinkat` error."
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "edsantiago",
+            "body": "I can't tell if this is an issue: I've done my Monday-morning pass over the flakes list, and don't see any instances in the last two weeks - but again, the only way to know for sure is to click on and examine every single CI log, and I didn't actually do that - I just did a sample of what I hope was representative."
+        },
+        {
+            "user": "rhatdan",
+            "body": "Ok I will close, and we can reopen if you see another instance."
+        },
+        {
+            "user": "edsantiago",
+            "body": "It's not dead yet:\n\n## sys: podman start --all - start all containers\n* ubuntu-2010 : sys podman ubuntu-2010 rootless host\n  * PR #10219\n    * [05-20 07:47](https://storage.googleapis.com/cirrus-ci-6707778565701632-fcae48/artifacts/containers/podman/5484453767151616/html/sys-podman-ubuntu-2010-rootless-host.log.html)\n\n```\n# $ podman rm af1a43f994a4ea7c900a9b58107dc59286c1237678fe313da804fae8654f7079\n# Error: error removing container af1a43f994a4ea7c900a9b58107dc59286c1237678fe313da804fae8654f7079 root filesystem: 1 error occurred:\n# \t* unlinkat /home/some26267dude/.local/share/containers/storage/overlay/b500eadb34b65fd1f33b5676dbc39ff356e3d8229aff6cea38ea9c8bd80b5d59/merged: device or resource busy\n```\nOnce again, this is a pernicious flake because it manifests in many different tests. I caught this one just now by doing a manual review of recent flakes. It's possible that there are other instances I haven't caught."
+        },
+        {
+            "user": "edsantiago",
+            "body": "Indeed, here's another:\n## sys: podman run - basic tests\n* ubuntu-2104 : sys podman ubuntu-2104 rootless host\n  * PR #10219\n    * [05-20 07:46](https://storage.googleapis.com/cirrus-ci-6707778565701632-fcae48/artifacts/containers/podman/6047403720572928/html/sys-podman-ubuntu-2104-rootless-host.log.html)\n"
+        },
+        {
+            "user": "edsantiago",
+            "body": "Looks like the same thing, but root this time: https://storage.googleapis.com/cirrus-ci-6707778565701632-fcae48/artifacts/containers/podman/4697591129571328/html/int-podman-fedora-33-root-container.log.html#t--podman-pod-prune-removes-a-pod-with-a-stopped-container--2"
+        },
+        {
+            "user": "edsantiago",
+            "body": "And [another one (rootless)](https://storage.googleapis.com/cirrus-ci-6707778565701632-fcae48/artifacts/containers/podman/5893859780591616/html/sys-podman-ubuntu-2010-rootless-host.log.html)"
+        },
+        {
+            "user": "edsantiago",
+            "body": "## sys: podman start --all - start all containers\n* ubuntu-2010 : sys podman ubuntu-2010 rootless host\n  * PR #10427\n    * [05-21 10:50](https://storage.googleapis.com/cirrus-ci-6707778565701632-fcae48/artifacts/containers/podman/5893859780591616/html/sys-podman-ubuntu-2010-rootless-host.log.html)\n  * PR #10219\n    * [05-20 07:47](https://storage.googleapis.com/cirrus-ci-6707778565701632-fcae48/artifacts/containers/podman/5484453767151616/html/sys-podman-ubuntu-2010-rootless-host.log.html)\n* ubuntu-2104 : sys podman ubuntu-2104 rootless host\n  * PR #10411\n    * [05-20 11:05](https://storage.googleapis.com/cirrus-ci-6707778565701632-fcae48/artifacts/containers/podman/5292268274843648/html/sys-podman-ubuntu-2104-rootless-host.log.html)\n\nThis one looks similar (EBUSY) but the error message is slightly different:\n\n## Podman pod rm [It] podman pod rm removes a pod with a container\n* fedora-33 : int podman fedora-33 root container\n  * PR #10427\n    * [05-21 10:25](https://storage.googleapis.com/cirrus-ci-6707778565701632-fcae48/artifacts/containers/podman/4697591129571328/html/int-podman-fedora-33-root-container.log.html#t--podman-pod-rm-removes-a-pod-with-a-container--1)\n  * PR #10411\n    * [05-20 10:38](https://storage.googleapis.com/cirrus-ci-6707778565701632-fcae48/artifacts/containers/podman/5221899530665984/html/int-podman-fedora-33-root-container.log.html#t--podman-pod-rm-removes-a-pod-with-a-container--1)\n    * [05-20 10:38](https://storage.googleapis.com/cirrus-ci-6707778565701632-fcae48/artifacts/containers/podman/5221899530665984/html/int-podman-fedora-33-root-container.log.html#t--podman-pod-rm-removes-a-pod-with-a-container--2)\n    * [05-20 10:38](https://storage.googleapis.com/cirrus-ci-6707778565701632-fcae48/artifacts/containers/podman/5221899530665984/html/int-podman-fedora-33-root-container.log.html#t--podman-pod-rm-removes-a-pod-with-a-container--3)\n\n## Podman pod prune [It] podman pod prune removes a pod with a stopped container\n* fedora-33 : int podman fedora-33 root container\n  * PR #10427\n    * [05-21 10:25](https://storage.googleapis.com/cirrus-ci-6707778565701632-fcae48/artifacts/containers/podman/4697591129571328/html/int-podman-fedora-33-root-container.log.html#t--podman-pod-prune-removes-a-pod-with-a-stopped-container--1)\n    * [05-21 10:25](https://storage.googleapis.com/cirrus-ci-6707778565701632-fcae48/artifacts/containers/podman/4697591129571328/html/int-podman-fedora-33-root-container.log.html#t--podman-pod-prune-removes-a-pod-with-a-stopped-container--2)\n    * [05-21 10:25](https://storage.googleapis.com/cirrus-ci-6707778565701632-fcae48/artifacts/containers/podman/4697591129571328/html/int-podman-fedora-33-root-container.log.html#t--podman-pod-prune-removes-a-pod-with-a-stopped-container--3)\n\nPlease help, this one is getting bad."
+        },
+        {
+            "user": "edsantiago",
+            "body": "Here are a few more from today, but all of them non-pod-related. Should I create a separate issue for the non-pod unlinkat-EPERM flake?\n\n## sys: podman run - basic tests\n* ubuntu-2010 : sys podman ubuntu-2010 rootless host\n  * PR #10387\n    * [05-24 10:30](https://storage.googleapis.com/cirrus-ci-6707778565701632-fcae48/artifacts/containers/podman/6645354771775488/html/sys-podman-ubuntu-2010-rootless-host.log.html)\n\n## sys: podman start --all - start all containers\n* ubuntu-2010 : sys podman ubuntu-2010 rootless host\n  * PR #10421\n    * [05-24 09:20](https://storage.googleapis.com/cirrus-ci-6707778565701632-fcae48/artifacts/containers/podman/5321092370792448/html/sys-podman-ubuntu-2010-rootless-host.log.html)\n   * PR #10387\n      * [05-24 10:30](https://storage.googleapis.com/cirrus-ci-6707778565701632-fcae48/artifacts/containers/podman/6645354771775488/html/sys-podman-ubuntu-2010-rootless-host.log.html)\n      * [05-24 10:19](https://storage.googleapis.com/cirrus-ci-6707778565701632-fcae48/artifacts/containers/podman/5672827610202112/html/sys-podman-ubuntu-2010-rootless-host.log.html)\n      * [05-24 09:46](https://storage.googleapis.com/cirrus-ci-6707778565701632-fcae48/artifacts/containers/podman/5420103111016448/html/sys-podman-ubuntu-2010-rootless-host.log.html)\n      * [05-24 08:35](https://storage.googleapis.com/cirrus-ci-6707778565701632-fcae48/artifacts/containers/podman/4911054460289024/html/sys-podman-ubuntu-2010-rootless-host.log.html)\n\n\n"
+        },
+        {
+            "user": "vrothberg",
+            "body": "@edsantiago, have you seen this flake since commit c9609d820b6f?  I wonder if this issue was an early symptom of the recent flake of doom."
+        },
+        {
+            "user": "edsantiago",
+            "body": "No unlinkat/EBUSY flakes since May 27. I'm going to close in hopes that it was fixed by https://github.com/containers/storage/pull/926"
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 7111
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 7851
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 8013
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 8042
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 9026
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 9086
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 10427
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 10421
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 10449
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 11594
+        }
+    ]
+}

@@ -1,0 +1,75 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 8837,
+    "type": "pull_request",
+    "title": "[wip] Support additional layer store (patch for podman)",
+    "state": "closed",
+    "labels": [
+        "do-not-merge/work-in-progress",
+        "locked - please file new issue/PR"
+    ],
+    "user": "ktock",
+    "body": "https://github.com/containers/podman/issues/4739\n\nThis enables podman to create containers using layers stored in a specified directory instead of pulling them from the registry. Leveraging this feature with remotely-mountable layers provided by stargz/zstd:chunked or CVMFS, podman can achieve lazy pulling.\n\nThat directory is named \"additional layer store\" (call ALS in this doc) and has the following structure.\n\n```\n<ALS root>\n`-- <ID of layer1>\n`-- <ID of layer2>\n...\n`-- .pool\n```\n\nEach layer is extracted and stored in ALS with a unique directory name (`<ID of layer1>`, `<ID of layer2>` in the above). There is `.pool` directory which is used for layer discovery described later.\n\n### Changes in contianers/storage: https://github.com/containers/storage/pull/795\n\nWhen the storage driver (e.g. overlay) is configured to use ALS, it uses layers in ALS with regarding each directory name as layer ID. In overlay driver, each layer directory in ALS is treated as the layer's `diff` directory, with assuming `lower` = \"\" and no link in the `l` directory.\n\nWhen the `storage.Store` is configured to use ALS, this loads layers from ALS as read-only with assuming they don't have compressed digest nor uncompressed digest. This assumption should be the right thing just because exploded layers aren't archived nor compressed.\n\n`storage.Store` also has layer discovery functionality which is indispensable for enabling lazy pulling. When a layer is queried with an ID via `Layer()` API with annotations (`key1=value1`, `key2=value2`...) and if that ID doesn't exist in ALS, `storage.Store` searches that layer from `.pool` directory with the following path.\n\n```\n<ALS root>/.pool/base64(\"key1=value1\")/base64(\"key2=value2\")/.../rootfs.<layer ID>\n```\n\nEach path element is base64 encoded key-value pair in the annotation.\nThe underlying filesystem (e.g. stargz/zstd:chunked-based filesystem or CVMFS) should show the exploded view of the target layer at that location. Example filesystem implementation (currently stargz-based) is https://github.com/ktock/stargz-snapshotter/tree/als-pool-example (this must be mounted under `<ALS root>/.pool`)\n\n\nIf `storage.Store` successfully accessed to this location, this creates the following symlink.\n\n```\n<ALS root>/<layer ID> -> <ALS root>/base64(key1=value1)/base64(key2=value2)/.../rootfs.<layer ID>\n```\n\nThen this layer (named `<layer ID>`) is accessible by the driver (with `<layer ID>`). So podman don't need to pull this layer from the registry.\n\n### Changes in containers/image: https://github.com/containers/image/pull/1109\n\nNow copier leverages this store. Every time this pulls images, it first tries to reuse blobs using `Layer()` API. This passes all annotations appended to the OCI descriptor of each layer and it also adds the following annotations by default for supporting registry-backed filesystems (e.g. stargz/zstd:chunked).\n\n- `containers/image/target.layerdigest`: The digest of the target layer.\n- `containers/image/target.reference`: The image reference of an image that contains the target layer.\n\nWhen this copier successfully acquired that layer, it reused it without pulling.\n\n### Changes in containers/podman: https://github.com/containers/podman/pull/8837\n\nThis patch also fixes libpod to eliminate unnecessary check of digest and size information of each layer\nat runtime.\n\ncc: @siscia @giuseppe ",
+    "comments": [
+        {
+            "user": "openshift-ci-robot",
+            "body": "[APPROVALNOTIFIER] This PR is **NOT APPROVED**\n\nThis pull-request has been approved by: *<a href=\"https://github.com/containers/podman/pull/8837#\" title=\"Author self-approved\">ktock</a>*\nTo complete the [pull request process](https://git.k8s.io/community/contributors/guide/owners.md#the-code-review-process), please assign **umohnani8** after the PR has been reviewed.\nYou can assign the PR to them by writing `/assign @umohnani8` in a comment when ready.\n\nThe full list of commands accepted by this bot can be found [here](https://go.k8s.io/bot-commands?repo=containers%2Fpodman).\n\n<details open>\nNeeds approval from an approver in each of these files:\n\n- **[OWNERS](https://github.com/containers/podman/blob/master/OWNERS)**\n\nApprovers can indicate their approval by writing `/approve` in a comment\nApprovers can cancel approval by writing `/approve cancel` in a comment\n</details>\n<!-- META={\"approvers\":[\"umohnani8\"]} -->"
+        },
+        {
+            "user": "AkihiroSuda",
+            "body": "How will this work with Podman CLI?"
+        },
+        {
+            "user": "ktock",
+            "body": "Assuming `/tmp/storage` as the additional layer store and https://github.com/ktock/stargz-snapshotter/tree/als-pool-example is mounted at `/tmp/storage/.pool` (see also https://github.com/ktock/stargz-snapshotter/blob/als-pool-example/script/demo/run2.sh).\n\nImage can be pulled with skipping downloading layers using `--storage-opt`:\n\n```\npodman --storage-opt \"layerstore=/tmp/storage\" pull ghcr.io/stargz-containers/rethinkdb:2.3.6-esgz\n```\n\nThis image can run using the same storage option:\n\n```\npodman --storage-opt \"layerstore=/tmp/storage\" run --rm -it ghcr.io/stargz-containers/rethinkdb:2.3.6-esgz /bin/echo 'Hello, World!'\n```\n\nImage pulled in this way cannot be exported (e.g. podman saved).\nFor doing this, that image needs to be re-pulled without `--storage-opt`.\n\n```\npodman pull ghcr.io/stargz-containers/rethinkdb:2.3.6-esgz\npodman save ghcr.io/stargz-containers/rethinkdb:2.3.6-esgz > /tmp/img.tar\n```\n"
+        },
+        {
+            "user": "ktock",
+            "body": "This is for skipping [`*storageImageSource.getSize()`](https://github.com/containers/image/blob/122b16af75d13b9dacda1b04111fa7fdffde30c5/storage/storage_image.go#L1035-L1038) which includes checks of size >= 0 and uncompressedDigest != \"\" (exploded layers provided through additional layer store aren't archived nor compressed).\nAdditionally, the size information seems not to be used in `*storageService.CreateContainerStorage()`?"
+        },
+        {
+            "user": "ktock",
+            "body": "Redesigning not to depend on this patch. (please see https://github.com/containers/image/pull/1109 and https://github.com/containers/storage/pull/795)"
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this PR had no activity for 30 days."
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this PR had no activity for 30 days."
+        },
+        {
+            "user": "ktock",
+            "body": "After several redesigning, this PR is now not needed. \n(containers/image#1109 and containers/storage#795 are still needed)"
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "containers",
+            "repository": "image",
+            "number": 1109
+        },
+        {
+            "organization": "containers",
+            "repository": "storage",
+            "number": 795
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 4739
+        },
+        {
+            "organization": "containers",
+            "repository": "image",
+            "number": 956
+        },
+        {
+            "organization": "containers",
+            "repository": "storage",
+            "number": 644
+        }
+    ]
+}

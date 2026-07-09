@@ -1,0 +1,162 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 10105,
+    "type": "issue",
+    "title": "Support Kubernetes secrets ",
+    "state": "closed",
+    "labels": [
+        "kind/feature",
+        "stale-issue",
+        "kube",
+        "locked - please file new issue/PR"
+    ],
+    "user": "ashley-cui",
+    "body": "/kind feature\n\n**Description**\n\nWe want to be able to support kubernetes secrets so we can use podman secrets with generate and play kube\n\nhttps://kubernetes.io/docs/concepts/configuration/secret/\n",
+    "comments": [
+        {
+            "user": "mheon",
+            "body": "Is this just for `generate kube` / `play kube` or do you see this as a separate backend for secrets?"
+        },
+        {
+            "user": "ashley-cui",
+            "body": "Not sure yet, haven't gotten to look too deep into it"
+        },
+        {
+            "user": "rhatdan",
+            "body": "This is just generate/play.\nBasically translate from podman secrets and kube secrets back and forth."
+        },
+        {
+            "user": "larsks",
+            "body": "I was interesting in running a pod locally that consumes secrets, so @ashley-cui  pointed me at this issue. I'm not clear on what the scope of this feature is supposed to be, so I thought we should make explicit what secret support looks like in kubernetes.\nUnlike the current podman secrets implementation, Kubernetes secrets must be `Secret` resources, which have the following structure:\n\n```\napiVersion: v1\nkind: Secret\nmetadata:\n  name: secret-sample\ntype: Opaque\nstringData:\n  my_first_secret: supersecret\n  my_second_secret: anothersecret\n```\n\nCritical is the fact that a single resource may contain multiple key/value pairs in the `data` section (these values are base64 encoded; you can use `stringData` instead for simple text secrets).\n\nSecrets can be exposed as either environment variables or as files on the filesystem via volume mounts.\n\n## As environment variables\n\nEnvironment variable access looks like this to expose a single\nkey/value pair:\n\n```\nenv:\n  - name: MY_FIRST_SECRET\n    valueFrom:\n      secretKeyRef:\n        name: secret-sample\n        key: my_first_secret\n```\n\nOr like this to expose all key/value pairs from a `Secret` resource:\n\n```\nenvFrom:\n  - secretRef:\n      name: secret-sample\n```\n\n## As volume mounts\n\nAccess via volume mounts looks like this:\n\n```\n[...]\nspec:\n  containers:\n    - name: mycontainer\n      volumeMounts:\n        - name: mysecret\n          mountPath: /etc/mysecret\n  [...]\n  volumes:\n    - name: mysecret\n      secret:\n        secretName: secret-sample\n```\n\nThe above would expose all the key/value pairs from the referenced `Secret` resource as files inside the `/etc/mysecret` directory.  You can expose a single key/value pair using a `subPath` argument:\n\n```\n[...]\nspec:\n  containers:\n    - name: mycontainer\n      volumeMounts:\n        - name: mysecret\n          mountPath: /etc/my_first_secret\n          subPath: my_first_secret\n  [...]\n  volumes:\n    - name: mysecret\n      secret:\n        secretName: secret-sample\n```\n\n---\n\nAll of the above examples rely on the fact that secrets are structured documents. For podman to offer a meaningful analogue of this behavior, it seems as if podman's secrets support must also support something very much like the k8s `Secret` resource.\n"
+        },
+        {
+            "user": "ashley-cui",
+            "body": "@larsks Thanks for the clarification!"
+        },
+        {
+            "user": "rhatdan",
+            "body": "@larsks Interested in opening some PRs for this?"
+        },
+        {
+            "user": "larsks",
+            "body": "@rhatdan interested, yes, but I have no prior Go experience so the activation threshold is pretty high. Let me take a peek at the code and see how inscrutable it looks.\n"
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@ashley-cui Have some time to work on this now?"
+        },
+        {
+            "user": "ashley-cui",
+            "body": "I think there's a PR that may have done this already, but I'll verify today."
+        },
+        {
+            "user": "ashley-cui",
+            "body": "Okay, looks like a secret as a env var is implemented for generate/play (https://github.com/containers/podman/pull/9842) but not as an actual k8s secret. I'll start working on this rn."
+        },
+        {
+            "user": "ashley-cui",
+            "body": "Took a look and read through some stuff. Podman secrets and k8s secrets work a little differently, and I’m concerned about how they’ll work together:\n\nPodman secret: \nmysecretname: mysecretdata\n\nMounted in the container as /run/secrets/mysecretname, inside the file is mysecretdata\n\nK8s secret:\nmysecretname: m[secretkey1] = secretvalue1, m[secretkey2] = secretvalue2, etc\n\nEach secretkey is mounted in at /user/designated/path/secretkey, and inside that file is secretvalue\n\nThis makes things tricky for two reasons:\n1. Podman’s architecture is designed just to mount the secret as a file, and not read the secret and mount each key. \n2. K8s secrets can be mounted anywhere. Podman secrets are only mounted on /run/secrets, which is a tmpfs, which is not committed, so secrets actually works. Supporting mounting a k8s secrets would mean we would have to make sure we’re using a tmpfs in other locations (or just not committing the file? But I’d be more comfy with a tmpfs so we’re not on disk. Not entirely sure here)\n\nThe env secrets PR for k8s secrets just sets a regular env var for secret values, not an actual secret environment variable, which means that play kube works, a play then a generate does not get you back to the original k8s file. We could do this with mounted secrets as well, just mounting them as regular mounted files. But this doesn't sound like the best idea. \n\nOne solution here is to implement a --secret type=k8s in regular podman (like type=mount,env), where it assumes that the secret is k8s structured and then does the k8s secret behavior. Then, we use that to do play/generate kube.  This is essentially a separate backend for k8s secrets. I'm also not sure about this. It would get what we want, but concern 2 still stands. \n\n@rhatdan WDYT?\n"
+        },
+        {
+            "user": "rhatdan",
+            "body": "Let's setup a meeting to discuss this with @umohnani8 @haircommander @vrothberg and other concerned parties.  I think we should be able to handle this."
+        },
+        {
+            "user": "ashley-cui",
+            "body": "Okay, after some discussion, we've realized that kubernetnes' two level secret hierarchy is _really_ hard to handle because it differs so much from podman's secret hierarchy. Specifically, each key-value pair within a Kubernetes secret is equivalent to a single secret in podman's eyes. This creates a problem because Kubernetnes can have two different secrets with the same key. Podman would be unable to handle this since secret names are unique in podman. If we were to instead, store key value pairs inside of a podman secret, like kubernetnes does, it would require a lot of play kube specific code inside a container, and possibly another type of secret. This also runs into the problem of having to create unique secrets in podman every time a play kube is run with a different file.\n\nWe basically came to the conclusion that we can support generate kube, but playing kube file with a secret is a can of worms that we shoudn't support other than a warning that the secret is not inside the container. \n\n`podman generate kube --secret mysecret` would create a kube file for a container, and, if there are secrets used in that container, it would properly create yaml to describe a container, with the secretname being mysecret. That is,\n```\n$ podman generate kube --secret mysecret\n\napiVersion: v1\nkind: Pod\nmetadata:\n  name: mypod\nspec:\n  containers:\n  - name: mypod\n    image: redis\n    volumeMounts:\n    - name: foo\n      mountPath: \"/etc/foo\"\n      readOnly: true\n  volumes:\n  - name: foo\n    secret:\n      secretName: mysecret\n---\napiVersion: v1\nkind: Secret\nmetadata:\n  name: mysecret\ntype: Opaque\ndata:\n  secret1: data1\n  secret2: data2\n```\n\nIf the this file were to be played with `podman play kube`, podman play kube would warn that secrets are not supported. However, `podman play kube` with environment secrets has been implemented (https://github.com/containers/podman/pull/9842), where the data inside a secret should be a key value pair. I think this architecture conflicts with the solution we came up with in our discussion of kubernetnes secrets. This also doesn't create an EnvVarSecret in podman, so a play and a generate would not yield the same result, and the envvar set isn't a secret env var, but rather just an env var that has a possibility of being leaked. @AlbanBedel what do you think on this play kube env secrets issue?\n\n@vrothberg @rhatdan "
+        },
+        {
+            "user": "AlbanBedel",
+            "body": "With k8s secrets I think the important part is that they can be passed to podman separated from the pod definitions. What really happen once both have been input into podman doesn't matter that much to me, as an operator I could extract them anyway. Sure it would be great to add things like being able to mark env as secret so they can be redacted where it make sense, but that would still not allow to `generate` the original pod definition.\n\nThe internal representation of a container in podman is at a much lower level than k8s. For the `generate` output to be always identical to the `play` input we would have to limit our self to only the simplest of k8s features. But I don't think that maintaining this equivalence is a useful goal, especially if that mean limiting the feature set on the k8s side. I much prefer supporting more k8s features and accepting that the `generate` output is only functionally equivalent to the original `play` input.\n"
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "MartinX3",
+            "body": "@rhatdan please remove the stale status. :)"
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "MartinX3",
+            "body": "@rhatdan please remove the stale status. :)"
+        },
+        {
+            "user": "vrothberg",
+            "body": "Continuing the conversation from https://github.com/containers/podman/issues/12446 here:\n\n> support secrets in podman play kube. We know that podman already supports some form of secrets. Our goal is to use podman play kube for creating the secrets and the pods (with references to the secrets) just as we do in k8s. Will podman support that? Can my team add this support?\n\nPlease refer to an earlier comment above: https://github.com/containers/podman/issues/10105#issuecomment-859887828\n\ntl;dr\n\n> We basically came to the conclusion that we can support generate kube, but playing kube file with a secret is a can of worms that we shoudn't support other than a warning that the secret is not inside the container."
+        },
+        {
+            "user": "mogsie",
+            "body": "Just as a user of both k8s and podman, I'd like to offer an opinion on what I would find useful for secret interoperability.\n\nThe thing that podman play brings to the table is being able to take a Deployment and being able to \"play\" that in podman.  If the deployment defines and references persistent volumes, then (if fashioned correctly) Podman play can use those.\n\nIt should be the same for secrets: If the manifests defines secrets and the Deployment / Pod references those, then the resulting container should use those secrets.\n\nIf a k8s secret defines 3 keys with 3 values, then why not create 3 podman secrets (one for each key) and wire it all together?  This would even extend to things like projected volumes; podman play kube could just mount stuff correctly to mimic what happens in a k8s cluster?\n\nThe end goal should be: I can run \"kustomize build\" to generate a deployment with secret references, and pipe that into podman, instead of having to use minikube, microk8s or kind."
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "MartinX3",
+            "body": "@rhatdan please remove the stale status. :)"
+        },
+        {
+            "user": "nivekuil",
+            "body": "According to an error message I just got podman has a secret size limit of 512k, which I think should block this issue since k8s can have much bigger secrets (https://github.com/kubernetes/kubernetes/issues/19781)"
+        },
+        {
+            "user": "rhatdan",
+            "body": "@ashley-cui PTAL"
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "MartinX3",
+            "body": "/remove Stale"
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "cdoern",
+            "body": "This is completed"
+        },
+        {
+            "user": "TrevorBenson",
+            "body": "@cdoern Which PR merged to complete this issue?\n\nThanks"
+        },
+        {
+            "user": "TrevorBenson",
+            "body": "> @cdoern Which PR merged to complete this issue?\n> \n> Thanks\n\nI believe I tracked it to #14567 **Implement kubernetes secret handling for podman play kube**"
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 12446
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 12396
+        }
+    ]
+}

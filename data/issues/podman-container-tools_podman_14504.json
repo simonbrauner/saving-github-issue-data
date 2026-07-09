@@ -1,0 +1,92 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 14504,
+    "type": "issue",
+    "title": "run --rootfs is broken, (at least) 2 different ways",
+    "state": "closed",
+    "labels": [
+        "kind/bug",
+        "stale-issue",
+        "locked - please file new issue/PR"
+    ],
+    "user": "edsantiago",
+    "body": "Background: this system test\n\nhttps://github.com/containers/podman/blob/0c0d68e98d9b5d2d6a87a4ff4004f86d8cb5c4a6/test/system/030-run.bats#L624-L632\n\nHistory PR #9231, which claims to fix #9230\n\nProblem: the test works with `quay.io/libpod/testimage:20210610`, but does not work with any other image that I can find. These are the ~~two~~ three failure modes:\n```\nError: OCI runtime error: crun: mkdir `secrets`: Read-only file system\n```\nor\n```\nError: crun: open `/var/lib/..../merged/.containerenv`: No such file or directory: \n    -> OCI runtime attempted to invoke a command that was not found\n```\nor\n```\n(same as above, but with resolv.conf instead of .containerenv)\n```\nThe error is not deterministic: a simple `!!` of the reproducer can fail in any of those three ways. (Usually the `.containerenv` one, but not always).\n\nReproducer:\n```bash\n#!/bin/bash\nsudo bin/podman pull -q \"$1\"\nx=$(sudo bin/podman image mount \"$1\")\nsudo bin/podman run --rm --rootfs $x echo hi\nsudo bin/podman image unmount \"$1\"\n```\nSave as `test-mounting`, chmod it +x, and run it with:\n```console\n$ ./test-mounting quay.io/libpod/testimage:20210610     <---- this always works\n$ ./test-mounting docker.io/library/alpine:3.13.5  (or 3.14, or 3.16)\n     ^------ this always fails, even though 3.13.5 is the image that testimage:20210610 is based on\n```\n@vrothberg PTAL",
+    "comments": [
+        {
+            "user": "vrothberg",
+            "body": "The described symptoms suggest a race condition.  My queue is quite full today but maybe I find time."
+        },
+        {
+            "user": "edsantiago",
+            "body": "Oh, no hurry: if noone has noticed in more than a year, it's not that big a deal. (It's just blocking me from fixing #14456, but I can always just disable the `--rootfs`. And I'm OOTO today, so I can't do anything until Wednesday)."
+        },
+        {
+            "user": "Luap99",
+            "body": "Note that the difference in the image is likely the `/run` and `/etc` directory because podman tries always tries to bind mount certain files such as `/run/.containerenv`, `/etc/resolv.conf`, `/etc/hosts` and more. In order to bind mount to a target, the file/directory must exists. Normally this is not a problem since the OCI runtime does this for us (see the `open`/`mkdir` error). However in this case the fs is readonly so creating the file/directory cannot work.\n"
+        },
+        {
+            "user": "rhatdan",
+            "body": "Add an Overlay :O mount to the --rootfs object.\n```\n mnt=$(podman image mount alpine)\nsh-5.1# podman run --rm --rootfs $mnt ls / \nError: OCI runtime error: crun: mkdir `secrets`: Read-only file system\nsh-5.1# podman run --rm --rootfs $mnt:O ls / \nbin\ndev\netc\nhome\nlib\nmedia\nmnt\nopt\nproc\nroot\nrun\nsbin\nsrv\nsys\ntmp\nusr\nvar\n```"
+        },
+        {
+            "user": "Luap99",
+            "body": "The point of the test is to use --rootfs with an readonly rootfs and not overlay."
+        },
+        {
+            "user": "vrothberg",
+            "body": "> The point of the test is to use --rootfs with an readonly rootfs and not overlay.\n\nI think we should check whether the --rootfs is read-only and carry that information along.  If it's RO, then Podman shouldn't attempt to write on it.  Probably worth emitting a warning and pointing to the overlay mount alternative."
+        },
+        {
+            "user": "edsantiago",
+            "body": "While this is getting resolved, may I just submit my PR with this test skipped?"
+        },
+        {
+            "user": "vrothberg",
+            "body": "> While this is getting resolved, may I just submit my PR with this test skipped?\n\nIt's probably a good idea.  Alternatively, we can use `:O` for now.  Once the issue is fixed, the test should pass as is now."
+        },
+        {
+            "user": "rhatdan",
+            "body": "I do not know what the general fix for this is, other then to state that all of the mount points need to be precreated in the original image for --rootfs to work on a read-only file system.  We could attempt to give a list of these locations, but I am not sure how complete it would be and difficult to maintain going forward."
+        },
+        {
+            "user": "vrothberg",
+            "body": "> I do not know what the general fix for this is, other then to state that all of the mount points need to be precreated in the original image for --rootfs to work on a read-only file system. We could attempt to give a list of these locations, but I am not sure how complete it would be and difficult to maintain going forward.\n\nSo should we detect a RO rootfs and error out?"
+        },
+        {
+            "user": "Luap99",
+            "body": "No, this clearly works as long as you have the correct paths that podman bind mounts already in the rootfs. There are options to turn off the bind mounts for /etc/{hosts,resolv.conf}. I do not know if there is a option for the /run mounts? Although I wonder why does podman tries to create /run/secrets when the container does not use any secrets. "
+        },
+        {
+            "user": "rhatdan",
+            "body": "We could, but this use case might work if /dev, /run, /etc/hosts, /etc/resolv.conf exist in the image."
+        },
+        {
+            "user": "rhatdan",
+            "body": "/run/secrets is created for RHEL stuff as well. Not sure if it is always created.  A container without read/write /run would fail is most cases as well."
+        },
+        {
+            "user": "giuseppe",
+            "body": "I think we should not support a read-only rootfs, many things can break. e.g. what to do if the rootfs is missing a `/proc` directory?  \n If the rootfs must be read-only then it can be done only after all the mounts are created by the OCI runtime and we specify `--read-only` to `run`."
+        },
+        {
+            "user": "rhatdan",
+            "body": "I agree, lets just force people to use Overlay for this use case."
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "rhatdan",
+            "body": "Since we agreed to force overlay for this use case I am going to close."
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "containers",
+            "repository": "storage",
+            "number": 1410
+        }
+    ]
+}

@@ -1,0 +1,111 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 19576,
+    "type": "pull_request",
+    "title": "New partial-line test is flaking",
+    "state": "closed",
+    "labels": [
+        "lgtm",
+        "approved",
+        "release-note-none",
+        "locked - please file new issue/PR"
+    ],
+    "user": "edsantiago",
+    "body": "...add a 'sleep 1' in hopes of clearing the flake.\n\n```release-note\nNone\n```\n",
+    "comments": [
+        {
+            "user": "openshift-ci[bot]",
+            "body": "[APPROVALNOTIFIER] This PR is **APPROVED**\n\nThis pull-request has been approved by: *<a href=\"https://github.com/containers/podman/pull/19576#\" title=\"Author self-approved\">edsantiago</a>*\n\nThe full list of commands accepted by this bot can be found [here](https://go.k8s.io/bot-commands?repo=containers%2Fpodman).\n\nThe pull request process is described [here](https://git.k8s.io/community/contributors/guide/owners.md#the-code-review-process)\n\n<details >\nNeeds approval from an approver in each of these files:\n\n- ~~[OWNERS](https://github.com/containers/podman/blob/main/OWNERS)~~ [edsantiago]\n\nApprovers can indicate their approval by writing `/approve` in a comment\nApprovers can cancel approval by writing `/approve cancel` in a comment\n</details>\n<!-- META={\"approvers\":[]} -->"
+        },
+        {
+            "user": "edsantiago",
+            "body": "Sample [flake](https://api.cirrus-ci.com/v1/artifact/task/6536551153270784/html/sys-podman-debian-13-rootless-host-sqlite.log.html#t--00127):\n```\n<+018ms> # $ podman logs --tail 1 tail_container\n<+090ms> # Error: unable to read log file .../ctr.log : '2023-08-09T22:16:13.299101545+00:00' is not a valid container log line\n```"
+        },
+        {
+            "user": "edsantiago",
+            "body": "@lsm5 are you aware that pack-it is failing again?"
+        },
+        {
+            "user": "lsm5",
+            "body": "> @lsm5 are you aware that pack-it is failing again?\n\nI'm aware now :D . Looks like dnf / gpg issues to me, should go away soon. "
+        },
+        {
+            "user": "lsm5",
+            "body": "> > @lsm5 are you aware that pack-it is failing again?\n> \n> I'm aware now :D . Looks like dnf / gpg issues to me, should go away soon.\n\nohh btw, they've been branching fedora 39 from rawhide recently, so I suspect that might be the cause behind this."
+        },
+        {
+            "user": "lsm5",
+            "body": "@edsantiago @cevich I'm thinking we could create some label to ignore packit failures. Checking with packit team if they have something of that sort already."
+        },
+        {
+            "user": "lsm5",
+            "body": "> @edsantiago @cevich I'm thinking we could create some label to ignore packit failures. Checking with packit team if they have something of that sort already.\n\n@edsantiago packit doesn't have anything of that sort atm. So, we can just `manually ignore` :D this for now and move on."
+        },
+        {
+            "user": "edsantiago",
+            "body": "/hold\n\nStill failing."
+        },
+        {
+            "user": "lsm5",
+            "body": "> Still failing.\n\nWe can ignore the rawhide failure for now. It looks like a copr env issue. One other person has also reported it in the fedora copr matrix room."
+        },
+        {
+            "user": "edsantiago",
+            "body": "No, I mean, failing IRL. In CI. As in, this PR does not fix anything.\n\n(Sorry Lokesh, but we're all accustomed to ignoring packit failures)"
+        },
+        {
+            "user": "Luap99",
+            "body": "Do you have a reproducer? I have a hard time understanding the error condition here.\nThe error is saying `2023-08-09T22:16:13.299101545+00:00` is the only thing on the log line which means something in the log must been cut off (now that makes zero sense because we know we write a valid log).\nNow the only other logical explanation is my changed code is incorrect and it for some reason cuts of in the middle of the line. The problem with that is I do not see what that would be flaky."
+        },
+        {
+            "user": "edsantiago",
+            "body": "My reproducer is:\n```console\n$ echo '2023-08-10T08:48:45.298918348-06:00' >| ~/.local/share/..../ctr.log\n```\nI am of course trying a more realistic one so I can see what the log looks like. No luck yet."
+        },
+        {
+            "user": "Luap99",
+            "body": "@edsantiago Assuming you see this in no flake retry PR feel free to apply this:\n```diff\ndiff --git a/libpod/logs/log.go b/libpod/logs/log.go\nindex 4229501cf..574463455 100644\n--- a/libpod/logs/log.go\n+++ b/libpod/logs/log.go\n@@ -83,6 +83,17 @@ func GetLogFile(path string, options *LogOptions) (*tail.Tail, []*LogLine, error\n        return t, logTail, err\n }\n \n+func printFileToStderr(path string) {\n+       f, err := os.Open(path)\n+       if err != nil {\n+               logrus.Errorf(\"failed to read file: %v\", err)\n+       }\n+       _, err = io.Copy(os.Stderr, f)\n+       if err != nil {\n+               logrus.Errorf(\"failed to print file: %v\", err)\n+       }\n+}\n+\n func getTailLog(path string, tail int) ([]*LogLine, error) {\n        var (\n                nllCounter int\n@@ -120,7 +131,8 @@ func getTailLog(path string, tail int) ([]*LogLine, error) {\n                        }\n                        nll, err := NewLogLine(lines[i])\n                        if err != nil {\n-                               return nil, err\n+                               printFileToStderr(path)\n+                               return nil, fmt.Errorf(\"parse log line: %w\", err)\n                        }\n                        if !nll.Partial() || first {\n                                nllCounter++\n@@ -146,7 +158,8 @@ func getTailLog(path string, tail int) ([]*LogLine, error) {\n                        if leftover != \"\" && nllCounter < tail {\n                                nll, err := NewLogLine(leftover)\n                                if err != nil {\n-                                       return nil, err\n+                                       printFileToStderr(path)\n+                                       return nil, fmt.Errorf(\"parse leftover log line: %w\", err)\n                                }\n                                tailLog = append(tailLog, nll)\n                        }\n```\n\nIt should print the full file content to stderr and show me which of the two code paths failed.\n"
+        },
+        {
+            "user": "edsantiago",
+            "body": "@Luap99 I'd love to, but patch doesn't apply. I don't have 4229501cf in my repo. Is it possible that your patch is applied on other uncommitted local work in your repo? I can't even figure out how to apply the patch by hand."
+        },
+        {
+            "user": "edsantiago",
+            "body": "Never mind, I hand-picked it (still don't know why it failed) and have pushed to #17831."
+        },
+        {
+            "user": "Luap99",
+            "body": "No I am on current main, `git show 4229501cf` for me only shows the raw log file and not an actual commit which I find very confusion. No idea what git magic this is."
+        },
+        {
+            "user": "lsm5",
+            "body": "@edsantiago looks like the copr folks fixed rawhide."
+        },
+        {
+            "user": "edsantiago",
+            "body": "[Weird.....](https://api.cirrus-ci.com/v1/artifact/task/6548297570058240/html/sys-remote-debian-13-root-host-sqlite.log.html#t--00127)\n```\n<+008ms> # # podman-remote --url unix:/tmp/podman_tmp_oCoc inspect --format {{.HostConfig.LogConfig.Path}} tail_container\n<+047ms> # /var/lib/containers/storage/overlay-containers/8b2990f1029b8a9789cc4ed6314f4b69c4251241fe89b724a5a96e158c01b67d/userdata/ctr.log\n         # 2023-08-10T20:36:55.215741863+00:00\n         # 2023-08-10T20:36:55.215856820+00:00 stdout F podman1\n\n         # 2023-08-10T20:36:55.215741863+00:00\n         # 2023-08-10T20:36:55.215856820+00:00 stdout P podman2\n         # 2023-08-10T20:36:55.215741863+00:00\n         # 2023-08-10T20:36:55.215856820+00:00 stdout F \n\n         # 2023-08-10T20:36:55.215741863+00:00\n         # 2023-08-10T20:36:55.215856820+00:00 stdout F podman3\n\n<+020ms> # # podman-remote --url unix:/tmp/podman_tmp_oCoc logs --tail 1 tail_container\n<+041ms> # Error: failed to obtain logs for Container 'tail_container': unable to read log file 8b2990f1029b8a9789cc4ed6314f4b69c4251241fe89b724a5a96e158c01b67d for /var/lib/containers/storage/overlay-containers/8b2990f1029b8a9789cc4ed6314f4b69c4251241fe89b724a5a96e158c01b67d/userdata/ctr.log : parse log line: '2023-08-10T20:36:55.215741863+00:00' is not a valid container log line\n```\nNow I wonder if it's my `awk`? Anyhow, I'm really sure this is my fault, a test bug, not a bug in your (@Luap99's) code"
+        },
+        {
+            "user": "Luap99",
+            "body": "Right if the original log already contains two lines (partial + full) then the awk would return two timestamps thus corrupt the log. So I think we managed to add a test which runs into the same flake my PR fixed (incorrect handling of partial lines)  :laughing:\n\nDo you really care about the current ts used? We could just hard code the ts and safe that awk step.\n\n"
+        },
+        {
+            "user": "edsantiago",
+            "body": "What I don't understand is how `echo hi` could generate a partial line, but that's something I'll worry about later. Or never. \n\nI added `head -1`, and ran three test cycles on it without any flakes. I don't have strong feelings about `awk` vs a hardcoded TS, if you or someone prefer hardcoded I will update the PR next week. Otherwise I think it's ready for review."
+        },
+        {
+            "user": "Luap99",
+            "body": "I am good with it either way, given tests are green LGTM. It is not worth to repush for that."
+        },
+        {
+            "user": "edsantiago",
+            "body": "On reflection I have a mild preference for keeping it this way, for separation-of-knowledge reasons: with this form, the test has to know `<timestamp> <P|F> stdout <msg>` but does not need to know what `timestamp` looks like. And FWIW I've given this 7-8 spins in #17831 with no failures."
+        },
+        {
+            "user": "Luap99",
+            "body": "/hold cancel\n\n/lgtm"
+        }
+    ],
+    "cross_references": []
+}

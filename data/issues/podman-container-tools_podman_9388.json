@@ -1,0 +1,119 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 9388,
+    "type": "pull_request",
+    "title": "exitcode/timestamp consistency after checkpoint creation/restore",
+    "state": "closed",
+    "labels": [
+        "stale-pr",
+        "locked - please file new issue/PR"
+    ],
+    "user": "buck2202",
+    "body": "In docker, the exitcode of a container checkpointed without `--leave-running` is 137, which matches the exitcode of a container that is manually stopped. podman leaves the exitcode as 0\n\nIn `libpod/container_internal_linux.go::checkpoint()`, I used `libpod/container_internal.go::stop()` as an example and copied the call to `c.waitForExitFileAndSync()` rather than manually assigning the exitcode to 137. I assumed this would be better than using 137 as a magic number, but maybe that would've been fine. I'm not totally sure if there are other implications to this function call. Additionally in `checkpoint()`, I removed the unconditional assignment to the container's FinishedTime. This happens within the `waitForExitFileAndSync` call chain if the container is stopped, and probably shouldn't have been happening at all if `--leave-running` was specified.\n\nIn `libpod/container_internal_linux.go::restore()` after the container state is set to running, I explicitly set the container exitcode to zero, its StartedTime to now, and clear its FinishedTime.\n\nWith these changes, the timestamps and exitcode _almost_ track with docker's behavior. I noticed in collecting the output here that docker never actually resets the \"FinishedAt\" time when a container is restored. If the goal is completely matching docker, I can remove the line that clears it upon restore. IMO, it seems more logical to have a null FinishedAt time for a container that's running.\n\nPodman:\n```\n$ sudo podman run --detach --name cr busybox /bin/sleep 60\n7f2de709a7be88542d03cebf194deca877b5ad69557f48597259767e1b4a8f83\n$ sudo podman container inspect cr |grep -E \"(\\\"Created|FinishedAt|StartedAt|ExitCode)\"\n        \"Created\": \"2021-02-15T16:07:48.815788417-05:00\",\n            \"ExitCode\": 0,\n            \"StartedAt\": \"2021-02-15T16:07:49.374606028-05:00\",\n            \"FinishedAt\": \"0001-01-01T00:00:00Z\",\n$ sudo podman container checkpoint cr\n7f2de709a7be88542d03cebf194deca877b5ad69557f48597259767e1b4a8f83\n$ sudo podman container inspect cr |grep -E \"(\\\"Created|FinishedAt|StartedAt|ExitCode)\"\n        \"Created\": \"2021-02-15T16:07:48.815788417-05:00\",\n            \"ExitCode\": 137,\n            \"StartedAt\": \"2021-02-15T16:07:49.374606028-05:00\",\n            \"FinishedAt\": \"2021-02-15T16:08:03.296056384-05:00\",\n$ sudo podman container restore cr\n7f2de709a7be88542d03cebf194deca877b5ad69557f48597259767e1b4a8f83\n$ sudo podman container inspect cr |grep -E \"(\\\"Created|FinishedAt|StartedAt|ExitCode)\"\n        \"Created\": \"2021-02-15T16:07:48.815788417-05:00\",\n            \"ExitCode\": 0,\n            \"StartedAt\": \"2021-02-15T16:08:23.071588181-05:00\",\n            \"FinishedAt\": \"0001-01-01T00:00:00Z\",\n$ sleep 60\n$ sudo podman container inspect cr |grep -E \"(\\\"Created|FinishedAt|StartedAt|ExitCode)\"\n        \"Created\": \"2021-02-15T16:07:48.815788417-05:00\",\n            \"ExitCode\": 0,\n            \"StartedAt\": \"2021-02-15T16:08:23.071588181-05:00\",\n            \"FinishedAt\": \"2021-02-15T16:09:09.804056384-05:00\",\n\n```\n\nDocker:\n```\n$ docker run --detach --name cr busybox /bin/sleep 60\n66d0545e3d3932f58e2b59f8ea7489dea1c909ebbf02789883478f98ebd9fc3d\n$ docker container inspect cr | grep -E \"(\\\"Created|FinishedAt|StartedAt|ExitCode)\"\n        \"Created\": \"2021-02-15T21:11:54.129271959Z\",\n            \"ExitCode\": 0,\n            \"StartedAt\": \"2021-02-15T21:11:54.772211374Z\",\n            \"FinishedAt\": \"0001-01-01T00:00:00Z\"\n$ docker checkpoint create cr chk\nchk\n$ docker container inspect cr | grep -E \"(\\\"Created|FinishedAt|StartedAt|ExitCode)\"\n        \"Created\": \"2021-02-15T21:11:54.129271959Z\",\n            \"ExitCode\": 137,\n            \"StartedAt\": \"2021-02-15T21:11:54.772211374Z\",\n            \"FinishedAt\": \"2021-02-15T21:12:06.879920447Z\"\n$ docker start --checkpoint chk cr\n$ docker container inspect cr | grep -E \"(\\\"Created|FinishedAt|StartedAt|ExitCode)\"\n        \"Created\": \"2021-02-15T21:11:54.129271959Z\",\n            \"ExitCode\": 0,\n            \"StartedAt\": \"2021-02-15T21:12:25.566876155Z\",\n            \"FinishedAt\": \"2021-02-15T21:12:06.879920447Z\"\n$ sleep 60\n$ docker container inspect cr | grep -E \"(\\\"Created|FinishedAt|StartedAt|ExitCode)\"\n        \"Created\": \"2021-02-15T21:11:54.129271959Z\",\n            \"ExitCode\": 0,\n            \"StartedAt\": \"2021-02-15T21:12:25.566876155Z\",\n            \"FinishedAt\": \"2021-02-15T21:13:14.151229075Z\"\n\n```\n\nUnfortunately I couldn't get the `validate` or `lint` tests to function. Not sure what I'm missing in following the instructions in the contributing doc :/\n\nCloses #8432 \n<!--\nThanks for sending a pull request!\n\nPlease make sure you've read our contributing guidelines and how to submit a pull request (https://github.com/containers/podman/blob/master/CONTRIBUTING.md#submitting-pull-requests).\n\nIn case you're only changing docs, make sure to prefix the pull-request title with \"[CI:DOCS]\".  That will prevent functional tests from running and save time and energy.\n-->\n",
+    "comments": [
+        {
+            "user": "openshift-ci-robot",
+            "body": "[APPROVALNOTIFIER] This PR is **NOT APPROVED**\n\nThis pull-request has been approved by: *<a href=\"https://github.com/containers/podman/pull/9388#\" title=\"Author self-approved\">buck2202</a>*\nTo complete the [pull request process](https://git.k8s.io/community/contributors/guide/owners.md#the-code-review-process), please assign **umohnani8** after the PR has been reviewed.\nYou can assign the PR to them by writing `/assign @umohnani8` in a comment when ready.\n\nThe full list of commands accepted by this bot can be found [here](https://go.k8s.io/bot-commands?repo=containers%2Fpodman).\n\n<details open>\nNeeds approval from an approver in each of these files:\n\n- **[OWNERS](https://github.com/containers/podman/blob/master/OWNERS)**\n\nApprovers can indicate their approval by writing `/approve` in a comment\nApprovers can cancel approval by writing `/approve cancel` in a comment\n</details>\n<!-- META={\"approvers\":[\"umohnani8\"]} -->"
+        },
+        {
+            "user": "buck2202",
+            "body": "pinging @rhatdan @baude since you commented in the original issue. hope this looks ok! My familiarity with doing PRs is very low, so sorry if I'm missing something here\n\nedit: also not that familiar with git. didn't realize that the first line of a commit message was treated as a \"subject\" with length restriction. will try to fix\n\nedit2: my force-push to shorten the commit message looks like it brought in a different commit. I'll leave this to finish its checks, but if it doesn't work, I don't think I know git well enough to do anything less drastic than reforking and trying again :/"
+        },
+        {
+            "user": "mheon",
+            "body": "You can try rebasing atop master - that should remove the extra commit.\n\nOverall LGTM but I'd feel more comfortable if someone more familiar with CRIU reviewed this prior to merge."
+        },
+        {
+            "user": "buck2202",
+            "body": "Turns out I hadn't fixed the commit msg length issue anyway...guess it doesn't count as a subject without a blank line following.  Think I've fixed the errant commit and the string length now.\n\nI guess I didn't fully understand the tests requirement. I think flagging none needed would be appropriate here? Does adding another commit with that message take care of it, or does it have to be present in each commit to be merged?\n\n\nSorry for the problems! I wanted to contribute and I've used git a little in isolation, but collaborative git/CI are new to me."
+        },
+        {
+            "user": "buck2202",
+            "body": "I guess I could actually modify one of the checkpoint/restore tests in e2e/checkpoint_test.go to cover these changes, but I haven't had any luck yet following the [instructions](https://github.com/containers/podman/blob/master/test/README.md) to actually run a test locally. I'll keep trying when I find time again"
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this PR had no activity for 30 days."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@buck2202 what is the scoop on this one.\n"
+        },
+        {
+            "user": "buck2202",
+            "body": "@rhatdan Sorry, missed the bot action on this. I commented in the issue thread when it got marked stale (https://github.com/containers/podman/issues/8432#issuecomment-801533225) but not here.\n\nI wasn't able to get `make validate`, `make lint`, and tests to run locally when I was working on it; the last of those stopped me from creating a validation/regression test to pass the CI checks (and I think it does deserve a test). I still plan to revisit, but it's been a very busy month.\n\n\nBeyond general review of my approach, the only open code question on my end was whether `FinishedAt` should retain its old value after restore (matching docker) or reset to nil once the container is running (what I did, not realizing it was _not_ what docker did until the very end)."
+        },
+        {
+            "user": "vrothberg",
+            "body": "@buck2202, to pass CI, you need to add `[NO TESTS NEEDED]` to the commit message (see the bottom of https://github.com/containers/podman/pull/9388/checks?check_run_id=1906735716).\n\nCan you rebase and repush?"
+        },
+        {
+            "user": "openshift-ci[bot]",
+            "body": "[APPROVALNOTIFIER] This PR is **NOT APPROVED**\n\nThis pull-request has been approved by: *<a href=\"https://github.com/containers/podman/pull/9388#\" title=\"Author self-approved\">buck2202</a>*\nTo complete the [pull request process](https://git.k8s.io/community/contributors/guide/owners.md#the-code-review-process), please assign **umohnani8** after the PR has been reviewed.\nYou can assign the PR to them by writing `/assign @umohnani8` in a comment when ready.\n\nThe full list of commands accepted by this bot can be found [here](https://go.k8s.io/bot-commands?repo=containers%2Fpodman).\n\n<details open>\nNeeds approval from an approver in each of these files:\n\n- **[OWNERS](https://github.com/containers/podman/blob/master/OWNERS)**\n\nApprovers can indicate their approval by writing `/approve` in a comment\nApprovers can cancel approval by writing `/approve cancel` in a comment\n</details>\n<!-- META={\"approvers\":[\"umohnani8\"]} -->"
+        },
+        {
+            "user": "buck2202",
+            "body": "I've played with this off and on, but was never able to get the lint, validate, and ginkgo frameworks to function in my build environment following the docs. Seems like there could easily be a regression test on a container's exitcode after a stopping-checkpoint (`137` rather than `0`), but I hesitate to write it without actually being able to exercise it.\n\nSo, I've added the `[NO TESTS NEEDED]` flag per @vrothberg in the interest of getting this past checks for discussion. @adrianreber [suggested](https://github.com/containers/podman/issues/8432#issuecomment-827020182) that he did not see this as an issue that needed fixing--if you decide that this *is* something you'd like to merge, maybe someone could help me with the regression test.\n\nedit: just to bring my rationale into the discussion here--the current behavior of `podman container checkpoint foo` forcibly stops the container but leaves a container exitcode of `0`, while my naive expectation coming from docker was that the container exitcode would reflect the force-stop. The `0` doesn't allow a \"natural\" exit to be distinguished from a checkpoint stop in the `inspect` output--to maintain that distinction in my own scripts for managing transient containers, my workaround has been to exclusively use `checkpoint --leave-running`, followed by `stop` if desired.\n\n<details>\n<summary>edit2: test failure seems unrelated to my commits</summary>\n\n```\n[+0447s] not ok 212 podman networking: port with --userns=keep-id\n[+0447s] # (in test file test/system/500-networking.bats, line 145)\n[+0447s] #   `echo \"$teststring\" | nc 127.0.0.1 $myport' failed\n[+0447s] # # /var/tmp/go/src/github.com/containers/podman/bin/podman-remote --url unix:/tmp/podman_tmp_hwB7 rm --all --force\n[+0447s] # # /var/tmp/go/src/github.com/containers/podman/bin/podman-remote --url unix:/tmp/podman_tmp_hwB7 ps --all --external --format {{.ID}} {{.Names}}\n[+0447s] # # /var/tmp/go/src/github.com/containers/podman/bin/podman-remote --url unix:/tmp/podman_tmp_hwB7 images --all --format {{.Repository}}:{{.Tag}} {{.ID}}\n[+0447s] # quay.io/libpod/testimage:20210427 aadc32e2a626\n[+0447s] # # /var/tmp/go/src/github.com/containers/podman/bin/podman-remote --url unix:/tmp/podman_tmp_hwB7 run -d --userns=keep-id -p 127.0.0.1:54322:54322 quay.io/libpod/testimage:20210427 nc -l -n -v -p 54322\n[+0447s] # 9d9cbd582a67af8fc968b4fab7b766a5524b7ec4b411e091c26857735c93e062\n[+0447s] # Ncat: No route to host.\n[+0447s] # # [teardown]\n[+0447s] # # /var/tmp/go/src/github.com/containers/podman/bin/podman-remote --url unix:/tmp/podman_tmp_hwB7 pod rm --all --force\n[+0447s] # # /var/tmp/go/src/github.com/containers/podman/bin/podman-remote --url unix:/tmp/podman_tmp_hwB7 rm --all --force\n[+0447s] # 9d9cbd582a67af8fc968b4fab7b766a5524b7ec4b411e091c26857735c93e062\n```\n</details>\n"
+        },
+        {
+            "user": "vrothberg",
+            "body": "@adrianreber PTAL\n\n@buck2202, apologies. Could you do another rebase?"
+        },
+        {
+            "user": "adrianreber",
+            "body": "From my point of view this does not make sense. Why should a checkpointed container have 137 as exit code? From my point of view that sounds like something did not work. 137 is a SIGKILL which is correct because without `--leave-running` CRIU terminates the container process, but this would leave us in the situation to not be able to distinguish between a checkpointed container and a killed container process. This just moves the unclear state of the checkpointed container to something else.\n\nIf the command `podman container checkpoint` returns with a 0 the container should be successfully checkpointed.\n\nThere is no reason to do what Docker does for me, because the whole checkpoint/restore is completely different in Podman.\n\n>  The 0 doesn't allow a \"natural\" exit to be distinguished from a checkpoint stop in the inspect output--to maintain that distinction in my own scripts for managing transient containers, my workaround has been to exclusively use checkpoint --leave-running, followed by stop if desired.\n\nThe right solution would be to track the state correctly as checkpointed. But if the Podman maintainers feel that 137 is the right exit status then I am also not against it. For me it just does not make sense."
+        },
+        {
+            "user": "mheon",
+            "body": "I don't think an entire state for Checkpointed is appropriate (adding new states is a substantial burden as we have a lot of internal state-checking logic to ensure commands are in the right state), but we could easily have a bool in the database for \"Checkpointed\" which is set on a container killed by a checkpoint operation, and cleared again on the container restarting; we can expose this in `podman inspect` for the container."
+        },
+        {
+            "user": "adrianreber",
+            "body": "> I don't think an entire state for Checkpointed is appropriate (adding new states is a substantial burden as we have a lot of internal state-checking logic to ensure commands are in the right state), but we could easily have a bool in the database for \"Checkpointed\" which is set on a container killed by a checkpoint operation, and cleared again on the container restarting; we can expose this in `podman inspect` for the container.\n\nThat sounds like a really good idea."
+        },
+        {
+            "user": "buck2202",
+            "body": "> From my point of view this does not make sense. Why should a checkpointed container have 137 as exit code? From my point of view that sounds like something did not work. 137 is a SIGKILL which is correct because without `--leave-running` CRIU terminates the container process, but this would leave us in the situation to not be able to distinguish between a checkpointed container and a killed container process. This just moves the unclear state of the checkpointed container to something else.\n> \n> If the command `podman container checkpoint` returns with a 0 the container should be successfully checkpointed.\n\nI agree that both the current behavior and my commits leave something undefined--or, at least, difficult to discern--without additional tracking. From my perspective, I thought it made more sense to rely solely on the `podman container checkpoint` exitcode for the checkpoint operation, with the container exitcode only reflecting the container processes' state (so, 137 if SIGKILLed, regardless of the signal source).\n\nMy experience may be atypical, though, so I understand that opinions may differ. I run transient containers in a preemptible cloud environment with periodic, non-terminating, exported checkpoints; and a terminating checkpoint either on-demand or when the VM reaches its max-allowed uptime. Because my VMs can be killed at any time (including during a checkpoint operation), I use the `podman container checkpoint` exitcode to maintain a fs-persistent list of known-valid checkpoints per container. This additional tracking probably biases me away from seeing an issue with a container reporting 137 after a successful checkpoint. My preference was that exitcode 0 be unambiguous, and I do have a workaround for that under the current behavior.\n\nI also like @mheon's idea.\n\n\n<details>\n<summary>I rebased, but the checks seem to have failed again unrelated to my commits</summary>\n\n```\n[+0040s] Successfully built 6cdbe067979c\n[+0040s] Successfully tagged env_and_volume_reader\n[+0040s] Image for service reader was built because it did not already exist. To rebuild this image you must use `docker-compose build` or `docker-compose up --build`.\n[+0040s] Creating env_and_volume_reader_1 ... done\n[+0040s] Creating env_and_volume_writer_1 ... done\n[+0047s] not ok 3 env_and_volume : port 5001\n[+0047s] #  expected: podman_rulez\n[+0047s] #    actual: <!DOCTYPE HTML PUBLIC \"-//W3C//DTD HTML 3.2 Final//EN\">\n[+0047s] <title>500 Internal Server Error</title>\n[+0047s] <h1>Internal Server Error</h1>\n[+0047s] <p>The server encountered an internal error and was unable to complete your request. Either the server is overloaded or there is an error in the application.</p>\n```\n\n</details>"
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this PR had no activity for 30 days."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@mheon @buck2202 @adrianreber What should we do with this PR?"
+        },
+        {
+            "user": "mheon",
+            "body": "I think we close, and I take over and create a PR to add a Checkpointed bool to the output of `podman inspect`."
+        },
+        {
+            "user": "buck2202",
+            "body": "No objection from me"
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this PR had no activity for 30 days."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@mheon Did  you ever work on this?"
+        },
+        {
+            "user": "mheon",
+            "body": "Negative. Let me do it now."
+        },
+        {
+            "user": "mheon",
+            "body": "Closing in favor of #11471 "
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 8432
+        }
+    ]
+}

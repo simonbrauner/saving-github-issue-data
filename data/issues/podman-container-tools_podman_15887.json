@@ -1,0 +1,145 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 15887,
+    "type": "issue",
+    "title": "Podman save / load across machines causes cache misses and rebuilding of images",
+    "state": "closed",
+    "labels": [
+        "kind/bug",
+        "stale-issue",
+        "ShouldBlog",
+        "locked - please file new issue/PR"
+    ],
+    "user": "samskiter",
+    "body": "<!--\n---------------------------------------------------\nBUG REPORT INFORMATION\n---------------------------------------------------\nUse the commands below to provide key information from your environment:\nYou do NOT have to include this information if this is a FEATURE REQUEST\n\n**NOTE** A large number of issues reported against Podman are often found to already be fixed\nin more current versions of the project.  Before reporting an issue, please verify the\nversion you are running with `podman version` and compare it to the latest release\ndocumented on the top of Podman's [README.md](../README.md).  If they differ, please\nupdate your version of Podman to the latest possible and retry your command before creating\nan issue.\n\nAlso, there is a running list of known issues in the [Podman Troubleshooting Guide](https://github.com/containers/podman/blob/main/troubleshooting.md),\nplease reference that page before opening a new issue.\n\nIf you are filing a bug against `podman build`, please instead file a bug\nagainst Buildah (https://github.com/containers/buildah/issues). Podman build\nexecutes Buildah to perform container builds, and as such the Buildah\nmaintainers are best equipped to handle these bugs.\n-->\n\n/kind bug\n\n**Description**\n\n<!--\nBriefly describe the problem you are having in a few paragraphs.\n-->\n\nI’m trying to save an image (with layers) on one machine and then load it later on another in order to accelerate our CI build pipeline. However, after loading I'm still getting a cache miss even at the first line of my build file. When I re-run my build locally, podman build get's full cache hits and my builds are super fast.\n\nThis is a feature that seems to be supported by docker - I *roughly* followed [this](https://learn.microsoft.com/en-us/azure/devops/pipelines/release/caching?view=azure-devops#docker-images) guide to do this (obviously replacing docker for podman).\n\n**Steps to reproduce the issue:**\n\n1. `podman save image`\n1. Switch to another machine\n1. `podman load image.tar`\n1. podman build\n\n**Describe the results you received:**\n\nAll instructions in the build file are run.\n\n**Describe the results you expected:**\n\nInstructions that have not changes should be able to use the cached layers from `podman save`\n\n**Additional information you deem important (e.g. issue happens only occasionally):**\n\nI think this is a supported behaviour with docker - I asked on the #crio slack channel and @mheon suggested this is a bug in buildah/podman and that I should file a bug.\n\nI have tried to narrow my dockerignore file to include only the files my build absolutely needs, but even my first `FROM blah` and `RUN` commands are getting cache misses before any `COPY` command.\n\nPotentially related bug: https://github.com/containers/buildah/issues/2954\n\n**Output of `podman version`:**\n\n```\n3.4.2\n```\n\n**Output of `podman info`:**\n\nNA\n\n**Package info (e.g. output of `rpm -q podman` or `apt list podman`):**\n\n```\n(paste your output here)\n```\n\n**Have you tested with the latest version of Podman and have you checked the Podman Troubleshooting Guide? (https://github.com/containers/podman/blob/main/troubleshooting.md)**\n\nNo - using ubuntu so 3.4.2 is the latest.\n\n**Additional environment details (AWS, VirtualBox, physical, etc.):**\n\nRunning on MS hosted build agents on Azure Devops.\n\n\nKeywords:\n\nPodman\nbuild \nload\nsave\nlayers",
+    "comments": [
+        {
+            "user": "mheon",
+            "body": "@flouthoc PTAL"
+        },
+        {
+            "user": "flouthoc",
+            "body": "Hi @samskiter , If there is a shared registry between two machine running the CI, I'd suggest a better solution which is `--cache-to` and `--cache-from`. See options `--cache-to` and `--cache-from` here https://github.com/containers/buildah/blob/main/docs/buildah-build.1.md#options\n\n\nSo on one machine you can just do `buildah build --layers --cache-to <yourrepo>/cache --cache-from <yourrepo>/cache -t test .` and on second or any other machine just run same command and it will automatically use cache from registry instead of re-running a step.\n\nThis tells me that buildah needs a blog for this."
+        },
+        {
+            "user": "baude",
+            "body": "@flouthoc so is it a bug or are you saying you have a work around."
+        },
+        {
+            "user": "samskiter",
+            "body": "Hi @flouthoc I don't currently have a shared registry to easily use so I'd prefer to use `save` / `load` if possible (as per this guide: https://learn.microsoft.com/en-us/azure/devops/pipelines/release/caching?view=azure-devops#docker-images ). Also don't want to have to add a bunch of --cache-to and --cache-from to all my scripts"
+        },
+        {
+            "user": "flouthoc",
+            "body": "`save` and `load` does not carries intermediate images which buildah uses as cache, afaik so i don't think it will hit the cache as is but let me confirm."
+        },
+        {
+            "user": "flouthoc",
+            "body": "@samskiter Let me check your shared link and confirm back."
+        },
+        {
+            "user": "flouthoc",
+            "body": "This will not work as is, buildah caching works differently than docker, In order to support this feature I think we must implement filesystem exporters to `--cache-to` and `--cache-from` and let `save` and `load` silently use them for images with `--layers`.\n\nAnother method is sharing storage between two machines or using additional stores which is not possible for your scenario as you mentioned so I think implementing the first feature makes more sense here.\n\nBut I'm gonna tag @nalind to confirm or point out if i missed anything."
+        },
+        {
+            "user": "samskiter",
+            "body": "Thanks @flouthoc for the analysis - it would be great if podman could match docker on this feature, but appreciate it sounds like some work to get there.... if there are other workaround or ways I can get the image caching to line up, let me know!"
+        },
+        {
+            "user": "samskiter",
+            "body": "I also considered using a local root directory and caching that, but in some situations I need to combine multiple different builds into one while ensuring that I'm building the latest code - I wouldn't really know how to combine stores in this situation.... I think I may have to go away and try and work out how to use some container store now, but the access permissions to a repository may be tricky."
+        },
+        {
+            "user": "nalind",
+            "body": "You can save all images with `podman images -aq | xargs podman save -m -o /tmp/images.tar`.  If you're consistently building with `--format docker`, then `podman load`ing the images from the archive first should let the cache logic recognize the images as cache hits.\n\nI say `--format docker` because `save -m` appears to be limited to using Docker format, minor differences between OCI and Docker formats could keep cache hits from happening, and we default to `--format oci`."
+        },
+        {
+            "user": "flouthoc",
+            "body": "> You can save all images with `podman images -aq | xargs podman save -m -o /tmp/images.tar`. If you're consistently building with `--format docker`, then `podman load`ing the images from the archive first should let the cache logic recognize the images as cache hits.\n> \n> I say `--format docker` because `save -m` appears to be limited to using Docker format, minor differences between OCI and Docker formats could keep cache hits from happening, and we default to `--format oci`.\n\nThis is a really nice workaround till this feature is implemented upstream,  just adding a side-note for workaround this can generate final `.tar` really big in size if local storage contains lot of images."
+        },
+        {
+            "user": "samskiter",
+            "body": "Thanks all, I will check this out asap. One piece of clarification though -\nthe docs say that the docker format is the default. Is this wrong? See\nhere: https://docs.podman.io/en/latest/markdown/podman-save.1.html\n\nOn Wed, 21 Sept 2022, 19:05 flouthoc, ***@***.***> wrote:\n\n> You can save all images with podman images -aq | xargs podman save -m -o\n> /tmp/images.tar. If you're consistently building with --format docker,\n> then podman loading the images from the archive first should let the\n> cache logic recognize the images as cache hits.\n>\n> I say --format docker because save -m appears to be limited to using\n> Docker format, minor differences between OCI and Docker formats could keep\n> cache hits from happening, and we default to --format oci.\n>\n> This is a really nice workaround till this is implemented upstream, just\n> adding a side-note for workaround this can generate final .tar really big\n> in size if local storage contains lot of images.\n>\n> —\n> Reply to this email directly, view it on GitHub\n> <https://github.com/containers/podman/issues/15887#issuecomment-1254052393>,\n> or unsubscribe\n> <https://github.com/notifications/unsubscribe-auth/AAJWOW3LWHMTBY2XN2BVGQDV7NE4ZANCNFSM6AAAAAAQSEVEJ4>\n> .\n> You are receiving this because you were mentioned.Message ID:\n> ***@***.***>\n>\n"
+        },
+        {
+            "user": "nalind",
+            "body": "For `save`, docker format is the default.  For `build`, the default image format is OCI, so conversion happens, and I haven't checked lately how converting on save and then reloading affects the cache evaluation logic."
+        },
+        {
+            "user": "samskiter",
+            "body": "So does this mean I should save with oci?\n\nOn Wed, 21 Sept 2022, 19:53 Nalin Dahyabhai, ***@***.***>\nwrote:\n\n> For save, docker format is the default. For build, the default image\n> format is OCI, so conversion happens, and I haven't checked lately how\n> converting on save and then reloading affects the cache evaluation logic.\n>\n> —\n> Reply to this email directly, view it on GitHub\n> <https://github.com/containers/podman/issues/15887#issuecomment-1254101172>,\n> or unsubscribe\n> <https://github.com/notifications/unsubscribe-auth/AAJWOW5S2AVQPGUE66JBIPDV7NKUJANCNFSM6AAAAAAQSEVEJ4>\n> .\n> You are receiving this because you were mentioned.Message ID:\n> ***@***.***>\n>\n"
+        },
+        {
+            "user": "nalind",
+            "body": "> So does this mean I should save with oci?\n\n`podman save -m` does not currently support OCI formats, so I would say no."
+        },
+        {
+            "user": "samskiter",
+            "body": "Gotya, thanks! https://github.com/containers/podman/issues/15887#issuecomment-1254036038 worked great, by the way! Is there any way to narrow only to a specific image and its parent layers?\n\n"
+        },
+        {
+            "user": "nalind",
+            "body": "It looks like running `podman image history -q` for the final image, filtering out the \"<missing>\" parents of the base image, would provide a useful result for builds that don't use multiple stages.  For builds that use multiple stages, by their nature, that wouldn't be the complete list of the involved images."
+        },
+        {
+            "user": "samskiter",
+            "body": "Awesome, thanks again! It's important because over time if I load in a cache of an old build and then some changes are made, the layers will change, but each time I export I will get all the old AND new image layers...."
+        },
+        {
+            "user": "samskiter",
+            "body": "for anyone who finds this in the future, my build commands look like this:\n\n`podman build --format docker --tag $IMAGE_NAME .`\n\nMy save commands look like this:\n\n`  podman image history -q \"${IMAGE_NAME}\" | sed '/<missing>/d' | xargs podman save -m -o \"$FILENAME\"`\n\nAnd my load command looks like this:\n\n`podman load -i \"$FILENAME\"`"
+        },
+        {
+            "user": "samskiter",
+            "body": "A semi-related issue - it seems that any `WORKDIR` command in the will invalidate a cache when I switch to a different machine. It seems [Docker has had a similar issue in the past](https://github.com/moby/moby/issues/30081)... This has been pretty reproducible for me is there any way to avoid this aside from prefixing a bunch of commands with `cd foo`? I ensured that the directory exists before the workdir command (`mkdir -p`) but still get the same issue. Could it be that the absolute path is different? Is there any way to customise the context to avoid this? Here's an example log:\n\n```\nSTEP 5/41: RUN mkdir -p /build/out\n--> Using cache ee5af70dcd2bf0cd2937b88a7c55e10e59a67c803768b4d0308634ce32e7fbe7\n--> ee5af70dcd2\nSTEP 6/41: WORKDIR /build\n--> 98b4032cbb3\nSTEP 7/41: ARG CPL_BRANCH\n```\n\nThis also seems to be happening with the ENTRYPOINT command - again only when it's occurring on different machines. Here's a log (Notice that the caches match up to Step 8/9):\n\nMachine A:\n```\nSTEP 7/9: RUN cp /tmp/qemu-install/bin/qemu-* /usr/local/bin/\n--> Using cache 0f25fb2d30af545cc3a4f7c98b5692c0416b53046a7ad631fa7dfeb2791772e2\n--> 0f25fb2d30a\nSTEP 8/9: COPY entrypoint.bash /usr/local/bin/entrypoint.bash\n--> Using cache 9b8d93f0a9d00c1a158b15c1860236315e52387d8e712ea091fd36876f9ca1cf\n--> 9b8d93f0a9d\nSTEP 9/9: ENTRYPOINT [\"entrypoint.bash\"]\nCOMMIT qemu-aarch64\n--> c66f2b8159e\nSuccessfully tagged localhost/qemu-aarch64:latest\nc66f2b8159ed65a5a4ae32f3d4b3a6fbaa4f6dd7b91d8d2fd67ef5638dd65b3b\n```\nMachine B:\n```\nSTEP 7/9: RUN cp /tmp/qemu-install/bin/qemu-* /usr/local/bin/\n--> Using cache 0f25fb2d30af545cc3a4f7c98b5692c0416b53046a7ad631fa7dfeb2791772e2\n--> 0f25fb2d30a\nSTEP 8/9: COPY entrypoint.bash /usr/local/bin/entrypoint.bash\n--> Using cache 9b8d93f0a9d00c1a158b15c1860236315e52387d8e712ea091fd36876f9ca1cf\n--> 9b8d93f0a9d\nSTEP 9/9: ENTRYPOINT [\"entrypoint.bash\"]\nCOMMIT qemu-aarch64\n--> 305cccf5186\nSuccessfully tagged localhost/qemu-aarch64:latest\n305cccf51864bdc7fbc2b181554e601741cd46fc365986e108d1cfa6b621b805\n```\n\nUnsure whether to leave there here or file 1 or even 2 new bugs.... thoughts?\n\nThanks\n\nSam"
+        },
+        {
+            "user": "samskiter",
+            "body": "@nalind more bad news - this also seems to be happening with the `ARG` command in my Dockerfile, but only when using `podman build --build-arg`. The arg is staying the same between runs, but passing it seems to invalidate the cache. While your solution is working in general, I'm now hitting into a second layer of issues. I don't support you have any more of those workarounds have you? Or is there any way to see *what* is causing the cache miss? Like what inputs were different?\n\n![6uro74](https://user-images.githubusercontent.com/1271643/192352834-078d0ee0-ea8d-4681-acc8-45ef8ce144e1.jpg)\n"
+        },
+        {
+            "user": "samskiter",
+            "body": "I'm also assuming that using a container registry won't help me here as there seems to be something about the way podman is calculating the layer cache from the runtime context that is inconsistent between machines rather than something being lost in the save-load process?"
+        },
+        {
+            "user": "nalind",
+            "body": "The cache evaluation includes the candidate image's history, so instructions that change the entry point, workdir, and such matter.\nWORKDIR in particular is used as the default destination when a subsequent COPY or ADD is given a relative destination, and as the working directory for subsequent RUN instructions.\nLikewise, changes to ARG values can affect the expansion of RUN instruction commands, so the corresponding history entry in the image's config includes ARGs and their values.  That's done to avoid incorrect cache hits when different build invocations get passed different ARG values on the command line.\n\nWhen none of that's a factor, it's not really clear why, assuming the final image was copied along with the intermediate images, the final image is not being accepted as a cache hit for the final instruction."
+        },
+        {
+            "user": "samskiter",
+            "body": "@nalind  thanks for the reply - so all of these are identical between the different builds. So far these have proven to invalidate the cache (when run on a different machine but with the same arguments):\n\n- WORKDIR\n- ENTRYPOINT\n- ARG (when the ARG is after a `FROM` statement)\n\nThe above logs show hits followed by misses for e.g. entrypoint - but the command hasn't changed."
+        },
+        {
+            "user": "samskiter",
+            "body": "Another update, `ENV` command is also doing this :(\n\nIMO this experience is very broken with podman at the minute... is there's anything I can do to help, let me know!"
+        },
+        {
+            "user": "samskiter",
+            "body": "Just wanted to highlight the podman version I'm using here - 3.4.2 - is there any reason to believe that this would be fixed in 4.2?"
+        },
+        {
+            "user": "rhatdan",
+            "body": "There are lots of changes and fixes in each release, so I guess it is worth a try."
+        },
+        {
+            "user": "samskiter",
+            "body": "@rhatdan Thanks for the reply - I have had a good go but have been unable to get 4.2 installed and working on the Azure hosted ubuntu 20.04 machines..."
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "rhatdan",
+            "body": "I am going to close this since I assume it is fixed, reopen if I am mistaken."
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 9636
+        }
+    ]
+}

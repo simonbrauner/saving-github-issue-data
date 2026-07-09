@@ -1,0 +1,96 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 27880,
+    "type": "pull_request",
+    "title": "rootless: use nsfs file handles to persist namespaces",
+    "state": "closed",
+    "labels": [
+        "locked - please file new issue/PR"
+    ],
+    "user": "giuseppe",
+    "body": "use name_to_handle_at and open_by_handle_at to persist rootless namespaces without needing a pause process.\n\nThe namespace file handles are stored in a file and can be used to rejoin the namespaces, as long as the namespaces still exist.\n\nFall back to the pause process approach only when the kernel doesn't support nsfs handles (EOPNOTSUPP).\n\nThese changes in the kernel are required (landed in Linux 6.18):\n\nhttps://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/commit/?id=3ab378cfa793\n\n<!--\nThanks for sending a pull request!\n\nFor more detailed information, please review our contributing guidelines:\nhttps://github.com/containers/podman/blob/main/CONTRIBUTING.md#submitting-pull-requests\n-->\n\n#### Checklist\n\nEnsure you have completed the following checklist for your pull request to be reviewed:\n<!-- Use [x] to mark as done, or click the checkbox after opening PR -->\n\n- [ ] Certify you wrote the patch or otherwise have the right to pass it on as an open-source patch by signing all\ncommits. (`git commit -s`). (If needed, use `git commit -s --amend`).  The author email must match\nthe sign-off email address. See [CONTRIBUTING.md](https://github.com/containers/podman/blob/main/CONTRIBUTING.md#sign-your-prs)\nfor more information.\n- [ ] Referenced issues using `Fixes: #00000` in commit message (if applicable)\n- [ ] [Tests](https://github.com/containers/podman/tree/main/test#readme) have been added/updated (or no tests are needed)\n- [ ] [Documentation](https://github.com/containers/podman/blob/main/docs/README.md) has been updated (or no documentation changes are needed)\n- [ ] All commits pass `make validatepr` (format/lint checks)\n- [ ] [Release note](https://github.com/kubernetes/community/blob/master/contributors/guide/release-notes.md) entered in the section below (or `None` if no user-facing changes)\n\n#### Does this PR introduce a user-facing change?\n\n<!--\nWrite `None` if there are no user-facing changes, otherwise enter your release note below.\nInclude \"action required\" if users need to take action when upgrading.\n-->\n\n```release-note\nFrom Linux 6.18, rootless Podman won't create a \"pause\" process to keep the user and mount namespaces alive.  It is gated behind the drop-pause-process environment variable\n```\n",
+    "comments": [
+        {
+            "user": "packit-as-a-service[bot]",
+            "body": "[NON-BLOCKING] Packit jobs failed. @containers/packit-build please check. Everyone else, feel free to ignore."
+        },
+        {
+            "user": "packit-as-a-service[bot]",
+            "body": "[NON-BLOCKING] Packit jobs failed. @containers/packit-build please check. Everyone else, feel free to ignore."
+        },
+        {
+            "user": "packit-as-a-service[bot]",
+            "body": "[NON-BLOCKING] Packit jobs failed. @containers/packit-build please check. Everyone else, feel free to ignore."
+        },
+        {
+            "user": "giuseppe",
+            "body": "@containers/podman-maintainers tests are passing, ready for review"
+        },
+        {
+            "user": "baude",
+            "body": "LGTM, I had a couple of sideways questions that you can decide on ... we should get somebody with more C to review this too. "
+        },
+        {
+            "user": "mheon",
+            "body": "What does this look like when upgrading from an older Podman without a restart? Will the user need a `system migrate` to kill the existing pause process and make sure all rootless containers are using the new, correct rootless userns?"
+        },
+        {
+            "user": "giuseppe",
+            "body": "> What does this look like when upgrading from an older Podman without a restart? Will the user need a `system migrate` to kill the existing pause process and make sure all rootless containers are using the new, correct rootless userns?\n\nno, it will automatically join the pause process as we do now, then save the file with the handles.  There is no manual intervention required.  It won't kill the pause process though, so it can be a problem if someone mixes different versions and restart the pause process"
+        },
+        {
+            "user": "giuseppe",
+            "body": "comments addressed"
+        },
+        {
+            "user": "jankaluza",
+            "body": "@giuseppe , Windows test fails with TestGetPausePidPath, this looks suspicious."
+        },
+        {
+            "user": "l0rd",
+            "body": "> @giuseppe , Windows test fails with TestGetPausePidPath, this looks suspicious.\n\nI will test locally on WSL/Hyper-V this afternoon, to provide more details."
+        },
+        {
+            "user": "giuseppe",
+            "body": "I've just pushed a new version.  Let's see how it goes"
+        },
+        {
+            "user": "giuseppe",
+            "body": "> Is that not a major possible breaking change if we recreate a new ns all the time?\n\nwe do not create it all the time, we create it only when there are no other containers running.  As long as there is at least one container or podman command keeping alive the namespaces, we reuse them.  Creating a user namespace all the time, would be an issue as we can't share resources among containers.\n\nSomething trivial as `podman unshare \npodman mount X && podman unshare ls /mountpath` will no longer work. The commands now must be in the same unshare command which is not a given. It also messes up the mount count state which can uncover problems like [containers/buildah#6480](https://github.com/containers/buildah/issues/6480)\n\nyes, that won't work.  The mount itself won't keep the namespaces alive.  We already have a different behavior with buildah vs podman, so this looks like an occasion to unify the two tools.  It will be easier to move the current behavior to the container-libs instead of relying on the pause process.  Having the pause process is not only a nuisance, it also leaks resources no matter if containers are running or not.  As long as you run some Podman commands, now you'll leak forever a process.  After this change there is no leak when there are no containers running.\n"
+        },
+        {
+            "user": "Luap99",
+            "body": "> > Is that not a major possible breaking change if we recreate a new ns all the time?\n> \n> we do not create it all the time, we create it only when there are no other containers running. As long as there is at least one container or podman command keeping alive the namespaces, we reuse them. Creating a user namespace all the time, would be an issue as we can't share resources among containers.\n> \n\nI got that, what I am saying is if there is no container running we rexec every single time which comes at a noticeable cost\n\nthis PR:\n```\n$ hyperfine \"bin/podman ps\"\nBenchmark 1: bin/podman ps\n  Time (mean ± σ):      71.8 ms ±   5.0 ms    [User: 53.1 ms, System: 33.8 ms]\n  Range (min … max):    65.6 ms …  94.1 ms    31 runs\n```\n\nmain:\n```\n$ hyperfine \"bin/podman ps\"\nBenchmark 1: bin/podman ps\n  Time (mean ± σ):      34.0 ms ±   2.9 ms    [User: 25.4 ms, System: 14.4 ms]\n  Range (min … max):    26.0 ms …  44.4 ms    83 runs\n```\n\nThat suggest a simple command that doesn't have to do much is now twice as slow which does seem like an issue to me.\nI would expect that quickly adds up even in our CI systems.\n\n>> Something trivial as `podman unshare podman mount X && podman unshare ls /mountpath` will no longer work. The commands now must be in the same unshare command which is not a given. It also messes up the mount count state which can uncover problems like [containers/buildah#6480](https://github.com/containers/buildah/issues/6480)\n> \n> yes, that won't work. The mount itself won't keep the namespaces alive. We already have a different behavior with buildah vs podman, so this looks like an occasion to unify the two tools. It will be easier to move the current behavior to the container-libs instead of relying on the pause process. Having the pause process is not only a nuisance, it also leaks resources no matter if containers are running or not. As long as you run some Podman commands, now you'll leak forever a process. After this change there is no leak when there are no containers running.\n\nSure, I am not saying the process leak is nice. I like to get rid of it. But I do wonder if the consequences of this new logic are not worse then the one process? At the very least I very much dislike that user will observe vastly different behaviours based on the kernel version."
+        },
+        {
+            "user": "giuseppe",
+            "body": "> I would expect that quickly adds up even in our CI systems.\n\na quick comparison to other PRs doesn't seem to suggest a visible effect in the CI. \n\nWhat do you suggest to move forward?  Make it configurable?"
+        },
+        {
+            "user": "Luap99",
+            "body": "> > I would expect that quickly adds up even in our CI systems.\n> \n> a quick comparison to other PRs doesn't seem to suggest a visible effect in the CI.\n\nCI run timings are very hard to compare of just a single run due its high variance, using Eds old timing scripts:\n\n```\n$ ./ci-watch/cirrus-pr-timing  27880\n>> 27:05\n| type | user     | Rc |      d14 |      f42 |      f43 |   f43-aa |      raw |\n| ---- | -------- | -- | -------- | -------- | -------- | -------- | -------- |\n| int  | root     |    |    17:14 |    16:29 |    14:11 |          |    16:37 |\n| int  | root     | R  |    18:27 |    16:34 |    15:39 |          |    16:50 |\n| int  | root     |  c |          |          |    15:19 |          |          |\n| int  | rootless |    |    15:08 |    15:34 |    15:32 |          |    15:24 |\n| sys  | root     |    |    19:24 |    19:54 |    17:29 |    13:20 |    19:28 |\n| sys  | root     | R  |    15:45 |    12:33 |    11:40 |    09:11 |    13:00 |\n| sys  | rootless |    |    19:30 |    17:30 |    18:11 |          |    17:02 |\n| sys  | rootless | R  |          |          |    10:47 |          |          |\n\n$ ./ci-watch/cirrus-pr-timing  27927\n>> 35:09\n| type | user     | Rc |      d14 |      f42 |      f43 |   f43-aa |      raw |\n| ---- | -------- | -- | -------- | -------- | -------- | -------- | -------- |\n| int  | root     |    |    16:54 |    15:19 |    16:13 |          |    16:29 |\n| int  | root     | R  |    18:18 |    16:04 |    15:16 |          |    16:10 |\n| int  | root     |  c |          |          |    14:50 |          |          |\n| int  | rootless |    |    14:08 |    16:20 |    14:48 |          |    14:44 |\n| sys  | root     |    |    20:09 |    18:19 |    17:05 |    13:52 |    18:57 |\n| sys  | root     | R  |    13:41 |    12:20 |    11:44 |    09:23 |    12:25 |\n| sys  | rootless |    |    18:44 |    17:41 |    16:13 |          |    16:04 |\n| sys  | rootless | R  |          |          |    10:08 |          |          |\n$ ./ci-watch/cirrus-pr-timing  27929\n>> 28:59\n| type | user     | Rc |      d14 |      f42 |      f43 |   f43-aa |      raw |\n| ---- | -------- | -- | -------- | -------- | -------- | -------- | -------- |\n| int  | root     |    |    17:16 |    16:05 |    14:44 |          |    15:28 |\n| int  | root     | R  |    18:58 |    16:32 |    16:23 |          |    16:45 |\n| int  | root     |  c |          |          |    15:15 |          |          |\n| int  | rootless |    |    13:50 |    15:50 |    16:38 |          |    15:05 |\n| sys  | root     |    |    18:59 |    18:03 |    20:15 |    13:28 |    18:46 |\n| sys  | root     | R  |    14:23 |    12:47 |    11:32 |    09:40 |    12:42 |\n| sys  | rootless |    |    18:45 |    18:00 |    16:23 |          |    15:49 |\n| sys  | rootless | R  |          |          |    10:43 |          |          |\n$ ./ci-watch/cirrus-pr-timing  27901\n>> 48:27\n| type | user     | Rc |      d14 |      f42 |      f43 |   f43-aa |      raw |\n| ---- | -------- | -- | -------- | -------- | -------- | -------- | -------- |\n| int  | root     |    |    17:38 |    15:20 |    14:19 |          |    15:38 |\n| int  | root     | R  |    18:21 |    16:23 |    16:34 |          |    16:20 |\n| int  | root     |  c |          |          |    14:55 |          |          |\n| int  | rootless |    |    14:31 |    16:39 |    15:02 |          |    15:37 |\n| sys  | root     |    |    19:03 |    18:52 |    17:09 |    14:16 |    19:07 |\n| sys  | root     | R  |    14:49 |    12:14 |    11:32 |    09:29 |    12:52 |\n| sys  | rootless |    |    18:48 |    17:39 |    16:55 |          |    16:48 |\n| sys  | rootless | R  |          |          |    10:41 |          |          |\n\n```\n\nthis debian run is awfully close to the 20m timeout we have for this jobs. But without having multiple runs I would not interpret much into this. But my hyperfine example has shows that if there are no running containers on the system basic commands take twice as long and that worries me together with the fact that we are exposing much more fragile reexec code\n\n> \n> What do you suggest to move forward? Make it configurable?\n\nyes, a containers.conf option would be good."
+        },
+        {
+            "user": "giuseppe",
+            "body": "> > What do you suggest to move forward? Make it configurable?\n> \n> yes, a containers.conf option would be good.\n\nare you ok with an env variable for now to get some feedbacks before setting it in stone in containers.conf (so far we don't leak this implementation detail to the config files)?\n\nEDIT: that is more painful to use (and nobody will).  Going to work on the proper implementation"
+        },
+        {
+            "user": "Luap99",
+            "body": "env var works for me for now"
+        },
+        {
+            "user": "giuseppe",
+            "body": "fixed"
+        },
+        {
+            "user": "l0rd",
+            "body": "FWIW I have tested this PR code on arm64 Windows by replacing the podman service binary on both WSL (with it's own kernel) and Hyper-V and I haven't spotted any problem."
+        },
+        {
+            "user": "giuseppe",
+            "body": "@containers/podman-maintainers PTAL"
+        }
+    ],
+    "cross_references": []
+}

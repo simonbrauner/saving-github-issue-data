@@ -1,0 +1,75 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 14777,
+    "type": "pull_request",
+    "title": "Use SafeChown rather then chown for volumes on NFS",
+    "state": "closed",
+    "labels": [
+        "lgtm",
+        "approved",
+        "release-note-none",
+        "locked - please file new issue/PR"
+    ],
+    "user": "rhatdan",
+    "body": "NFS Servers will thrown ENOTSUPP error if you attempt to\nchown a directory to the same UID and GID as the directory\nalready has. If volumes are stored on NFS directories this\nthrows an ugly error and then works on the next try.\n\nBottom line don't chown directories that already have the correct\nUID and GID.\n\nFixes: https://github.com/containers/podman/issues/14766\n\n[NO NEW TESTS NEEDED] Difficult to setup an NFS Server in testing.\n\nSigned-off-by: Daniel J Walsh <dwalsh@redhat.com>\n\n<!--\nThanks for sending a pull request!\n\nPlease make sure you've read our contributing guidelines and how to submit a pull request (https://github.com/containers/podman/blob/main/CONTRIBUTING.md#submitting-pull-requests).\n\nIn case you're only changing docs, make sure to prefix the pull-request title with \"[CI:DOCS]\". That will prevent functional tests from running and save time and energy.\n\nFinally, be sure to sign commits with your real name. Since by opening\na PR you already have commits, you can add signatures if needed with\nsomething like `git commit -s --amend`.\n-->\n\n#### Does this PR introduce a user-facing change?\n\n<!--\nIf no, just write `None` in the release-note block below. If yes, a release note\nis required: Enter your extended release note in the block below. If the PR\nrequires additional action from users switching to the new release, include the\nstring \"action required\".\n\nFor more information on release notes, please follow the Kubernetes model:\nhttps://git.k8s.io/community/contributors/guide/release-notes.md\n-->\n\n```release-note\nNone\n\n```\n",
+    "comments": [
+        {
+            "user": "rhatdan",
+            "body": "@[berndbausch](https://github.com/berndbausch) could you try this out and see if it fixes your issue"
+        },
+        {
+            "user": "berndbausch",
+            "body": "> @[berndbausch](https://github.com/berndbausch) could you try this out and see if it fixes your issue\n\nTLDR: I did, but the problem is still there, sorry.\n\nI am not a developer and not familiar with the process how to try this out. Having said that, I did the following: Clone Podman version 4.0.3 on my Fedora VM, install the Go compiler and related packages as per the Podman installation instructions, add/change the two lines in libpod/runtime_volume_linux.go, compile Podman (`make BUILDTAGS=\"selinux seccomp systemd\"`). Then use the compiled binary `bin/podman` to create the volume and run the container. \n\nUnfortunately, same error. I can't tell if I did something wrong or your modification is not effective here. The error message in the code, by the way, is \"chowning volume directory %q to %d:%d\", which is not the message I get (but perhaps the \"chowning\" message is written somewhere else, and I definitely don't know how the code is structured)."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@What is the actual error you are seeing?  I updated the PR with a Chown I had missed."
+        },
+        {
+            "user": "berndbausch",
+            "body": "> @what is the actual error you are seeing? I updated the PR with a Chown I had missed.\n\nSorry for the delay. It doesn't help that I am on the other side of the planet from the US East Coast. The error I am getting is \n```\nError: lchown /var/lib/containers/storage/volumes/mynfs/_data: operation not permitted\n```\nWhere *mynfs* is the volume's name. This error may come from `vendor/github.com/containers/storage/pkg/system/lchown.go`.\n\nI should have made that more prominent in the issue description."
+        },
+        {
+            "user": "rhatdan",
+            "body": "I think this would mean that the storage is owned by a different user then the user of podman?  \nWhat is the podman command you are using?\nCould you show the output of \nid \nand \nls -l /var/lib/containers/storage/volumes/mynfs\n\nThis indicates to me that mynfs is not owned by the root user?  if you are running Podman as root?  Or are you running in rootless mode?"
+        },
+        {
+            "user": "berndbausch",
+            "body": "It's root all around. Rootless containers can't deal with NFS-based volumes, since the NFS filesystem can be mounted in a user namespace.\n\nI found, meanwhile, that setting the `no_root_squash` option on the NFS server makes the problem go away. Which makes sense, since this option means that root on the NFS client is root on the NFS server and can therefore perform the lchown.\n\nList of my commands, plus the mountpoint permissions:\n```\n$ sudo podman volume create mynfs --driver local --opt type=nfs --opt o=rw --opt device=192.168.1.16:/srv/nfs\n\n$ sudo ls -lZ /var/lib/containers/storage/volumes/mynfs\ntotal 0\ndrwxr-xr-x. 2 root root system_u:object_r:container_file_t:s0 6 Jul  1 21:20 _data\n\nsudo podman run -it --rm -v mynfs:/myvol fedora sh\nError: lchown /var/lib/containers/storage/volumes/mynfs/_data: operation not permitted\n```\nIt's also not due to SELinux (or Apparmor, on the Ubuntu system where I did the same thing); I set it to permissive to ensure it doesn't interfere."
+        },
+        {
+            "user": "rhatdan",
+            "body": "The weird thing is the safechown should see that the file is owned by root and not attampt the chown, with this patch.  But you are seeing it still attempting the chown.  "
+        },
+        {
+            "user": "berndbausch",
+            "body": "As far as I am concerned, personally, I don't need this problem to be pursued at all costs. It looks like a niche problem not many people would have, and in my case, I am only experimenting with Podman in order to develop a training course. I would be very happy to contribute to its solution, but don't need the Podman lead developer to spend all his time on it.\n\nSo if you are fine, I am happy to close this issue."
+        },
+        {
+            "user": "rhatdan",
+            "body": "Well this does not hurt anything and should fix problems with NFS backends for volume storage.  I think we should add it.\n\n@containers/podman-maintainers PTAL"
+        },
+        {
+            "user": "giuseppe",
+            "body": "> Well this does not hurt anything and should fix problems with NFS backends for volume storage. I think we should add it.\n\nit adds a `Stat` for each `Chown`, which is very expensive on NFS.  I think we should first fix `SafeChown` to attempt the chown and then do the stat on errors."
+        },
+        {
+            "user": "giuseppe",
+            "body": "> it adds a `Stat` for each `Chown`, which is very expensive on NFS. I think we should first fix `SafeChown` to attempt the chown and then do the stat on errors.\n\nopened a PR for c/storage to address this problem: https://github.com/containers/storage/pull/1281"
+        },
+        {
+            "user": "rhatdan",
+            "body": "This only stats the first time a volume is created.  So there would be no really issue with performance."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@containers/podman-maintainers PTAL\n@vrothberg @giuseppe @flouthoc @mheon @baude @ashley-cui PTAL"
+        },
+        {
+            "user": "openshift-ci[bot]",
+            "body": "[APPROVALNOTIFIER] This PR is **APPROVED**\n\nThis pull-request has been approved by: *<a href=\"https://github.com/containers/podman/pull/14777#pullrequestreview-1041281225\" title=\"Approved\">flouthoc</a>*, *<a href=\"https://github.com/containers/podman/pull/14777#\" title=\"Author self-approved\">rhatdan</a>*, *<a href=\"https://github.com/containers/podman/pull/14777#pullrequestreview-1029932343\" title=\"Approved\">saschagrunert</a>*\n\nThe full list of commands accepted by this bot can be found [here](https://go.k8s.io/bot-commands?repo=containers%2Fpodman).\n\nThe pull request process is described [here](https://git.k8s.io/community/contributors/guide/owners.md#the-code-review-process)\n\n<details >\nNeeds approval from an approver in each of these files:\n\n- ~~[OWNERS](https://github.com/containers/podman/blob/main/OWNERS)~~ [flouthoc,rhatdan,saschagrunert]\n\nApprovers can indicate their approval by writing `/approve` in a comment\nApprovers can cancel approval by writing `/approve cancel` in a comment\n</details>\n<!-- META={\"approvers\":[]} -->"
+        }
+    ],
+    "cross_references": []
+}
