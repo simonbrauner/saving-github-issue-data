@@ -1,0 +1,36 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "buildah",
+    "number": 4742,
+    "type": "issue",
+    "title": "Buildah in podman - Wrong architecture for base image in multistage build",
+    "state": "open",
+    "labels": [
+        "stale-issue"
+    ],
+    "user": "pini-gh",
+    "body": "**Description**\n\nI've successfully set up a gitlab runner after [this documentation](https://docs.gitlab.com/runner/executors/docker.html#use-podman-to-run-docker-commands).\n\nIt works great for single-stage Dockerfile, but when building multistage for a foreign architecture it pulls the wrong arch image at the final stage.\n\nNote: single stage builds are OK.\n\n**Steps to reproduce the issue:**\n\nMy box runs Debian testing amd64. The current podman version is 4.3.1. The package `qemu-user-static` is installed.\n\n1. Set up a new `buildah-issue` directory with this Dockerfile:\n\n       FROM --platform=$BUILDPLATFORM debian:bullseye-slim as build\n       ARG BUILDPLATFORM\n       ARG TARGETPLATFORM\n\n       RUN apt update && DEBIAN_FRONTEND=noninteractive apt -y install jq dpkg-dev\n       RUN mkdir -p /build && cp /usr/bin/jq /build/\n       RUN dpkg-architecture\n\n       # =========================================\n       FROM debian:bullseye-slim\n\n       RUN apt update && DEBIAN_FRONTEND=noninteractive apt -y install dpkg-dev file\n       RUN dpkg-architecture\n\n       COPY --from=build /build /usr/local/bin/\n       RUN file /usr/local/bin/jq /bin/bash\n\n   This tow stages Dockerfile is written after [this Docker documentation](https://www.docker.com/blog/faster-multi-platform-builds-dockerfile-cross-compilation-guide/):\n   1. First stage = cross compilation\n   2. second stage = installation\n\n1. Run `quay.io/buildah/stable` with this folder mounted\n\n       $ podman run --privileged --rm -it -v ./buildah-issue:/buildah-issue quay.io/buildah/stable\n\n1. Enter the mounted volume and build with `--layers --platform linux/amd64`\n\n       # cd /buildah-issue\n       # buildah bud --layers --platform linux/amd64 --tag test:amd64-latest -f Dockerfile .\n\n1. Do the same with `--layers --platform linux/arm64`\n\n       # buildah bud --layers --platform linux/arm64 --tag test:arm64-latest -f Dockerfile .\n\n**Describe the results you received:**\n\nWhen building for `linux/arm64` at the second stage every layer is pulled from the cache after the `linux/amd64` build, and the resulting image is the very same as the `linux/amd64` one:\n```\n# buildah bud --layers --platform linux/arm64 --tag test:arm64-latest -f Dockerfile .\n...\n[2/2] STEP 1/5: FROM debian:bullseye-slim\n[2/2] STEP 2/5: RUN apt update && DEBIAN_FRONTEND=noninteractive apt -y install dpkg-dev file\n--> Using cache c899df24e2ee6902c318dcbf287ccaed14b680b537b661ed0090cb4fc2a6d7ae\n--> c899df24e2e\n[2/2] STEP 3/5: RUN dpkg-architecture\n--> Using cache bb290c9d3b3180c9e70f7ef15152d75a61a315394e6be63ab8daa81a2d448a82\n--> bb290c9d3b3\n[2/2] STEP 4/5: COPY --from=build /build /usr/local/bin/\n--> Using cache a3e13a020d9ec7a74965eb12f92b782c05af6852e4e189f86295b436b514a121\n--> a3e13a020d9\n[2/2] STEP 5/5: RUN file /usr/local/bin/jq /bin/bash\n--> Using cache 2032e897a756841406ca9c74aceaf09281563de44cb740dfed9b5db1579f5adc\n[2/2] COMMIT test:arm64-latest\n--> 2032e897a75\n[Warning] one or more build args were not consumed: [TARGETARCH TARGETOS]\nSuccessfully tagged localhost/test:arm64-latest\nSuccessfully tagged localhost/test:amd64-latest\n2032e897a756841406ca9c74aceaf09281563de44cb740dfed9b5db1579f5adc\n```\n\n**Describe the results you expected:**\n\nThe second stage base image should have pulled the `linux/arm64` `debian:bullseye-slim` image from docker.io registry instead of pulling the `linux/amd64` one from the cache.\n\n**Output of `buildah version`:**\n\nAs said above I use buildah from image `quay.io/buildah/stable`. In this context:\n```\n# buildah version\nVersion:         1.29.1\nGo Version:      go1.19.5\nImage Spec:      1.0.2-dev\nRuntime Spec:    1.0.2-dev\nCNI Spec:        1.0.0\nlibcni Version:  v1.1.2\nimage Version:   5.24.1\nGit Commit:      \nBuilt:           Fri Feb 17 10:05:41 2023\nOS/Arch:         linux/amd64\nBuildPlatform:   linux/amd64\n```\n\n**Output of `podman version`  on the host**\n```\n$ podman --version\npodman version 4.3.1\ngitlab-runner@maison:~$ podman version\nClient:       Podman Engine\nVersion:      4.3.1\nAPI Version:  4.3.1\nGo Version:   go1.19.6\nBuilt:        Thu Jan  1 01:00:00 1970\nOS/Arch:      linux/amd64\n```\n\n**Output of `cat /etc/*release`:**\n```\n$ cat /etc/*release\nPRETTY_NAME=\"Debian GNU/Linux 12 (bookworm)\"\nNAME=\"Debian GNU/Linux\"\nVERSION_ID=\"12\"\nVERSION=\"12 (bookworm)\"\nVERSION_CODENAME=bookworm\nID=debian\nHOME_URL=\"https://www.debian.org/\"\nSUPPORT_URL=\"https://www.debian.org/support\"\nBUG_REPORT_URL=\"https://bugs.debian.org/\"\n```\n\n**Output of `uname -a`:**\n\n```\n$ uname -a\nLinux maison 6.1.0-7-amd64 #1 SMP PREEMPT_DYNAMIC Debian 6.1.20-1 (2023-03-19) x86_64 GNU/Linux\n```\n\n**Output of `cat /etc/containers/storage.conf`:**\n\nNo such file. I don't think this is relevant in this context anyway.\n",
+    "comments": [
+        {
+            "user": "pini-gh",
+            "body": "As a workaround, tweaking the Dockerfile to pull the foreign arch first does work:\n```\nFROM debian:bullseye-slim as target\n\nFROM --platform=$BUILDPLATFORM debian:bullseye-slim as build\n# Do cross compilation\n\nFROM target\n# Do installation\n```\n\nThen I guess that the issue is that `--platform` information is lost after the first stage."
+        },
+        {
+            "user": "flouthoc",
+            "body": "Hi @pini-gh , The issue happens because buildah's cache mechanism only considers history not the original architecture requested, I guess this can be fixed at buildah end, thanks for creating the issue and reporting :) I'll check this."
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@flouthoc any update?"
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        }
+    ],
+    "cross_references": []
+}

@@ -1,0 +1,48 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "buildah",
+    "number": 2619,
+    "type": "issue",
+    "title": "buildah add fails to resolve path",
+    "state": "closed",
+    "labels": [
+        "locked - please file new issue/PR"
+    ],
+    "user": "Obirvalger",
+    "body": "---------------------------------------------------\nBUG REPORT INFORMATION\n---------------------------------------------------\n\n**Description**\nEither buildah add fails to resolve path or it writes a wrong error message. In an error message is said that the passed path could not be resolved relative to `/` even if the path is a rigth absolute path but without starting `/`.  Also, it seems unusual that buildah add resolvs relative path relative to `/` instead of the current working directory.\n\n**Steps to reproduce the issue:**\n1. Create a container: `buildah from alt`\n2. Get the container id: `buildah containers`\n3. Create a file: `touch /root/test.txt`\n4. Try to add the file to the container: `buildah add a6ed3927b913 root/test.txt /tmp`\n\n**Describe the results you received:**\nFailing with the following error message:\n`error adding content to container \"alt-working-container\": error computing path of \"root/test.txt\": Rel: can't make root/test.txt relative to /`\n\n**Describe the results you expected:**\nResolving the file root/test.txt relative to `/` as `/root/txt` and adding the file to the container. \n\n**Output of `rpm -q buildah` or `apt list buildah`:**\n\n```\n# rpm -q buildah\nbuildah-1.16.0-alt1.x86_64\n```\n\n**Output of `buildah version`:**\n\n```\nVersion:         1.16.0\nGo Version:      go1.15.2\nImage Spec:      1.0.1-dev\nRuntime Spec:    1.0.2-dev\nCNI Spec:        0.4.0\nlibcni Version:  v0.7.2-0.20190904153231-83439463f784\nimage Version:   5.5.2\nGit Commit:      295b825cdc0795f7e60349b901880e40e9850f5a\nBuilt:           Wed Sep  9 19:21:15 2020\nOS/Arch:         linux/amd64\n```\n\n**Output of `cat /etc/*release`:**\n\n```\nALT Sisyphus Sisyphus (unstable) (sisyphus)\nALT Sisyphus Sisyphus (unstable) (sisyphus)\nNAME=\"Sisyphus\"\nVERSION=\"20191026/unstable\"\nID=altlinux\nVERSION_ID=20191026\nPRETTY_NAME=\"ALT Regular\"\nANSI_COLOR=\"1;33\"\nCPE_NAME=\"cpe:/o:alt:sisyphus:20191026\"\nHOME_URL=\"http://en.altlinux.org\"\nBUG_REPORT_URL=\"https://bugs.altlinux.org/\"\nALT Sisyphus Sisyphus (unstable) (sisyphus)\nALT Sisyphus Sisyphus (unstable) (sisyphus)\n```\n\n**Output of `uname -a`:**\n\n```\nLinux mainvm 5.4.40-std-def-alt2 #1 SMP Tue May 12 09:06:57 UTC 2020 x86_64 GNU/Linux\n```",
+    "comments": [
+        {
+            "user": "amakeenk",
+            "body": "I am faced with similarly problem:\n```\n# pwd\n/root\n\n# touch ./testfile\n\n# buildah add 00195cc76eb0 ./testfile /tmp\nerror adding content to container \"alt-working-container\": error checking on source ./testfile under \"/\": Rel: can't make ./testfile relative to /; copier: stat: \"/testfile\": no such file or directory\n\n# buildah add 00195cc76eb0 /root/testfile /tmp\nae5d539e414db61f1333cc0e975a81084e344505af20f29d5a0676d86d2fab2d\n```\nVersion of buildah:\n```\n# rpm -q buildah \nbuildah-1.16.0-alt1.x86_64\n\n# buildah version\nVersion:         1.16.0\nGo Version:      go1.14.7\nImage Spec:      1.0.1-dev\nRuntime Spec:    1.0.2-dev\nCNI Spec:        0.4.0\nlibcni Version:  v0.7.2-0.20190904153231-83439463f784\nimage Version:   5.5.2\nGit Commit:      295b825cdc0795f7e60349b901880e40e9850f5a\nBuilt:           Wed Sep  9 22:38:47 2020\nOS/Arch:         linux/amd64\n```\n\nSystem:\n```\nNAME=\"ALT Workstation\"\nVERSION=\"9.1\"\nID=altlinux\nVERSION_ID=9.1\nPRETTY_NAME=\"ALT Workstation 9.1 (Laertes)\"\nANSI_COLOR=\"1;33\"\nCPE_NAME=\"cpe:/o:alt:workstation:9.1\"\nHOME_URL=\"https://basealt.ru/\"\nBUG_REPORT_URL=\"https://bugs.altlinux.org/\"\n```"
+        },
+        {
+            "user": "TomSweeneyRedHat",
+            "body": "The code that's hanging up here is in add.go at this [line](https://github.com/containers/buildah/blob/master/add.go#L358).  It's triggered because the `filepath.Rel(contextDir, glob)` call a few lines up is failing as it designed.  The value for contextDir is `/` and the glob is `root/test.txt`.  As the Rel() function just looks at those two strings that are given it, the glob is not relative to the contextDir in this instance. \n\nIf you pass in `/root/test.txt` instead to the add command, then it works.  Similar comment for @amakeenk , but in a different section of add.go.\n\n@nalind @rhatdan, I can change the code to work around this by joining the contextdir and the file and retrying rel again like this:  \n\n```\n# git diff\ndiff --git a/add.go b/add.go\nindex 1c1f116d..01a06899 100644\n--- a/add.go\n+++ b/add.go\n@@ -355,7 +355,11 @@ func (b *Builder) Add(destination string, extract bool, options AddAndCopyOption\n                for _, glob := range localSourceStat.Globbed {\n                        rel, err := filepath.Rel(contextDir, glob)\n                        if err != nil {\n-                               return errors.Wrapf(err, \"error computing path of %q\", glob)\n+                               localFile := filepath.Join(contextDir, glob)\n+                               rel, err = filepath.Rel(contextDir, localFile)\n+                               if err != nil {\n+                                       return errors.Wrapf(err, \"error computing path of %q\", localFile)\n+                               }\n                        }\n                        if strings.HasPrefix(rel, \"..\"+string(os.PathSeparator)) {\n                                return errors.Errorf(\"possible escaping context directory error: %q is outside of %q\", glob, contextDir)\n```\nBut I'm not sure if that's the approach to take or not.  Thoughts?\n"
+        },
+        {
+            "user": "nalind",
+            "body": "I'm not sure that using `Join()` and `Rel()` in that way does what we want, since `Rel()` is specified to return something that could be passed to Join to get the originally-passed path.  It looks like I completely missed the \"ContextDir is not set\" case during the recent overhaul.  Self-assigning."
+        },
+        {
+            "user": "Obirvalger",
+            "body": "This patch also fixes work with relative paths. But I don't know why deleting code was added and what this change could break.\n\n```\ndiff --git a/add.go b/add.go\nindex 1c1f116d..c3914b67 100644\n--- a/add.go\n+++ b/add.go\n@@ -151,9 +151,6 @@ func (b *Builder) Add(destination string, extract bool, options AddAndCopyOption\n        }()\n \n        contextDir := options.ContextDir\n-       if contextDir == \"\" {\n-               contextDir = string(os.PathSeparator)\n-       }\n \n        // Figure out what sorts of sources we have.\n        var localSources, remoteSources []string\n```"
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "buildah",
+            "number": 2630
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "buildah",
+            "number": 2633
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "buildah",
+            "number": 2658
+        }
+    ]
+}

@@ -1,0 +1,269 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "buildah",
+    "number": 5952,
+    "type": "issue",
+    "title": "buildah 1.38.1 build \"FROM oci-archive:\" fails to find content generated inside a build",
+    "state": "closed",
+    "labels": [
+        "locked - please file new issue/PR",
+        "jira"
+    ],
+    "user": "henrywang",
+    "body": "`quay.io/buildah/stable:v1.38.1` failed to build image with `FROM oci-archive:./out.ociarchive` and got error:\n```\n[2/2] STEP 1/3: FROM oci-archive:./out.ociarchive\nError: creating build container: creating temp directory: archive file not found: \"/builds/redhat/rhel/bifrost/compose-bootc/out.ociarchive\"\n```\n\n`quay.io/buildah/stable:v1.38.0` does not have this issue.",
+    "comments": [
+        {
+            "user": "vrothberg",
+            "body": "Detected in the Image Mode pipelines which cannot use v1.38.1 for now.\n\nhttps://gitlab.com/redhat/rhel/bifrost/compose-bootc/-/merge_requests/208/diffs"
+        },
+        {
+            "user": "vrothberg",
+            "body": "Another [MR](https://gitlab.com/redhat/rhel/bifrost/compose-bootc/-/merge_requests/212/diffs) only bumping buildah [fails](https://gitlab.com/redhat/rhel/bifrost/compose-bootc/-/jobs/8985979871) as well."
+        },
+        {
+            "user": "vrothberg",
+            "body": "@henrywang do we have an easy reproducer?"
+        },
+        {
+            "user": "cgwalters",
+            "body": "I think this is a regression from https://github.com/containers/buildah/commit/25a3b385afd1b4166d739afb665df57752c46ccd\n\nThis feature is really key as a way to generate chunked/reproducible containers and we've been using it for quite some time for rpm-ostree, and we have plans in the immediate future to promote this more for custom base images (ref https://gitlab.com/fedora/bootc/tracker/-/issues/32 and https://github.com/coreos/rpm-ostree/issues/5221 specifically)\n\nWay back in https://github.com/coreos/rpm-ostree/issues/4688#issuecomment-2020442280 there was a soft commitment to support this.\n\nMy understanding is that there are security implications (not mentioned in the commit message) that motivated https://github.com/containers/buildah/commit/25a3b385afd1b4166d739afb665df57752c46ccd\n\nCan we elaborate on those now that the commit is public (I don't see a corresponding PR with discussion)?\n\nIt seems to me that what we always wanted here is a way to write not to the build context, but just any internal filesystem (a tmpfs or a tempdir bind mount) whose lifetime is scoped to the entire build, right?"
+        },
+        {
+            "user": "mheon",
+            "body": "The relevant CVE is https://github.com/advisories/GHSA-5vpc-35f4-r8w6\n\nA core part of this was the ability to write to the host filesystem from mounts, which is why it was disabled - so what you desire is a large part of a high-severity CVE. I don't see us turning this back on. Adding an option with the understanding that enabling it is explicitly insecure and exposes the host to potential escape by malicious Dockerfile is a potential option, but that also feels very bad."
+        },
+        {
+            "user": "cgwalters",
+            "body": "> @henrywang do we have an easy reproducer?\n\nHere's a trivial example of a \"build\" that actually just copies from a registry into a local oci: directory via skopeo - but the point is that an \"oci\" directory is something that any tool *running in the container build* can synthesize however it wants - without e.g. being subject to [injected floating-timestamp content from buildah itself](https://github.com/containers/buildah/issues/4242) etc. but also more generally having total power over structuring the layout of the target container image.\n\n```\nFROM registry.access.redhat.com/ubi9/ubi:latest  as builder\nRUN --mount=type=bind,rw=true,src=.,dst=/buildcontext,bind-propagation=shared \\\n  dnf -y install skopeo && skopeo copy docker://busybox oci:/buildcontext/out.oci\n\nFROM oci:./out.oci\n# Need to reference builder here to force ordering. But since we have to run\n# something anyway, we might as well cleanup after ourselves.\nRUN --mount=type=bind,from=builder,src=.,target=/var/tmp \\\n    --mount=type=bind,rw=true,src=.,dst=/buildcontext,bind-propagation=shared \\\n      rm /buildcontext/out.oci -rf\n```\n"
+        },
+        {
+            "user": "cgwalters",
+            "body": ">  Adding an option with the understanding that enabling it is explicitly insecure and exposes the host to potential escape by malicious Dockerfile is a potential option, but that also feels very bad.\n\nYes, agree adding an option isn't what we want here. Let's instead dig more into the final paragraph of my previous comment:\n\n> It seems to me that what we always wanted here is a way to write not to the build context, but just any internal filesystem (a tmpfs or a tempdir bind mount) whose lifetime is scoped to the entire build, right?\n\nTo flesh this out slightly...maybe we could use `RUN --mount=type=cache` for this since it's already defined to be a writable, persistent-across-run-invocations area. IOW we change to:\n\n```\nFROM registry.access.redhat.com/ubi9/ubi:latest  as builder\nRUN --mount=type=cache,sharing=private,dst=/output \\\n  dnf -y install skopeo && skopeo copy docker://busybox oci:/output/out.oci\n\n# Here I made up the syntax //<cachename>/ to reference a cache\nFROM oci://output/out.oci\n```\n\nNote if we take this step and formalize things more it actually gets a lot cleaner as the builder can know the ordering here and we can declare that the cached OCI directory is automatically consumed (since why would you leave it around)?"
+        },
+        {
+            "user": "nalind",
+            "body": "> Note if we take this step and formalize things more it actually gets a lot cleaner as the builder can know the ordering here and we can declare that the cached OCI directory is automatically consumed (since why would you leave it around)?\n\nCaches are not scoped to the lifetime of a given build."
+        },
+        {
+            "user": "cgwalters",
+            "body": "> Caches are not scoped to the lifetime of a given build.\n\nYes I know - its lifetime is longer - which isn't needed here, but should still work. In my proposal you'd just end up with an empty directory/image as a cache; which actually we could detect that's the case and just discard.\n\nDo you have any alternative proposals?\n"
+        },
+        {
+            "user": "cgwalters",
+            "body": "Maybe another possible fix would be to expand the lifetime of the overlayfs created from a `RUN --mount=type=bind,rw=true,src=.,dst=/buildcontext,bind-propagation=shared` to the entire build, instead of each RUN invocation?\n\nI guess though a downside of this might be that it's different from what Docker is doing today, which could confuse people.\n\nBut at the cost of getting more hacky, we could do that scope expansion only if we detect there's a `FROM oci:` in the build?"
+        },
+        {
+            "user": "cgwalters",
+            "body": "I should emphasize here though again: our production builds use this feature today. Having a working version of this (and really ideally compatible with the existing Containerfile, although that wouldn't be a requirement) as relatively soon as possible (e.g. < 1 month) would be quite helpful.\n\nI think in the short term we can just hold off on applying the buildah update, but that's obviously not sustainable. Among other things, a big part of the entire point of this is that we can tell people the base image build is just \"podman build\" today, and after updating that no longer works.\n\n"
+        },
+        {
+            "user": "cgwalters",
+            "body": "> Maybe another possible fix would be to expand the lifetime of the overlayfs created from a RUN --mount=type=bind,rw=true,src=.,dst=/buildcontext,bind-propagation=shared to the entire build, instead of each RUN invocation?\n\nIt looks like `bind-propagatation` is a buildah-specific extension not supported by Docker; so perhaps we could also key off that as a lifetime extension hint? Though when I test things out, a build works without it - so either it was never required or something else changed in buildah.\n\nI guess the more I think about the more I'd say:\n\n- Short term, detect `FROM oci` in the image and lifetime expand any `RUN --mount=type=bind,rw=true,src=.,dst=/buildcontext,bind-propagation=shared` to the entire build (mounts identified by source+destination pair)\n- Medium term, try to come up with a design that's cleaner and can ideally be added to docker (and other builders) as well, for which I think I like the `FROM oci://output/out.oci` or `FROM --mount=type=cache,target=/output oci:/output/out.oci` or so."
+        },
+        {
+            "user": "nalind",
+            "body": "I would have (and have previously) suggested solving this at the pipeline level.\n\nAnyway, the reason the FROM fails is that the OCI archive is no longer being written to the actual build context directory by the previous stage, so it's literally not where the FROM instruction says it is.  Unless it's a remote build being done via `podman`, a `-v` flag at the command line can be used instead of a `--mount=type=bind` in the Containerfile to expose the build context directory to RUN instructions.\n\nWhen we teach the `--build-context` command line flag about OCI layouts (and possibly archives), the value on the FROM line will be able to be replaced by the nickname given as part of the flag's argument.  That'll back us off just a bit further away from having custom behavior in Containerfiles, which is a direction I've come to generally try to discourage because the target we're trying to be compatible with moves."
+        },
+        {
+            "user": "nalind",
+            "body": "> It looks like `bind-propagatation` is a buildah-specific extension not supported by Docker\n\nIt looks like that flag is there because the set of accepted flags for `buildah run --mount` was modeled after `podman run`'s `--mount` flag, and the logic for parsing its key-value arguments list was reused when it was later implemented for RUN in Containerfiles."
+        },
+        {
+            "user": "cgwalters",
+            "body": "> I would have (and have previously) suggested solving this at the pipeline level.\n\nCan you elaborate on that? Previously in [this comment](https://github.com/coreos/rpm-ostree/issues/4688#issuecomment-1802060958) you said:\n\n> and I'm not sure we want to sign up for that when the standard advice for jobs that can't be done with a Dockerfile is to use buildah's other commands.\n\nIn what we're doing here we aren't using buildah in any way because we want fine-grained control over the bit for bit output of the OCI archive.\n\nBut your point more generally here I would phrase as \"don't try to do it via Containerfile\" - which definitely makes sense as a starting point, except I'd just reiterate that going from \"podman build\" to \"run this script/Makefile\" is a large leap.\n\nActually today e.g. on MacOS (or more generally with podman-machine) this trick doesn't work; I didn't dig in but I think it has to do with us always copying the build context with podman-remote. But in theory, it *could* work on podman-remote/podman-machine cases, which is quite important because there's lots of infrastructure built on top of \"podman-build\". If we have a custom script/pipeline, then especially in podman-remote cases we'd have to do some careful juggling to make sure our build works there.\n\nHmm...I guess in theory we could implement our build process as \"spawn a container image with write access to containers-storage:\" (or if one wants to isolate it more, \"spawn a container imgae with write access to an empty tempdir, which at the end of the build should contain an oci directory with one image\").\n\nBut we *just* went through a large effort to switch our Konflux builds over to the \"stock\" buildah task they expose. Reworking everywhere we do a build, from the documented local developer entrypoint to Konflux would not be a small thing for us.\n\nIt's big enough that if I had to I'd rather spend that engineering time on implementing a more sustainable way to do this in buildah myself.\n"
+        },
+        {
+            "user": "cgwalters",
+            "body": "> When we teach the --build-context command line flag about OCI layouts (and possibly archives), the value on the FROM line will be able to be replaced by the nickname given as part of the flag's argument. \n\nHmm...but here we're generating an entire OCI layout inside a build stage, we can't provide it as a build context at the start of a build."
+        },
+        {
+            "user": "nalind",
+            "body": "> > I would have (and have previously) suggested solving this at the pipeline level.\n> \n> Can you elaborate on that? Previously in [this comment](https://github.com/coreos/rpm-ostree/issues/4688#issuecomment-1802060958) you said:\n> \n> > and I'm not sure we want to sign up for that when the standard advice for jobs that can't be done with a Dockerfile is to use buildah's other commands.\n> \n> In what we're doing here we aren't using buildah in any way because we want fine-grained control over the bit for bit output of the OCI archive.\n\nI'm pretty sure that at that point I was referring to \"FROM oci-archive:\", and if you're feeling charitable, depending on it.\n\n> But your point more generally here I would phrase as \"don't try to do it via Containerfile\" - which definitely makes sense as a starting point, except I'd just reiterate that going from \"podman build\" to \"run this script/Makefile\" is a large leap.\n\nAgreed, it's not as simple a story to tell.\n\n> Actually today e.g. on MacOS (or more generally with podman-machine) this trick doesn't work; I didn't dig in but I think it has to do with us always copying the build context with podman-remote. But in theory, it _could_ work on podman-remote/podman-machine cases, which is quite important because there's lots of infrastructure built on top of \"podman-build\". If we have a custom script/pipeline, then especially in podman-remote cases we'd have to do some careful juggling to make sure our build works there.\n \n> Hmm...I guess in theory we could implement our build process as \"spawn a container image with write access to containers-storage:\" (or if one wants to isolate it more, \"spawn a container imgae with write access to an empty tempdir, which at the end of the build should contain an oci directory with one image\").\n\nI have personally tripped over the overlay driver's mount_program option having to be specified, or not specified, more than I'd like to have, to the point that I tend to want to avoid sharing the storage space.  That's before you start worrying about different storage drivers.\n\nThe `-t` flag is supposed to accept any valid `containers-transports(5)` value, if that's of help."
+        },
+        {
+            "user": "cgwalters",
+            "body": "Can you indicate level of support for the \"short+medium term options\" listed [in this comment](https://github.com/containers/buildah/issues/5952#issuecomment-2622760256) you have ranging from say \"yes I'd implement\" to \"would take a patch\" to \"no\"? Most especially the \"short term\" one of lifetime-extending only if we detect `FROM oci`:\n\nActually let me just repeat it here, and expand/elaborate:\n\n## Option lifetime-extend:\n\n- Detect `FROM oci:` in the container build and lifetime expand the overlayfs created by any `RUN --mount=type=bind,rw=true,src=<local path>` to the entire build\n- Though now that I think about this more since I am pretty sure that the `FROM oci:` part was actually relying on being able to pick up the OCI archive from the host/default mount namespace by default, we may need to add some special casing here to say that the file path used for that is the *last* `RUN --mount=type=bind,rw=true,src=.` (note special casing of `.`?)\n\nAdvantages:\n\n- Compatibility with existing Containerfiles we use today\n\n## Option `FROM oci://stage/path`\n\nIn this the new syntax `//stage/` as part of `FROM oci://stage/path` acts the same as a `from=` section of `RUN --mount=type=cache`. Instead of \n\nAdvantages:\n\n- Much clearer and less hacky in general IMO and I think we could try to get this into Docker too\n\nDisadvantages:\n\n- Not compatible with the Containerfiles we use today, would be a bit of a pain to say \"you need to update podman/buildah\" but we could deal with it\n- "
+        },
+        {
+            "user": "nalind",
+            "body": "> ## Option lifetime-extend:\n> \n>     * Detect `FROM oci:` in the container build and lifetime expand the overlayfs created by any `RUN --mount=type=bind,rw=true,src=<local path>` to the entire build\n> \n>     * Though now that I think about this more since I am pretty sure that the `FROM oci:` part was actually relying on being able to pick up the OCI archive from the host/default mount namespace by default, we may need to add some special casing here to say that the file path used for that is the _last_ `RUN --mount=type=bind,rw=true,src=.` (note special casing of `.`?)\n> \n> Advantages:\n> \n>     * Compatibility with existing Containerfiles we use today\n\nHaving just done the changes to make this an overlay, I can say that the number of places in the source code that this impacts would be high.  I also don't relish creating more differences in behavior that a user has to remember and keep track of, so I would lean toward not doing this.\n\n> ## Option `FROM oci://stage/path`\n> \n> In this the new syntax `//stage/` as part of `FROM oci://stage/path` acts the same as a `from=` section of `RUN --mount=type=cache`. Instead of\n> \n> Advantages:\n> \n>     * Much clearer and less hacky in general IMO and I think we could try to get this into Docker too \n> \n> Disadvantages:\n> \n>     * Not compatible with the Containerfiles we use today, would be a bit of a pain to say \"you need to update podman/buildah\" but we could deal with it\n\n`oci:` already has a meaning in this context, and the syntax for it is incompatible with this, so I don't see us doing that."
+        },
+        {
+            "user": "cgwalters",
+            "body": "> oci: already has a meaning in this context, and the syntax for it is incompatible with this, so I don't see us doing that.\n\nHow would the syntax be incompatible? The leading `://` seems to me to be sufficiently unlikely to occur for existing users. But if we wanted to avoid all potential for ambiguity, how about `FROM --mount=type=cache,target=/output oci:/output/out.oci` ?\n\n\n "
+        },
+        {
+            "user": "cgwalters",
+            "body": "> Agreed, it's not as simple a story to tell.\n\nIt's more than a story, it's about the ecosystem. While there certainly are multiple build systems to build container images, Dockerfile is very, very popular as I think everyone here knows. And that means that actual infrastructure has been built on top of it.\n\nAt Red Hat for example with Konflux there's been an investment in a few things like \"hermetic\" builds where the builds can't fetch arbitrary things from the network, only a restricted set of inputs. Also, there's policies around which container images can be used in tasks.\n\nBoth of these things are today applied on top of Dockerfile/Containerfile (though there's also lockfiles for rpms and other source content needed). As soon as \"build this project\" becomes more freeform than that, it needs custom logic to match these types of policies.\n\nAnother related thing is there are some parts of Dockerfile that function perfectly fine and don't need reinventing, such as e.g. `LABEL`.\n\nThe fact that we were able to fit custom container images into the \"shape\" of a Dockerfile and again continue to reuse existing things like `LABEL` while producing [reproducible tarballs in a more intelligent way possible than Dockerfile](https://grahamc.com/blog/nix-and-layered-docker-images/) has been *extremely* useful.\n\n"
+        },
+        {
+            "user": "nalind",
+            "body": "> > oci: already has a meaning in this context, and the syntax for it is incompatible with this, so I don't see us doing that.\n> \n> How would the syntax be incompatible? The leading `://` seems to me to be sufficiently unlikely to occur for existing users.\n\nThere is no leading `://` for `oci:`, as there isn't one for `oci-archive:`.  The portion after that \":\" is a filesystem path name, and that's a problem \n\n> But if we wanted to avoid all potential for ambiguity, how about `FROM --mount=type=cache,target=/output oci:/output/out.oci` ?\n\nThe ideal for me here is an approach that doesn't depend on implementing custom syntax, and that doesn't break when we fix compliance bugs."
+        },
+        {
+            "user": "cgwalters",
+            "body": "> doesn't depend on implementing custom syntax,\n\nRight, it would clearly make sense to try to get this into Docker at some point, though last I looked at that the ecosystem there is around buildx, which basically a whole lot of people who want to build containers in a more intelligent way are using. But maybe they'd be amenable to the `FROM --mount=type=cache` or whatever. Anyways, that's not a short term thing.\n\n---\n\nOne thing I realized in a conversation just now with the team is that actually because of this writable mount to the build context and some other reasons, we'd required the build to be run with `--security-opt=label=disable --cap-add=all --device /dev/fuse` already...which is basically `--privileged`. So the CVE isolation doesn't apply to this current use case anyways.\n\nSo here's yet another, hopefully more targeted short term proposal:\n\nChange buildah to detect when the input build is privileged in this way (`CAP_SYS_ADMIN` in the outer userns, which I am sure could be leveraged into a full breakout); if it's not, no behavior change from current git.\n- extend the lifetime of the most recent host bind mount that references `.` to the end of the build\n- change `FROM oci`/`FROM oci-archive` to in the case where the image referenced is not found in the host mountns, look in that most recent overlayfs\n\nor so\n"
+        },
+        {
+            "user": "jlebon",
+            "body": "For the longer term RFE, one idea I had in https://github.com/coreos/rpm-ostree/issues/4688#issuecomment-1800250818 was to add the concept of \"builder images\". This is not novel of course; it's similar to OpenShift S2I and Buildpaks. But having it built into buildah would generalize the rpm-ostree case to something much more impactful for the ecosystem."
+        },
+        {
+            "user": "cgwalters",
+            "body": "https://github.com/coreos/rpm-ostree/pull/5268 will switch us over to more clearly supporting a flow that doesn't depend on this now removed feature."
+        },
+        {
+            "user": "cgwalters",
+            "body": "And as I am trying to document/test that PR, for the record a pain point I'm hitting that I think is illuminating in that I was recommending doing `-v /var/lib/containers:/var/lib/containers` so we can write to the container storage, but that obviously falls over for rootless builds.\n\nOne thing I did in https://github.com/containers/bootc/pull/919 that was some nontrivial code (that I can certainly rework to make usable here too) is dynamically mounting these things and not forcing the user to specify them. But even there I only needed to care about rootful; here it's a bit more complicated as really in the general case I want the code running in this container image to match the c/storage configuration of the host. I'm sure this has come up elsewhere?\n\nI guess *most* use cases of \"build from a container\" actually end up with a c/storage instance scoped to that container, isolated from the host storage; which we obviously want to support too, but would be annoying for many local dev cases.\n\nIt's exactly this type of thing that we all just got For Free as being part of `podman build`.\n"
+        },
+        {
+            "user": "cgwalters",
+            "body": "OK here's *another* proposal: Again since in this use case we already require privileges, we add a new `buildah-overlay=false` option to `RUN --mount=type=bind,rw=true,src=.,dst=/buildcontext,buildah-overlay=false` that is only available to privileged builds. This seems like it'd be pretty simple, and we namespace the option to avoid any potential clash with docker."
+        },
+        {
+            "user": "cgwalters",
+            "body": "> For the longer term RFE, one idea I had in https://github.com/coreos/rpm-ostree/issues/4688#issuecomment-1800250818 was to add the concept of \"builder images\".\n\nWe should probably split off longer term things into a distinct issue but it would seem to me to be strictly better to have a model where the Containerfile can control this and it's not something that needs to be passed via a new CLI argument. I see my proposal above of `FROM oci://stage/path` (or some variant) of that as strictly more powerful basically because the \"builder\" image here can just be another `FROM` argument."
+        },
+        {
+            "user": "dustymabe",
+            "body": "> better to have a model where the Containerfile can control this and it's not something that needs to be passed via a new CLI argument\n\n👍 "
+        },
+        {
+            "user": "jlebon",
+            "body": "> > For the longer term RFE, one idea I had in [coreos/rpm-ostree#4688 (comment)](https://github.com/coreos/rpm-ostree/issues/4688#issuecomment-1800250818) was to add the concept of \"builder images\".\n> \n> We should probably split off longer term things into a distinct issue but it would seem to me to be strictly better to have a model where the Containerfile can control this and it's not something that needs to be passed via a new CLI argument. I see my proposal above of `FROM oci://stage/path` (or some variant) of that as strictly more powerful basically because the \"builder\" image here can just be another `FROM` argument.\n\nYes, for sure. But the point with the build models like S2I and Buildpaks is that you decouple your app code from the buildroot so they can be maintained independently/possibly by different organizations. So you wouldn't even have a `Containerfile` in your git repo. Obviously there are tradeoffs with that too.\n\nWhere it's useful for our case specifically is that there's less cargo-culting that needs to be done to get this working right. We can e.g. just implement the magic `FROM oci:` equivalent once on the builder image side. But also it makes it easier to build declarative interfaces on top.\n\nOf course, having built-in `Containerfile` support is not mutually exclusive with the concept."
+        },
+        {
+            "user": "vrothberg",
+            "body": "> OK here's _another_ proposal: Again since in this use case we already require privileges, we add a new `buildah-overlay=false` option to `RUN --mount=type=bind,rw=true,src=.,dst=/buildcontext,buildah-overlay=false` that is only available to privileged builds. This seems like it'd be pretty simple, and we namespace the option to avoid any potential clash with docker.\n\nI am in favor of making the new security guard configurable. The CVE fix is valid but currently there is no alternative to the previous behavior. It can hit any user. So +1 from my end on the direction. I refrain from suggesting a better name :^ )\n\n@nalind, how do you feel about it?"
+        },
+        {
+            "user": "nalind",
+            "body": "I think that the ability to bypass \"shouldn't be allowed to write to the build context\" isn't the kind of thing we're supposed to be trusting a Containerfile's author on."
+        },
+        {
+            "user": "vrothberg",
+            "body": "> I think that the ability to bypass \"shouldn't be allowed to write to the build context\" isn't the kind of thing we're supposed to be trusting a Containerfile's author on.\n\nVery fair point.  If it had to be explicitly allowed by the build environment/builder/admin."
+        },
+        {
+            "user": "dustymabe",
+            "body": "> I think that the ability to bypass \"shouldn't be allowed to write to the build context\" isn't the kind of thing we're supposed to be trusting a Containerfile's author on.\n\nI actually don't think the feature we desire (and were previously using) requires writing to the build context. \n\nIIUC all we really want to do is be able to take a file or directory generated in an earlier stage of a multi-stage build and slurp that into the `FROM` so that the output of the overall container build from the Containerfile is the image that was generated in that earlier stage.\n\nWriting out that file to the build context and then using it in the form of `FROM: oci-archive:` worked nicely, but we could (I believe) make it work without writing to the build context, and thus not bumping into the security issue.\n\nI think Colin suggested something like this [earlier](https://github.com/containers/buildah/issues/5952#issuecomment-2622933583):\n\n> FROM oci://stage/path\n\nI guess an example here would be something like:\n\n```Containerfile\nFROM quay.io/fedora/fedora-bootc:rawhide as rootfs\nRUN dnf -y install htop\nRUN bootc container lint\n\nFROM quay.io/fedora/fedora-bootc:rawhide as builder\nRUN --mount=from=rootfs,dst=/rootfs <<EORUN\nrpm-ostree experimental compose build-chunked-oci --bootc --format-version=1 \\\n           --rootfs=/rootfs --output /output/out.oci\nEORUN\n\nFROM oci://builder/output/out.oci\nLABEL empty # not sure if this would be required or not\n```\n\n\n\nAlernatively, something like this could work:\n\n```Containerfile\nFROM --mount=from=builder,src=/output/,dst=/output/ oci:/output/out.oci\nLABEL empty # not sure if this would be required or not\n```\n\nI think it's not too important the syntax (you container experts are probably better equipped to know what syntax would be ideal here). What is important (to us at least) is the use case.\n\nI know what we're describing here is a specialized use case. Maybe it's worth a new issue/RFE? "
+        },
+        {
+            "user": "cgwalters",
+            "body": "> I think that the ability to bypass \"shouldn't be allowed to write to the build context\" isn't the kind of thing we're supposed to be trusting a Containerfile's author on.\n\nI think I addressed this in [my comment above](https://github.com/containers/buildah/issues/5952#issuecomment-2628458469) - again we already require privileges (for other reasons) for this build type, so gating this capability on e.g. `CAP_SYS_ADMIN` from the outer namespace would be fine. Hmm actually...when talking about capabilities here of course the user namespace is important. It looks like (unsurprisingly) `podman build` as root mirrors `podman run` and does not allocate a userns by default. That'd be good to evangelize changing as it adds a lot of security.\n\n(But yes of course at a technical level there's no reason this *should* require privileges, but we're just hung up on a syntax to tell the `FROM` stage to operate not on the outer mountns)\n\n---\n\n\nAnyways...I have to say on one hand it's good that this happened *now* and not months from now, that would have been dramatically more painful. And supporting this *outside* of a Podman-specific Containerfile feature is something we had to do regardless. \n\n---\n\nWhile we are doing that work to decouple, bottom line though it'd still be really, really useful to have a short term change to re-enable (*again* gated on privileges) and e.g. emitted a warning \"this feature may be removed in a year\" or something.\n"
+        },
+        {
+            "user": "dustymabe",
+            "body": "> again we already require privileges (for other reasons) for this build type\n\nI may be missing something; but narrowing the scope of this exact issue/RFE would be useful.\n\nWhat's not clear to me is if the feature we desire *HERE* actually requires privileges. The workflow I describe in [my previous comment](https://github.com/containers/buildah/issues/5952#issuecomment-2634362776) shouldn't.\n\nI guess another way to write the example (to remove the tooling from the equation, to try to add clarity):\n\n\n```Containerfile\nFROM quay.io/fedora/fedora:rawhide as curler\nRUN curl https://builds.coreos.fedoraproject.org/prod/streams/stable/builds/41.20250117.3.0/x86_64/fedora-coreos-41.20250117.3.0-ostree.x86_64.ociarchive > /output/out.ociarchive\n\nFROM oci-archive://curler/output/out.ociarchive\nLABEL empty # not sure if this would be required or not\n```\n\nIn this scenario, I don't see the need for privilege at all. Am I missing something?"
+        },
+        {
+            "user": "nalind",
+            "body": "I don't think suggestions that require changing the details of how we interpret containers-transports(5) locations are going to be part of the solution here, particularly when we've already established that the current acceptance of them has to have a limited shelf life."
+        },
+        {
+            "user": "dustymabe",
+            "body": "> I don't think suggestions that require changing the details of how we interpret containers-transports(5) locations are going to be part of the solution here\n\nOK. That's acceptable, but I feel like one of the options from https://github.com/containers/buildah/issues/5952#issuecomment-2634362776 may not invalidate that?\n\n```\nFROM --mount=from=builder,src=/output/,dst=/output/ oci:/output/out.oci\nLABEL empty # not sure if this would be required or not\n```\n\ni.e. no new container-transports parsing required in that example, but support for a way to mount in the output from a previous stage.\n\n\n> particularly when we've already established that the current acceptance of them has to have a limited shelf life.\n\nhmm. I missed that part. Are you implying that `FROM` won't work with containers-transports(5) described locations in the future? i.e. `FROM oci-archive:./foo.ociarchive` even if it's not from a previous build stage? \n\n"
+        },
+        {
+            "user": "nalind",
+            "body": "They really shouldn't, no.  Pathnames don't really make sense in remote builds."
+        },
+        {
+            "user": "nalind",
+            "body": "> Maybe another possible fix would be to expand the lifetime of the overlayfs created from a `RUN --mount=type=bind,rw=true,src=.,dst=/buildcontext,bind-propagation=shared` to the entire build, instead of each RUN invocation?\n\nTo do that, when we have to allow for multiple users simultaneously, some read-only, any writing, we have to mount the overlay over the build context directory before any stage accesses the directory tree in any way, so that ADD, COPY, and RUN instructions that read from the location reflect changes that have been made by RUN instructions that modify that location in different stages that could be running concurrently.\n\nFixing up the handling of paths in certain FROM values is still necessary because \".\" is the directory from which we were invoked, and that's not where data being \"written\" to the build context will be, but there's still potential for problems there.\n\n#5975 tries to get this workflow going again."
+        },
+        {
+            "user": "dustymabe",
+            "body": "IIUC https://github.com/containers/buildah/pull/5975 deals with the build context directory, which is how we were using this before, but taking a step back and looking at what we want to do wouldn't being able to `FROM` a file from a previous stage be a better solution? Leveraging the build context was just a vehicle for what we wanted to do, but maybe not the best solution.\n\n```\nFROM quay.io/fedora/fedora:rawhide as curler\nRUN curl https://builds.coreos.fedoraproject.org/prod/streams/stable/builds/41.20250117.3.0/x86_64/fedora-coreos-41.20250117.3.0-ostree.x86_64.ociarchive > /output/out.ociarchive\n\nFROM --mount=from=curler,src=/output/,dst=/output/ oci-archive:/output/out.ociarchive\nLABEL empty # not sure if this would be required or not\n```"
+        },
+        {
+            "user": "cgwalters",
+            "body": "> wouldn't being able to FROM a file from a previous stage be a better solution?\n\nI think everyone agrees it would, I proposed something similar above. But the concern here is that it requires new syntax which doesn't exist in Dockerfile AIUI, see [this comment](https://github.com/containers/buildah/issues/5952#issuecomment-2624726459) and the one below."
+        },
+        {
+            "user": "yuravk",
+            "body": "AlmaLinux is facing the same issue since podman version `5.2.2-13` (Buildah `v1.37.6`) for our BootC images pipeline:\nhttps://github.com/AlmaLinux/bootc-images/actions/runs/13255082776/job/37000516781\n\n```\nGenerating container image...done\nPushed digest: sha256:1a6dc60447f117b9ba01f55afac44bee6eceae31570ef52f3234bbd1b1b4b232\nWrote: oci-archive:/buildcontext/out.ociarchive\n--> b120be48e54e\n[3/3] STEP 1/2: FROM oci-archive:./out.ociarchive\nError: creating build container: creating temp directory: archive file not found: \"/actions-runner/_work/bootc-images/bootc-images/out.ociarchive\"\n```"
+        },
+        {
+            "user": "cgwalters",
+            "body": "I wanted to keep this issue updated as well. Since this event happened, we've been reworking our base image builds to not require this.\n\nSee the updated docs https://docs.fedoraproject.org/en-US/bootc/building-custom-base/ (which uses some new code that landed in https://gitlab.com/fedora/bootc/base-images )\n\nConceptually we now support a two-phase approach:\n\n- Build a container image however you want (could even be docker or whatever)\n- Optionally, run [the rechunker](https://coreos.github.io/rpm-ostree/experimental-build-chunked-oci/) on it to canonicalize timestamps and output a new image\n\nWe're working to \"productize\" the separate rechunker more right now.\n\n---\n\nTo repeat and emphasize: I think it's actually much better to support a flow like this because it keeps things clearly separate, and it's highly likely we'd have needed to do this *anyways* even if this issue hadn't happened.\n\nBut at the same time, the ergonomic gains of being able to execute both a build and a rechunking as part of a single `buildah build` are quite substantial too, so I'd still really like to see us land support for it.\n\n"
+        },
+        {
+            "user": "cgwalters",
+            "body": "Well, this issue didn't make progress in the last 5 months, which is unfortunate, but what gets further problematic is we ran into some issues trying to do the rechunking separately in konflux. In the meantime they finally got around to trying to update their ~5 month old fork of buildah, but then reverted it in https://github.com/konflux-ci/buildah-container/pull/126#issue-2993146748\n(maybe due to fallout from https://github.com/containers/buildah/issues/5988 ? wasn't clarified).\n\nAnyways I think we're going to try to push harder though to split off rechunking and drop our immediate need for this issue. Just giving a status update here.\n"
+        },
+        {
+            "user": "cgwalters",
+            "body": "Over in https://github.com/konflux-ci/buildah-container/issues/134 @chmeliik came up with a relatively straightforward workaround - since for the *primary* use cases of this (building custom base images) we already require some additional privileges for nested containerization, adding required privileges to do explicit writes to the context directory is not a problem at all - and is no way a security problem because in production builds the context directory is just a git clone that gets discarded.\n\nWe're looking at adapting our production builds to use this approach, and it means from my PoV we can significantly deprioritize this issue and think more about what longer term/nicer things are in this space (even scoping in getting docker to add this feature too for symmetry)."
+        },
+        {
+            "user": "jlebon",
+            "body": "I think this is technically now fixed by https://github.com/containers/buildah/pull/5975. However, there's still an underlying lingering RFE for supporting this more natively which has been discussed extensively here. But it probably still makes more sense to close this off at this point since it's intermixed with obsolete comments and open a fresh one to track just that?\n\nOK, did that in https://github.com/containers/buildah/issues/6621."
+        },
+        {
+            "user": "jlebon",
+            "body": "FWIW, I would consider this even more closed now with https://github.com/containers/buildah/pull/6654."
+        },
+        {
+            "user": "nalind",
+            "body": "Alright then, closing."
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "coreos",
+            "repository": "rpm-ostree",
+            "number": 5268
+        },
+        {
+            "organization": "coreos",
+            "repository": "fedora-coreos-tracker",
+            "number": 1861
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "buildah",
+            "number": 5975
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "buildah",
+            "number": 5951
+        },
+        {
+            "organization": "konflux-ci",
+            "repository": "buildah-container",
+            "number": 126
+        },
+        {
+            "organization": "konflux-ci",
+            "repository": "buildah-container",
+            "number": 134
+        },
+        {
+            "organization": "coreos",
+            "repository": "fedora-coreos-config",
+            "number": 3348
+        },
+        {
+            "organization": "composefs",
+            "repository": "composefs-rs",
+            "number": 132
+        },
+        {
+            "organization": "coreos",
+            "repository": "fedora-coreos-config",
+            "number": 3550
+        },
+        {
+            "organization": "coreos",
+            "repository": "fedora-coreos-config",
+            "number": 3628
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "buildah",
+            "number": 6621
+        }
+    ]
+}

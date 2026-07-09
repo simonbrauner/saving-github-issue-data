@@ -1,0 +1,176 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "buildah",
+    "number": 600,
+    "type": "issue",
+    "title": "Buildah is injecting /bin/bash into cmd and should not be",
+    "state": "closed",
+    "labels": [
+        "locked - please file new issue/PR"
+    ],
+    "user": "TomSweeneyRedHat",
+    "body": "**Description**\n\nAs reported by @pixdrift in #593 \n@rhatdan @TomSweeneyRedHat this isn't a complete fix. When using buildah native it is injecting a spurious /bin/bash into cmd which shouldn't be there.\n\nWhat's occuring then is that the cmd is being appended to the entrypoint. Changing entrypoint to /bin/sh -c will match docker entrypoint behaviour, but doesn't fix buildah always injecting /bin/bash into cmd.\n\n**Steps to reproduce the issue:**\nbuild and image using buildah bud or buildah cmd.  Then run 'buildah inspect' on the image and note the extraneous /bin/bash in the Cmd.\n\n\n**Describe the results you received:**\nSee description.\n\n**Describe the results you expected:**\n\nNo extraneous /bin/bash.  This can can cause the container to not be  run appropriately.\n\n\n**Output of `buildah version`:**\n\nBuildah v0.16\n\n",
+    "comments": [
+        {
+            "user": "pixdrift",
+            "body": "Thanks @TomSweeneyRedHat, I had the ticket half written up."
+        },
+        {
+            "user": "TomSweeneyRedHat",
+            "body": "@pixdrift, that's unusual, I usually don't have fast fingers in the morning before my tea!  ;^)   I tried to assign this one to you, but GitHub for some reason wouldn't let me."
+        },
+        {
+            "user": "pixdrift",
+            "body": "@TomSweeneyRedHat, I tried to track this down last night and had trouble finding where the value was coming from. Keen to see what you (or whoever provides the fix) comes up with so I can better understand the components involved in the earlier part of the creation process. I ended up on `config.go` last night when looking.\n\n"
+        },
+        {
+            "user": "rhatdan",
+            "body": "Is the /bin/bash defined in the container image you are building from?"
+        },
+        {
+            "user": "pixdrift",
+            "body": "@rhatdan, sadly yes 😥 \n\nThis is where it was coming from. The problem in #593 was that it was coming from the parent container (centos 7) and getting appended to the entrypoint that was added.\n\nI guess blanking values from the parent container is an exercise for the user. Just checking the bud behaviour to see if it matches before closing this."
+        },
+        {
+            "user": "rhatdan",
+            "body": "If the user specifies an entrypoint it should replace the existing entrypoint.  Similarly to the command.  SO if you want to remove the command you would need to do a --command \"\"."
+        },
+        {
+            "user": "pixdrift",
+            "body": "The plot thickens.. buildah bud does blank the cmd entries from the container I am building from, this was the behaviour I saw last night.\n\nReproducer:\n```\nFROM centos:7\nENTRYPOINT /bin/bash\nWORKDIR /tmp\n```\n\nResult\n```\n# buildah inspect 908e | jq '.Docker.config.Cmd'\nnull\n# buildah inspect 908e | jq '.OCIv1.config.Cmd'\nnull\n```\n"
+        },
+        {
+            "user": "rhatdan",
+            "body": "Does docker build do the same?  \nI would want to check two other things.\n\nIf I did\nFROM centos:7\nWORKDIR /tmp\n\nIs .Docker.cmd still bash or null?  Ie is it the FROM command that nulls out the command or is it the fact that the ENTRYPOINT was specified that the CMD gets nulled?"
+        },
+        {
+            "user": "pixdrift",
+            "body": "@rhatdan, give me 5 mins.. I will try and get a more complete picture of behaviour with/without options\n\n"
+        },
+        {
+            "user": "pixdrift",
+            "body": "Source container (centos:7):\n```\n# buildah inspect centos:7 | jq '.Docker.config.Cmd'\n[\n  \"/bin/bash\"\n]\n# buildah inspect centos:7 | jq '.OCIv1.config.Cmd'\n[\n  \"/bin/bash\"\n]\n```\n\n**Test 1:** buildah bud the following (no entrypoint):\n```\nFROM centos:7\nWORKDIR /tmp\n```\n\nResult:\n```\n# buildah inspect 215c | jq '.Docker.config.Cmd'\n[\n  \"/bin/bash\"\n]\n# buildah inspect 215c | jq '.OCIv1.config.Cmd'\n[\n  \"/bin/bash\"\n]\n```\n\n**Test 2:** buildah bud the following (entrypoint):\n```\nFROM centos:7\nENTRYPOINT /bin/bash\nWORKDIR /tmp\n```\n\nResult:\n```\n# buildah inspect 87d5 | jq '.OCIv1.config.Cmd'\nnull\n# buildah inspect 87d5 | jq '.Docker.config.Cmd'\nnull\n```\n\n**Test 3:** buildah native the following (no entrypoint):\n```\n#!/bin/bash\nctr=$(buildah from centos:7)\nbuildah commit $ctr pix_noentry\n```\n\nResult:\n```\n# buildah inspect pix_noentry | jq '.OCIv1.config.Cmd'\n[\n  \"/bin/bash\"\n]\n# buildah inspect pix_noentry | jq '.Docker.config.Cmd'\n[\n  \"/bin/bash\"\n]\n```\n\n**Test 4:** buildah native the following (entrypoint):\n```\n#!/bin/bash\nctr=$(buildah from centos:7)\nbuildah config --entrypoint \"/bin/bash\" $ctr\nbuildah commit $ctr pix_entry\n```\n\nResult:\n```\n# buildah inspect pix_entry | jq '.Docker.config.Cmd'\n[\n  \"/bin/bash\"\n]\n# buildah inspect pix_entry | jq '.OCIv1.config.Cmd'\n[\n  \"/bin/bash\"\n]\n\n```\n\n@rhatdan In summary, I would expect Test 2 and Test 4 to produce the same result."
+        },
+        {
+            "user": "rhatdan",
+            "body": "Could you also do the two tests with Docker."
+        },
+        {
+            "user": "rhatdan",
+            "body": "It looks like specifying ENTRYPOINT has a side effect of clearing command.  If docker does the same, then we should do it."
+        },
+        {
+            "user": "pixdrift",
+            "body": "@rhatdan ack and agree. Will fire up Docker now."
+        },
+        {
+            "user": "pixdrift",
+            "body": "**Test 5:** docker build the following (no entrypoint)\n```\nFROM centos:7\nWORKDIR /tmp\n```\n\nResult:\n```\n# docker inspect b33 | jq '.[].Config.Cmd'\n[\n  \"/bin/bash\"\n]\n```\n\n**Test 6:** docker build the following (entrypoint)\n```\nFROM centos:7\nENTRYPOINT /bin/bash\nWORKDIR /tmp\n```\n\nResult:\n```\n# docker inspect 93e | jq '.[].Config.Cmd'\nnull\n```\n\n@rhatdan, results. Test 4 doesn't align."
+        },
+        {
+            "user": "rhatdan",
+            "body": "Thanks @pixdrift \nLooks like setting ENTRYPOINT should nil out CMD.  \n\nbuildah config --entrypoint foo\n\nShould result in cmd == Null\n\nbuildah config --entrypoint foo --command bar\nShould result in cmd == bar\n\nbuildah config --workingdir /tmp\n\nShould result in cmd == Parent Container CMD."
+        },
+        {
+            "user": "pixdrift",
+            "body": "Should be OK to clear `cmd` here\nhttps://github.com/projectatomic/buildah/blob/master/cmd/buildah/config.go#L142\n\nAnd if it's explicitly set through command line option, it will be re-populated in the following `if` block.\n\nThoughts?"
+        },
+        {
+            "user": "rhatdan",
+            "body": "SGTM, Open a PR. And add a Command to state the CMD should always be done after Entrypoint."
+        },
+        {
+            "user": "pixdrift",
+            "body": "PR will be ~24 hours away because i'm running close to midnight here and need to wrap up. Happy for someone else to put the PR together during your daylight hours today, if not, I will pick it up tomorrow my time. Cheers."
+        },
+        {
+            "user": "rhatdan",
+            "body": "I opened a PR for it.  Thanks @pixdrift "
+        },
+        {
+            "user": "TomSweeneyRedHat",
+            "body": "Just to be sure, if someone specifies both the --cmd and --entry-point parameters, both should be retained.  In that case the Cmd should not be set to nil, but to what ever the user passed in.   Holldr if that's not right."
+        },
+        {
+            "user": "rhatdan",
+            "body": "Yes"
+        },
+        {
+            "user": "pixdrift",
+            "body": "Just thought of another potential test/edge case\n`buildah --entrypoint \"\" $ctr`\n\nYou're setting the entrypoint.. in this case to an empty value, should that be blanking/clearing cmd?\n\nI will take a look at this with the PR."
+        },
+        {
+            "user": "rhatdan",
+            "body": "If you do that in a Dockerfile and run `docker build` on it, what happens?"
+        },
+        {
+            "user": "pixdrift",
+            "body": "@rhatdan I will do some more tests including Docker"
+        },
+        {
+            "user": "pixdrift",
+            "body": "**Test 7:** docker build the following (empty entrypoint)\n```\nFROM centos:7\nENTRYPOINT \"\"\nWORKDIR /tmp\n```\n\nResult:\n```\n# docker inspect a50 | jq '.[].Config.Cmd'\nnull\n```\n\nSo it looks like Docker clears `Cmd` even when `ENTRYPOINT` is an empty value."
+        },
+        {
+            "user": "adelton",
+            "body": "I've just hit the issue attempting to test FreeIPA container build. The `ENTRYPOINT` value is injected to `RUN` commands as well, something docker does not do in build time:\n\n```\n# cat Dockerfile\nFROM registry.fedoraproject.org/fedora:26\nRUN uuidgen > /build-id-pre-entrypoint\nENTRYPOINT [ \"/non/existent/entrypoint\" ]\nRUN uuidgen > /build-id-post-entrypoint\n```\n\n```\n# docker build -t test-entrypoint .\nSending build context to Docker daemon 2.048 kB\nStep 1/4 : FROM registry.fedoraproject.org/fedora:26\n ---> e569af8fd8d7\nStep 2/4 : RUN uuidgen > /build-id-pre-entrypoint\n ---> Using cache\n ---> cbe765590c1d\nStep 3/4 : ENTRYPOINT /non/existent/entrypoint\n ---> Using cache\n ---> 61e435f6b309\nStep 4/4 : RUN uuidgen > /build-id-post-entrypoint\n ---> Using cache\n ---> 5954df23046e\nSuccessfully built 5954df23046e\n# docker run --entrypoint cat test-entrypoint /build-id-post-entrypoint\nc98ac630-132e-4706-89db-4e944ee727c3\n```\n\n```\n# buildah bud -t test-entrypoint .\nSTEP 1: FROM registry.fedoraproject.org/fedora:26\nSTEP 2: RUN uuidgen > /build-id-pre-entrypoint\nSTEP 3: ENTRYPOINT [ \"/non/existent/entrypoint\" ]\nSTEP 4: RUN uuidgen > /build-id-post-entrypoint\ncontainer_linux.go:348: starting container process caused \"exec: \\\"/non/existent/entrypoint\\\": stat /non/existent/entrypoint: no such file or directory\"\nerror building at step {Env:[DISTTAG=f26container FGC=f26  PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin] Command:run Args:[uuidgen > /build-id-post-entrypoint] Flags:[] Attrs:map[] Message:RUN uuidgen > /build-id-post-entrypoint Original:RUN uuidgen > /build-id-post-entrypoint}: exit status 1\n```\n\nIn FreeIPA case we don't use nonexistent path for `ENTRYPOINT` but we specify script which ecpects only a limited set of parameters, so subsequent `RUN`s fail because they are not in the list.\n\nIs it expected that `ENTRYPOINT` would need to be the last command in the `Dockerfile`?"
+        },
+        {
+            "user": "TomSweeneyRedHat",
+            "body": "@adelton The ENTRYPOINT command shouldn't need to be the last command/line in the Dockerfile.  If you find otherwise, please let us know."
+        },
+        {
+            "user": "pixdrift",
+            "body": "Thanks @adelton, can reproduce on latest build with provided Dockerfile.\n\nI think this is related but is a separate issue.\n\nBuildah bud `RUN` should be treated differently to command line `buildah run`."
+        },
+        {
+            "user": "adelton",
+            "body": "@pixdrift, thanks for reproducing it. Should I file a separate issue or is it OK to track it here?"
+        },
+        {
+            "user": "pixdrift",
+            "body": "@adelton i'll raise a separate issue for it now as this issue was just closed out by a PR."
+        },
+        {
+            "user": "TomSweeneyRedHat",
+            "body": "@adelton and @pixdrift , yes please a separate issue and ty!"
+        },
+        {
+            "user": "pixdrift",
+            "body": "Opened issue #607 \n\n@TomSweeneyRedHat Should be good to close this one out as PR #602 resolved."
+        },
+        {
+            "user": "rhatdan",
+            "body": "I don't agree buildah run and buildah bud Dockerfile RUN, should work the same.  The basic idea of the buildah run command is to be an equivalent BASH version of the Dockerfile RUN command.  @pixdrift Why do you think they should behave differently?  \n\nBTW I agree that this is a bug, we should match the Docker behaviour."
+        },
+        {
+            "user": "pixdrift",
+            "body": "@rhatdan ? I don't think it, it's just from what I have determined from testing.\n\n-edit- wrong issue?"
+        },
+        {
+            "user": "pixdrift",
+            "body": "@TomSweeneyRedHat, should be good to close this, was resolved with PR #602 \n\n@rhatdan, agree re: RUN behaviour, I see the comment you were responding to, apologies.\n\nTo clarify, the following _don't_ use entrypoint value and should behave the same\n```\ndocker build RUN\nbuildah bud RUN\nbuildah run\n```\n\nThe following _do_ use entrypoint value and should behave the same\n```\ndocker run\npodman run\n```"
+        },
+        {
+            "user": "TomSweeneyRedHat",
+            "body": "Closing based on #602.  Thanks to all for the discussion, especially @pixdrift for starting it up."
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "buildah",
+            "number": 593
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "buildah",
+            "number": 602
+        },
+        {
+            "organization": "freeipa",
+            "repository": "freeipa-container",
+            "number": 186
+        }
+    ]
+}

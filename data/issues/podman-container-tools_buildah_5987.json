@@ -1,0 +1,86 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "buildah",
+    "number": 5987,
+    "type": "issue",
+    "title": "[feature request] support setting build-time environment variables",
+    "state": "closed",
+    "labels": [],
+    "user": "chmeliik",
+    "body": "As developers of a CI system that uses buildah for building (https://konflux-ci.dev/), we have a need to dynamically set environment variables at build time (for the `RUN` instructions in a Containerfile).[^1]\n\nWe didn't find any great way to achieve that at present. The options we considered:\n* `--build-arg`\n  * Requires the `ARG`s to be defined up-front in the Containerfile (or requires modifying the Container dynamically to inject them)\n  * `ARG`s have a lower precedence than `ENV`. The Containerfile or the parent image may already be setting the variable via `ENV` => we're not able to override it\n* `--env`\n  * Sets the environment variable in the image config, which we want to avoid. We want to set the environment variables only at build time\n* Inject a `.env` shell script into the build using `--volume`. Dynamically modify the `RUN` instructions in the Containerfile to `source` this shell script before doing the rest of the command(s)\n  * _This is the option we currently use, despite the problems_\n  * Modifying the RUN instructions is error-prone. We don't even support all the possible forms (e.g. exec form and heredoc form - [related issue](https://github.com/konflux-ci/build-definitions/issues/1200))\n  * Some users are uncomfortable with having their Containerfile dynamically modified\n\nIt would be awesome if we could set build-time environment variables more easily. Some options that could work:\n* Buildah currently supports the `env` array from the [engine table](https://github.com/containers/common/blob/main/docs/containers.conf.5.md#engine-table) in containers.conf. Would it be reasonable to support `env` from the [containers table](https://github.com/containers/common/blob/main/docs/containers.conf.5.md#containers-table) as well and use these for the `RUN` environment?\n  * Or, would it be reasonable for the `[engine.env]` variables to propagate to `RUN` instructions?\n* A new `--build-env` CLI option for `buildah build` that would set environment variables for `RUN` instructions but wouldn't set them on the resulting image config.\n\n[^1]: For example, we set `GOMODCACHE` to a pre-populated cache directory that we mount into the build using `--volume`. We do a similar thing for Python builds - pointing pip to a directory instead of an index server using `PIP_FIND_LINKS`.",
+    "comments": [
+        {
+            "user": "flouthoc",
+            "body": "One hack which can be done is dump all the `env` into a file in `contextdir` and use \n`RUN --mount=type=bind,src=myfile.sh,target=myfile.sh,Z source myfile.sh <do other operation> `\n\n@chmeliik Any thoughts ?"
+        },
+        {
+            "user": "chmeliik",
+            "body": "> One hack which can be done is dump all the `env` into a file in `contextdir` and use `RUN --mount=type=bind,src=myfile.sh,target=myfile.sh,Z source myfile.sh <do other operation> `\n> \n> [@chmeliik](https://github.com/chmeliik) Any thoughts ?\n\nThat's pretty much what we currently do\n\n> Inject a `.env` shell script into the build using `--volume`. Dynamically modify the `RUN` instructions ...\n\nWith the downsides mentioned in the issue description.\n\nFor more context: we don't own the Containerfiles we build. A user supplies the Containerfile, and we'd like the ability to set build-time environment variables without having to modify their Containerfile."
+        },
+        {
+            "user": "cgwalters",
+            "body": "> --env Sets the environment variable in the image config, which we want to avoid. We want to set the environment variables only at build time\n\nYeah, though one could also edit the generated config to remove them after today.\n\n> A new --build-env CLI option for buildah build that would set environment variables for RUN instructions but wouldn't set them on the resulting image config.\n\nMakes sense to me, although\n\n> Some users are uncomfortable with having their Containerfile dynamically modified\n\nRight that's the thing, today cachi2 basically breaks the ability to replicate what happens in a pipeline with `podman build`, and if e.g. we *also* supported an `ARG CACHI2_WHATEVER` that the container owner would take responsibility to handle, that would seem like a clean option too.\n\n"
+        },
+        {
+            "user": "chmeliik",
+            "body": "> Yeah, though one could also edit the generated config to remove them after today.\n\nWe'd also need to take care not to unset environment variables that a user explicitly sets in their Containerfile, let's say\n\n```Containerfile\nFROM registry.fedoraproject.org/fedora-minimal:41\n\nENV GOMODCACHE=/tmp/gomodcache\n```\n\nWe would end up running something like `buildah build --env GOMODCACHE=/cachi2/output/deps/gomod -f Containerfile`. It seems that the ENV in the Containerfile takes precedence in this case, which is probably good. It breaks the cachi2 integration, but that might be fine. The Containerfile owner can fix that by moving the `ENV` below all the relevant `RUN` instructions (that might feel weird though). We would just have to make sure not to unset variables if their value is different from what we thought we were setting.\n\nBut it is a bit of unpleasant added complexity.\n\n> if e.g. we also supported an ARG CACHI2_WHATEVER that the container owner would take responsibility to handle, that would seem like a clean option too.\n\nThe existence of a `--build-env` option would make this unnecessary in my opinion. But if adding it is not acceptable, this could be an OK-ish fallback"
+        },
+        {
+            "user": "chmeliik",
+            "body": "> the ENV in the Containerfile takes precedence\n\nThis reminds me - the potential `--build-env` variables would need to take precedence over `--env/ENV`"
+        },
+        {
+            "user": "cgwalters",
+            "body": "> The Containerfile owner can fix that by moving the ENV below all the relevant RUN instructions \n\nThat said shouldn't basically *every* build be done via multi-stage? For everything *except* dnf installs that covers this problem I'd say as the `ENV` should only be transient to the builder phase. I think we could make cachi2/dnf work in a multi-stage flow too, but it would be supremely ugly like\n\n```\nFROM ubi as builder\nENV cachi2=blah # or whatever\nRUN dnf download foo bar baz\n\nFROM ubi\nRUN --mount=from=builder,target=/builder dnf -y install /builder/*.rpm\n```"
+        },
+        {
+            "user": "chmeliik",
+            "body": "> That said shouldn't basically every build be done via multi-stage? For everything except dnf installs that covers this problem\n\nI think most Python apps also wouldn't be built multi-stage (could be, but people aren't used to it).\n\nBut I don't really care how our users build their Containers, I'm looking for an easy solution that would cover the most use cases"
+        },
+        {
+            "user": "nalind",
+            "body": "As described, this would intentionally not leave a trace in the built image's config, meaning it could not be accounted for by the cache evaluation logic."
+        },
+        {
+            "user": "chmeliik",
+            "body": "> As described, this would intentionally not leave a trace in the built image's config, meaning it could not be accounted for by the cache evaluation logic.\n\nAh, so it would have to imply `--no-cache` (or require that the user also specify `--no-cache` explicitly). That would work for us"
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "chmeliik",
+            "body": "Would this be a reasonable feature to have, or do the caching concerns disqualify it?"
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "chmeliik",
+            "body": "We would still be interested in having this"
+        },
+        {
+            "user": "chmeliik",
+            "body": "I can confirm that @aeijdenberg's contributions work for our use case. Using the code in main, we can achieve what we need with a combination of `--secret` and `--mount`:\n\n```bash\n$ bin/buildah build -t test \\\n    --secret id=GOMODCACHE,src=<(echo -n /tmp/go/pkg/mod) \\\n    --mount type=secret,id=GOMODCACHE,env=GOMODCACHE\nSTEP 1/3: FROM alpine:latest\nSTEP 2/3: ENV GOMODCACHE=/root/go/pkg/mod\nSTEP 3/3: RUN echo \"$GOMODCACHE\"\n/tmp/go/pkg/mod\n```\n\n(and they do take precedence over ENV and ARG 🎉)\n\nLooking forward to making use of these in the next release!\n\n@aeijdenberg thank you very much for contributing the --mount improvements"
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "buildah",
+            "number": 6289
+        },
+        {
+            "organization": "konflux-ci",
+            "repository": "architecture",
+            "number": 299
+        },
+        {
+            "organization": "opendatahub-io",
+            "repository": "notebooks",
+            "number": 3515
+        }
+    ]
+}

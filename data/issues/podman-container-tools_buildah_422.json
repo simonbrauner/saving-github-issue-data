@@ -1,0 +1,94 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "buildah",
+    "number": 422,
+    "type": "pull_request",
+    "title": "Trim the image reference to just the name before calling getImageName",
+    "state": "closed",
+    "labels": [
+        "locked - please file new issue/PR"
+    ],
+    "user": "boaz0",
+    "body": "When setting a container name the getImageName function goes through all the names of the resolved image and finds the name that contains the given name by the user.\n\nHowever, if the user is specifying \"docker.io/tagged-image\" the Docker transport returns \"docker.io/library/tagged-image\" which makes getImageName returns the original image name because it does not find a match (basically \"docker.io/tagged-image\" is not a substring of \"docker.io/library/tagged-image\").\n\nTo resolve this issue, before calling getImageName, the image given by the user will be trimmed to be just the image name.",
+    "comments": [
+        {
+            "user": "rhatdan",
+            "body": "I have a concern with this in that docker.io/tagged-image might end up returning. \nregistry.fedora.com/tagged-image when the user clearly stated he wanted docker.io/library/tagged-image."
+        },
+        {
+            "user": "boaz0",
+            "body": "Will that be a problem?\n1) this happens if \"registry.fedora.com/tagged-image\" is a tag to \"docker.io/library/tagged-image\" which is OK because they have the same content.\n2) either way we are going to use just the image name which is \"tagged-image\" and ignore the domain."
+        },
+        {
+            "user": "rhatdan",
+            "body": "What happens if both fedora.registry and docker.io have different fedora images.?\n\nbuildah from docker.io/fedora\n"
+        },
+        {
+            "user": "boaz0",
+            "body": "I see what you're saying. You want `fedora.registry/nginx` and `docker.io/nginx` to have different container names.\nRight now it will set the same container name because of this [line](https://github.com/ripcurld0/buildah/blob/1d8c27805fd4f4c9ac05eaf40198cb31ed102495/new.go#L241).\n\nWas that what you meant?"
+        },
+        {
+            "user": "rhatdan",
+            "body": "Yes"
+        },
+        {
+            "user": "boaz0",
+            "body": "Do you want the domain to be reflected in the container name, if specified in `buildah-from`.\n\nFor example:\n\n```\n$ buildah from busybox\nbusybox-working-container\n\n$ buildah from docker.io/busybox\ndocker_io_busybox-working-container\n\n$ buildah from docker.io/library/busybox\ndocker_io_library_busybox-working-container\n```\n\n?"
+        },
+        {
+            "user": "rhatdan",
+            "body": "No I just want to make sure we pull the correct image.  In the example above where there is an docker.io/library/nginx and a fedora.registry.com/nginx, if a user specifies docker.io/nginx, then we better pull the one from docker.  Perhaps you insert library when the user does not specify the full registry path?"
+        },
+        {
+            "user": "boaz0",
+            "body": "the `library` is injected only if the [name doesn't contain \"/\" and the domain is `docker.io`](https://github.com/projectatomic/buildah/blob/c615c3e23d0a43dcb0989eec37edf4ff96430a84/vendor/github.com/containers/image/docker/reference/normalize.go#L61-L75).\nUnless you specify the domain (f.e. `fedora.registry.com`) in the image name the domain is set to the default one which is [`docker.io`](https://github.com/projectatomic/buildah/blob/master/vendor/github.com/containers/image/docker/reference/normalize.go#L13).\n\nAnyway, it looks to me that we are pulling the correct image:\n\n`buildah from busybox` will pull `docker.io/library/busybox`\n`buildah from ripcurld0/busybox` will pull `docker.io/ripcurld0/busybox`\n`buildah from fedora.registry.com/busybox` will pull `fedora.registry.com/busybox`\n\nAnything that I might be missing?\n\nI guess I can make this a little bit better without using the `imageNamePrefix`, though."
+        },
+        {
+            "user": "boaz0",
+            "body": "So I guess that `imageNamePrefix` is a redundancy here.\nIn a second thought what I should have done in #399 is to remove the following part\n\n```\nif len(img.Names) > 0 {\n    image = img.Names[0]\n}\n```\n\nBecause If `img != nil` it means the image name given by the user exists and thus there is no need to assign a value to `image`.\n\n@nalind @rhatdan @TomSweeneyRedHat  WDYT?"
+        },
+        {
+            "user": "rhatdan",
+            "body": "No I just want to make sure we pull the correct image.  In the example above where there is an docker.io/library/nginx and a fedora.registry.com/nginx, if a user specifies docker.io/nginx, then we better pull the one from docker.  Perhaps you insert library when the user does not specify the full registry path?"
+        },
+        {
+            "user": "rhatdan",
+            "body": "Can you check that pulling docker.io/fedora wih registry.fedoraproject.org as first in the registry lists, pulls from docker.io."
+        },
+        {
+            "user": "boaz0",
+            "body": "`/etc/containers/registries.d/default.yaml`: \n```\n# This is the default signature write location for docker registries.                  \ndefault-docker:                            \n  sigstore-staging: file:///var/lib/atomic/sigstore                                    \ndocker:                                    \n  registry.fedoraproject.org:              \n    sigstore: https://registry.fedoraproject.org                                       \n  docker.io:              \n    sigstore: https://docker.io                                       \n```\n\nrunning `sudo ./buildah --debug from docker.io/fedora` prints\n```\nDEBU[0000] [graphdriver] trying provided driver \"overlay\"                              \nDEBU[0000] overlay: override_kernelcheck=true                                          \nDEBU[0000] overlay test mount with multiple lowers succeeded                           \nDEBU[0000] backingFs=extfs, projectQuotaSupported=false                                \nDEBU[0000] parsed reference to refname into \"[overlay@/var/lib/containers/storage+/var/run/containers/storage:overlay.override_kernel_check=true]docker.io/library/fedora:latest\" \nDEBU[0000] parsed reference to refname into \"[overlay@/var/lib/containers/storage+/var/run/containers/storage:overlay.override_kernel_check=true]docker.io/library/fedora:latest\" \nDEBU[0000] reference \"[overlay@/var/lib/containers/storage+/var/run/containers/storage:overlay.override_kernel_check=true]docker.io/library/fedora:latest\" does not resolve to an image ID \nDEBU[0000] parsed reference to refname into \"[overlay@/var/lib/containers/storage+/var/run/containers/storage:overlay.override_kernel_check=true]docker.io/library/fedora:latest\" \nDEBU[0000] parsed reference to refname into \"[overlay@/var/lib/containers/storage+/var/run/containers/storage:overlay.override_kernel_check=true]docker.io/library/fedora:latest\" \nDEBU[0000] Using registries.d directory /etc/containers/registries.d for sigstore configuration                                                                               \nDEBU[0000]  Using \"default-docker\" configuration                                       \nDEBU[0000]  No signature storage configuration found for docker.io/library/fedora:latest                                                                                      \nDEBU[0000] Looking for TLS certificates and private keys in /etc/docker/certs.d/docker.io                                                                                     \nDEBU[0000] copying \"docker://docker.io/fedora\" to \"docker.io/library/fedora:latest\"    \nDEBU[0000] Using registries.d directory /etc/containers/registries.d for sigstore configuration                                                                               \nDEBU[0000]  Using \"default-docker\" configuration                                       \nDEBU[0000]  No signature storage configuration found for docker.io/library/fedora:latest                                                                                      \nDEBU[0000] Looking for TLS certificates and private keys in /etc/docker/certs.d/docker.io                                                                                     \nDEBU[0000] GET https://registry-1.docker.io/v2/                                        \nDEBU[0000] Ping https://registry-1.docker.io/v2/ err <nil>                             \nDEBU[0000] Ping https://registry-1.docker.io/v2/ status 401                            \nDEBU[0001] GET https://registry-1.docker.io/v2/library/fedora/manifests/latest         \nDEBU[0002] Source is a manifest list; copying (only) instance sha256:1b9bfb4e634dc1e5c19d0fa1eb2e5a28a5c2b498e3d3e4ac742bd7f5dae08611                                         \nDEBU[0002] GET https://registry-1.docker.io/v2/library/fedora/manifests/sha256:1b9bfb4e634dc1e5c19d0fa1eb2e5a28a5c2b498e3d3e4ac742bd7f5dae08611                               \nDEBU[0003] IsRunningImageAllowed for image docker:docker.io/library/fedora:latest      \nDEBU[0003]  Using default policy section                                               \nDEBU[0003]  Requirement 0: allowed                                                     \nDEBU[0003] Overall: allowed                                                            \nDEBU[0003] Downloading /v2/library/fedora/blobs/sha256:422dc563ca3260ad9ef5c47a1c246f5065d7f177ce51f4dd208efd82967ff182                                                       \nDEBU[0003] GET https://registry-1.docker.io/v2/library/fedora/blobs/sha256:422dc563ca3260ad9ef5c47a1c246f5065d7f177ce51f4dd208efd82967ff182                                   \n```\n\nwhich means that you're correct. it pulls the image from `docker.io` even when the first registry in the list was `registry.fedoraproject.org`."
+        },
+        {
+            "user": "rhatdan",
+            "body": "Ok that is what we want."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@rh-atomic-bot r+"
+        },
+        {
+            "user": "rh-atomic-bot",
+            "body": ":pushpin: Commit 1d8c278 has been approved by `rhatdan`\n\n<!-- @rh-atomic-bot r=rhatdan 1d8c27805fd4f4c9ac05eaf40198cb31ed102495 -->"
+        },
+        {
+            "user": "rh-atomic-bot",
+            "body": ":hourglass: Testing commit 1d8c278 with merge 815cedf..."
+        },
+        {
+            "user": "rh-atomic-bot",
+            "body": ":sunny: Test successful - [status-papr](https://s3.amazonaws.com/aos-ci/ghprb/projectatomic/buildah/815cedfc71fff7460b683b5f9e8fe053b31a31ef.1517744883539842560/index.html)\nApproved by: rhatdan\nPushing 815cedfc71fff7460b683b5f9e8fe053b31a31ef to master..."
+        },
+        {
+            "user": "boaz0",
+            "body": "thank you @rhatdan "
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "buildah",
+            "number": 396
+        }
+    ]
+}

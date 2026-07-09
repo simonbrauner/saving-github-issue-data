@@ -1,0 +1,48 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "buildah",
+    "number": 1094,
+    "type": "issue",
+    "title": "Buildah bud chokes when running in a non default network namespace",
+    "state": "closed",
+    "labels": [
+        "locked - please file new issue/PR"
+    ],
+    "user": "najamelan",
+    "body": "**Description**\n\nI have setup my system so as to only allow internet access from certain ns namespaces (for security). This means that I have to run buildah in a ns that is not the default if I want it to download packages during container build. However when doing so, I get the following error:\n\n`container_linux.go:348: starting container process caused \"process_linux.go:279: applying cgroup configuration for process caused \"mountpoint for cgroup not found\"\"`\n\nThe error takes place on the first `RUN` command in the docker file, even for something like `RUN id`\n\nWhen running in the default namespace, I don't get this error, but I can't build succesfully, because of lacking internet access.\n\n**Steps to reproduce the issue:**\n1. Create a docker file with a `RUN` command\n2. run buildah bud in a network namespace other than the default with `ip netns exec namespace buildah bud ....`\n\n\n**Output of `buildah version`:**\n```\nbuildah 1.4-2\n```\n\n**Output of `cat /etc/*release`:**\n\n```\nNAME=\"Arch Linux\"\nPRETTY_NAME=\"Arch Linux\"\nID=arch\nID_LIKE=archlinux\nANSI_COLOR=\"0;36\"\nHOME_URL=\"https://www.archlinux.org/\"\nSUPPORT_URL=\"https://bbs.archlinux.org/\"\nBUG_REPORT_URL=\"https://bugs.archlinux.org/\"\n```\n\n**Output of `uname -a`:**\n\n```\nLinux computer 4.18.12-arch1-1-ARCH #1 SMP PREEMPT Thu Oct 4 01:01:27 UTC 2018 x86_64 GNU/Linux\n```\n\n**Output of `cat /etc/containers/storage.conf`:**\n\nhas not been changed from the defaults\n",
+    "comments": [
+        {
+            "user": "rhatdan",
+            "body": "@ypu Could you try this out with buildah 1.5 and see if it still happens.  "
+        },
+        {
+            "user": "najamelan",
+            "body": "Sorry for the delay, I'm plugged into internet again. I just tested with buildah version: \n```\nVersion:         1.5\nGo Version:      go1.11.2\nImage Spec:      1.0.0\nRuntime Spec:    1.0.0\nCNI Spec:        0.4.0\nlibcni Version:  v0.7.0-alpha1\nGit Commit:      e94b4f98\nBuilt:           Wed Nov 28 11:10:56 2018\nOS/Arch:         linux/amd64\n```\nI still have the same error, except for the line numbers:\n`container_linux.go:337: starting container process caused \"process_linux.go:280: applying cgroup configuration for process caused \\\"mountpoint for cgroup not found\\\"\"`\n"
+        },
+        {
+            "user": "rhatdan",
+            "body": "@najamelan Could you give us the exact Command you are executing and a simplified Dockerfile, which shows this issue?\n\nBy any chance could you check if `podman build` also shows this behaviour?\n\nLastly are you executing buildah as root or non-root."
+        },
+        {
+            "user": "TomSweeneyRedHat",
+            "body": "@najamelan Can you run the command again with `--debug` please?  `bulidah --debug bud ...` and let us know what shows up there.  Also is there anything in journalctl of interest?"
+        },
+        {
+            "user": "najamelan",
+            "body": "I try to give you a complete guide to reproduce. You need to run buildah in a network namespace that is not the default. I run into this because my default namespace does not have internet access and buildah wants to download the base image. So I suppose you will probably need a ns with internet access. To set this up is +/- like this:\n```bash\n# Make sure the kernel can forward packages:\n#\nsysctl --write net.ipv4.ip_forward=1\n\n# create a new namespace\n#\nip netns add container\n\n# create a virtual ethernet device to connect it to your default namespace\n#\nip link add def_container type veth peer name container_def\n\n# Move one end into the container ns\n#\nip link set container_def netns container\n\n# Give them both an ip address\n#\n                         ip addr add 10.0.0.10/24  dev def_container\nip netns exec container  ip addr add 10.0.0.20/24  dev container_def\n\n# Turn them on\n#\n                         ip link set def_container  up\nip netns exec container  ip link set container_def  up\n\n# Setup the routing\n#\n                        ip route add 10.0.0.20  via 10.0.0.10\nip netns exec container ip route add default    via 10.0.0.10\n\n\n# Ok, all that's left for internet access is NAT masquerading. You can do it with any firewall you want, this is firehol configuration:\n#\n# Nat for container\n#\nrouter4 container2internet outface eth0  src 10.1.1.20 <--- CHANGE THE NAME OF YOUR NETWORK CARD IF NEEDED (eg. eth0 or wlan0)\n\n\t# does not inherit the rule parameters from router (so re-specify src)\n\t#\n\tmasquerade src 10.1.1.20\n\n\tserver     any accept\n\tpolicy         reject\n\n```\nYou can do all this in a virtual machine if you don't want to mess with your network setup as long as the vm has internet access.\nNow you should be able to run commands that need internet in the new network namespace:\n```bash\n# get a shell in the new ns\n#\nip netns exec container bash\n\n# verify that it works\n#\nping 8.8.8.8\n```\n\nContents of `Dockerfile`\n```Dockerfile\nFROM alpine:latest\n\nRUN id\n```\n\nCommand: `buildah bud --tag buildahbug .` Verify that it works in the default namespace, then verify it does not work in the container namespace.\n\nFeedback:\nNothing shows up in journalctl\nRunning as root or unprivileged gives the same result.\nOutput from podman-build is almost identical, it does not seem to recognise a --debug option.\n\nOutput from --debug, this is the last part, and I suppose the relevant part, the rest is in the attached [buildah.log](https://github.com/containers/buildah/files/2721243/buildah.log):\n```\nDEBU[0000] Running [\"runc\" \"create\" \"--bundle\" \"/tmp/buildah603891595\" \"--pid-file\" \"/tmp/buildah603891595/pid\" \"--no-new-keyring\" \"--console-socket\" \"/tmp/buildah603891595/console.sock\" \"buildah-buildah603891595\"] \ncontainer_linux.go:337: starting container process caused \"process_linux.go:280: applying cgroup configuration for process caused \\\"mountpoint for cgroup not found\\\"\"\nDEBU[0000] \"/tmp/buildah603891595/mnt/rootfs\" is apparently not really mounted, skipping \nerror running container: error creating container for [/bin/sh -c id]: : exit status 1\nERRO[0001] error building at step {Env:[PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin] Command:run Args:[id] Flags:[] Attrs:map[] Message:RUN id Original:RUN id}: error while running runtime: exit status 1 \nERRO[0001] exit status 1                                \n```\n"
+        },
+        {
+            "user": "najamelan",
+            "body": "Ok, I found something relevant. When run in a network namespace, `mount | grep cgroup` will return nothing. It seems you can't see any cgroup mount points from within a network namespace. I have no idea why this is. I will investigate a bit further.\n\nThe documentation for Network Namespaces mentions that a network namespace isolate the UNIX domain abstract socket namespace. Mayby cgroup mounts are sockets? I can't seem to find much documentation about all this."
+        },
+        {
+            "user": "najamelan",
+            "body": "I made some progress. Apparently `ip netns exec` creates a mount namespace, in order to bind mount network configuration files like resolv.conf per namespace. I suppose that they don't propagate all other mount points to the new namespace. I will ask if that's intended behavior."
+        },
+        {
+            "user": "najamelan",
+            "body": "According to Eric Biederman the code for iproute2 will need to be updated since cgroups and others aren't mounted in the same way they used to. So I will close this because it's not a buildah issue. No idea of the ETA for a patch."
+        }
+    ],
+    "cross_references": []
+}

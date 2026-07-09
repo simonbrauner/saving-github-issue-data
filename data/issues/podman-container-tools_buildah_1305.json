@@ -1,0 +1,75 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "buildah",
+    "number": 1305,
+    "type": "issue",
+    "title": "umask 0077 breaks build-using-dockerfile with USER statement",
+    "state": "closed",
+    "labels": [
+        "locked - please file new issue/PR"
+    ],
+    "user": "praiskup",
+    "body": "BUG REPORT INFORMATION\n---------------------------------------------------\n\n```\n$ cat Dockerfile\nFROM registry.fedoraproject.org/fedora:29\nRUN useradd jdoe\nUSER jdoe\nRUN id\n$ buildah bud .\nSTEP 1: FROM registry.fedoraproject.org/fedora:29\nSTEP 2: RUN useradd jdoe\nSTEP 3: USER jdoe\nSTEP 4: RUN id\ncontainer_linux.go:344: starting container process caused \"chdir to cwd (\\\"/\\\") set in config.json failed: permission denied\"\nerror running container: error creating container for [/bin/sh -c id]: : exit status 1\nerror building at step {Env:[DISTTAG=f29container FGC=f29  PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin] Command:run Args:[id] Flags:[] Attrs:map[] Message:RUN id Original:RUN id}: error while running runtime: exit status 1\nERRO[0001] exit status 1\n$ rpm -q buildah\nbuildah-1.6-2.git5f95bd9.fc29.x86_64\n```\n\n**Description**\n\nIdeally, buildah should make sure that the created `/` directory is created a standard way (say chmod 666 per filesystem.rpm content), or if it at least warned properly.\n\n**Describe the results you received:**\n\n`buildah bud` ends with strange permission error with umask 0077 after `USER` command/statement.\n\n**Describe the results you expected:**\n\n`buildah bud` either works under those contitions.\n\n**Output of `rpm -q buildah` or `apt list buildah`:**\n\n```\nbuildah-1.6-2.git5f95bd9.fc29.x86_64\n```\n\n**Output of `buildah version`:**\n\n```\nVersion:         1.6\nGo Version:      go1.11.4\nImage Spec:      1.0.0\nRuntime Spec:    1.0.0\nCNI Spec:        0.4.0\nlibcni Version:  \nGit Commit:      \nBuilt:           Thu Jan  1 01:00:00 1970\nOS/Arch:         linux/amd64\n```\n**Output of `cat /etc/*release`:**\n\n```Fedora release 29 (Twenty Nine)\nNAME=Fedora\nVERSION=\"29 (Twenty Nine)\"\nID=fedora\nVERSION_ID=29\nVERSION_CODENAME=\"\"\nPLATFORM_ID=\"platform:f29\"\nPRETTY_NAME=\"Fedora 29 (Twenty Nine)\"\nANSI_COLOR=\"0;34\"\nLOGO=fedora-logo-icon\nCPE_NAME=\"cpe:/o:fedoraproject:fedora:29\"\nHOME_URL=\"https://fedoraproject.org/\"\nDOCUMENTATION_URL=\"https://docs.fedoraproject.org/en-US/fedora/f29/system-administrators-guide/\"\nSUPPORT_URL=\"https://fedoraproject.org/wiki/Communicating_and_getting_help\"\nBUG_REPORT_URL=\"https://bugzilla.redhat.com/\"\nREDHAT_BUGZILLA_PRODUCT=\"Fedora\"\nREDHAT_BUGZILLA_PRODUCT_VERSION=29\nREDHAT_SUPPORT_PRODUCT=\"Fedora\"\nREDHAT_SUPPORT_PRODUCT_VERSION=29\nPRIVACY_POLICY_URL=\"https://fedoraproject.org/wiki/Legal:PrivacyPolicy\"\nFedora release 29 (Twenty Nine)\nFedora release 29 (Twenty Nine)\n```\n\n**Output of `cat /etc/containers/storage.conf`:**\n\n```\n[storage]\ndriver = \"overlay\"\nrunroot = \"/var/run/containers/storage\"\ngraphroot = \"/var/lib/containers/storage\"\n[storage.options]\nadditionalimagestores = [\n]\nsize = \"\"\noverride_kernel_check = \"true\"\nmountopt = \"nodev\"\n[storage.options.thinpool]\nostree_repo = \"\"\nskip_mount_home = \"false\"\n```\n",
+    "comments": [
+        {
+            "user": "TomSweeneyRedHat",
+            "body": "@giuseppe any thoughts?"
+        },
+        {
+            "user": "giuseppe",
+            "body": "I recently fixed an issue in fuse-overlayfs not honoring umask.  It is released as part of fuse-overlayfs 0.3:\nhttps://github.com/containers/fuse-overlayfs/pull/40\n\nWhat version of fuse-overlayfs are you using?"
+        },
+        {
+            "user": "giuseppe",
+            "body": "I see the problem now.\n\nThe same thing happens when running as root though.  Should buildah stop honoring `umask` and override it?  I think that if umask is set it should be honored, perhaps we can add a warning.\n\n@rhatdan @nalind what do you think?"
+        },
+        {
+            "user": "praiskup",
+            "body": "@giuseppe wrote:\n> I think that if umask is set it should be honored, perhaps we can add a warning.\n\nI'd agree if that was manually created directory, but in this case -> I just inherited from\n`fedora:29` image, I did `RUN useradd foo` -> `USER foo` -> and then any `RUN`\ncommand issued later (as `foo` user) fails because `foo` is unable to read `/` directory.\nIt's unexpected, warning in this case doesn't seem to be convenient enough."
+        },
+        {
+            "user": "rhatdan",
+            "body": "I think we should make sure that the / of the image is searchable. 0755.  If that is what the issue is?"
+        },
+        {
+            "user": "giuseppe",
+            "body": "I am still not sure we should override the umask if it is set.  If that is what the user expects, we are going to silently override it.\n\nI think we should just add a warning when `umask` is set"
+        },
+        {
+            "user": "rhatdan",
+            "body": "Is this just leaking through to containers/storage?  IE when it writes the image / ends up with two tight of permissions.  I think we could eaisly override the permissions on /."
+        },
+        {
+            "user": "giuseppe",
+            "body": "we can simply solve it as:\n\n```\n$ git diff\ndiff --git a/cmd/buildah/main.go b/cmd/buildah/main.go\nindex 1927eace..cdee1a33 100644\n--- a/cmd/buildah/main.go\n+++ b/cmd/buildah/main.go\n@@ -4,6 +4,7 @@ import (\n        \"fmt\"\n        \"github.com/containers/buildah\"\n        \"os\"\n+       \"syscall\"\n \n        \"github.com/containers/libpod/pkg/util\"\n        \"github.com/containers/storage\"\n@@ -63,6 +64,8 @@ func init() {\n                defaultStoreDriverOptions = optionSlice\n        }\n \n+       syscall.Umask(0)\n+\n        cobra.OnInitialize(initConfig)\n        //rootCmd.TraverseChildren = true\n        rootCmd.Version = fmt.Sprintf(\"%s (image-spec %s, runtime-spec %s)\", buildah.Version, ispecs.Version, rspecs.Version)\n```\n\nbut I am still not convinced we should silently do it.\n\nPerhaps we should just fail the build as having a `umask` in place breaks the reproducibility of builds as different umask generates different images"
+        },
+        {
+            "user": "praiskup",
+            "body": "> Perhaps we should just fail the build as having a umask in place breaks the reproducibility of builds as different umask generates different images\n\nThis would require a definition of \"expected umask value\".  I have (intentionally) 0077 for years on my box, but users can have any value there (default on _Fedora_ is 0022 afaik)."
+        },
+        {
+            "user": "giuseppe",
+            "body": "I think the only \"expected umask value\" should be 0.  Anything else modifies how the image looks like, so we need to either error out, or force it to 0 and throw a warning"
+        },
+        {
+            "user": "praiskup",
+            "body": "~~OK, I agree disagree that it should be zero~~ It should be probably 0002, but bothering errors everywhere (because the distributions defaults) don't make sense IMO. Enforcing ~~umask 0~~ some default umask makes more sense at least to me."
+        },
+        {
+            "user": "giuseppe",
+            "body": "Proposed fix: https://github.com/containers/buildah/pull/1325\n\nI'll probably need to do the same thing for Podman"
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "buildah",
+            "number": 1325
+        },
+        {
+            "organization": "sclorg",
+            "repository": "container-common-scripts",
+            "number": 119
+        }
+    ]
+}

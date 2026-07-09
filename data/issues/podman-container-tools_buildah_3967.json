@@ -1,0 +1,124 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "buildah",
+    "number": 3967,
+    "type": "issue",
+    "title": "volume not chowned before container start",
+    "state": "closed",
+    "labels": [],
+    "user": "ctml91",
+    "body": "The volume option U does not seem to result in the volume being recursively chowned prior to entrypoint on the first run.\n\nExample: This specific container checks permissions of the mounted dir in the container and fails if they are set to root.\n\nhttps://github.com/abraunegg/onedrive\n```\n[root@fedora volumes]# podman run --name test -v newvolume:/mount:U,Z --user 1000:1000 onedrive:latest\n```\n\nAlthough the volume is created it is not chowned before the entrypoint is called and it throws an error. You can confirm the permissions on the host will show as `root:root`.  \n\n```\n[root@fedora volumes]# ls -lthd newvolume/_data/\ndrwx------. 3 root root 4.0K Mar  10 02:25 _data\n\n[root@fedora volumes]# podman rm test\n```\n\nNow remove the container and recreate it without recreating the volume. The volume is successfully chowned this time around. The `U` flag is skipped/ignored if the volume is created during a `podman run` for some reason, I am not sure if there is something specific this container is doing or if it can be reproduced with others easily. I did try creating the volume before hand with `podman volume create` but experienced the same behaviour where only after the second run of the container do the permissions get set correctly prior to entrypoint call.\n\n",
+    "comments": [
+        {
+            "user": "vrothberg",
+            "body": "Thanks for reaching out.\n\nPlease fill out the entire template when opening an issue. Knowing which versions of Podman in which environment is run is oftentimes incremental to debug.  Can you share the output of `podman info --debug`?\n\nI cannot reproduce on my end."
+        },
+        {
+            "user": "giuseppe",
+            "body": "I also cannot reproduce it.\n\nI am closing the issue as it lacks feedback, please reopen if you've more data to share"
+        },
+        {
+            "user": "leonardolang",
+            "body": "Hi - I also experienced the same issue and had some trouble pinpointing what was causing this behaviour in the particular script where it appeared, but eventually was able to narrow it down to having a `buildah run` statement after `buildah config --volume=[..]`. Not sure if there are other requirements but I was able to consistently trigger/avoid the issue.\n\nSee below a minimum example that triggers the behaviour by setting an env variable:\n\n```\n#!/bin/bash\n\nset -eux -o pipefail\n\n# always create a new volume\npodman volume rm testing || :\n\nBASE=\"alpine\"\nFROM=$(buildah from $BASE)\n\nmkentrypoint() {\ncat <<EOF\n#!/bin/sh\nset -eux\nls -la /srv/testing/\ntouch /srv/testing/test && echo 😎 || echo 💥\nEOF\n}\n\nmkentrypoint | buildah run $FROM -- \\\n    /bin/sh -c 'cat > /myentrypoint.sh && chmod 755 myentrypoint.sh'\n\nbuildah config \\\n    --user=nobody \\\n    --volume=/srv/testing \\\n    --cmd='[\"/myentrypoint.sh\"]' \\\n    $FROM\n\n# running this script with `env KABOOM=1` will trigger a failure to access the\n# newly-created volume due to incorrect permissions\n\n[[ ${KABOOM:-} = 1 ]] && buildah run $FROM -- \\\n    /bin/sh -c \"set -x && ls -la /srv/testing\"\n\nbuildah commit $FROM testing:latest\n\npodman run --rm -it \\\n    --volume testing:/srv/testing:U \\\n    testing\n```\n\nRegarding environment:\n```\n> podman version\nClient:       Podman Engine\nVersion:      4.0.1\nAPI Version:  4.0.1\nGo Version:   go1.17.8\nGit Commit:   c8b9a2e3ec3630e9172499e15205c11b823c8107\nBuilt:        Sun Mar 13 07:44:23 2022\nOS/Arch:      linux/amd64\n```\n\nI was able to replicate it on two machines, running either rootless or as root.\n\n@giuseppe @vrothberg (pinging you since I'm not the original reporter and cannot reopen the issue)"
+        },
+        {
+            "user": "ctml91",
+            "body": "/reopen\n@giuseppe @vrothberg "
+        },
+        {
+            "user": "openshift-ci[bot]",
+            "body": "@ctml91: Reopened this issue.\n\n<details>\n\nIn response to [this](containers/buildah#3967):\n\n>/reopen\n>@giuseppe @vrothberg \n\n\nInstructions for interacting with me using PR comments are available [here](https://git.k8s.io/community/contributors/guide/pull-requests.md).  If you have questions or suggestions related to my behavior, please file an issue against the [kubernetes/test-infra](https://github.com/kubernetes/test-infra/issues/new?title=Prow%20issue:) repository.\n</details>"
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "rhatdan",
+            "body": "```\nsh /tmp/t.sh \n+ podman volume rm testing\nError: no volume with name \"testing\" found: no such volume\n+ :\n+ BASE=alpine\n++ buildah from alpine\n+ FROM=alpine-working-container\n+ mkentrypoint\n+ cat\n+ buildah run alpine-working-container -- /bin/sh -c 'cat > /myentrypoint.sh && chmod 755 myentrypoint.sh'\n+ buildah config --user=nobody --volume=/srv/testing '--cmd=[\"/myentrypoint.sh\"]' alpine-working-container\n+ [[ '' = 1 ]]\n+ buildah commit alpine-working-container testing:latest\nGetting image source signatures\nCopying blob 4fc242d58285 skipped: already exists  \nCopying blob 2639456bcf64 done  \nCopying config ac4038f20e done  \nWriting manifest to image destination\nStoring signatures\nac4038f20e2f7d6fdc3e4413389d7f6f26407e4a0f285185b013376ccd523cab\n+ podman run --rm -it --volume testing:/srv/testing:U testing\n+ ls -la /srv/testing/\ntotal 0\ndrwxr-xr-x    2 nobody   nobody           6 May  2 16:45 .\ndrwxr-xr-x    1 root     root            21 May  2 16:45 ..\n+ touch /srv/testing/test\n+ echo '😎'\n😎\n```"
+        },
+        {
+            "user": "rhatdan",
+            "body": "Seems to work with podman 4.0.3."
+        },
+        {
+            "user": "leonardolang",
+            "body": "@rhatdan You are not setting the environment variable.\n\nRun it like this:\n\n`env KABOOM=1 sh /tmp/t.sh`\n\nI just repeated the test with podman 4.0.3 and the issue is still there."
+        },
+        {
+            "user": "ctml91",
+            "body": "/reopen"
+        },
+        {
+            "user": "openshift-ci[bot]",
+            "body": "@ctml91: Reopened this issue.\n\n<details>\n\nIn response to [this](containers/buildah#3967):\n\n>/reopen\n\n\nInstructions for interacting with me using PR comments are available [here](https://git.k8s.io/community/contributors/guide/pull-requests.md).  If you have questions or suggestions related to my behavior, please file an issue against the [kubernetes/test-infra](https://github.com/kubernetes/test-infra/issues/new?title=Prow%20issue:) repository.\n</details>"
+        },
+        {
+            "user": "rhatdan",
+            "body": "This seems like more of a buildah bug then Podman."
+        },
+        {
+            "user": "rhatdan",
+            "body": "$ podman run -v newvolume:/mount:U,Z --user 1000:1000 ubi8 ls -ld /mount\ndrwxr-xr-x. 2 1000 1000 6 May  5 14:08 /mount\n"
+        },
+        {
+            "user": "leonardolang",
+            "body": "Just repeated the test with buildah 1.28.0 + podman 4.3.0 and it's still happening.\n\n```\nVersion:         1.28.0\nGo Version:      go1.19.1\nImage Spec:      1.0.2-dev\nRuntime Spec:    1.0.2-dev\nCNI Spec:        1.0.0\nlibcni Version:  v1.1.2\nimage Version:   5.23.0\nGit Commit:      79f41e3235ecc17d711a9aa06ec769234ec95399\nBuilt:           Tue Oct  4 02:34:51 2022\nOS/Arch:         linux/amd64\nBuildPlatform:   linux/amd64\n```\n\n```\n> podman version\nClient:       Podman Engine\nVersion:      4.3.0\nAPI Version:  4.3.0\nGo Version:   go1.19.2\nGit Commit:   ad42af94903ce4f3c3cd0693e4e17e4286bf094b-dirty\nBuilt:        Wed Oct 19 17:09:30 2022\nOS/Arch:      linux/amd64\n\n```\nFor the record: adding \",Z\" to the bind mount options doesn't make any difference.\n"
+        },
+        {
+            "user": "rhatdan",
+            "body": "What command exactly blew up, can you generate a simple repeater?"
+        },
+        {
+            "user": "leonardolang",
+            "body": "Does NOT work:\n\n```\nFROM=$(buildah from alpine)\n\nbuildah config \\\n    --user=nobody \\\n    --volume=/srv/testing \\\n    --cmd='[\"ls\",\"-la\",\"/srv/testing\"]' \\\n    $FROM\n\nbuildah run $FROM /bin/sh -c \"/bin/true\"\n\nbuildah commit $FROM testing:latest\n\npodman run --rm -it \\\n    --volume testing:/srv/testing:U \\\n    testing\n```\n\nDoes work:\n\n```\nFROM=$(buildah from alpine)\n\nbuildah config \\\n    --user=nobody \\\n    --volume=/srv/testing \\\n    --cmd='[\"ls\",\"-la\",\"/srv/testing\"]' \\\n    $FROM\n\nbuildah commit $FROM testing:latest\n\npodman run --rm -it \\\n    --volume testing:/srv/testing:U \\\n    testing\n```\n\nThere is literally a one-line difference between them (the `buildah run` line before `buildah commit`).\n\nThis is a trimmed-down version of the same script I pasted above, with the niceties removed (cleanup, logs, etc).\n"
+        },
+        {
+            "user": "rhatdan",
+            "body": "The first one works for me with \n```\n$ cat /tmp/t.sh \nFROM=$(buildah from alpine)\n\nbuildah config \\\n    --user=nobody \\\n    --volume=/srv/testing \\\n    --cmd='[\"ls\",\"-la\",\"/srv/testing\"]' \\\n    $FROM\n\nbuildah run $FROM /bin/sh -c \"/bin/true\"\n\nbuildah commit $FROM testing:latest\n$ sh /tmp/t.sh \nGetting image source signatures\nCopying blob e5e13b0c77cb skipped: already exists  \nCopying blob bce4e3b0c4e5 done  \nCopying config 4c355e100c done  \nWriting manifest to image destination\nStoring signatures\n4c355e100cb28e0ad60f515b8ef3ee37dc927d46415aecc49bc43083c00bb6b6\n$ podman run --rm -it \\\n    --volume testing:/srv/testing:U \\\n    testing\ntotal 0\ndrwxr-xr-x    2 root     root             6 Nov 21 19:28 .\ndrwxr-xr-x    1 root     root            21 Nov 21 19:28 ..\n$ podman -v\npodman version 4.3.1\n```"
+        },
+        {
+            "user": "leonardolang",
+            "body": "Unfortunately no, it is not working for you as well. The permissions are incorrect.\n\nPlease check the title of this issue."
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "leonardolang",
+            "body": "Same issue still happening:\n\n```\n> buildah version\nVersion:         1.28.0\nGo Version:      go1.19.1\nImage Spec:      1.0.2-dev\nRuntime Spec:    1.0.2-dev\nCNI Spec:        1.0.0\nlibcni Version:  v1.1.2\nimage Version:   5.23.0\nGit Commit:      79f41e3235ecc17d711a9aa06ec769234ec95399\nBuilt:           Tue Oct  4 02:34:51 2022\nOS/Arch:         linux/amd64\nBuildPlatform:   linux/amd64\n```\n\n```\n> podman version\nClient:       Podman Engine\nVersion:      4.3.1\nAPI Version:  4.3.1\nGo Version:   go1.19.3\nGit Commit:   814b7b003cc630bf6ab188274706c383f9fb9915-dirty\nBuilt:        Thu Nov 10 09:59:17 2022\nOS/Arch:      linux/amd64\n```\n\nRunning the first script (NOT OK):\n\n```\ndrwxr-xr-x    2 root     root            60 Dec 24 00:18 .\ndrwxr-xr-x    1 root     root            60 Dec 24 00:18 ..\n```\n\nRunning the second script (all good, permissions are updated):\n\n```\ndrwxr-xr-x    2 nobody   nobody          60 Dec 24 00:18 .\ndrwxr-xr-x    1 root     root            60 Dec 24 00:18 ..\n```\n\nKeep in mind you need to remove the temporary volume (testing) between execution of both scripts.\n\nSee my previous comment from **Nov 20** for both scripts."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@flouthoc PTAL"
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@flouthoc did you ever get a chance to look at this?"
+        },
+        {
+            "user": "flouthoc",
+            "body": "I'll take a look at this."
+        },
+        {
+            "user": "leonardolang",
+            "body": "I come from the future to say I can no longer reproduce the issue on my machine:\n\n```\n# buildah version\nVersion:         1.42.1\nGo Version:      go1.25.8\nImage Spec:      1.1.1\nRuntime Spec:    1.2.1\nCNI Spec:        1.1.0\nlibcni Version:  v1.3.0\nimage Version:   5.38.0\n```\n\n```\n# podman version\nClient:       Podman Engine\nVersion:      5.7.0\nAPI Version:  5.7.0\nGo Version:   go1.25.8\n``` \n\nJust to confirm, I re-tested with an older installation and I was able to reproduce the issue with these versions:\n\n``` \n# podman version\nClient:       Podman Engine\nVersion:      4.7.2\nAPI Version:  4.7.2\nGo Version:   go1.21.3\n```\n\n```\n# buildah version\nVersion:         1.32.2\nGo Version:      go1.21.3\nImage Spec:      1.1.0-rc.4\nRuntime Spec:    1.1.0\nCNI Spec:        1.0.0\nlibcni Version:  v1.1.2\nimage Version:   5.28.0\n```\n\nSo it was likely fixed between these releases."
+        },
+        {
+            "user": "giuseppe",
+            "body": "thanks for confirming it!"
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "buildah",
+            "number": 4116
+        }
+    ]
+}

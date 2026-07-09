@@ -1,0 +1,46 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "buildah",
+    "number": 6116,
+    "type": "issue",
+    "title": "Buildah incompatible with fuse-overlayfs 1.14+",
+    "state": "open",
+    "labels": [
+        "stale-issue"
+    ],
+    "user": "jackwhelpton",
+    "body": "Of course, \"incompatible\" may just mean \"breaking changes with my setup\". I'm seeing this error when building an image using an container with `buildah` 1.39.4 (and earlier), running in Kubernetes:\n\n```\nError: mounting new container: mounting build container \"10f101c113c4b1d872c217fccd2b1d5e3b631d130d4fed1cfd156a12641decd2\": creating overlay mount to /var/lib/containers/storage/overlay/2d7134fc5236f71ae832f9f63ed3d40fe8484f7ec507d8c8ca62e05e319dba4f/merged, mount_data=\"lowerdir=/var/lib/containers/storage/overlay/l/KDNIFVJTKORVJ7XUR5JEKENAG4,upperdir=/var/lib/containers/storage/overlay/2d7134fc5236f71ae832f9f63ed3d40fe8484f7ec507d8c8ca62e05e319dba4f/diff,workdir=/var/lib/containers/storage/overlay/2d7134fc5236f71ae832f9f63ed3d40fe8484f7ec507d8c8ca62e05e319dba4f/work,volatile\": using mount program /usr/sbin/fuse-overlayfs: unknown argument ignored: lazytime\nfuse: failed to execute /bin/mount: No such file or directory\nfuse-overlayfs: cannot mount: Invalid argument\n: exit status 1\n```\n\nIf I add `fuse-overlayfs` using the constraint `fuse-overlayfs<1.14`, this same build succeeds. Here's my Dockerfile, with extraneous portions elided:\n\n```dockerfile\nFROM cgr.dev/chainguard/wolfi-base\n\nRUN apk --no-cache add \\\n    buildah crun 'fuse-overlayfs<1.14' ip6tables netavark && \\\n    mkdir -p /var/tmp\n\nENV BUILDAH_LAYERS=true\n\nCOPY config /root/.config/containers\n```\n\nIn the config directory, `storage.conf` looks like this:\n\n```toml\n[storage]\ndriver = \"overlay\"\n\n[storage.options.overlay]\nmount_program = \"/usr/bin/fuse-overlayfs\"\nmountopt = \"nodev,fsync=0\"\n```\n\nI think that's all of the moving parts, but let me know if I missed anything. Any ideas?",
+    "comments": [
+        {
+            "user": "nalind",
+            "body": "The warning about \"lazytime\" looks like https://github.com/containers/fuse-overlayfs/issues/429, where it was hard-coded, but it was removed by https://github.com/containers/fuse-overlayfs/issues/430 after fuse-overlayfs 1.14 was tagged.\n\nIt looks like `fuse: failed to execute /bin/mount: No such file or directory` is the fatal error here, and you need the \"mount\"(?) package installed to clear that one up.\n\nIf your cluster's nodes are running Linux 5.11 or later, or a kernel that's had the changes backported, you should also be able to use overlay without fuse-overlayfs, if you prefer."
+        },
+        {
+            "user": "jackwhelpton",
+            "body": "Aha, this was the hint I needed, thanks! I had verified that `mount` didn't exist in my container image prior to 1.14, but I hadn't considered the possibility that 1.14 introduced it as a new dependency, adding it to the image reinstates successful builds.\n\nI'm checking with our sysadmins regarding the node cluster version... the fewer pieces involved here the better. For example, I'd already determined that explicitly specifying the `mount_program` appears to be unnecessary now.\n\nIs there a guide to removing the fuse-overlayfs dependency? Would it be as simple as omitting the `storage.conf`? I recall that when I built this up a few months back I did start from nothing, so every piece that's there is there for a reason (or was back then)."
+        },
+        {
+            "user": "nalind",
+            "body": "If the container's `/var/lib/containers/storage` directory is fresh for each run, omit the \"mount_program\" setting from the configuration, and you should be done.  Otherwise, since fuse-overlayfs and the kernel don't handle whiteouts exactly the same, you'd likely need to wipe it and re-pull images in order to ensure that whiteouts are stored in the format that the kernel expects."
+        },
+        {
+            "user": "jackwhelpton",
+            "body": "It's as simple as just omitting the \"mount_program\"? I tried without any `storage.conf` at all and it works, but if I remove the deps from the container altogether (no longer install `fuse-overlayfs` or `mount`) I get this error:\n\n```\ntime=\"2025-04-08T20:51:30Z\" level=error msg=\"[graphdriver] prior storage driver overlay failed: 'overlay' is not supported over overlayfs, a mount_program is required: backing file system is unsupported for this graph driver\"\nError: 'overlay' is not supported over overlayfs, a mount_program is required: backing file system is unsupported for this graph driver\ntime=\"2025-04-08T20:51:30Z\" level=error msg=\"[graphdriver] prior storage driver overlay failed: 'overlay' is not supported over overlayfs, a mount_program is required: backing file system is unsupported for this graph driver\"\ntime=\"2025-04-08T20:51:30Z\" level=warning msg=\"failed to shutdown storage: \\\"'overlay' is not supported over overlayfs, a mount_program is required: backing file system is unsupported for this graph driver\\\"\"\n```\n\nI see the same error when installing only `mount`, so `fuse-overlayfs` does appear to be required: what would I replace it with in order to run using the kernel as you suggest? I can confirm we're on at least kernel version 5.15.\n\nThanks for walking me through this, it's appreciated."
+        },
+        {
+            "user": "nalind",
+            "body": "Ah, right, it's still in a container, which means it's probably on top of an overlay filesystem, and fuse-overlayfs is okay with that situation in a way that the kernel's implementation isn't.\n\nHaving the pod spec mount an `emptyDir` on `/var/lib/containers` should get that area of the container's filesystem to be a non-overlay filesystem.\n\nIf your cluster's node's storage is on top of a filesystem that supports the FICLONE and FICLONERANGE ioctls (btrfs, xfs, bcachefs, ocfs2?), then overlay on the node will make use of it, so even using the \"vfs\" driver in the container shouldn't feel that slow."
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "buildah",
+            "number": 6910
+        }
+    ]
+}

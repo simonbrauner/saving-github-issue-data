@@ -1,0 +1,107 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "buildah",
+    "number": 4563,
+    "type": "issue",
+    "title": "[regression] Almost all buildah commands started to require either `CAP_SYS_ADMIN` or `unshare(CLONE_NEWUSER)` syscomp policy",
+    "state": "closed",
+    "labels": [
+        "locked - please file new issue/PR"
+    ],
+    "user": "slonopotamus",
+    "body": "**Steps to reproduce the issue:**\n1. Default Docker 20.10.x (in my case, 20.10.22) seccomp policy\n2. `docker run --rm -it quay.io/buildah/upstream:latest buildah --storage-driver=vfs info` or `docker run --rm -it quay.io/buildah/upstream:latest buildah --storage-driver=vfs images`\n\n\n**Describe the results you received:**\n\n```\nError during unshare(CLONE_NEWUSER): Operation not permitted\nERRO[0000] parsing PID \"\": strconv.Atoi: parsing \"\": invalid syntax \nERRO[0000] (Unable to determine exit status)\n```\n\n**Describe the results you expected:**\n\nI'd expect that `CAP_SYS_ADMIN` or `unshare(CLONE_NEWUSER)` are only required in case buildah **runs** nested containers. I should even be able to `buildah build` a Dockerfile that doesn't contain `RUN` instructions.\n\nThis all **worked** for buildah v1.28.0:\n\n```\n$ docker run --rm -it quay.io/buildah/stable:v1.28.0 buildah --storage-driver=vfs info\n{\n    \"host\": {\n        \"CgroupVersion\": \"v1\",\n        \"Distribution\": {\n            \"distribution\": \"fedora\",\n            \"version\": \"37\"\n        },\n< snip>\n}\n\n$ docker run --rm -it quay.io/buildah/stable:v1.28.0 buildah --storage-driver=vfs images\nREPOSITORY   TAG   IMAGE ID   CREATED   SIZE\n```\n\n**Output of `buildah version`:**\n\n```\n$ docker run --rm -it quay.io/buildah/upstream:latest buildah --storage-driver=vfs version\nVersion:         1.30.0-dev\nGo Version:      go1.19.5\nImage Spec:      1.0.2-dev\nRuntime Spec:    1.0.2-dev\nCNI Spec:        1.0.0\nlibcni Version:  v1.1.2\nimage Version:   5.24.0\nGit Commit:      \nBuilt:           Thu Feb  2 14:10:01 2023\nOS/Arch:         linux/amd64\nBuildPlatform:   linux/amd64\n```\n\n**Output of `uname -a`:**\n\n```\n$ uname -a\nLinux noblesse 5.15.80-gentoo-x86_64 #1 SMP Sat Dec 10 21:45:12 MSK 2022 x86_64 AMD Ryzen 7 3700X 8-Core Processor AuthenticAMD GNU/Linux\n```\n\n\n**Additional info:**\n\nThe issue comes from the fact that [buildah calls `unshare.MaybeReexecUsingUserNamespace`](https://github.com/containers/buildah/blob/v1.29.0/cmd/buildah/main.go#L150), which, starting with https://github.com/containers/storage/pull/1415 attempts to `unshare(CLONE_NEWUSER)` when run as a root without `CAP_SYS_ADMIN`.",
+    "comments": [
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "devurandom",
+            "body": "I get a similar issue when trying to build an image in CircleCI:\n```sh\nbuildah build \\\n  --tag \"${IMAGE_NAME}:${CIRCLE_SHA1}\" \\\n  --annotation org.opencontainers.image.authors=\"${CIRCLE_USERNAME}\" \\\n  --annotation org.opencontainers.image.revision=\"${CIRCLE_SHA1}\" \\\n  .\n```\n\nThe error is:\n```\nError: mount /var/lib/containers/storage/overlay:/var/lib/containers/storage/overlay, flags: 0x1000: operation not permitted\nWARN[0000] failed to shutdown storage: \"mount /var/lib/containers/storage/overlay:/var/lib/containers/storage/overlay, flags: 0x1000: operation not permitted\" \n\nExited with code exit status 125\n```\n\nThe `Containerfile` is:\n```Containerfile\nFROM docker.io/library/eclipse-temurin:17.0.6_10-jre@sha256:ab4ea8ace9acd2a9b19489cd2a8e8236a722257668d07a0a5a1f7ecaa9242bb1\nCMD [\"-javaagent:/javaagent.jar\", \"-jar\", \"/app.jar\"]\nCOPY javaagent/javaagent.jar /javaagent.jar\nCOPY target/app-*-standalone.jar /app.jar\n```\n\nIs this related, or should I open a separate issue?"
+        },
+        {
+            "user": "rhatdan",
+            "body": "Most likely a separate issue."
+        },
+        {
+            "user": "sjdrc",
+            "body": "Also started experiencing the exact same issue all of a sudden, After bumping gitlab-runner from 0.49.0 to 0.51.0"
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@giuseppe @flouthoc thoughts?"
+        },
+        {
+            "user": "giuseppe",
+            "body": "this seems like a duplicate of https://github.com/containers/buildah/issues/1901.\n\nBuildah needs CAP_SYS_ADMIN to be useful, either granted directly to its environment or being able to create a new user namespace (so `unshare` must be allowed)"
+        },
+        {
+            "user": "slonopotamus",
+            "body": "Yes, but no. The only why buildah needs those capabilities is for `RUN` directive. `FROM`, `COPY` and image download/upload can perfectly work without them."
+        },
+        {
+            "user": "rhatdan",
+            "body": "FROM and COPY also need to be able to store UIDs that are not the same as the UID of the user running BUILDAH, which means that we need to create a user namespace for rootless users at least."
+        },
+        {
+            "user": "ivanov17",
+            "body": "I have the similar issue with a custom Buildah image  based on the official Fedora 38 image. The reason I build custom image is because I'm using a Buildbot worker in the same container to run the Buildah process. I use the almost the same build instructions for my image that are used for the official Buildah image. I'm running containers using Podman on Centos 9 Stream. \n\nMy build process fails every time when Buildah tries to chroot into its own build directory. Here is the build log:\n\n```\nbuildah build --root /data/buildah/storage --file buildbot-worker/Containerfile --tag 192.168.100.110:5000/buildbot-worker\n in dir /data/buildah/build (timeout 1200 secs)\n watching logfiles {}\n argv: [b'buildah', b'build', b'--root', b'/data/buildah/storage', b'--file', b'buildbot-worker/Containerfile', b'--tag', b'192.168.100.110:5000/buildbot-worker']\n environment:\n  BUILDAH_ISOLATION=chroot\n  DISTTAG=f38container\n  FGC=f38\n  HOME=/data\n  HOSTNAME=buildbot\n  LC_CTYPE=C.UTF-8\n  PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin\n  PWD=/data/buildah/build\n  TERM=xterm\n  TZ=Etc/UTC\n  WORKERNAME=containers\n  container=oci\n using PTY: False\nSTEP 1/24: FROM quay.io/fedora/fedora-minimal:latest\nSTEP 2/24: ENV TZ=Etc/UTC\nSTEP 3/24: ENV BUILDAH_ISOLATION=chroot\nSTEP 4/24: RUN mkdir /data && chown 101:101 /data\nError: building at STEP \"RUN mkdir /data && chown 101:101 /data\": error in copier subprocess: chrooting to directory \"/data/buildah/storage/overlay/e3513e69bf4327c9f973802dd80e4b97b7867a431dffa64866c56c1e17d595f2/merged\": operation not permitted\nprogram finished with exit code 125\nelapsedTime=2.244802\n```\n\nMy image is labeled with `io.containers.capabilities`:\n\n```\n\"io.containers.capabilities\": \"CHOWN,DAC_OVERRIDE,FOWNER,FSETID,KILL,NET_BIND_SERVICE,SETFCAP,SETGID,SETPCAP,SETUID,CHOWN,DAC_OVERRIDE,FOWNER,FSETID,KILL,NET_BIND_SERVICE,SETFCAP,SETGID,SETPCAP,SETUID,SYS_CHROOT\"\n```\n\n\nI even tried to add `CAP_SYS_ADMIN` to the capabilities list, but it has no effect. \n\nIs this the same issue, or do I need to create a new issue for this?"
+        },
+        {
+            "user": "ivanov17",
+            "body": "A thousand apologies... I just forgot to use the `--security-opt label=disable` and `--security-opt seccomp=unconfined` options. If I run my container with them, it works as it should. I'll just leave this here for those who have a bad memory like me."
+        },
+        {
+            "user": "slonopotamus",
+            "body": "This is a **bad** advice because it removes lots of layers of security.\n\n----\n\nAnyway. I got the impression that buildah devs are not going to continue to support unprivileged containers, so this issue can be closed."
+        },
+        {
+            "user": "ivanov17",
+            "body": "> This is a **bad** advice because it removes lots of layers of security.\n\nBut this is an official recommendation: \n\n>  turn off label and seccomp confinement in the container\n\nhttps://quay.io/repository/buildah/stable?tab=info\n\nI think it's okay if the container is not on the host network, but in the same pod with the local registry"
+        },
+        {
+            "user": "slonopotamus",
+            "body": "> But this is an official recommendation\n\nSo what? This is a bad official recomendation. Code running as root inside `seccomp=unconfined` container can [load kernel modules into host](https://tbhaxor.com/breakout-from-seccomp-unconfined-container/) and do other nasty stuff."
+        },
+        {
+            "user": "giuseppe",
+            "body": "You only need to allow unshare and clone*.  You don't need to allow all the syscalls"
+        },
+        {
+            "user": "ivanov17",
+            "body": "> Code running as root inside `seccomp=unconfined` container can [load kernel modules into host](https://tbhaxor.com/breakout-from-seccomp-unconfined-container/) and do other nasty stuff.\n\nThis is true, but using Buildah to create container images does not require root privileges"
+        },
+        {
+            "user": "slonopotamus",
+            "body": "> But using Buildah to create container images does not require root privileges\n\nBut [documentation that was referenced above](https://quay.io/repository/buildah/stable?tab=info) suggests running with root privileges inside unconfined container."
+        },
+        {
+            "user": "dghubble",
+            "body": "I hit this in an environment that runs buildah within a Kubernetes Pod.\n\n```\nError during unshare(CLONE_NEWUSER): Permission denied\nlevel=error msg=\"parsing PID \\\"\\\": strconv.Atoi: parsing \\\"\\\": invalid syntax\"\n```\n\nThe changelog doesn't mention that suddenly buildah has different needs, starting around v1.30. For Kubernetes pods, just adding the `SYS_CAP_ADMIN` capability to the security context wasn't sufficient. `privileged` solves it, but that's not a great workaround. End result here is our security is weakened, when the intention was certainy the opposite."
+        },
+        {
+            "user": "rhatdan",
+            "body": "This looks like you are running on a platform with seccomp rules that dropped the unshare syscall, "
+        },
+        {
+            "user": "magnus-longva-bouvet",
+            "body": "> I hit this in an environment that runs buildah within a Kubernetes Pod.\n> \n> ```\n> Error during unshare(CLONE_NEWUSER): Permission denied\n> level=error msg=\"parsing PID \\\"\\\": strconv.Atoi: parsing \\\"\\\": invalid syntax\"\n> ```\n> \n> The changelog doesn't mention that suddenly buildah has different needs, starting around v1.30. For Kubernetes pods, just adding the `SYS_CAP_ADMIN` capability to the security context wasn't sufficient. `privileged` solves it, but that's not a great workaround. End result here is our security is weakened, when the intention was certainy the opposite.\n\nDid you just misspell the capability? `CAP_SYS_ADMIN` , not `SYS_CAP_ADMIN`. It works for me."
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "buildah",
+            "number": 4538
+        },
+        {
+            "organization": "containers",
+            "repository": "storage",
+            "number": 1415
+        }
+    ]
+}

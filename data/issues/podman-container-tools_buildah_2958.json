@@ -1,0 +1,153 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "buildah",
+    "number": 2958,
+    "type": "issue",
+    "title": "Build multi-arch buildah images",
+    "state": "closed",
+    "labels": [
+        "buildkit",
+        "locked - please file new issue/PR"
+    ],
+    "user": "barthy1",
+    "body": "This issue is created to track the discussion about best ways to build multi-arch images for buildah.\nSo far several CI tools were discussed:\n- [Cirrus-CI](https://cirrus-ci.org/ )\n  - default CI tool for buildah\n  - no hardware available, except x86_64\n  - no [docker buildx](https://docs.docker.com/buildx/working-with-buildx/) from the box for hardware emulation in builds\n\nConclusion: Needs more investigation, probably `buildah bud --arch ..` is a solution, still needs to setup everything from scratch\n\n- [Travis](https://docs.travis-ci.com/)\n  - no use in buildah repo \n  - has real hardware to run the builds or tests\n  - have limitation in free usage\n  - limited to physically available hardware to support(amd64, arm64, ppc64le, s390x)\n  - has already multi-arch build setup in skopeo to use as example\n\nConclusion: depends on community opinion?? if Travis should be back on the table for buildah\n\n- [Github Actions](https://docs.github.com/en/actions)\n  - no use in buildah repo \n  - no hardware available, except x86_64\n  - has \"library\" to run multi-arch builds in emulation mode\n\nConclusion: easy to use, but new CI tool\n\nLong term approach - Cirrus-CI should be the right way to do everything.\nShort term approach - probably, Github Actions as easiest way to prepare the code.\n\nStart of discussion - https://github.com/containers/skopeo/pull/1104#issuecomment-771601568\n\ncc @cevich @TomSweeneyRedHat @rhatdan ",
+    "comments": [
+        {
+            "user": "cevich",
+            "body": "Re: Cirrus-CI - we 100% control the [contents of the VM images](https://github.com/containers/automation_images) and the speed/size of the VMs.  The only restrictions are those imposed by the underlying cloud (currently GCP).  Adding packages is pretty easy.  The only possible exception are images for MacOS and Windows tasks, we use the default ones provided by the platform."
+        },
+        {
+            "user": "cevich",
+            "body": "Re: Travis - The multi-arch hardware is really the only plus.  The Ubuntu-centric-ness and slowness/limitations are HUGE detractors."
+        },
+        {
+            "user": "cevich",
+            "body": "Re: Github Actions - Biggest attraction is the \"slick\" containers-based workflow.  IMHO, this is also biggest detractor - it's not very portable to other CI systems.  Secondarily, it's a relatively immature platform (some strange/quirky \"features\" and limitations), and I fear (given time) they may start imposing more heavy-handed usage limitations like Travis."
+        },
+        {
+            "user": "cevich",
+            "body": "Oh!  Another option here could be to use [OBS](http://openbuildservice.org/), IIRC they _do_ have native hardware available...but I have zero knowledge of how it works.  @vrothberg knows more about this."
+        },
+        {
+            "user": "rhatdan",
+            "body": "The issue with buildah bud --arch ...\nIs that downloading the dnf/yum xml content and processing it can take forever in emulation mode. Using ubi8 images is much better then Fedora for this, since it has much smaller differences between the image and the latest updates."
+        },
+        {
+            "user": "cevich",
+            "body": "Dang.  Those are the kinds of things that seem to get to be slow ***and** arrive at 99% before suddenly failing.\n\nMaybe is there an arch-sensitive dnf downloader we could use to pre-populate all/most of the needed packages locally, before running the build?  Makes for an \"interesting\" Containerfile...but might drastically improve performance."
+        },
+        {
+            "user": "rhatdan",
+            "body": "Would love to talk to the dnf guys here to see if this is something that could be done on local arch and mounted into the container."
+        },
+        {
+            "user": "cevich",
+            "body": "On F32, `man dnf download` shows that it ***DOES*** accept a `--arch` option along with a `--resolve` option to make it also grab dependencies.\n\nedit: The `--resolve` option operates WRT the local system, so that probably won't be very helpful.  So before using `dnf download` we would need to be able to feed it a complete dep-solved list of packages :confounded: \n\nanother edit:  There is a `--forcearch` general option to `dnf`, but it specifically says it requires QEMU emulation to operate properly.  ugh! Exactly the problem we want to avoid :confounded: "
+        },
+        {
+            "user": "cevich",
+            "body": "Oh!  Wait, maybe the docs are lying, because I found `--downloadonly` with `--forcearch` does seem to work as long as you ***also*** specify `--installroot`, no emulation required.  To proove QEMU need not be involved, it can be done using a F33 (latest) container.  I was able to cache over 200 dependencies for s390x podman package (F30 release chosen at random):\n\n```\n[cevich@localhost ~]$\n[cevich@localhost ~]$ IROOT=/tmp/s390_root\n[cevich@localhost ~]$ VCD=\"$IROOT/var/cache/dnf\"\n[cevich@localhost ~]$ mkdir -p $VCD\n[cevich@localhost ~]$ $PRUN dnf install -y --releasever=30 --forcearch=s390x --installroot=$IROOT --downloadonly podman\nFedora 30 openh264 (From Cisco) - s390x               5.4 kB/s | 4.3 kB     00:00\nFedora Modular 30 - s390x                             1.3 MB/s | 2.6 MB     00:01\nFedora Modular 30 - s390x - Updates                   5.3 MB/s | 4.1 MB     00:00\nFedora 30 - s390x - Updates                           8.9 MB/s |  21 MB     00:02\nFedora 30 - s390x                                     9.1 MB/s |  64 MB     00:07\nDependencies resolved.\n======================================================================================\n Package                     Arch   Version                             Repo     Size\n======================================================================================\nInstalling:\n podman                      s390x  2:1.8.0-4.fc30                      updates  13 M\nInstalling dependencies:\n acl                         s390x  2.2.53-3.fc30                       fedora   67 k\n...cut...\n trousers                    s390x  0.3.13-12.fc30                      fedora  127 k\n\nTransaction Summary\n======================================================================================\nInstall  231 Packages\n\nTotal download size: 167 M\nInstalled size: 737 M\nDNF will only download packages for the transaction.\nDownloading Packages:\n(1/231): audit-libs-3.0-0.15.20191104git1c2f876.fc30. 758 kB/s | 103 kB     00:00\n...cut...\n(231/231): tar-1.32-1.fc30.s390x.rpm                  629 kB/s | 855 kB     00:01\n--------------------------------------------------------------------------------------\nTotal                                                 7.3 MB/s | 167 MB     00:22\nwarning: /tmp/s390_root/var/cache/dnf/updates-297edde6bb84db09/packages/audit-libs-3.0-0.15.20191104git1c2f876.fc30.s390x.rpm: Header V3 RSA/SHA256 Signature, key ID cfc659b9: NOKEY\nFedora 30 - s390x - Updates                           1.6 MB/s | 1.6 kB     00:00\nImporting GPG key 0xCFC659B9:\n Userid     : \"Fedora (30) <fedora-30-primary@fedoraproject.org>\"\n Fingerprint: F1D8 EC98 F241 AAF2 0DF6 9420 EF3C 111F CFC6 59B9\n From       : /etc/pki/rpm-gpg/RPM-GPG-KEY-fedora-30-s390x\nKey imported successfully\nComplete!\nThe downloaded packages were saved in cache until the next successful transaction.\nYou can remove cached packages by executing 'dnf clean packages'.\n[cevich@localhost ~]$ ls $IROOT\nvar\n[cevich@localhost ~]$ du -shxc $VCD\n357M    /tmp/s390_root/var/cache/dnf\n357M    total\n[cevich@localhost ~]$\n```\n\nSo, if we could do something like that to seed the cache (even w/o using a container like I did), then run the emulated `buildah bud -v $VCD:$VCD:Z --arch...` it should pickup packages from cache.  Bonus: No need to clean the dnf cache in a RUN command inside the Dockerfile, since the volume-mount will simply be absent at runtime."
+        },
+        {
+            "user": "rhatdan",
+            "body": "Nice work, we have -v $VCD:$VCD:O for this use case, which should handle everything perfectly."
+        },
+        {
+            "user": "barthy1",
+            "body": "From my side, I finished sample Github action to build buildah stable version.\nIf you are interested, you can have a look - https://github.com/barthy1/buildah/blob/mult_arch_build/.github/workflows/multi-arch-build.yaml\n\nBuild and push for 4 archs took 36m https://github.com/barthy1/buildah/runs/1839925493?check_suite_focus=true"
+        },
+        {
+            "user": "cevich",
+            "body": "@barthy1 my apologies for the slow attention, my attention is divided across many fronts :disappointed: Looking now..."
+        },
+        {
+            "user": "barthy1",
+            "body": "@cevich np, it's not a PR so far. Just some demonstration of build Github action."
+        },
+        {
+            "user": "cevich",
+            "body": "...some minor suggestions:\n\nLine 35: Use `date -u --iso-8601=seconds` I think would improve readability.\nLine 58: This looks like some kind of conditional to me, but is confusing, would it be clearer if done as an `if:` on the step?\n\nOverall it looks really good actually.  The 36-minute full-build time isn't that bad actually, considering it would only happen on branches and cron-schedule (i.e. nobody's waiting for it).  Unless you're working on something further, this looks ready to me for a PR.  I'm happy to setup the robot accounts and github-action secrets once we have a PR."
+        },
+        {
+            "user": "barthy1",
+            "body": "> Line 58: This looks like some kind of conditional to me, but is confusing, would it be clearer if done as an if: on the step?\n\nThis condition is done actually to push the images only when it's on branches and cron-schedule. For other case it would be just build (to make sure that build actually works) without push. The end of your comment makes me think that it's better to run this step only when we want to push (`if:`) and skip it for other cases (to avoid waiting problem).\n\n>  Unless you're working on something further, this looks ready to me for a PR. I'm happy to setup the robot accounts and github-action secrets once we have a PR.\n\nI am going to add one more part to current setup to build `upstream` buildah version(in addition to `stable` one) in parallel. After that I will submit PR and ping you regarding secrets."
+        },
+        {
+            "user": "cevich",
+            "body": "> and skip it for other cases (to avoid waiting problem).\n\nThanks for the clarification.  Ya, I think that might be beneficial, people like waiting even less than machines :smile: \n\n> I am going to add one more part to current setup to build upstream buildah version(in addition to stable one)\n\nThis is where things with github-actions can make people loose their minds.  IIRC, some workflows (like cron) only operate from the worflow yaml on the default branch.  Others (pull request) will run on branches (if the yaml is there).  Regardless, when a new release of buildah happens, the workflow yaml will appear on multiple branches, but only **sometimes** be used :confounded: \n\nI would suggest splitting up the YAML into multiple files, based on the different `on` conditions.  However last I checked, there's no way to re-use steps from one workflow in another, so this would lead to lots of ugly duplication :confounded: Anyway, point is, I think initially it's perfectly fine to have a PR just focus on getting the latest-master working.  Leave the other branches up to a future PR - it will likely need lots and lots of comments covering necessary complications due to (IMHO) the horrible design-decisions WRT branches and workflow YAML."
+        },
+        {
+            "user": "barthy1",
+            "body": "hmm, I guess I was not clear enough. \nI'd like just to repeat the same setup as it was done for skopeo.\nMeaning build images for \n`upstream` version - https://github.com/containers/buildah/tree/master/contrib/buildahimage/upstream\n                     and push to `quay.io/buildah/upstream:master`\nand\n`stable` version - https://github.com/containers/buildah/tree/master/contrib/buildahimage/stable\n                     and push to `quay.io/buildah/stable:v...` and `quay.io/containers/buildah:v...`\n\nThis can be done in one workflow using [matrix](https://docs.github.com/en/actions/learn-github-actions/managing-complex-workflows#using-a-build-matrix) to reuse almost everything accept path to Dockerfile and tags"
+        },
+        {
+            "user": "cevich",
+            "body": "Oh I gotcha, yeah that's no problem."
+        },
+        {
+            "user": "barthy1",
+            "body": "The PR is created - https://github.com/containers/buildah/pull/3006\nSorry, it takes some time to figure out the challenge, that docker login doesn't support having creds for 2 repos of 1 org (`quay.io/containers` and `quay.io/buildah`), so had to have the login and push steps separately for 2 repos :(\nMy test workflow run https://github.com/barthy1/buildah/actions/runs/558348033\nFor `stable`(contrib/buildahimage/stable) it was - 30m\nFor `upstream` (contrib/buildahimage/upstream) - 1h12m\nAt least build are running in parallel."
+        },
+        {
+            "user": "cevich",
+            "body": "> docker login doesn't support having creds for 2 repos of 1 org\n\nAhh yes, \"*that*\" problem :disappointed: "
+        },
+        {
+            "user": "james-crowley",
+            "body": "Sorry I am late to the discussion. I actually worked with Cirrus CI on enabling multi-arch workers/Persistent Workers. You should be able to add any architecture(arm64, ppc64le, s390x, amd64) to their platform. Once the workers are configured to and you should be able to deploy jobs.\n\nYou can see more information in this issue: https://github.com/cirruslabs/cirrus-ci-docs/issues/263\n\nThe persistent workers worked very well. If `buildah` needs access to s390x and ppc64le workers let me know. \n\nThank you @barthy1 outlining everything!\n\n@rhatdan Let me know if you need help/want access to hardware."
+        },
+        {
+            "user": "TomSweeneyRedHat",
+            "body": "@barthy1 first off, TYVM for your fine work here.\nDoes `podman login` not let you sign in to both?  I've not looked at the PR yet, but don't know if that would be an option or not for it."
+        },
+        {
+            "user": "barthy1",
+            "body": "@TomSweeneyRedHat  hmm, on my local test machine `podman login` had same behaviour as docker login, however I have Fedora 30 with old podman and even installed docker at the same machine :(( so can be a lot of confusions..\nIf latest podman should resolve problem with login, I will definitely test it with github actions workflow(yes, it can make code better), as podman is now available among preinstalled tools - https://github.com/actions/virtual-environments/issues/320"
+        },
+        {
+            "user": "barthy1",
+            "body": "just tested the behaviour in github actions. `podman login` to 2 quay repos one after another and after that 1 `docker push` with tags for 2 quay repos fails with unauthorized error :("
+        },
+        {
+            "user": "barthy1",
+            "body": "at least confirmed that now podman can be used with Github actions easily :)"
+        },
+        {
+            "user": "cevich",
+            "body": "> Sorry I am late to the discussion. I actually worked with Cirrus CI on enabling multi-arch workers/Persistent Workers. You should be able to add any architecture(arm64, ppc64le, s390x, amd64) to their platform. Once the workers are configured to and you should be able to deploy jobs.\n\n@james-crowley I caught that feature the other week, very cool! Thanks for helping with that!  As badly designed/immature as github-actions is, and the slowness of emulation, the implementation (in this case) is quite compact.  Mainly we're using Github-Actions here because it happened first and @barthy1 already volunteered, not technical superiority.  So I certainly won't write-off moving this over to native hardware under Cirrus-CI eventually, esp. if hardware is volunteered :grin:  I would very much prefer to stay on one, common automation platform anyway."
+        },
+        {
+            "user": "barthy1",
+            "body": "@cevich feel free just to stop working on my PR, if you think you can have Cirrus-CI setup with native hardware fast.\nAnyway, Cirrus-CI is target platform at the end, and my final goal is to have multi-arch builds, not use Github actions ;)"
+        },
+        {
+            "user": "cevich",
+            "body": "I don't think it will be \"fast\".  We would need to script all the build, tag, and push aspects + test that it all works at scale, using a brand-new Cirrus-CI feature.  Whereas you've got something already (in your PR) completely \"scripted\" and (it sounds like) already tested.  Despite it being non-optimized and on the non-preferred  Github Actions platform, \"working and tested\" is nearly always better than \"theoretical and untested\" and most certainly better than the current single-arch \"cron jobs on a laptop\" situation.\n\nI've considered the \"Sunken Cost Fallacy\", but I think in this case it's fine to go out with what you have in your PR.  Call it a \"prototype\" or \"proof-of-concept\" if you like.  Then we plan on followup development of an optimized setup on Cirrus + Native hardware.  The main reason is...during the development of the optimized setup, however long that takes, the community can benefit from having automated multi-arch images built.  It can also act as a fall-back, in case native hardware + Cirrus doesn't work out in the end.\n\nDoes that make sense?  (I'm okay with being wrong about this)"
+        },
+        {
+            "user": "fkorotkov",
+            "body": "Just stumbled on this issue and not sure if my information is relevant now for for future researchers... \n\n[Cirrus can build multi-arch images and use buildx](https://cirrus-ci.org/guide/docker-builder-vm/#multi-arch-builds). @cevich here is the [packer template for the image with QEMU](https://github.com/cirruslabs/vm-images/blob/f69860f9ffae4f717af27e0560d87341d3cfe86d/googlecompute/ubuntu_images.json#L87)."
+        },
+        {
+            "user": "cevich",
+            "body": "Thanks @fkorotkov, I'll keep this in my back-pocket.\n\nFor this specific issue, we've got this mostly working in github-actions but I'm so very much not a fan.  Our container-tools image build-logic has grown well beyond what simple buildx can easily accommodate.  Meanwhile, github-actions has proven itself several times, as overly complex, restrictive, unreadable, and unmaintainable by non-experts.\n\nSo I'm currently working to re-implement as simple bash scripts, we can then run on our Cirrus-CI VMs.  Since I'm going that way anyway, moving over to our own container tooling also makes sense.  See also https://github.com/containers/buildah/issues/3268"
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "skopeo",
+            "number": 1104
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "buildah",
+            "number": 2002
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "buildah",
+            "number": 3006
+        }
+    ]
+}

@@ -1,0 +1,573 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "buildah",
+    "number": 158,
+    "type": "issue",
+    "title": "can buildah run in a docker container?",
+    "state": "closed",
+    "labels": [
+        "locked - please file new issue/PR"
+    ],
+    "user": "rawlingsj",
+    "body": "I'd like to use buildah inside a an OpenShift / Kubernetes pod.  So I'm testing buildah from inside a docker container however `buildah bud` and `buildah run` commands fail with:\n```\nERRO[0000] 'overlay' is not supported over overlay\nERRO[0000] 'overlay' is not supported over overlay\nERRO[0000] backing file system is unsupported for this graph driver\nbacking file system is unsupported for this graph driver\n``` \n",
+    "comments": [
+        {
+            "user": "rhatdan",
+            "body": " I think you should have /var/lib/containers/ volume mounted into the container which should work.  Since that storage would not be on a overlay file system then.  Right now you are building a container on top of a /var/lib/container/storage inside.\n"
+        },
+        {
+            "user": "rawlingsj",
+            "body": "Thanks @rhatdan that fixed it although I had to run the docker container as privileged for it to work.  Are there any plans or is it even possible to use buildah in a non privileged docker container?  "
+        },
+        {
+            "user": "rhatdan",
+            "body": "It could potentially run some workloads without requiring too much privilege, \nYou would need to add capability SYS_ADMIN since it is mounting shares.  It should be able to work with SELinux enforcing on it though.  @nalind WDYT"
+        },
+        {
+            "user": "rawlingsj",
+            "body": "My main use case is to build images with fabric8 / OpenShift.io using non privileged pods and also  push (using skopeo?) that image to external registries."
+        },
+        {
+            "user": "rawlingsj",
+            "body": "FWIW these are the steps I took to test this incase it's helpful to others.  I have a Mac so decided to use minishift so I could mount the `/var/lib/containers/` dir.\n\nI created a [Dockerfile](https://github.com/rawlingsj/buildah/blob/master/Dockerfile) which includes the example from the blog http://www.projectatomic.io/blog/2017/06/introducing-buildah/\n\n```\neval $(minishift docker-env)\ngit clone https://github.com/rawlingsj/buildah.git\ncd buildah \ndocker build -t  test/buildah:dev .\ndocker run --privileged -v /var/lib/containers/:/var/lib/containers/ -ti test/buildah:dev bash\nbuildah bud -t hellofromcontainer .\nbuildah run hellofromcontainer-working-container\n```"
+        },
+        {
+            "user": "rhatdan",
+            "body": "Could you see if this would work with a couple of tweeks.\n\ndocker run --cap-add=SYS_ADMIN  -v /var/lib/containers/:/var/lib/containers/:Z -ti test/buildah:dev bash\n\nThat if this works it proves that buildah would work with a more confined container, then privileged.\n\nBTW \nbuildah run != docker run.\n\nIt is really equivalent of executing the RUN statement inside of a Dockerfile.   It will execute a the sepcified command inside the buildcontainer using runc."
+        },
+        {
+            "user": "rawlingsj",
+            "body": "> It is really equivalent of executing the RUN statement inside of a Dockerfile. It will execute a the sepcified command inside the buildcontainer using runc.\n\nAh ok, so we'd still need to be able to perform buildah run.\n\n> Could you see if this would work with a couple of tweeks.\ndocker run --cap-add=SYS_ADMIN -v /var/lib/containers/:/var/lib/containers/:Z -ti test/buildah:dev bash\n\nSure thing, so bud works and run fails:\n\nbuildah run hellofromcontainer-working-container\n```\n[root@7e09af59a10a example]# buildah run hellofromcontainer-working-container\ncontainer_linux.go:259: starting container process caused \"process_linux.go:257: getting pipe fds for pid 74 caused \\\"readlink /proc/74/fd/0: permission denied\\\"\"\n```"
+        },
+        {
+            "user": "mariusgrigoriu",
+            "body": "The SYS_ADMIN capability is as good as root. http://forums.grsecurity.net/viewtopic.php?f=7&t=2522\nBuilding container images without requiring root would be a benefit to those of us who want to build images in shared CI environments without single-use virtual machines."
+        },
+        {
+            "user": "rhatdan",
+            "body": "That article is comparing CAPABILITIES.  Not CAPABILITIES while in a container.  With things like SELinux further locking the processes down.  Namespaces/seccomp would provide some hurdles needed to break through as well.\n\nThat being said, I am not sure how easily someone can break out of the containment with SYS_ADMIN.  First thing would be to remount the kernel file systems to read/write and see if you could modify the kernel to break out.\n\n@rawlingsj The difficult part here is figuring out what was blocked.\n\nCould you see if you have any AVC's.   ausearch -m avc -ts recent\n\n"
+        },
+        {
+            "user": "ae6rt",
+            "body": "I'm interested in building container images within a container, as the original poster is.  \n\nI'm using Docker for Mac, and do\n\n## On the Mac\n\n```\n$ sudo mkdir -p /private/var/lib/containers\n\n$ sudo chmod -R ugo+rwx /private/var/lib/containers\n\n$ docker run --cap-add=SYS_ADMIN -v /private/var/lib/containers/:/var/lib/containers/:rw,Z -ti fedora bash\n```\n\n##  Within the container \n```\n# dnf install -y buildah\n\n# buildah from fedora\nGetting image source signatures\nCopying blob sha256:4db9daa7aafd1ea07f24d2ec893833adc17b5a9c5dde4150cf99a5789b3d322e\n 72.07 MiB / 72.07 MiB [=======================================================]\nERRO[0009] error pulling image \"fedora\": Error writing blob: Error processing tar file(exit status 1): open /root/.bash_logout: permission denied \n```\nAny ideas on how to fix this?\n\nThanks.\n\n"
+        },
+        {
+            "user": "rhatdan",
+            "body": "I have no idea, do you have any AVC's from the host?"
+        },
+        {
+            "user": "ae6rt",
+            "body": "The version of Linux used by Docker for Mac is some Alpine variant that has no SELinux enabled as far as I can tell.\n\n(The *buildah* docker image in the docker-run commands below is nothing more than fedora with *dnf install -y buildah* run on it).\n\nBut this is interesting:  consider basing a new buildah-image on ubuntu, and then another one on alpine.  The ubuntu build fails, but not in the same way the fedora build [above](https://github.com/projectatomic/buildah/issues/158#issuecomment-323125577) fails.  The alpine build succeeds.  \n\n### Ubuntu\n\n```\n$ docker run --cap-add=SYS_ADMIN -v /private/tmp/containers/:/var/lib/containers/:rw,Z -ti buildah buildah from ubuntu\nGetting image source signatures\nCopying blob sha256:d5c6f90da05dc7e77d2e5fef63c341ab05ba2a03396ab5ae8f18814a7bbf5265\n 43.44 MiB / 45.07 MiB [=====================================================>-]\n 45.07 MiB / 45.07 MiB [=======================================================]\nERRO[0006] error pulling image \"ubuntu\": Error writing blob: Error processing tar file(exit status 1): function not implemented \n```\n\n### Alpine\n\n```\n$ docker run --cap-add=SYS_ADMIN -v /private/tmp/containers/:/var/lib/containers/:rw,Z -ti buildah buildah from alpine\nGetting image source signatures\nCopying blob sha256:88286f41530e93dffd4b964e1db22ce4939fffa4a4c665dab8591fbab03d4926\n 0 B / 1.90 MiB [--------------------------------------------------------------]\nCopying config sha256:7328f6f8b41890597575cbaadc884e7386ae0acc53b747401ebce5cf0d624560\n 0 B / 1.48 KiB [--------------------------------------------------------------]\nWriting manifest to image destination\nStoring signatures\n 1.90 MiB / 1.90 MiB [=========================================================]\nalpine-working-container\n```\n\n### More on fedora\n\nCircling back to the fedora build, because the failure message mentioned a specific file (/root/.bash_logout), if you set *--debug* on buildah while building the fedora image, you get this excerpt\n\n```\n$ docker run --cap-add=SYS_ADMIN -v /private/tmp/containers/:/var/lib/containers/:rw,Z -ti buildah buildah --debug from fedora\n...\nDEBU[0001] GET https://registry-1.docker.io/v2/library/fedora/blobs/sha256:4db9daa7aafd1ea07f24d2ec893833adc17b5a9c5dde4150cf99a5789b3d322e \nDEBU[0002] Detected compression format gzip             \n 0 B / 72.07 MiB [-------------------------------------------------------------]DEBU[0002] Using original blob without modification     \nDEBU[0002] Applying tar in /var/lib/containers/storage/overlay/4a78003b84c8ead429ff490634b32ac9cb15c1b5edadfd4c997c97c9a521cc71/diff \n 72.07 MiB / 72.07 MiB [=======================================================]DEBU[0008] error importing layer blob \"sha256:4db9daa7aafd1ea07f24d2ec893833adc17b5a9c5dde4150cf99a5789b3d322e\" as \"4a78003b84c8ead429ff490634b32ac9cb15c1b5edadfd4c997c97c9a521cc71\": Error processing tar file(exit status 1): open /root/.bash_logout: permission denied \n\nERRO[0009] error pulling image \"fedora\": Error writing blob: Error processing tar file(exit status 1): open /root/.bash_logout: permission denied \n```\n\nIf you pull that fedora layer manually with\n\n```\ncurl -L -O -H\"Authorization: Bearer ${token}\"   https://registry-1.docker.io/v2/library/fedora/blobs/sha256:4db9daa7aafd1ea07f24d2ec893833adc17b5a9c5dde4150cf99a5789b3d322e\n```\n\nand inspect the layer tar file, you see\n\n```\n$ tar tvf sha256\\:4db9daa7aafd1ea07f24d2ec893833adc17b5a9c5dde4150cf99a5789b3d322e\n...\ndr-xr-x---  0 0      0           0 Jul  5 14:48 root/\n-rw-r--r--  0 0      0          18 Feb 11  2017 root/.bash_logout\n-rw-r--r--  0 0      0         176 Feb 11  2017 root/.bash_profile\n-rw-r--r--  0 0      0         176 Feb 11  2017 root/.bashrc\n-rw-r--r--  0 0      0         100 Feb 11  2017 root/.cshrc\n-rw-r--r--  0 0      0         129 Feb 11  2017 root/.tcshrc\n...\n```\n\nI still don't know what it all means, but more info is better than less :)\n\n\n\n"
+        },
+        {
+            "user": "TomSweeneyRedHat",
+            "body": "I'll try the AVC's again.  This was on a Fedora rather than a MAC host.  After posting my previous comment I realized I'd not chmod the file as @ae6rt had.\n\n[root@58f3375e03c8 /]# buildah from fedora\nGetting image source signatures\nCopying blob sha256:4db9daa7aafd1ea07f24d2ec893833adc17b5a9c5dde4150cf99a5789b3d322e\n 72.07 MiB / 72.07 MiB [=======================================================]\nERRO[0012] error pulling image \"fedora\": Error writing blob: Error processing tar file(exit status 1): error unmounting root: permission denied \n\n\nAug 17 18:08:29 localhost.localdomain audit[2284]: AVC avc:  denied  { unmount } for  pid=2284 comm=\"exe\" scontext=system_u:system_r:container_t:s0:c600,c868 tcontext=system_u:object_r:fs_t:s0 tclass=filesystem permissive=0\nAug 17 18:08:39 localhost.localdomain dockerd-current[1000]: [4.1K blob data]\nAug 17 18:08:39 localhost.localdomain audit[2278]: AVC avc:  denied  { unmount } for  pid=2278 comm=\"buildah\" scontext=system_u:system_r:container_t:s0:c600,c868 tcontext=system_u:object_r:fs_t:s0 tclass=filesystem permissive=0\nAug 17 18:08:39 localhost.localdomain audit[2278]: AVC avc:  denied  { unmount } for  pid=2278 comm=\"buildah\" scontext=system_u:system_r:container_t:s0:c600,c868 tcontext=system_u:object_r:fs_t:s0 tclass=filesystem permissive=0\nAug 17 18:08:39 localhost.localdomain audit[2278]: AVC avc:  denied  { unmount } for  pid=2278 comm=\"buildah\" scontext=system_u:system_r:container_t:s0:c600,c868 tcontext=system_u:object_r:fs_t:s0 tclass=filesystem permissive=0\nAug 17 18:08:40 localhost.localdomain audit[2278]: AVC avc:  denied  { unmount } for  pid=2278 comm=\"buildah\" scontext=system_u:system_r:container_t:s0:c600,c868 tcontext=system_u:object_r:fs_t:s0 tclass=filesystem permissive=0\nAug 17 18:08:40 localhost.localdomain audit[2278]: AVC avc:  denied  { unmount } for  pid=2278 comm=\"buildah\" scontext=system_u:system_r:container_t:s0:c600,c868 tcontext=system_u:object_r:fs_t:s0 tclass=filesystem permissive=0\nAug 17 18:08:40 localhost.localdomain audit[2278]: AVC avc:  denied  { unmount } for  pid=2278 comm=\"buildah\" scontext=system_u:system_r:container_t:s0:c600,c868 tcontext=system_u:object_r:fs_t:s0 tclass=filesystem permissive=0\nAug 17 18:08:40 localhost.localdomain audit[2278]: AVC avc:  denied  { unmount } for  pid=2278 comm=\"buildah\" scontext=system_u:system_r:container_t:s0:c600,c868 tcontext=system_u:object_r:fs_t:s0 tclass=filesystem permissive=0\nAug 17 18:08:40 localhost.localdomain audit[2278]: AVC avc:  denied  { unmount } for  pid=2278 comm=\"buildah\" scontext=system_u:system_r:container_t:s0:c600,c868 tcontext=system_u:object_r:fs_t:s0 tclass=filesystem permissive=0\nAug 17 18:08:40 localhost.localdomain audit[2278]: AVC avc:  denied  { unmount } for  pid=2278 comm=\"buildah\" scontext=system_u:system_r:container_t:s0:c600,c868 tcontext=system_u:object_r:fs_t:s0 tclass=filesystem permissive=0\nAug 17 18:08:40 localhost.localdomain audit[2278]: AVC avc:  denied  { unmount } for  pid=2278 comm=\"buildah\" scontext=system_u:system_r:container_t:s0:c600,c868 tcontext=system_u:object_r:fs_t:s0 tclass=filesystem permissive=0\n:\n"
+        },
+        {
+            "user": "ae6rt",
+            "body": "I'm sorry, I should have stated my buildah version:  it is\n\n```\n$ docker run --cap-add=SYS_ADMIN -v /private/tmp/containers/:/var/lib/containers/:rw,Z -ti buildah buildah version\nVersion:       0.3\nGo Version:    go1.8.1\nImage Spec:    1.0.0\nRuntime Spec:  1.0.0\nGit Commit:    e9748f0\nBuilt:         Thu Jul 20 20:45:03 2017\nOS/Arch:       linux/amd64\n```"
+        },
+        {
+            "user": "rhatdan",
+            "body": "Ok so lets start by putting the machine into permissive mode to gather the AVC's.  It would probably be best to run \"buildah\" containers under a different context or with SELinux Disabled in the container.  SELinux will definitely block mounting behaviour."
+        },
+        {
+            "user": "ae6rt",
+            "body": "For my part, using Docker for Mac, there is no SELinux:\n\n```\n/ # cat /etc/os-release \nNAME=\"Alpine Linux\"\nID=alpine\nVERSION_ID=3.5.0\nPRETTY_NAME=\"Alpine Linux v3.5\"\nHOME_URL=\"http://alpinelinux.org\"\nBUG_REPORT_URL=\"http://bugs.alpinelinux.org\"\n```\n \n```\n/ # apk info | grep selinux\n```\n \n```\n/ # ls -ld /etc/se*\n-rw-r--r--    1 root     root            71 Aug 17 16:00 /etc/securetty\n-rw-r--r--    1 root     root         36141 Nov 25  2016 /etc/services\n```\n"
+        },
+        {
+            "user": "rhatdan",
+            "body": "So your VM is running alpine?"
+        },
+        {
+            "user": "ae6rt",
+            "body": "Yes.  When a user installs Docker for Mac, you get an Alpine VM as the actual docker host.\n\nhttps://www.docker.com/docker-mac"
+        },
+        {
+            "user": "TomSweeneyRedHat",
+            "body": "FWIW.  Running a Fedora VM (not making any changes to it) then doing the commands @ae6rt (Mark) had:\n```\n# sudo mkdir -p /private/var/lib/containers\n# sudo chmod -R ugo+rwx /private/var/lib/containers\n# docker run --cap-add=SYS_ADMIN -v /private/var/lib/containers/:/var/lib/containers/:rw,Z -ti fedora bash\n\nThen in the container  'vi /etc/sysconfig/docker' and change this line:\n  OPTIONS='--selinux-enabled --log-driver=journald'\nto\n  OPTIONS='--log-driver=journald'\n\n[root@653f673b728c /]# dnf install -y buildah\n[root@653f673b728c /]# buildah from fedora\nGetting image source signatures\nCopying blob sha256:4db9daa7aafd1ea07f24d2ec893833adc17b5a9c5dde4150cf99a5789b3d322e\n 72.07 MiB / 72.07 MiB [=======================================================]\nCopying config sha256:49236bc2f0da4105c84cfb7238b48879efb489a62fe8536934434cf2072a2319\n 0 B / 2.29 KiB [--------------------------------------------------------------]\nWriting manifest to image destination\nStoring signatures\nfedora-working-container\n```\nNo selinux, but otherwise happy sauce.\n\nMark, TYVM! for telling us about this and for working through this issue with us.  Much appreciated!\n"
+        },
+        {
+            "user": "ae6rt",
+            "body": "Of course, Tom.  Happy to help.  There is a tremendous need for a tool like buildah.  And with so many Macs in developer hands these days, getting it to work well with Docker for Mac would be a very big deal.  Let me know if I can help further.  I'm motivated.\n"
+        },
+        {
+            "user": "rhatdan",
+            "body": "@ae6rt I think this could be seccomp related or CAPABILTIES,  I think next step would be to turn off all caps, and see if it works.  If yes then we can start guessing at which cap it needs.\n"
+        },
+        {
+            "user": "ae6rt",
+            "body": "@rhatdan Here is what I believe you are advising.  It also fails:\n\n```\n$ docker run --security-opt=\"seccomp=unconfined\" --cap-add=ALL -v /private/tmp/containers/:/var/lib/containers/:rw,Z -ti buildah buildah from fedora\nGetting image source signatures\nCopying blob sha256:4db9daa7aafd1ea07f24d2ec893833adc17b5a9c5dde4150cf99a5789b3d322e\n 72.07 MiB / 72.07 MiB [=======================================================]\nERRO[0130] error pulling image \"containers-storage:[overlay@/var/lib/containers/storage+/var/run/containers/storage]docker.io/library/fedora:latest\": Error writing blob: Error processing tar file(exit status 1): open /root/.bash_logout: permission denied \n```\n\nMore information, gathered from inside the Alpine VM that is the docker host:\n\n```\n/ # docker info\nContainers: 597\n Running: 0\n Paused: 0\n Stopped: 597\nImages: 121\nServer Version: 17.06.0-ce\nStorage Driver: overlay2\n Backing Filesystem: extfs\n Supports d_type: true\n Native Overlay Diff: true\nLogging Driver: json-file\nCgroup Driver: cgroupfs\nPlugins: \n Volume: local\n Network: bridge host ipvlan macvlan null overlay\n Log: awslogs fluentd gcplogs gelf journald json-file logentries splunk syslog\nSwarm: inactive\nRuntimes: runc\nDefault Runtime: runc\nInit Binary: docker-init\ncontainerd version: cfb82a876ecc11b5ca0977d1733adbe58599088a\nrunc version: 2d41c047c83e09a6d61d464906feb2a2f3c52aa4\ninit version: 949e6fa\nSecurity Options:\n seccomp\n  Profile: default\nKernel Version: 4.9.36-moby\nOperating System: Alpine Linux v3.5\nOSType: linux\nArchitecture: x86_64\nCPUs: 4\nTotal Memory: 1.952GiB\nName: moby\nID: AQ6J:JHUG:2CHZ:A4RA:AGVM:JAIE:ECC4:RG6A:25YV:XJYF:TDRQ:D4ZS\nDocker Root Dir: /var/lib/docker\nDebug Mode (client): false\nDebug Mode (server): true\n File Descriptors: 22\n Goroutines: 46\n System Time: 2017-08-18T18:02:27.865040689Z\n EventsListeners: 1\nNo Proxy: *.local, 169.254/16\nRegistry: https://index.docker.io/v1/\nExperimental: true\nInsecure Registries:\n 127.0.0.0/8\nLive Restore Enabled: false\n```\n"
+        },
+        {
+            "user": "rhatdan",
+            "body": "Which brings us to seccomp.  Run with --privileged, and see if that helps.  If that works you can disable seccomp with \ndocker run -ti security-opts seccomp:unconfined ...\nI think."
+        },
+        {
+            "user": "ae6rt",
+            "body": "I ran with seccomp unconfined [here](https://github.com/projectatomic/buildah/issues/158#issuecomment-323424091), but I'm probably misunderstanding something.\n\nHere is what I get when I add *--privileged* to the mix:\n\n```\n$ docker run --privileged --security-opt=\"seccomp=unconfined\" --cap-add=ALL -v /private/tmp/containers/:/var/lib/containers/:rw,Z -ti buildah buildah from fedora\nGetting image source signatures\nCopying blob sha256:4db9daa7aafd1ea07f24d2ec893833adc17b5a9c5dde4150cf99a5789b3d322e\n 72.07 MiB / 72.07 MiB [=======================================================]\nERRO[0154] error pulling image \"containers-storage:[overlay@/var/lib/containers/storage+/var/run/containers/storage]docker.io/library/fedora:latest\": Error writing blob: Error processing tar file(exit status 1): open /root/.bash_logout: permission denied \n```\n"
+        },
+        {
+            "user": "rhatdan",
+            "body": "What happens if you run alpine with out buildah and attempt to write to /root/.bash_logout?\n"
+        },
+        {
+            "user": "ae6rt",
+            "body": "Oh, I'm sorry, I don't understand.  What should I type, even if pseudo-code?"
+        },
+        {
+            "user": "ae6rt",
+            "body": "What I can do, and whether it proves anything seems unlikely, is that getting a shell inside a plain fedora container, then grabbing the offending fedora image layer like I did [here](https://github.com/projectatomic/buildah/issues/158#issuecomment-323210367), then running *tar zxf thelayer* successfully in a scratch directory succeeds.  There, /root/.bash_logout is written just fine.  The fedora container where I get the shell to run these tasks resides on the Alpine Docker for Mac VM.\n\n```\n# ls -al root\ntotal 40\ndr-xr-x---  2 root root 4096 Jul  5 21:48 .\ndrwxr-xr-x 15 root root 4096 Aug 18 20:26 ..\n-rw-r--r--  1 root root   18 Feb 11  2017 .bash_logout\n-rw-r--r--  1 root root  176 Feb 11  2017 .bash_profile\n-rw-r--r--  1 root root  176 Feb 11  2017 .bashrc\n-rw-r--r--  1 root root  100 Feb 11  2017 .cshrc\n-rw-r--r--  1 root root  129 Feb 11  2017 .tcshrc\n-rw-------  1 root root 2955 Jul  5 21:48 anaconda-ks.cfg\n-rw-r--r--  1 root root  435 Jul  5 21:48 anaconda-post.log\n-rw-------  1 root root 2615 Jul  5 21:48 original-ks.cfg\n```\n\n"
+        },
+        {
+            "user": "rhatdan",
+            "body": "docker run -ti buildah touch /root/.bash_logout\n"
+        },
+        {
+            "user": "rhatdan",
+            "body": "Did you do this on the /var/lib/containers directory?  What is the file system in this directory?  This could be something where overlay is not allowed to write to the file system.\n@rhvgoyal @nalind Any ideas?"
+        },
+        {
+            "user": "ae6rt",
+            "body": "That works fine, and I would expect it to.\n\n```\ndocker run -ti buildah touch /root/.bash_logout\n<no output>\n```\n\nLest I confuse what you asked for with what I think buildah is doing, I would say that the failure to un-tar /root/.bash_logout in my failure cases is buildah failing, for whatever reason, to un-tar the fedora layer in question to someplace in /var/lib/containers, right?  Unless I am missing something, /root/.bash_logout in the fedora container itself is not the filesystem object the failure is talking about."
+        },
+        {
+            "user": "rhatdan",
+            "body": "Yes I misread, the error.  I think this is something with the COW layer.\nYou could try a hack of passing in \n\nbuildah --storage-driver=vfs from fedora\n"
+        },
+        {
+            "user": "ae6rt",
+            "body": "1) Still fails, but the error is slightly different, referencing 'ApplyLayer', and failing way before the entire blob is downloaded (see the lone \">\" picket before the fast-failure), unlike the earlier failures:\n\n```\n# buildah  --storage-driver=vfs from fedora\nGetting image source signatures\nCopying blob sha256:4db9daa7aafd1ea07f24d2ec893833adc17b5a9c5dde4150cf99a5789b3d322e\n 943.20 KiB / 72.07 MiB [>-----------------------------------------------------]\nERRO[0008] error pulling image \"containers-storage:[vfs@/var/lib/containers/storage+/var/run/containers/storage]docker.io/library/fedora:latest\": Error writing blob: ApplyLayer exit status 1 stdout:  stderr: open /root/.bash_logout: permission denied \n```\n2) but lookie here, based on your question about 'can you untar to /var/lib/containers'.  This is from inside the fedora container, where buildah had been run previously.  I grab the layer and try to untar while pwd == /var/lib/containers/t (t seemed as good as anywhere else):\n\n\n```\n# cat /sha256\\:4db9daa7aafd1ea07f24d2ec893833adc17b5a9c5dde4150cf99a5789b3d322e | tar zxf - 2>&1 | head\ntar: root/.bash_logout: Cannot open: Permission denied\ntar: root/.bash_profile: Cannot open: Permission denied\ntar: root/.bashrc: Cannot open: Permission denied\ntar: root/.cshrc: Cannot open: Permission denied\ntar: root/.tcshrc: Cannot open: Permission denied\ntar: root/anaconda-ks.cfg: Cannot open: Permission denied\ntar: root/anaconda-post.log: Cannot open: Permission denied\ntar: root/original-ks.cfg: Cannot open: Permission denied\ntar: usr/bin/[: Cannot open: Permission denied\ntar: usr/bin/alias: Cannot open: Permission denied\n...\n```\n"
+        },
+        {
+            "user": "rhatdan",
+            "body": "If you just run a shell can you write to /var/lib/containers?  Or is it blocked?  Are you using UserNamespace?\nCan you write to this location before buildah but not afterwards?"
+        },
+        {
+            "user": "ae6rt",
+            "body": "I can write to /var/lib/containers from a shell\n\n```\ndocker run --privileged  --cap-add=ALL -v /private/tmp/containers/:/var/lib/containers/:rw,Z -ti buildah echo foo > /var/lib/containers/foo\n```\nI can continue to write after the buildah failure to 'buildah from fedora'.\n"
+        },
+        {
+            "user": "ae6rt",
+            "body": "How would I know if I was using UserNameSpace?  "
+        },
+        {
+            "user": "rhatdan",
+            "body": "But why is the tar failing?"
+        },
+        {
+            "user": "rhatdan",
+            "body": "@aweiteka Could you try this out on your MAC?"
+        },
+        {
+            "user": "ae6rt",
+            "body": "I hate to ask this, but I thought for decades that tar was pretty dumb - just get the archive contents and start writing blobs.  Can tar make decisions about symlinks and mounts?  "
+        },
+        {
+            "user": "rhatdan",
+            "body": "No I don't think tar is causing this.  It knows nothing about mounts, links maybe"
+        },
+        {
+            "user": "ae6rt",
+            "body": "My Docker for Mac version.\n\n![image](https://user-images.githubusercontent.com/392176/29478443-c23cd952-8421-11e7-94df-b8b7b7962eab.png)\n"
+        },
+        {
+            "user": "ae6rt",
+            "body": "Thread's getting long.  A summary of the failing operation:\n\n```\nsudo rm -rf /tmp/containers && sudo mkdir -p /tmp/containers && sudo chmod -R ugo+rwx /tmp/containers && docker run --privileged  --cap-add=ALL -v /tmp/containers/:/var/lib/containers/:rw,Z -ti buildah buildah from fedora\nGetting image source signatures\nCopying blob sha256:4db9daa7aafd1ea07f24d2ec893833adc17b5a9c5dde4150cf99a5789b3d322e\n 72.07 MiB / 72.07 MiB [=======================================================]\nERRO[0083] error pulling image \"containers-storage:[overlay@/var/lib/containers/storage+/var/run/containers/storage]docker.io/library/fedora:latest\": Error writing blob: Error processing tar file(exit status 1): open /root/.bash_logout: permission denied \n```\n\nwhere the buildah container is nothing more than \"fedora\" (latest) with \"dnf install -y buildah\" run on it."
+        },
+        {
+            "user": "nalind",
+            "body": "The layer (which is basically a tarball, give or take special entries (\"whiteout\"), typically with length=0, which are interpreted by extraction logic as an instruction to \"remove this file\") doesn't know anything about mountpoints, but it can contain both hard and symbolic links.  If you want to dig into it, the references linked from the top of [the archive/tar reference](https://golang.org/pkg/archive/tar/) make for good reading.\n\nThe error message you're seeing is produced after the child process which is writing the files to disk has done a chroot() into the container's root directory."
+        },
+        {
+            "user": "ae6rt",
+            "body": "Well this is interesting. Now, enter the Alpine VM and bind mount a directory from the VM into the container.  Said directory is *not* also mounted into the VM from the Mac, like /tmp was.\n\nSo, from the root command line prompt inside the Docker for Mac Alpine VM dockerhost:\n\n```\n/ # docker run --privileged --security-opt seccomp=unconfined  --cap-add=ALL -v \n/t:/var/lib/containers/:rw -ti buildah bash\n[root@0c15ad363c5c /]# \n[root@0c15ad363c5c /]# \n[root@0c15ad363c5c /]# \n[root@0c15ad363c5c /]# buildah from fedora\nGetting image source signatures\nCopying blob sha256:4db9daa7aafd1ea07f24d2ec893833adc17b5a9c5dde4150cf99a5789b3d322e\n 72.07 MiB / 72.07 MiB  \nCopying config sha256:49236bc2f0da4105c84cfb7238b48879efb489a62fe8536934434cf2072a2319\n 0 B / 2.29 KiB \nWriting manifest to image destination\nStoring signatures\nfedora-working-container\n```\n\nWorks.  Need to poke at this some more to make sure I'm not seeing things.  But at first glance it looks like some weird interaction between the Alpine VM, docker and the Mac directories mounted inside the Alpine VM, where were in turn mounted inside the buildah container.  \n\nWould welcome independent confirmation or reproduction of this result."
+        },
+        {
+            "user": "rhatdan",
+            "body": "Could it be attempting to set extended attributes which MAC Doesn't Allow?"
+        },
+        {
+            "user": "ae6rt",
+            "body": "I don't know.  I'm grasping at this point.  Maybe I can build a debug version of buildah to get more information."
+        },
+        {
+            "user": "ae6rt",
+            "body": "Another small step forward:  Assume */alpinevm* exists inside the Alpine docker host (the Docker for Mac docs [call this](https://docs.docker.com/docker-for-mac/osxfs/#namespaces) the *Moby Linux VM*).  From inside the Moby Linux VM, observe\n\n```\n# ls -ld /alpinevm/\ndrwxr-xr-x    3 root     root            60 Aug 19 13:50 /alpinevm/\n```\nNow, from the Mac, mount this into the fedora-based buildah container and run buildah, which now succeeds\n\n```\n$ docker run --cap-add=SYS_ADMIN -v /alpinevm/:/var/lib/containers/:Z -ti buildah buildah from fedora\nGetting image source signatures\nCopying blob sha256:4db9daa7aafd1ea07f24d2ec893833adc17b5a9c5dde4150cf99a5789b3d322e\n 72.07 MiB / 72.07 MiB [=======================================================]\nCopying config sha256:49236bc2f0da4105c84cfb7238b48879efb489a62fe8536934434cf2072a2319\n 0 B / 2.29 KiB [--------------------------------------------------------------]\nWriting manifest to image destination\nStoring signatures\nfedora-working-container\n```\n\n"
+        },
+        {
+            "user": "rhatdan",
+            "body": "Have you tried to use buildah with an image like alpine?\n\nI am wondering if the fedora image comes with XAttrs while the alpine image would not."
+        },
+        {
+            "user": "ae6rt",
+            "body": "Yes, I can build alpine without errors:\n\n```\n$ docker run --cap-add=SYS_ADMIN -v /tmp/:/var/lib/containers/:Z -ti buildah buildah from alpine\nGetting image source signatures\nCopying blob sha256:88286f41530e93dffd4b964e1db22ce4939fffa4a4c665dab8591fbab03d4926\n 1.90 MiB / 1.90 MiB [=========================================================]\nCopying config sha256:7328f6f8b41890597575cbaadc884e7386ae0acc53b747401ebce5cf0d624560\n 0 B / 1.48 KiB [--------------------------------------------------------------]\nWriting manifest to image destination\nStoring signatures\nalpine-working-container\n```\n\nBuilding ubuntu fails differently that does building fedora\n\n```\n$ docker run --cap-add=SYS_ADMIN -v /tmp/:/var/lib/containers/:Z -ti buildah buildah from ubuntu\nGetting image source signatures\nCopying blob sha256:d5c6f90da05dc7e77d2e5fef63c341ab05ba2a03396ab5ae8f18814a7bbf5265\n 45.00 MiB / 45.07 MiB [=======================================================]\n 45.07 MiB / 45.07 MiB [=======================================================]\nERRO[0090] error pulling image \"containers-storage:[overlay@/var/lib/containers/storage+/var/run/containers/storage]docker.io/library/ubuntu:latest\": Error writing blob: Error processing tar file(exit status 1): function not implemented \n```"
+        },
+        {
+            "user": "ae6rt",
+            "body": "Here is a small program that examines the tar.Header structure for files starting with \"root/\" in the [fedora layer](https://registry-1.docker.io/v2/library/fedora/blobs/sha256:4db9daa7aafd1ea07f24d2ec893833adc17b5a9c5dde4150cf99a5789b3d322e) that is causing problems.  I don't see any Xattrs in anything.\n\nhttps://gist.github.com/ae6rt/0100903271711499293d91ced0de998e\n\nRun it:\n\n```\ntartool$ ./tartool sha256\\:4db9daa7aafd1ea07f24d2ec893833adc17b5a9c5dde4150cf99a5789b3d322e.tar  \n&{Name:root/ Mode:16744 Uid:0 Gid:0 Size:0 ModTime:2017-07-05 14:48:05 -0700 PDT Typeflag:53 Linkname: Uname: Gname: Devmajor:0 Devminor:0 AccessTime:0001-01-01 00:00:00 +0000 UTC ChangeTime:0001-01-01 00:00:00 +0000 UTC Xattrs:map[]}\n&{Name:root/.bash_logout Mode:33188 Uid:0 Gid:0 Size:18 ModTime:2017-02-11 14:28:42 -0800 PST Typeflag:48 Linkname: Uname: Gname: Devmajor:0 Devminor:0 AccessTime:0001-01-01 00:00:00 +0000 UTC ChangeTime:0001-01-01 00:00:00 +0000 UTC Xattrs:map[]}\n&{Name:root/.bash_profile Mode:33188 Uid:0 Gid:0 Size:176 ModTime:2017-02-11 14:28:42 -0800 PST Typeflag:48 Linkname: Uname: Gname: Devmajor:0 Devminor:0 AccessTime:0001-01-01 00:00:00 +0000 UTC ChangeTime:0001-01-01 00:00:00 +0000 UTC Xattrs:map[]}\n&{Name:root/.bashrc Mode:33188 Uid:0 Gid:0 Size:176 ModTime:2017-02-11 14:28:42 -0800 PST Typeflag:48 Linkname: Uname: Gname: Devmajor:0 Devminor:0 AccessTime:0001-01-01 00:00:00 +0000 UTC ChangeTime:0001-01-01 00:00:00 +0000 UTC Xattrs:map[]}\n&{Name:root/.cshrc Mode:33188 Uid:0 Gid:0 Size:100 ModTime:2017-02-11 14:28:42 -0800 PST Typeflag:48 Linkname: Uname: Gname: Devmajor:0 Devminor:0 AccessTime:0001-01-01 00:00:00 +0000 UTC ChangeTime:0001-01-01 00:00:00 +0000 UTC Xattrs:map[]}\n&{Name:root/.tcshrc Mode:33188 Uid:0 Gid:0 Size:129 ModTime:2017-02-11 14:28:42 -0800 PST Typeflag:48 Linkname: Uname: Gname: Devmajor:0 Devminor:0 AccessTime:0001-01-01 00:00:00 +0000 UTC ChangeTime:0001-01-01 00:00:00 +0000 UTC Xattrs:map[]}\n&{Name:root/anaconda-ks.cfg Mode:33152 Uid:0 Gid:0 Size:2955 ModTime:2017-07-05 14:48:05 -0700 PDT Typeflag:48 Linkname: Uname: Gname: Devmajor:0 Devminor:0 AccessTime:0001-01-01 00:00:00 +0000 UTC ChangeTime:0001-01-01 00:00:00 +0000 UTC Xattrs:map[]}\n&{Name:root/anaconda-post.log Mode:33188 Uid:0 Gid:0 Size:435 ModTime:2017-07-05 14:48:05 -0700 PDT Typeflag:48 Linkname: Uname: Gname: Devmajor:0 Devminor:0 AccessTime:0001-01-01 00:00:00 +0000 UTC ChangeTime:0001-01-01 00:00:00 +0000 UTC Xattrs:map[]}\n&{Name:root/original-ks.cfg Mode:33152 Uid:0 Gid:0 Size:2615 ModTime:2017-07-05 14:48:05 -0700 PDT Typeflag:48 Linkname: Uname: Gname: Devmajor:0 Devminor:0 AccessTime:0001-01-01 00:00:00 +0000 UTC ChangeTime:0001-01-01 00:00:00 +0000 UTC Xattrs:map[]}\n2017/08/20 06:39:06 EOF\n```\n\nAs a reference, here is a \"tar tvf thelayer.tar\" on the layer itself\n\nhttps://gist.github.com/ae6rt/0a89d644a4158e9244516e5e0aa46a64"
+        },
+        {
+            "user": "ae6rt",
+            "body": "Here is a whole page about the tradeoffs when mounting OS X filesystems into the Moby VM that ships with Docker for Mac:  https://docs.docker.com/docker-for-mac/osxfs-caching/#tuning-with-consistent-cached-and-delegated-configurations\n\nI vainly tried running with the :delegated, :cached, and :consistent options, where I was admittedly thrashing around, trying anything."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@vbatts @rhvgoyal Any ideas?\n\nThe only thing special fedora might put down would be xattrs for things like SELinux, File Capabilities, perhaps ACLs?\n\nBut this is definitely a file system issue."
+        },
+        {
+            "user": "ae6rt",
+            "body": "I asked another Mac user to run these commands to see if he obtained the same failure as I have observed on the fedora layer.\n\nhttps://gist.github.com/ae6rt/d6455fba727b611a4c3ef346bca48224\n\nHe did.  So it's not just me :)"
+        },
+        {
+            "user": "rhatdan",
+            "body": "We need to get someone who understands Mac File systems versus Linux to see what is causing these issues."
+        },
+        {
+            "user": "vrutkovs",
+            "body": "A workaround to run it without mounting `/var/lib/containers/storage':\n```\nmkdir -p /var/lib/containers/storage\nmount -t tmpfs -o size=20G tmpfs /var/lib/containers/storage\n```"
+        },
+        {
+            "user": "rhatdan",
+            "body": "Good idea, although you will need a lot of memory..."
+        },
+        {
+            "user": "jtligon",
+            "body": "@ae6rt did you ever get this running? did @vrutkovs suggested fix make any progress?"
+        },
+        {
+            "user": "ae6rt",
+            "body": "@jtligon I did not succeed in getting this to run. The way I read @vrutkovs's suggestion was to mount a scratch tmpfs directory from the docker host into the buildah container, which is not what I sought.  What I need is a mount from the OS X filesystem into the docker host into the container to be workable.  \n\nMaybe I misunderstood @vrutkovs suggestion."
+        },
+        {
+            "user": "vrutkovs",
+            "body": ">mount a scratch tmpfs directory from the docker host into the buildah container\n\n`mount` would create a new FS, which would use RAM as a storage. This would bypass overlay check in buildah. It doesn't need any mounts from host to work.\n\nNote, that there is no easy way to move the stored container to host (except for pushing to the registry), so this workaround has a lot of disadvantages "
+        },
+        {
+            "user": "rhatdan",
+            "body": "@vrutkovs What about using a storage backend of vfs?  That might work.  @rhvgoyal He is trying to use a OS X as an overlay file system, which Linux does not seem to support."
+        },
+        {
+            "user": "Spindel",
+            "body": "This is relevant to my interests.  We're trying to replace DockerInDocker  or mounted docker sockets with buildah, so we can run our container builds in k8s.\n\nAre the requirements so far:\n- Privileged (CAP SYS ADMIN)\n- not using overlayfs storage driver for docker/rkt/crio?\n\n\n"
+        },
+        {
+            "user": "rhatdan",
+            "body": "You can use overlayfs, as long as you volume mount the /var/lib/containers/storage into your container.  The problem is if /var/lib/containers/storage in the container is on an Overlay file system it will cause issues."
+        },
+        {
+            "user": "domenicbove",
+            "body": "I am trying to run buildah within a pod on OpenShift 3.6. My image is simply rhel7.4 + buildah. Here's my pod definition:\n```\napiVersion: v1\nitems:\n- apiVersion: v1\n  kind: Pod\n  metadata:\n    name: scan-image-grtvf\n  spec:\n    containers:\n    - command:\n      - /bin/bash\n      - -c\n      - |\n        buildah from registry.access.redhat.com/rhel7.4\n      image: docker-registry.default.svc:5000/cicd/image-scan-base:latest\n      name: scan-image\n      securityContext:\n        privileged: true\n      volumeMounts:\n      - mountPath: /var/lib/containers/\n        name: docker-mount\n    restartPolicy: Never\n    serviceAccount: imagemanager\n    volumes:\n    - hostPath:\n        path: /var/lib/containers/\n      name: docker-mount\nkind: List\nmetadata: {}\n```\nAnd I am getting the same overlay errors:\n\n```\n  | time=\"2017-11-07T01:03:49Z\" level=error msg=\"'overlay' not found as a supported filesystem on this host. Please ensure kernel is new enough and has overlay support loaded.\"\n-- | --\n  | time=\"2017-11-07T01:03:49Z\" level=error msg=\"'overlay' not found as a supported filesystem on this host. Please ensure kernel is new enough and has overlay support loaded.\"\n  | time=\"2017-11-07T01:03:49Z\" level=error msg=\"kernel does not support overlay fs: driver not supported\n  | kernel does not support overlay fs: driver not supported\"\n```\nI also have concerns with the amount of privilege that I have to give the pod is going against the norms of openshift. Any thoughts/advice would be appreciated!\n@raffaelespazzoli "
+        },
+        {
+            "user": "domenicbove",
+            "body": "My goal is to use buildah and OpenScap to scan images built by OpenShift without doing Docker in Docker. The full pod script will look something like \n```\nbuildah from registry.access.redhat.com/rhel7.4\nbuildah mount rhel7.4-working-container\noscap-chroot /var/lib/containers/storage/overlay/dafb9ee7e8f9a774242afae1c5dce5b357cb1dfcb020bed629092b0cf21e2bfe/merged oval eval --results oval-results.xml --report report.html /usr/share/xml/scap/ssg/content/ssg-rhel7-oval.xml\n```"
+        },
+        {
+            "user": "rhatdan",
+            "body": "You will need two things.  \n\nFirst a newer version os skopeo-containers or at least add\n\n```\noverride_kernel_check = \"true\"\n```\nto your /etc/containers/storage.conf\n\nThis tells the storage driver to ignore the kernel version, since the RHEL kernel has backported the fixes.\n\nThe second issue you will see is buildah can not use overlay on top of overlay.  \nTo fix this you will need to volume mount in disk area on top of /var/lib/containers/storage.  Or theoretically you could put a tmpfs on that directory."
+        },
+        {
+            "user": "domenicbove",
+            "body": "Hi @rhatdan Thanks for getting back to me. Can you take a look at my [Repo](https://github.com/domenicbove/image-scanning)?\n\nHere's my Dockerfile:\n```\nFROM registry.access.redhat.com/rhel7/rhel\nUSER root\nRUN yum --enablerepo=\"rhel-7-server-extras-rpms\" --enablerepo=\"rhel-7-server-optional-rpms\" -y install libassuan-devel \\\n  ostree-devel runc skopeo-containers openscap-utils scap-security-guide\nRUN curl -o buildah-0.4.1.x86_64.rpm https://kojipkgs.fedoraproject.org//packages/buildah/0.4/1.git9cbccf8.fc27/x86_64/buildah-0.4-1.git9cbccf8.fc27.x86_64.rpm && \\\n  rpm -ivh buildah-0.4.1.x86_64.rpm && yum -y install buildah && \\\n  rm buildah-0.4.1.x86_64.rpm\nCOPY storage.conf etc/containers/storage.conf\n```\n\nI found that after installing all the rpms, there was no storage.conf file in etc/containers. I then went and found a storage.conf file online and tried putting the override_kernel_check flag as you recommended. Here's the storage.conf file I then added to /etc/containers:\n\n```\n# The \"container storage\" table contains all of the server options.\n[storage]\n\n# Default Storage Driver\ndriver = \"overlay\"\n\n[storage.options]\n# AdditionalImageStores is used to pass paths to additional Read/Only image stores\n# Must be comma separated list.\nadditionalimagestores = [\n]\n\n# Size is used to set a maximum size of the container image.  Only supported by\n# certain container storage drivers.\nsize = \"\"\n\n# OverrideKernelCheck tells the driver to ignore kernel checks based on kernel version\noverride_kernel_check = \"true\"\n```\n\n\nAnd again when I run the command `buildah from registry.access.redhat.com/rhel7.4` on that image I get the same error: \"'overlay' not found as a supported filesystem on this host. Please ensure kernel is new enough and has overlay support loaded.\"\n\nAny ideas?"
+        },
+        {
+            "user": "raffaelespazzoli",
+            "body": "@rhatdan I'm working with @domenicbove. We are using the following versions:\n```\n[root@scan-image-70h3o-debug /]# rpm -qa | grep skopeo\nskopeo-containers-0.1.24-1.dev.git28d4e08.el7.x86_64\n[root@scan-image-70h3o-debug /]# rpm -qa | grep buildah\nbuildah-0.4-1.git9cbccf8.fc27.x86_64\n```\nit wasn't clear where to put the `override_kernel_check = \"true\"` option in `/etc/containers/storage.conf` so we put it in both stanzas.  \n\nWe are still getting the same error:\n```\ntime=\"2017-11-08T01:37:30Z\" level=error msg=\"'overlay' not found as a supported filesystem on this host. Please ensure kernel is new enough and has overlay support loaded.\" \ntime=\"2017-11-08T01:37:30Z\" level=error msg=\"'overlay' not found as a supported filesystem on this host. Please ensure kernel is new enough and has overlay support loaded.\" \ntime=\"2017-11-08T01:37:30Z\" level=error msg=\"kernel does not support overlay fs: driver not supported\nkernel does not support overlay fs: driver not supported\"\n```\nrunning `uname -a` from the container gives the following:\n```\nsh-4.2# uname -a\nLinux scan-image-wext6-debug 3.10.0-693.5.2.el7.x86_64 #1 SMP Fri Oct 13 10:46:25 EDT 2017 x86_64 x86_64 x86_64 GNU/Linux\n```"
+        },
+        {
+            "user": "rhatdan",
+            "body": "@nalind WDYT?\n\nWhat does \n`buildah --debug from fedora`\n\nShow?\n\n\n"
+        },
+        {
+            "user": "rhatdan",
+            "body": "BTW I built buildah 0.5 yesterday.\nIt should be going into updates-testing for Fedora.\n\nAnd I built one for RHEL in BREW."
+        },
+        {
+            "user": "raffaelespazzoli",
+            "body": "@rhatdan here is what `buildah --debug from fedora` shows:\n```\nsh-4.2# buildah --debug from fedora\nDEBU[0000] [graphdriver] trying provided driver \"overlay\" \nERRO[0000] 'overlay' not found as a supported filesystem on this host. Please ensure kernel is new enough and has overlay support loaded. \nDEBU[0000] [graphdriver] trying provided driver \"overlay\" \nERRO[0000] 'overlay' not found as a supported filesystem on this host. Please ensure kernel is new enough and has overlay support loaded. \nERRO[0000] kernel does not support overlay fs: driver not supported\nkernel does not support overlay fs: driver not supported\n```"
+        },
+        {
+            "user": "rhatdan",
+            "body": "It looks like this version of buildah is not reading the config file.\n\nHere is what I get with buildah 0.5\n```\n# buildah --debug from fedora\nDEBU[0000] [graphdriver] trying provided driver \"overlay\" \nDEBU[0000] overlay: imagestore=/var/lib/nfs/storage     \nDEBU[0000] overlay: override_kernelcheck=true           \nDEBU[0000] NewControl(/var/lib/containers/storage/overlay): nextProjectID = 2 \nDEBU[0000] backingFs=xfs,  projectQuotaSupported=true   \nDEBU[0000] parsed reference into \"[overlay@/var/lib/containers/storage+/var/run/containers/storage:overlay.imagestore=/var/lib/nfs/storage,overlay.override_kernel_check=true]docker.io/library/fedora:latest\" \nDEBU[0000] parsed reference into \"[overlay@/var/lib/containers/storage+/var/run/containers/storage:overlay.imagestore=/var/lib/nfs/storage,overlay.override_kernel_check=true]docker.io/library/fedora:latest\" \nDEBU[0000] exporting opaque data as blob \"sha256:a602963ff8cdf7dcb8a1aafd9301717a11df064be39c06dd0deda8c40464c0b2\" \nfedora-working-container-3\n```"
+        },
+        {
+            "user": "rhatdan",
+            "body": "```\nLOCALF26:buildah: cat /etc/containers/storage.conf \n# See man 5 containers-storage.conf for more information\n# The \"container storage\" table contains all of the server options.\n[storage]\n\n# Default Storage Driver\ndriver = \"overlay\"\n\n# Temporary storage location\nrunroot = \"/var/run/containers/storage\"\n\n# Primary Read/Write location of container storage\ngraphroot = \"/var/lib/containers/storage\"\n\n[storage.options]\n# AdditionalImageStores is used to pass paths to additional Read/Only image stores\n# Must be comma separated list.\nadditionalimagestores = [\n\"/var/lib/nfs/storage\"\n]\n\n#size = \"20G\"\n\noverride_kernel_check = \"true\"\n```\n"
+        },
+        {
+            "user": "rhatdan",
+            "body": "You could try\n\nbuildah --storage-opt overlay.override_kernel_check=\"true\" from fedora\n\n"
+        },
+        {
+            "user": "raffaelespazzoli",
+            "body": "I'm still getting the same result:\n```\nsh-4.2# buildah --debug --storage-opt overlay.override_kernel_check=\"true\" from fedora\nDEBU[0000] [graphdriver] trying provided driver \"overlay\" \nERRO[0000] 'overlay' not found as a supported filesystem on this host. Please ensure kernel is new enough and has overlay support loaded. \nDEBU[0000] [graphdriver] trying provided driver \"overlay\" \nERRO[0000] 'overlay' not found as a supported filesystem on this host. Please ensure kernel is new enough and has overlay support loaded. \nERRO[0000] kernel does not support overlay fs: driver not supported\nkernel does not support overlay fs: driver not supported \n```"
+        },
+        {
+            "user": "rhatdan",
+            "body": "@raffaelespazzoli Can you grab the latest buildah package to see if this fixes the issue?"
+        },
+        {
+            "user": "raffaelespazzoli",
+            "body": "@rhatdan here it is:\n```\nsh-4.2# rpm -qa | grep buildah\nbuildah-0.5-1.git35afa1c.fc27.x86_64\nsh-4.2# buildah --debug --storage-opt overlay.override_kernel_check=\"true\" from fedora\nDEBU[0000] [graphdriver] trying provided driver \"overlay\" \nDEBU[0000] overlay: override_kernelcheck=true           \nDEBU[0000] overlay: override_kernelcheck=true           \nERRO[0000] 'overlay' not found as a supported filesystem on this host. Please ensure kernel is new enough and has overlay support loaded. \nDEBU[0000] [graphdriver] trying provided driver \"overlay\" \nDEBU[0000] overlay: override_kernelcheck=true           \nDEBU[0000] overlay: override_kernelcheck=true           \nERRO[0000] 'overlay' not found as a supported filesystem on this host. Please ensure kernel is new enough and has overlay support loaded. \nERRO[0000] kernel does not support overlay fs: driver not supported\nkernel does not support overlay fs: driver not supported \nsh-4.2# uname -a\nLinux scan-image-ojswv-debug 3.10.0-693.5.2.el7.x86_64 #1 SMP Fri Oct 13 10:46:25 EDT 2017 x86_64 x86_64 x86_64 GNU/Linux\n```\nstill not working. \nIs there a way to independent test if this kernel supports the overlay driver?"
+        },
+        {
+            "user": "rhatdan",
+            "body": "What RHEL version are you running this on?  I think you need RHEL7.4 kernel?"
+        },
+        {
+            "user": "rhatdan",
+            "body": "The code is looking at /proc/filesystem and searching for overlay?\n\n\nCan you `modprobe overlay` on the host.\n"
+        },
+        {
+            "user": "raffaelespazzoli",
+            "body": "on the node (not the pod)\n```\n[openshift@master-0 ~]$ lsb_release -i -r\nDistributor ID:\tRedHatEnterpriseServer\nRelease:\t7.4\n```\nagain on the node:\n```\n[root@master-0 ~]# cat /proc/filesystems \nnodev\tsysfs\nnodev\trootfs\nnodev\tramfs\nnodev\tbdev\nnodev\tproc\nnodev\tcgroup\nnodev\tcpuset\nnodev\ttmpfs\nnodev\tdevtmpfs\nnodev\tdebugfs\nnodev\tsecurityfs\nnodev\tsockfs\nnodev\tpipefs\nnodev\tanon_inodefs\nnodev\tconfigfs\nnodev\tdevpts\nnodev\thugetlbfs\nnodev\tautofs\nnodev\tpstore\nnodev\tmqueue\nnodev\tselinuxfs\nnodev\trpc_pipefs\n\txfs\nnodev\tnfsd\n```\nthere is no overlay.\n"
+        },
+        {
+            "user": "rhatdan",
+            "body": "Does \nmodprobe overlay\nAdd it?"
+        },
+        {
+            "user": "rhatdan",
+            "body": "@rhvgoyal ???"
+        },
+        {
+            "user": "vbatts",
+            "body": "```\n[vbatts@getdown] {master *} ~$ grep OVERLAY /boot/config-4.13.11-200.fc26.x86_64 \nCONFIG_OVERLAY_FS=m\n# CONFIG_OVERLAY_FS_REDIRECT_DIR is not set\n# CONFIG_OVERLAY_FS_INDEX is not set\n[vbatts@getdown] {master *} ~$ find /lib/modules/$(uname -r) | grep overlay\n/lib/modules/4.13.9-200.fc26.x86_64/kernel/fs/overlayfs\n/lib/modules/4.13.9-200.fc26.x86_64/kernel/fs/overlayfs/overlay.ko.xz\n[vbatts@getdown] {master *} ~$ cat /proc/filesystems \nnodev   sysfs\nnodev   rootfs\nnodev   ramfs\nnodev   bdev\nnodev   proc\nnodev   cpuset\nnodev   cgroup\nnodev   cgroup2\nnodev   tmpfs\nnodev   devtmpfs\nnodev   configfs\nnodev   debugfs\nnodev   tracefs\nnodev   securityfs\nnodev   sockfs\nnodev   dax\nnodev   bpf\nnodev   pipefs\nnodev   hugetlbfs\nnodev   devpts\n        ext3\n        ext2\n        ext4\nnodev   autofs\nnodev   pstore\nnodev   efivarfs\nnodev   mqueue\nnodev   resctrl\n        xfs\n        btrfs\n        vfat\nnodev   rpc_pipefs\n[vbatts@getdown] {master *} ~$ sudo modprobe overlay\n[vbatts@getdown] {master *} ~$ grep overlay /proc/filesystems \nnodev   overlay\n```"
+        },
+        {
+            "user": "raffaelespazzoli",
+            "body": "modprobe made the kernel load the driver.\nAfter that buildah worked. \nThanks.\nIs that expected that the driver is not mounted? if we have to run that command on every node every time they restart, it makes this approach unusable in a customer environment.\n\nAlso now that we have it working, I'd like to talk about security.\nWe are running that pod as privileged. Is that necessary?\nTo my understanding we could use SYS_ADMIN and anyuid. This is still a very difficult conversation with the customer. Is there a way to drop SYS_ADMIN and use a more specific capability? Also is root really needed?\nIn this use case we don't want to run a container but just run an openscap scan on a previously created image."
+        },
+        {
+            "user": "rhatdan",
+            "body": "Well your Container runtime is most likely moving to Overlay as the default.  Even in the case that it is not, you could setup the host to automatically load the kernel module.\n\nAs far as buildah requiring SYS_ADMIN.  We are stuck with that for now.  We could tighten the security and only give the container SYS_ADMIN, still lock it down with the other security measures.  This is far more secure then leaking the docker socket into the container, access to the docker socket allows a rogue process full control of the host, without any logging.\n\nWe want to work in the future on making buildah run without SYS_ADMIN.  It currently needs SYS_ADMIN in order to mount the filesystems and to run the proceses of the build in separate containers..  One crazy idea would be to split buildah into an init container which would do the from/mount and commit in a privileged container, and then run the actual users code in a locked down container."
+        },
+        {
+            "user": "redbaron",
+            "body": "\" It currently needs SYS_ADMIN in order to mount the filesystems and to run the proceses of the build in separate containers.\"\n\nDo you think it is technically feasible to support build mode where commands are executed in the chroot, not in a dedicated mount namespace? This would require no SYS_ADMIN support, which together with VFS storage driver would make it possible to run buildah in a quite restricted containers\n\nCurrent output from a container with no SYS_ADMIN and no --privileged:\n\n```\n[root@c6c7cd45835e tmp]# buildah --storage-driver vfs bud .                                                                                                                                                        \nSTEP 1: FROM busybox\nGetting image source signatures\nCopying blob sha256:0ffadd58f2a61468f527cc4f0fc45272ee4a1a428abe014546c89de2aa6a0eb5\n 88.28 KiB / 698.53 KiB [======>--------------------------------------------] 0s\nerror building: error creating build container: error pulling image \"docker.io/library/busybox:latest\": Error writing blob: ApplyLayer exit status 1 stdout:  stderr: Error creating mount namespace before pivot: operation not permitted\n```"
+        },
+        {
+            "user": "rhatdan",
+            "body": "We have thought about this, but have not had time to work on it yet.  We would have to make the RUN command not attempt to use runc but to run in a chroot as well.  runc requires SYS_ADMIN to setup namespaces."
+        },
+        {
+            "user": "redbaron",
+            "body": "Looking into it further, even before RUN , when it is unpacking `FROM`, it is choosing https://github.com/projectatomic/buildah/blob/8ecefa9/vendor/github.com/containers/storage/pkg/chrootarchive/chroot_linux.go#L20 over https://github.com/projectatomic/buildah/blob/8ecefa978ce56f5716acecf95da6b57866d03c9d/vendor/github.com/containers/storage/pkg/chrootarchive/chroot_unix.go#L7 \n\nI'll try to prepare patch to do classic chroot + runc-less exec of RUN commands, we'll see how far it can take us\n"
+        },
+        {
+            "user": "redbaron",
+            "body": "Hmm, for chroot commands to work reliably , you'd need to have /dev and /proc mounted inside chroot environment, but calling `mount` requires CAP_SYS_ADMIN, which defeats whole purpose of this excersise. @rhatdan any ideas for workarounds? How does fedora `mock` tool is building chroot envs when invoked from regular user? Possibly can do something with filesystem capabilities on `mount` binary itself, adding CAP_SYS_ADMIN might work"
+        },
+        {
+            "user": "rhatdan",
+            "body": "mock uses consolehelper which then users userhelper which is setuid.\nls -l /usr/bin/mock /usr/bin/consolehelper /usr/sbin/userhelper\n-rwxr-xr-x. 1 root root  7136 Aug  4 22:04 /usr/bin/consolehelper\nlrwxrwxrwx. 1 root root    13 Oct 31 16:25 /usr/bin/mock -> consolehelper\n-rws--x--x. 1 root root 40352 Aug  4 22:04 /usr/sbin/userhelper\n"
+        },
+        {
+            "user": "ashcrow",
+            "body": "Related: https://pagure.io/atomic-wg/issue/402"
+        },
+        {
+            "user": "itaysk",
+            "body": "Just want to +1. We could really use an unprivileged alternative for docker build"
+        },
+        {
+            "user": "redbaron",
+            "body": "`chroot` doesn't require any extra privileges, but for commands to work inside chroot , there must be /proc and /sys mounted, executing `mount` requiers CAP_SYS_ADMIN. No amount of suid bits on any binary  or `sefcap` would allow you to raise privileges beyond what container allows you. This means that container needs to be CAP_SYS_ADMIN and we are at the square 1.\n\n\nFor it to work, system, which runs container should also be mounting `proc`  and `sys` inside unprivileged container not only for container itself, but also for future chroot. so there will be 2 mounts of `procfs`: `/proc` and `/chroot` (where chroot is going to be.)\n\nHow do determine chroot location? Not trivial, currently `storage-driver=vfs` (as one requiring least privileges) creates unique directory for each layer. That unique directory should be chrooted into to run build commands. \n\nSo we have 2 conflicting requirements: runtime which starts unprivileged build container should be mounting extra `procfs` inside future chroot location, as container cannot do it itself due to being unprivileged. On another hand chroot locations are layers, and layers have unique names which are not known upfront and there are unknown number of them."
+        },
+        {
+            "user": "rhatdan",
+            "body": "One potential less secure short term fix would be to use SECCOMP along with SYS_ADMIN. and only allow Mount and unshare syscalls, blocking others that are allowed with by SYS_ADMIN.  Not sure if we can do a great job breaking this down, but it would be more secure then just allowing SYS_ADMIN."
+        },
+        {
+            "user": "redbaron",
+            "body": "I settled on a remote docker build daemon running in privileged container and available over TCP to CI job scripts. It allows CI jobs to run in unprivileged container and execute builds in unprivileged containers (docker build ...)so no user submitted code is executed in privileged mode. Docker daemon has authorization plugin enabled to allow build commands only and not run commands. It is still not ideal as multiple users can overwrite each other images, but getting closer.\n\nit would be nice if something like that was possible with alternative systems too"
+        },
+        {
+            "user": "mariusgrigoriu",
+            "body": "Not intending to troll, but that's why [Docker Rules for Bazel](https://github.com/bazelbuild/rules_docker) were written"
+        },
+        {
+            "user": "redbaron",
+            "body": "I saw them, correct me if I am wrong, but they are not allowing to have analogue  of  `RUN apt-get update && apt-get install -y ...`, right? Bazel is build system which can package results as a docker compatible image, thats is not like for like to what we try to do here "
+        },
+        {
+            "user": "ashcrow",
+            "body": "Is there currently an image that we can test with on Atomic Host?\n\n/cc @miabbott"
+        },
+        {
+            "user": "rhatdan",
+            "body": "@ipbabble Want to try to through together a container image that could be used to run buildah on atomic host?"
+        },
+        {
+            "user": "ipbabble",
+            "body": "I’d like that. I hadn’t kinda started the other day. I wanted to run a\nbuildah container on CoreOS Container Linux but got sidetracked with other\nfun stuff.\n\nOn Thu, Feb 8, 2018 at 6:30 AM Daniel J Walsh <notifications@github.com>\nwrote:\n\n> @ipbabble <https://github.com/ipbabble> Want to try to through together a\n> container image that could be used to run buildah on atomic host?\n>\n> —\n> You are receiving this because you were mentioned.\n> Reply to this email directly, view it on GitHub\n> <https://github.com/projectatomic/buildah/issues/158#issuecomment-364111502>,\n> or mute the thread\n> <https://github.com/notifications/unsubscribe-auth/ABPpgV-Uz6phunAgEirHN-O7Ylkpa9MUks5tSvbogaJpZM4ODYiG>\n> .\n>\n-- \nSent from Gmail Mobile on iPhone\n"
+        },
+        {
+            "user": "ashcrow",
+            "body": "@ipbabble let me know when there is something to test and/or if you end up needing a hand with the image. "
+        },
+        {
+            "user": "ipbabble",
+            "body": "Stephen,\n\nI have something but I want to write it up.\nIt buildah image works with podman and docker (with a slight variation due\nto a podman bug not using entrypoint)\nIt needs to run with flags as you'd expect. Using external /var mounts.\n\nWilliam\n\nWilliam Henry\nSenior Consulting Software Engineer\nRed Hat\nColorado, USA.\n\nOn Thu, Feb 8, 2018 at 12:27 PM, Stephen Milner <notifications@github.com>\nwrote:\n\n> @ipbabble <https://github.com/ipbabble> let me know when there is\n> something to test and/or if you end up needing a hand with the image.\n>\n> —\n> You are receiving this because you were mentioned.\n> Reply to this email directly, view it on GitHub\n> <https://github.com/projectatomic/buildah/issues/158#issuecomment-364221547>,\n> or mute the thread\n> <https://github.com/notifications/unsubscribe-auth/ABPpge7yDUlRelJcEPfRHFvgjXojIxRgks5tS0qQgaJpZM4ODYiG>\n> .\n>\n"
+        },
+        {
+            "user": "ashcrow",
+            "body": "Thanks William. Keep me updated!"
+        },
+        {
+            "user": "giuseppe",
+            "body": "I've worked on a feature for system containers that could be useful for the Buildah case as well:\n\nhttps://github.com/projectatomic/atomic/pull/1186"
+        },
+        {
+            "user": "ipbabble",
+            "body": "@ashcrow you can try pulling down whenry/buildah \nIf using podman remember some bind mounts -v <path of dockerfile>:<container path to dockerfile> and /var/lib/container et al ... also --privileged and also --network host   and using buildah bud add -f container-path-and-Dockerfile\n\nLet me know if you have any questions. I'm going to write this up. But thought I'd get something out there soon.\n\nWilliam"
+        },
+        {
+            "user": "ashcrow",
+            "body": "@ipbabble Thanks! I'll carve out some time this afternoon to give it a shot and get back with you."
+        },
+        {
+            "user": "ashcrow",
+            "body": "@ipbabble I used some of the steps in [this post](https://www.projectatomic.io/blog/2017/11/getting-started-with-buildah/) and things worked well.\n\nHere is the [gist](https://gist.github.com/ashcrow/9d0c650121f1f99eb0a1c2e60caff1a7) showing what I did to manually test and the results.\n\nI'm going to do a little more testing shortly but things look good."
+        },
+        {
+            "user": "ipbabble",
+            "body": "Sorry Stephen I meant to have something written up. I will don’t later.\n\nSorry. Decided to go skiing today.\n\n\n\n\nOn Wed, Feb 14, 2018 at 12:31 PM Stephen Milner <notifications@github.com>\nwrote:\n\n> @ipbabble <https://github.com/ipbabble> I used some of the steps in this\n> post\n> <https://www.projectatomic.io/blog/2017/11/getting-started-with-buildah/>\n> and things worked well.\n>\n> Here is the gist\n> <https://gist.github.com/ashcrow/9d0c650121f1f99eb0a1c2e60caff1a7>\n> showing what I did to manually test and the results.\n>\n> —\n> You are receiving this because you were mentioned.\n> Reply to this email directly, view it on GitHub\n> <https://github.com/projectatomic/buildah/issues/158#issuecomment-365719165>,\n> or mute the thread\n> <https://github.com/notifications/unsubscribe-auth/ABPpgXqBAqy4fzd3I_9QRLc9E3AFuAT_ks5tUzSggaJpZM4ODYiG>\n> .\n>\n-- \nSent from Gmail Mobile on iPhone\n"
+        },
+        {
+            "user": "ashcrow",
+            "body": "@ipbabble no problem. I'll let you know once I'm done with testing but so far so good."
+        },
+        {
+            "user": "baude",
+            "body": "fwiw, it will run in a podman container too"
+        },
+        {
+            "user": "ashcrow",
+            "body": "@ipbabble I haven't hit any issues. 👍 "
+        },
+        {
+            "user": "TomasTomecek",
+            "body": "I'm not sure if I'm late to the party but we are actually running buildah (and `s/kpod/podman/`) in a runc container within ansible container: https://github.com/ansible/ansible-container/pull/790/files#diff-9fa3b8fd302da35fe483d1166416a024R433\n\nWe also bind-mount `/var/lib/containers/` from host to the runc container and all of this works just fine. The container itself has privileges though.\n"
+        },
+        {
+            "user": "giuseppe",
+            "body": "@TomasTomecek would something like what I am doing in https://github.com/projectatomic/atomic/pull/1186 be helpful to you?"
+        },
+        {
+            "user": "TomasTomecek",
+            "body": "@giuseppe sounds interesting; I'm worried about adding dependency from atomic to ansible container (upstream guys actually want ansible container to be usable on mac and win); on linux it would be super-useful and helped us remove ton of code."
+        },
+        {
+            "user": "rhatdan",
+            "body": "Running buildah without requiring privs is a future goal.  Nice work people.  We need to get updates on Karma to get a good version of podman to demonstrate this tests though.\n\nhttps://bodhi.fedoraproject.org/updates/podman-0.2-3.git3d0100b.fc27"
+        },
+        {
+            "user": "ipbabble",
+            "body": "Hi Stephen et al,\n\nFYI for running with podman I found this successful:\n\npodman run --privileged --network host -v\n/var/lib/containers:/var/lib/containers:rw  -v /home/whenry/dfs:/tmp:Z\nbuildah bud -f /tmp/Dockerfile\n\nI had several other volume mounts that I used during my tests but just\nconfirmed I don't need them. The ones above are all you need.\n/var/lib/containers and any other use case based mounts - like if you need\nfiles added.\n\nWilliam\n\nWilliam\n\nWilliam Henry\nSenior Consulting Software Engineer\nRed Hat\nColorado, USA.\n\nOn Thu, Feb 15, 2018 at 9:09 AM, Daniel J Walsh <notifications@github.com>\nwrote:\n\n> Running buildah without requiring privs is a future goal. Nice work\n> people. We need to get updates on Karma to get a good version of podman to\n> demonstrate this tests though.\n>\n> https://bodhi.fedoraproject.org/updates/podman-0.2-3.git3d0100b.fc27\n>\n> —\n> You are receiving this because you were mentioned.\n> Reply to this email directly, view it on GitHub\n> <https://github.com/projectatomic/buildah/issues/158#issuecomment-365975559>,\n> or mute the thread\n> <https://github.com/notifications/unsubscribe-auth/ABPpgU2OSPfVLBOS5LOrgEzVN0luAprNks5tVFbHgaJpZM4ODYiG>\n> .\n>\n"
+        },
+        {
+            "user": "ipbabble",
+            "body": "HEre is what I used to build the buildah container image:\n\nbldah=$(buildah from scratch)\n\nscratchmnt=$(buildah mount $bldah)\n\ndnf install --installroot $scratchmnt --release 27 buildah --setopt\ninstall_weak_deps=false -y\n\ndnf clean all --installroot $scratchmnt --release 27\n\nbuildah config --cmd \"\\-\\-help\" $bldah\n\nbuildah config --entrypoint /usr/bin/buildah $bldah\n\nbuildah config --author \"wgh @ redhat.com\" --created-by \"ipbabble\" --label\nname=buildah $bldah\n\nbuildah commit working-container buildah\n\n\n\nThe clean step is important to reduce the size of the image.\n\nUse buildah config to add other meta data besides just CMD and ENTRYPOINT\n\n\npodman  push --creds <user>:<your key here>  buildah:latest\ndocker://whenry/buildah:latest\n\n\nI'm hoping to push it to Quay.io soon.\n\n\nWilliam\n\n\nWilliam Henry\nSenior Consulting Software Engineer\nRed Hat\nColorado, USA.\n\nOn Thu, Feb 15, 2018 at 10:13 AM, William Henry <whenry@redhat.com> wrote:\n\n> Hi Stephen et al,\n>\n> FYI for running with podman I found this successful:\n>\n> podman run --privileged --network host -v /var/lib/containers:/var/lib/containers:rw\n> -v /home/whenry/dfs:/tmp:Z buildah bud -f /tmp/Dockerfile\n>\n> I had several other volume mounts that I used during my tests but just\n> confirmed I don't need them. The ones above are all you need.\n> /var/lib/containers and any other use case based mounts - like if you need\n> files added.\n>\n> William\n>\n> William\n>\n> William Henry\n> Senior Consulting Software Engineer\n> Red Hat\n> Colorado, USA.\n>\n> On Thu, Feb 15, 2018 at 9:09 AM, Daniel J Walsh <notifications@github.com>\n> wrote:\n>\n>> Running buildah without requiring privs is a future goal. Nice work\n>> people. We need to get updates on Karma to get a good version of podman to\n>> demonstrate this tests though.\n>>\n>> https://bodhi.fedoraproject.org/updates/podman-0.2-3.git3d0100b.fc27\n>>\n>> —\n>> You are receiving this because you were mentioned.\n>> Reply to this email directly, view it on GitHub\n>> <https://github.com/projectatomic/buildah/issues/158#issuecomment-365975559>,\n>> or mute the thread\n>> <https://github.com/notifications/unsubscribe-auth/ABPpgU2OSPfVLBOS5LOrgEzVN0luAprNks5tVFbHgaJpZM4ODYiG>\n>> .\n>>\n>\n>\n"
+        },
+        {
+            "user": "giuseppe",
+            "body": "@nalind is it fine to use the 'vfs' driver instead of 'overlay'?\n\nI've done a quick try with running buildah in an user namespace, [bwrap-oci](https://github.com/projectatomic/bwrap-oci) handles it well, this runs as non-root user:\n```\n$ atomic pull --storage ostree docker.io/gscrivano/buildah\n$ atomic run --storage ostree docker.io/gscrivano/buildah buildah bud /host/home/gscrivano/container\nExtracting to /home/gscrivano/.containers/repo/tmp/atomic-container/14806/rootfs\nSTEP 1: FROM scratch\nSTEP 2: COPY foo /\nSTEP 3: COMMIT containers-storage:[vfs@/var/lib/containers/storage+/var/run/containers/storage:vfs.override_kernel_check=true]@14f360973b1eddabb1d41e79a3340611f05f74998c7cfaee05bef6efb8a4fafa\n```"
+        },
+        {
+            "user": "ipbabble",
+            "body": "You have to use if if you’re no bind mounting in /var/lib/containers. It\nworks but it is a little slower (I’m told - I didn’t do any formal timing)\n\nI couldn’t get —storage-driver devicemapper to work. Only vfs\n\nHaving said that the issue of building a container image  inside the\nbuildah container is that you lose many benefits. Every container on the\nhost will pull down the “from” image even if it has already been pulled.\nEach has its own copy of that image. And if I build a new “base” image,\neach container on the host that uses it would have to pull it down despite\nalready existing on the host. So it carries overhead.\n\nWilliam\n\nOn Thu, Feb 15, 2018 at 11:09 AM Giuseppe Scrivano <notifications@github.com>\nwrote:\n\n> @nalind <https://github.com/nalind> is it fine to use the 'vfs' driver\n> instead of 'overlay'?\n>\n> I've done a quick try with running buildah in an user namespace, bwrap-oci\n> <https://github.com/projectatomic/bwrap-oci> handles it well, this runs\n> as non-root user:\n>\n> $ atomic pull --storage ostree docker.io/gscrivano/buildah\n> $ atomic run --storage ostree docker.io/gscrivano/buildah buildah bud /host/home/gscrivano/container\n> Extracting to /home/gscrivano/.containers/repo/tmp/atomic-container/14806/rootfs\n> STEP 1: FROM scratch\n> STEP 2: COPY foo /\n> STEP 3: COMMIT containers-storage:[vfs@/var/lib/containers/storage+/var/run/containers/storage:vfs.override_kernel_check=true]@14f360973b1eddabb1d41e79a3340611f05f74998c7cfaee05bef6efb8a4fafa\n>\n> —\n> You are receiving this because you were mentioned.\n> Reply to this email directly, view it on GitHub\n> <https://github.com/projectatomic/buildah/issues/158#issuecomment-366012944>,\n> or mute the thread\n> <https://github.com/notifications/unsubscribe-auth/ABPpgUTF8TcxeRM70kckpYhU1fwH5Sqdks5tVHLUgaJpZM4ODYiG>\n> .\n>\n-- \nSent from Gmail Mobile on iPhone\n"
+        },
+        {
+            "user": "rhatdan",
+            "body": "I think only VFS would work on a rootless environment. Since otherwise you would be required to do a mount.  But @giuseppe you said you got this to work without requiring root?  "
+        },
+        {
+            "user": "giuseppe",
+            "body": "@rhatdan using vfs yes.  The steps I showed in my previous comment are done with my user uid=1000, and no root is required.  The container was managed by bwrap-oci.\n\nIt is the same system container image that works for the root user, it requires this change in atomic: https://github.com/projectatomic/atomic/pull/1186 so that we are able to `atomic run --storage ostree IMAGE COMMANDS`"
+        },
+        {
+            "user": "rhatdan",
+            "body": "SO is buildah running in a  usernamespace then?"
+        },
+        {
+            "user": "giuseppe",
+            "body": "Yes, it is"
+        },
+        {
+            "user": "ipbabble",
+            "body": "Me Too. i.e. when I ran for inside the container it was because I didn't\nwant --privileged. But really the use case for this is odd and the perf hit\nis high overall.\n\nWilliam Henry\nSenior Consulting Software Engineer\nRed Hat\nColorado, USA.\n\nOn Thu, Feb 15, 2018 at 12:25 PM, Daniel J Walsh <notifications@github.com>\nwrote:\n\n> I think only VFS would work on a rootless environment. Since otherwise you\n> would be required to do a mount. But @giuseppe\n> <https://github.com/giuseppe> you said you got this to work without\n> requiring root?\n>\n> —\n> You are receiving this because you were mentioned.\n> Reply to this email directly, view it on GitHub\n> <https://github.com/projectatomic/buildah/issues/158#issuecomment-366034727>,\n> or mute the thread\n> <https://github.com/notifications/unsubscribe-auth/ABPpgSFF7to21Pnxpc2UskK0aBawBumUks5tVITDgaJpZM4ODYiG>\n> .\n>\n"
+        },
+        {
+            "user": "rhatdan",
+            "body": "This is well worth a blog and an explanation on why it is slow.  Bottom line this can show we can build a container image without requiring root  using Buildah.  This is huge."
+        },
+        {
+            "user": "ipbabble",
+            "body": "@ashcrow also availabel on quay.io\n\npodman pull quay.io/ipbabble/buildah \n\nwrite up is done. having reviewed and will post asap.\n\nWilliam"
+        },
+        {
+            "user": "giuseppe",
+            "body": "@ipbabble could we merge our two efforts?\n\nMy work is here:\n\nhttps://github.com/projectatomic/atomic-system-containers/pull/162\n\nA system container is still able to run as a Docker container, I just needed to add some more metadata."
+        },
+        {
+            "user": "ipbabble",
+            "body": "@giuseppe Eager to chat.  I'm not sure what you mean by merge our two efforts. I did write up my use of vfs for the inside container file system build. I also wrote about why, despite being cool that it works, it's also not a very practical solution. (Due to every container potentially pulling down the same image on a single host.)\n\nLet's connect on IRC (freenode #podman) so we can discuss why I might be missing in my effort.\n"
+        },
+        {
+            "user": "ipbabble",
+            "body": "I've got a PR atomic-site for a blog post. \n\n1) It should be noted that it covers only the privileged container mode right now.\n2) It covers some of the issues we faced with unprivileged.\n3) I pulled the unpriv section for a later blog because I saw some regression that I am looking into.\n4) @giuseppe 's work has been incorporated into a separate blog because this one was getting too long.\n\nThis blog is framed as the Buildah container for Kubernetes. \nThe system container Buildah example will be for a Buildah system container for Atomic \nThe unpriv. example will be a sequel to the first one. \n\nI'll post the link when it goes live. \nAny questions?\n"
+        },
+        {
+            "user": "ipbabble",
+            "body": "https://github.com/projectatomic/atomic-site/pull/529"
+        },
+        {
+            "user": "ipbabble",
+            "body": "http://www.projectatomic.io/blog/2018/03/building-buildah-container-image-for-kubernetes/\n"
+        },
+        {
+            "user": "ashcrow",
+            "body": "@ipbabble great post! I did notice there's a hiccup in the markdown to youtube in the post."
+        },
+        {
+            "user": "ipbabble",
+            "body": "Yeah. I'm bummed I missed that. We all missed my misplaced quotes. I'm\ntrying to fix it.\n\n@rossturk gave me heads up too.\n\nCheers.\n\nWilliam\n\nWilliam Henry\nSenior Consulting Software Engineer\nRed Hat\nColorado, USA.\n\nOn Thu, Mar 1, 2018 at 11:11 AM, Stephen Milner <notifications@github.com>\nwrote:\n\n> @ipbabble <https://github.com/ipbabble> great post! I did notice there's\n> a hiccup in the markdown to youtube in the post.\n>\n> —\n> You are receiving this because you were mentioned.\n> Reply to this email directly, view it on GitHub\n> <https://github.com/projectatomic/buildah/issues/158#issuecomment-369680173>,\n> or mute the thread\n> <https://github.com/notifications/unsubscribe-auth/ABPpgXIKXcG1fz4Ye7fT8YXuTzS1C5QQks5taDnRgaJpZM4ODYiG>\n> .\n>\n"
+        },
+        {
+            "user": "ipbabble",
+            "body": "So I'm going to create a new/separate issue about non priv. Buildah container"
+        },
+        {
+            "user": "rhatdan",
+            "body": "The answer to this question is yes, so I am closing this issue.  We have other issues about running with UserNamespace and in un priv containers."
+        },
+        {
+            "user": "Conan-Kudo",
+            "body": "Since this issue is getting linked around the internets, I'll leave in here a little note about how we solved this problem for us:\n\nFor our GitLab CI setup, we made sure that the `/var/lib/containers` in the container environment mapped to a _different_ directory on the host system, so that the containers wouldn't be picked up by the container executor. That keeps us from accidentally breaking things in the CI system."
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "buildah",
+            "number": 193
+        },
+        {
+            "organization": "containers",
+            "repository": "storage",
+            "number": 134
+        },
+        {
+            "organization": "projectatomic",
+            "repository": "atomic-system-containers",
+            "number": 162
+        },
+        {
+            "organization": "wfau",
+            "repository": "gaia-dmp",
+            "number": 308
+        }
+    ]
+}

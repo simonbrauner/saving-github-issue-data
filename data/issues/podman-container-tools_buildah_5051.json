@@ -1,0 +1,79 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "buildah",
+    "number": 5051,
+    "type": "issue",
+    "title": "Image index media type and annotation",
+    "state": "closed",
+    "labels": [
+        "locked - please file new issue/PR"
+    ],
+    "user": "ok-ryoko",
+    "body": "For tighter integration with some container registries such as ghcr.io, I want to annotate multi-architecture image indexes. I understand that only media of type `application/vnd.oci.image.index.v1+json` support annotations. However, I’m unable to create an image index of this type using either Buildah or Podman. Moreover, there doesn’t seem to be a way to annotate image indexes—only images referenced by an index.\n\n**Steps to reproduce the issue:**\n\n```console\n$ buildah manifest create manticore && buildah manifest inspect manticore\n```\n\n**Describe the results you received:**\n\n```\nf25e51ee5f0a3be38ae63b954aa4a2367c20e514a9f66a007975ee1db8e9a217\n{\n    \"schemaVersion\": 2,\n    \"mediaType\": \"application/vnd.docker.distribution.manifest.list.v2+json\",\n    \"manifests\": null\n}\n```\n\n**Describe the results you expected:**\n\n```\nf25e51ee5f0a3be38ae63b954aa4a2367c20e514a9f66a007975ee1db8e9a217\n{\n    \"schemaVersion\": 2,\n    \"mediaType\": \"application/vnd.oci.image.index.v1+json\",\n    \"manifests\": null\n}\n```\n\n… because, as I understand it, conformance with OCI specifications is a high priority to Buildah, and Buildah defaults to using the OCI format in other operations, such as committing and pushing images.\n\n**Output of buildah version:**\n\n```\nVersion:         1.31.3\nGo Version:      go1.19.12\nImage Spec:      1.1.0-rc.3\nRuntime Spec:    1.1.0-rc.3\nCNI Spec:        1.0.0\nlibcni Version:\nimage Version:   5.26.2\nGit Commit:\nBuilt:           Fri Aug 25 08:51:43 2023\nOS/Arch:         linux/amd64\nBuildPlatform:   linux/amd64\n```\n\n---\n\nIn [*cmd/buildah/manifest.go*](https://github.com/containers/buildah/blob/df1bc383407781b5ddbc3a5fdba73c3ddb6abdc7/cmd/buildah/manifest.go#L367), the manifest type is currently fixed to `manifest.DockerV2ListMediaType`.\n\nCould `manifest create` take a `--format` option (the same way that `push` and `commit` do) and respect the `BUILDAH_FORMAT` environment variable?\n\nCould `manifest annotate` annotate the image index directly if (1) the media type is appropriate and (2) no image manifest digest is provided?",
+    "comments": [
+        {
+            "user": "flouthoc",
+            "body": "I'll check this thanks."
+        },
+        {
+            "user": "nalind",
+            "body": "Way back when, when an image index could be valid without a mediaType field, an index with no `mediaType` and `manifests` provided basically nothing to go on for logic that was trying to guess its MIME type, specifically whether or not a chunk of JSON represented a list or a runnable image.  That created problems elsewhere, so we defaulted to create lists in the Docker format, in which mediaType was a required field.\n\nIn practice, a list gets converted along with images when they're pushed somewhere with `--format`, or we choose a format when we update a local copy based on whether or not it contains information that's unique to one format or the other.\n\nNot having a way to add annotations to the index as a whole via the command line is a different chunk of code."
+        },
+        {
+            "user": "ok-ryoko",
+            "body": "@nalind Thank you for providing context. I have indeed noticed that inspecting some manifests reveals their `mediaType` to be `application/vnd.oci.image.index.v1+json` after pushing.\n\nIf we were hypothetically able to annotate an image index, would we thus expect to start with the Docker type and switch to the OCI type automatically upon annotation (assuming there are no incompatible manifests)?"
+        },
+        {
+            "user": "nalind",
+            "body": "When a list is being edited locally, when it's time to save the list, I'd expect the current logic to select the format that preserves any format-specific information when it goes to save the list in local storage.  Things like URL or Annotation fields in the OCI format, or a Features field in the Docker format.\n\nUnless it's changed since I was last in there, I don't think buildah itself cares about any correspondence between the mediaType of the list and the mediaType of images in the list -- it's not going to rewrite local images, which would change their IDs.  _Registries_ tend to care about that, so the image library tries to make everything match up on the fly, if they don't already, while a list is being pushed."
+        },
+        {
+            "user": "ok-ryoko",
+            "body": "> When a list is being edited locally, when it's time to save the list, I'd expect the current logic to select the format that preserves any format-specific information when it goes to save the list in local storage. Things like URL or Annotation fields in the OCI format, or a Features field in the Docker format.\n\nBased on my reading of the source code, I’d expect this behavior as well.\n\n> Unless it's changed since I was last in there, I don't think buildah itself cares about any correspondence between the mediaType of the list and the mediaType of images in the list -- it's not going to rewrite local images, which would change their IDs. _Registries_ tend to care about that, so the image library tries to make everything match up on the fly, if they don't already, while a list is being pushed.\n\nI confirmed that this is the case. When running `buildah manifest push`, Buildah [sets the image index type according to the `--format` option](https://github.com/containers/buildah/blob/df1bc383407781b5ddbc3a5fdba73c3ddb6abdc7/cmd/buildah/manifest.go#L913-L923). Buildah then defers the push operation to *containers/common/libimage*, which [normalizes the manifest type for single images](https://github.com/containers/common/blob/248cc7357d2f7035cd6a352569fdd13bce4e1cf1/libimage/manifests/manifests.go#L223-L233) according to the type of the image index. \n\nThank you again for the context."
+        },
+        {
+            "user": "flouthoc",
+            "body": "@ok-ryoko Is your issue resolved ? I'm closing this issue since this looks resolved please free to re-open if it is not so."
+        },
+        {
+            "user": "ok-ryoko",
+            "body": "@flouthoc, thank you for following up.\n\nThe discussion helped me understand why `application/vnd.docker.distribution.manifest.list.v2+json` is the default image index type and why this doesn’t pose problems when an OCI-type image index is desired at push time.\n\nHowever, there’s still no way to annotate image indexes using Buildah.\n\nWe currently have the following command that we can use to “[a]dd and update information about an image to a manifest list or image index”:\n\n```\nbuildah manifest annotate [options...] listNameOrIndexName imageManifestDigest\n```\n\nTo support image index annotation, we could (for example) make the `imageManifestDigest` argument optional such that, when `imageManifestDigest` is omitted, the annotation(s) apply to the image index itself.\n\nAs image index annotations are an OCIv1-specific feature ([source][OCI image index spec v1.1.0-rc5]), this operation would require the conversion of the image index type to `application/vnd.oci.image.index.v1+json` and would need to know how to handle conflicts appropriately.\n\nThis feature enhancement is something I’d be willing to design and contribute. Before writing any code, however, I’d like to get confirmation that this feature enhancement aligns with the project’s current vision and priorities.\n\nAnd perhaps modifying an existing command isn’t the best way to go about introducing this functionality?\n\n*p.s.* I’m not able to re-open the issue.\n\n[OCI image index spec v1.1.0-rc5]: https://github.com/opencontainers/image-spec/blob/v1.1.0-rc5/image-index.md#oci-image-index-specification"
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@nalind @flouthoc @umohnani8 Thoughts?"
+        },
+        {
+            "user": "ipanova",
+            "body": "@flouthoc There seems to be a clear benefit to have annotation on the image index, are there any updates on whether this is going to be added any time soon? Thanks!"
+        },
+        {
+            "user": "flouthoc",
+            "body": "I'll visit this again and update back here thanks."
+        },
+        {
+            "user": "nalind",
+            "body": "I'm already in this area, might as well assign it to me."
+        },
+        {
+            "user": "flouthoc",
+            "body": "Thank you @nalind , did it :smile: "
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "buildah",
+            "number": 5301
+        },
+        {
+            "organization": "kachick",
+            "repository": "dotfiles",
+            "number": 490
+        }
+    ]
+}

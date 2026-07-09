@@ -1,0 +1,116 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "buildah",
+    "number": 3668,
+    "type": "issue",
+    "title": "Unknown media type during manifest conversion: \"application/vnd.docker.image.rootfs.diff.tar.gzip\"",
+    "state": "closed",
+    "labels": [
+        "stale-issue",
+        "locked - please file new issue/PR"
+    ],
+    "user": "crisbal",
+    "body": "<!--\nIf you are reporting a new issue, make sure that we do not have any duplicates\nalready open. You can ensure this by searching the issue list for this\nrepository. If there is a duplicate, please close your issue and add a comment\nto the existing issue instead.\n\nIf you suspect your issue is a bug, please edit your issue description to\ninclude the BUG REPORT INFORMATION shown below. If you fail to provide this\ninformation within 7 days, we cannot debug your issue and will close it. We\nwill, however, reopen it if you later provide the information.\n\n---------------------------------------------------\nBUG REPORT INFORMATION\n---------------------------------------------------\nUse the commands below to provide key information from your environment:\nYou do NOT have to include this information if this is a FEATURE REQUEST\n-->\n\n**Description**\n\n<!--\nBriefly describe the problem you are having in a few paragraphs.\n-->\n\n**Steps to reproduce the issue:**\n\nI have an image built with Kaniko in CI, that I am trying to use as base image for another that I am building locally with `podman build`.\n\nThe local image has the following `Containerfile`\n\n```\nFROM ci-registry.company.com/image_build_with_kaniko\nRUN echo \"Hello\"\n```\n\nIf I build the image with `podman build -f Containerfile -t tmp-image .` I get the following error: (Adding `--format=docker` gets the same error)\n\n```\nTrying to pull ci-registry.company.com/image_build_with_kaniko\nGetting image source signatures\nCopying blob c408bb006db1 done  \nCopying blob 60c686673fbf done  \nCopying blob 46da271691fa done  \nCopying blob 1aa347c632b6 done  \nCopying config 04ee292f7a done  \nWriting manifest to image destination\nStoring signatures\nError: error creating build container: error preparing image configuration: error converting image \n\"containers-storage:[overlay@/var/lib/containers/storage+/run/containers/storage:overlay.mountopt=nodev]@04ee292f7a5549e765c99205acc567738a09eb084409cd71f6600facd3743c51\" \nfrom \"application/vnd.oci.image.manifest.v1+json\" to \"application/vnd.docker.distribution.manifest.v2+json\": \nUnknown media type during manifest conversion: \"application/vnd.docker.image.rootfs.diff.tar.gzip\"\n```\n**Describe the results you expected:**\n\nThe build should continue, maybe? What is going wrong here?\n\n**Output of `podman version` if reporting a `podman build` issue:**\n\n```\n3.4.4-1\n```\n\n**Output of `cat /etc/*release`:**\n\n```\ncat /etc/os-release\nNAME=\"Arch Linux\"\nPRETTY_NAME=\"Arch Linux\"\n```\n\n**Output of `uname -a`:**\n\n```\nLinux PC 5.4.72-microsoft-standard-WSL2 #1 SMP Wed Oct 28 23:40:43 UTC 2020 x86_64 GNU/Linux\n```\n\n**Output of `cat /etc/containers/storage.conf`:**\n\n```\nDid not touch this / Default one\n```\n",
+    "comments": [
+        {
+            "user": "vrothberg",
+            "body": "Thanks for reaching out, could you share the output of the following command?\n`skopeo inspect --raw docker://ci-registry.company.com/image_build_with_kaniko | jq .`\n\nThat will print the image's manifest."
+        },
+        {
+            "user": "crisbal",
+            "body": "Here it is:\n\n```\n{\n  \"schemaVersion\": 2,\n  \"mediaType\": \"\",\n  \"config\": {\n    \"mediaType\": \"application/vnd.oci.image.config.v1+json\",\n    \"size\": 1778,\n    \"digest\": \"sha256:04ee292f7a5549e765c99205acc567738a09eb084409cd71f6600facd3743c51\"\n  },\n  \"layers\": [\n    {\n      \"mediaType\": \"application/vnd.oci.image.layer.v1.tar+gzip\",\n      \"size\": 64239542,\n      \"digest\": \"sha256:60c686673fbf60314729fe8eacc2b514df4f3235cfe77642b81413b989ba6abe\"\n    },\n    {\n      \"mediaType\": \"application/vnd.docker.image.rootfs.diff.tar.gzip\",\n      \"size\": 268790402,\n      \"digest\": \"sha256:1aa347c632b602157e2e5b521ddb459bf82084746bcc8a4b4689c361dfb57348\"\n    },\n    {\n      \"mediaType\": \"application/vnd.docker.image.rootfs.diff.tar.gzip\",\n      \"size\": 238,\n      \"digest\": \"sha256:c408bb006db1d5cee3f5e30b7b864c471e23c5c5ea1b703f787c499eb82fd2d4\"\n    },\n    {\n      \"mediaType\": \"application/vnd.docker.image.rootfs.diff.tar.gzip\",\n      \"size\": 12903731,\n      \"digest\": \"sha256:46da271691fa1d20103f0c04a60028ab50ec59cac5e28696fb418fc45d41e7a8\"\n    }\n  ]\n}\n```"
+        },
+        {
+            "user": "vrothberg",
+            "body": "Thank you! That's what I suspected. The image claims to be an OCI one but lists Docker layers (`application/vnd.docker.image.rootfs.diff.tar.gzip`) which I think doesn't conform with the OCI image spec.\n\n@nalind WDYT?"
+        },
+        {
+            "user": "crisbal",
+            "body": "@vrothberg \n\nThe `ci-registry.company.com/image_build_with_kaniko` Dockerfile has this structure (some minor things omitted that  hopefully should not matter):\n\n```\nFROM ubuntu:20.04 AS installer\n\nWORKDIR /installer\nARG INSTALLER\nCOPY $INSTALLER .\nRUN bash $INSTALLER /opt/application/1.0.0\n\n################################################################################\n\nARG BASE_IMAGE\nFROM ${BASE_IMAGE}\n\nCOPY --from=installer /opt/application /opt/application\nRUN ln -s /opt/application/1.0.0 /opt/application/stable\n\nRUN echo \"source /opt/application/stable/activate.sh\" >> /root/.bashrc\n# non-oci! --format=docker required\nSHELL [\"/bin/bash\", \"-c\"]\nCMD [\"/bin/bash\"]\n```"
+        },
+        {
+            "user": "vrothberg",
+            "body": "Thanks, @crisbal.\n\nI suggest reaching out our friends over at kaniko to resolve the issue; the layers should be converted to OCI ones during build or when pushing to the registry.\n\nThe OCI image spec [states](https://github.com/opencontainers/image-spec/blob/main/manifest.md#oci-image-manifest-specification) that \"an encountered mediaType that is unknown to the implementation MUST be ignored\", but that is mostly for supporting OCI artifacts I presume. In this case (i.e., as a base image during build), where it's clear that those are layers I think that Buildah is right to reject the image."
+        },
+        {
+            "user": "vrothberg",
+            "body": "Cc @mtrmac @rhatdan "
+        },
+        {
+            "user": "nalind",
+            "body": "Since we build the manifest from scratch whenever we commit an image, we shouldn't be producing manifests that mark layers with types from different specs.  I'm not opposed to just accepting every layer blob type that's known to us (this may turn out to be another strictness check that we added to the image library that we need to walk back) if it's truly as simple as adding more `case` clauses in the manifest conversion logic."
+        },
+        {
+            "user": "crisbal",
+            "body": "Thanks, I reported it over to Kaniko, should I close this issue or it is something that you still want to fix on your side?"
+        },
+        {
+            "user": "mtrmac",
+            "body": "> Since we build the manifest from scratch whenever we commit an image, we shouldn't be producing manifests that mark layers with types from different specs\n\nThis is not just a build issue; a `skopeo copy --format …` can trigger the same code conversion path, which will fail on such MIME type mixes the same way.\n\nAt least this particular code path (`c/image/image/$type1.convertToManifest$type2`) can be trivially taught to handle more MIME types; I’d need to take a deeper look about possible variants of this situation that involve also compression/decompression.\n\nLet’s see what Kaniko says, hopefully these images will turn out to be so rare that we can just continue rejecting them."
+        },
+        {
+            "user": "crisbal",
+            "body": ">  hopefully these images will turn out to be so rare that we can just continue rejecting them\n\nIt looks like to me that the issue can be triggered easily but at the same time I wonder why it never came out, it is possible it is just a weird combination of steps.\n\nSo it is just:\n\n* Have a base image that has MediaType OCI\n* Build on top of the base image an intermediate image with Kaniko (this will get MediaType OCI and Docker Layers)\n* Attempt to build an image using as base the intermediate Kaniko image with `buildah build`"
+        },
+        {
+            "user": "remivoirin",
+            "body": "Thanks @crisbal for reporting directly to Kaniko. Do you think this is directly related and should be added to the issue on their side?\nWe have images built with Kaniko that can be run by Podman 3.3.1 on CentOS Stream 8, but not pushed to another registry because of this.\n\n```json\n$ skopeo inspect --raw docker://<kaniko built image> | jq .\n{\n  \"schemaVersion\": 2,\n  \"mediaType\": \"\",\n  \"config\": {\n    \"mediaType\": \"application/vnd.oci.image.config.v1+json\",\n    \"size\": 2229,\n    \"digest\": \"sha256:1d9384a1e8cf5636c4c525b02d3eb2c5e2a6300987717cf00b798db54aabd955\"\n  },\n  \"layers\": [\n    {\n      \"mediaType\": \"application/vnd.oci.image.layer.v1.tar+gzip\",\n      \"size\": 79848180,\n      \"digest\": \"sha256:78846bc60c09f099fe07532fd402aff11d9704b96310c7bcf0a7ee20085774a1\"\n    },\n    {\n      \"mediaType\": \"application/vnd.docker.image.rootfs.diff.tar.gzip\",\n      \"size\": 334659526,\n      \"digest\": \"sha256:e8430b5e4f32476399aedbebd2bce8e31406d9f53e61bce5149b0f77fc3e11df\"\n    },\n...\n```\n\nWhen trying to push:\n```\n$ podman push <kaniko built image>\nGetting image source signatures\nCopying blob 59a6252e61ff [--------------------------------------] 0.0b / 0.0b\nError: creating an updated image manifest: preparing updated manifest,\nlayer \"sha256:b208550f9bbbc279a3ea5d174d86f9aadd31da9ae83f3496e3e92d2ea864cef6\":\nunsupported MIME type for compression: application/vnd.docker.image.rootfs.diff.tar.gzip\n```"
+        },
+        {
+            "user": "crisbal",
+            "body": "Hey @remivoirin, the `skopeo inspect` part shows the same issue as my case. I will let the experts speak about the `podman push` but it looks related to me. \n\nAnyway you could join into the issue on Kaniko repo so maybe more noise helps in getting the issue sorted.\n"
+        },
+        {
+            "user": "remivoirin",
+            "body": "Thanks, will do!"
+        },
+        {
+            "user": "mtrmac",
+            "body": "> We have images built with Kaniko that can be run by Podman 3.3.1 on CentOS Stream 8, but not pushed to another registry because of this.\n\nYes, that’s the same underlying cause. The Kaniko-built images are inconsistent, and basically _any_ kind of consumption (not just builds using Buildah) could, in principle, cause them to be rejected. (The actual implementation only rejects them on some code paths, but that’s just an implementation detail, not a maintained feature.)"
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@nalind @mtrmac @vrothberg @crisbal What should we do with this issue?"
+        },
+        {
+            "user": "mtrmac",
+            "body": "I dunno. https://github.com/GoogleContainerTools/kaniko/issues/1836 is labeled “help wanted”, so one or both of:\n- Contribute a fix in Kaniko\n- Modify c/image to accept (and canonicalize??) such images.\n\nObviously doing neither, and hoping Kaniko fixes it without help, is attractive."
+        },
+        {
+            "user": "crisbal",
+            "body": "I would be happy to help but unfortunately I don't think I am skilled enough with the languages, concepts and technologies involved. "
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "K-A-R-I-M",
+            "body": "### I found a potential solution to solve this issue.\n\nIf you build your base image with `podman build -t base_image .` as usual, you will obtain an **OCI mediaType** manifest.\n\n```\n{\n  \"schemaVersion\": 2,\n  \"config\": {\n    \"mediaType\": \"application/vnd.oci.image.config.v1+json\",\n    \"digest\": \"sha256:a5d8d05897e1e276091ddedaf52f71a9de72c79a0fba215e9d6a0c3197cbd2c2\",\n    \"size\": 1553\n  },\n  \"layers\": [\n    {\n      \"mediaType\": \"application/vnd.oci.image.layer.v1.tar\",\n      \"digest\": \"sha256:59880d7ef6d202374f5f4775b63d61a1e2930c432c3a4f08237ed0f7f0c8e704\",\n      \"size\": 165120000\n    },\n    {\n      \"mediaType\": \"application/vnd.oci.image.layer.v1.tar\",\n      \"digest\": \"sha256:a11181b4bd92e5bf3c9589104bafa2e147d4cc5ee6b6c7f68a8d0baf7b1454cc\",\n      \"size\": 154247680\n    },\n    {\n      \"mediaType\": \"application/vnd.oci.image.layer.v1.tar\",\n      \"digest\": \"sha256:869d2f57befc8c54774604bb3646484f3e5691d4b1ff1da24b4e89f51573f03e\",\n      \"size\": 1978880\n    },\n    {\n      \"mediaType\": \"application/vnd.oci.image.layer.v1.tar\",\n      \"digest\": \"sha256:151e4cb91d30564ead5de52542bc9b40e2eb71c54b48fc394d5eebb0586c6353\",\n      \"size\": 251123200\n    }\n  ]\n}\n```\n\nthen you do:\n\n`podman push -f v2s2 registry.company.ch/base_image`\n\nwhen you push it to your registry.\n\nThis will allow you to have a **Docker mediaType** manifest.\n\n```\n{\n  \"schemaVersion\": 2,\n  \"mediaType\": \"application/vnd.docker.distribution.manifest.v2+json\",\n  \"config\": {\n    \"mediaType\": \"application/vnd.docker.container.image.v1+json\",\n    \"size\": 1555,\n    \"digest\": \"sha256:a78f1cad57997e34791a23c64c031d0221cc6420fe5f284acfd1b369c9a4dda3\"\n  },\n  \"layers\": [\n    {\n      \"mediaType\": \"application/vnd.docker.image.rootfs.diff.tar.gzip\",\n      \"size\": 64239979,\n      \"digest\": \"sha256:07132c1cc1a35ac077e1e2dd3de6875ebb1c74940398b56de41f214d6b3ebf51\"\n    },\n    {\n      \"mediaType\": \"application/vnd.docker.image.rootfs.diff.tar.gzip\",\n      \"size\": 97080546,\n      \"digest\": \"sha256:d10c72bf83d8e121602feee8a3b2a525c6426ce0b8058ac417182c78c7142444\"\n    },\n    {\n      \"mediaType\": \"application/vnd.docker.image.rootfs.diff.tar.gzip\",\n      \"size\": 515713,\n      \"digest\": \"sha256:86d3ca747a85bba71e083de35aaa72aa9ecc47c379f9664d26643a4c3e7e37be\"\n    },\n    {\n      \"mediaType\": \"application/vnd.docker.image.rootfs.diff.tar.gzip\",\n      \"size\": 122365225,\n      \"digest\": \"sha256:88e39919aa9eb54475ed8b43fc2d034642f91a2dba5b04a822ea25926d1ed490\"\n    }\n  ]\n}\n```\n\nwhich will no more be a problem for **Kaniko** and its way of adding **Docker mediaType** layers in your manifest."
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "rhatdan",
+            "body": "Since you found a solution for this problem, I am closing the issue, reopen if this is a mistake."
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "GoogleContainerTools",
+            "repository": "kaniko",
+            "number": 1836
+        },
+        {
+            "organization": "tailscale",
+            "repository": "mkctr",
+            "number": 10
+        }
+    ]
+}

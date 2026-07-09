@@ -1,0 +1,55 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "buildah",
+    "number": 3455,
+    "type": "issue",
+    "title": "Buildah in Tekton task is failing with: unshare(CLONE_NEWUSER): Invalid argument",
+    "state": "closed",
+    "labels": [
+        "locked - please file new issue/PR"
+    ],
+    "user": "cgruver",
+    "body": "buildah version: multiple (1.16, 1.21, 1.22)\n\nTekton Pipelines version 1.22 (OpenShift Pipelines 1.4.1)\n\nWe have observed three OpenShift clusters where buildah starts failing with the following errors:\n\n```bash\nunshare(CLONE_NEWUSER): Invalid argument\nERRO error parsing PID \"\": strconv.Atoi: parsing \"\": invalid syntax\nERRO (unable to determine exit status)\n```\n\nOnce it starts failing, it always fails.  We don't believe that the issue is directly related to buildah, but hope that someone might have a clue.  It's almost like underlying permissions are being affected for the pipeline service account running with the pipeline-scc SecurityContextConstraint.\n\nThe following Tekton `Task` works on the other clusters.  It fails with the above error in the clusters where the issue has manifested itself.\n\n```yaml\napiVersion: tekton.dev/v1beta1\nkind: Task\nmetadata:\n  name: buildah-test\nspec:\n  stepTemplate:\n    volumeMounts:\n    - name: varlibc\n      mountPath: /var/lib/containers\n  steps:\n  - name: prep-workingdir\n    image: quay.io/buildah/stable:latest\n    imagePullPolicy: IfNotPresent\n    script: |\n      chmod 777 /workspace/source\n      cp -r /tekton/creds/.docker /workspace/source\n      chown -R 1000:1000 /workspace/source/.docker\n    env:\n    - name: user.home\n      value: /workspace/source\n    workingDir: \"/workspace/source\"\n  - name: build-image\n    image: quay.io/buildah/stable:latest\n    securityContext:\n      runAsUser: 1000\n    imagePullPolicy: IfNotPresent\n    script: |\n      export HOME=/workspace/source\n      export BUILDAH_ISOLATION=chroot\n      APP_NAME=test\n      DESTINATION_IMAGE=\"image-registry.openshift-image-registry.svc:5000/$(context.taskRun.namespace)/${APP_NAME}:latest\"\n      buildah --version\n      BUILDAH_ARGS=\"--storage-driver vfs\"\n      CONTAINER=$(buildah ${BUILDAH_ARGS} from quay.io/buildah/stable:latest )\n      # CONTAINER=$(buildah --storage-driver vfs --log-level trace --userns-uid-map $(id -u):$(( $(id -u) + 1 )):65536 --userns-gid-map $(id -u):$(( $(id -u) + 1 )):65536 --tls-verify=false from quay.io/buildah/stable:latest )\n      cat << EOF > ./test.sh\n      #!/bin/bash\n      echo \"hello\"\n      EOF\n      chmod 750 ./test.sh\n      buildah ${BUILDAH_ARGS} copy ${CONTAINER} ./test.sh /application.sh\n      buildah ${BUILDAH_ARGS} config --entrypoint '[\"/application.sh\"]' --port 8080 ${CONTAINER}\n      buildah ${BUILDAH_ARGS} config --label GIT_COMMIT=\"Hello\" --author=\"Tekton\" ${CONTAINER}\n      buildah ${BUILDAH_ARGS} commit ${CONTAINER} ${DESTINATION_IMAGE}\n      buildah ${BUILDAH_ARGS} unmount ${CONTAINER}\n      buildah ${BUILDAH_ARGS} push ${DESTINATION_IMAGE} docker://${DESTINATION_IMAGE}\n    env:\n    - name: user.home\n      value: /workspace/source\n    workingDir: \"/workspace/source\"\n  volumes:\n  - name: varlibc\n    emptyDir: {}\n```\n\nI posted this on the Tekton Operator project as well.\n\nhttps://github.com/tektoncd/operator/issues/381",
+    "comments": [
+        {
+            "user": "rhatdan",
+            "body": "Could you check to see if there are seccomp or selinux avc errors in the audit.log when this fails.\n\nausearch -m seccomp\nausearch -m avc\n\nCould this be an older kernel?\n\n@giuseppe WDYT?"
+        },
+        {
+            "user": "cgruver",
+            "body": "We pinned a pod to a specific node and monitored both `journalctl` and `/var/log/audit/audit.log`\n\nWe didn't see anything.  But in the morning we'll look specifically for seccomp and avc.\n\nThis base OS is RHCOS on OCP 4.7.9 and ROSA 4.7.19\n\n\n"
+        },
+        {
+            "user": "cgruver",
+            "body": "No output from either of:\n\n```bash\nausearch -m seccomp\nausearch -m avc\n```\n\nKernel info: `Linux ip-10-112-120-43 4.18.0-240.22.1.el8_3.x86_64 #1 SMP Thu Mar 25 14:36:04 EDT 2021 x86_64 x86_64 x86_64 GNU/Linux`\n\nAdditional trace level output:\n\n```bash\nrunning [buildah-in-a-user-namespace --log-level trace from scratch]\n\ncontainer=oci STORAGE_DRIVER=vfs _BUILDAH_STARTED_IN_USERNS= BUILDAH_ISOLATION=chroot HOME=/root TMPDIR=/var/tmp _CONTAINERS_USERNS_CONFIGURED=1], UID map [{ContainerID:0 HostID:0 Size:4294967295}], and GID map [{ContainerID:0 HostID:0 Size:4294967295}]\"\n```\n\nHere is a much simpler test to reproduce.\n\n```yaml\napiVersion: v1\nkind: Pod\nmetadata:\n  name: buildah-bare-test\nspec:\n  serviceAccountName: pipeline\n  restartPolicy: Never\n  containers:\n    - name: buildah\n      image: registry.redhat.io/rhel8/buildah@sha256:6a68ece207bc5fd8db2dd5cc2d0b53136236fb5178eb5b71eebe5d07a3c33d13\n      command: [\"buildah\", \"from\", \"scratch\"]\n      volumeMounts:\n      - mountPath: /var/lib/containers\n        name: varlibcontainers\n  volumes:\n  - emptyDir: {}\n    name: varlibcontainers\n```\n\nSame error output:\n\n```bash\nError during unshare(CLONE_NEWUSER): Invalid argument\nlevel=error msg=\"error parsing PID \\\"\\\": strconv.Atoi: parsing \\\"\\\": invalid syntax\"\nlevel=error msg=\"(unable to determine exit status)\"\n```\n"
+        },
+        {
+            "user": "cgruver",
+            "body": "Additional Info:\n\nKernel info is the same on working and non-working clusters:\n\n`Linux ip-10-112-46-126 4.18.0-240.22.1.el8_3.x86_64 #1 SMP Thu Mar 25 14:36:04 EDT 2021 x86_64 x86_64 x86_64 GNU/Linux`\n\nThe non-working clusters were working...  so, something changed, but we have no idea what it could be.\n"
+        },
+        {
+            "user": "rhatdan",
+            "body": "@nalind @umohnani8 PTAL"
+        },
+        {
+            "user": "cgruver",
+            "body": "Additional info:\n\nThese clusters are running in AWS.  We are seeing that in the \"broken\" clusters, vanilla S2I builds are failing too with file permission issues in the init-container...  Starting to think that this is not isolated to buildah.\n\nWe're running another test overnight to see if maybe this is actually related to something in the AWS account.\n\nI'll update this issue with the results."
+        },
+        {
+            "user": "cgruver",
+            "body": "We have not yet found a definitive root cause.  However, the S2I build failures were caused by a misconfigured SCC that was created as part of a different operator installation.\n\nSo, at this point we are confident that the issue was self-inflicted.\n\nRecreating the OpenShift Cluster resolved the problem.\n\nIf we find a definitive root cause, I'll update this issue so that others can benefit.\n"
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "tektoncd",
+            "repository": "operator",
+            "number": 381
+        },
+        {
+            "organization": "marrober",
+            "repository": "pipelineBuildExample",
+            "number": 5
+        }
+    ]
+}

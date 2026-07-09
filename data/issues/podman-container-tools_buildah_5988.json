@@ -1,0 +1,127 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "buildah",
+    "number": 5988,
+    "type": "issue",
+    "title": "ERRO[0025] unlinkat /var/tmp/buildah2410054376/mounts3022885724/bind626918239: device or resource busy",
+    "state": "open",
+    "labels": [
+        "jira"
+    ],
+    "user": "cevich",
+    "body": "When building inside a rootless container using buildah's `vfs` storage driver and `chroot` isolation (As is very often done to build images in CI environments), specifying read/write bind volumes from other stages results in an error.  This behavior does not reproduce using buildah 1.37 or earlier.  Also verified this same behavior using a vanilla `registry.fedoraproject.org/fedora-minimal` images + `dnf5 install buildah`.  That is to say, I think it's a buildah problem, not a buildah image problem.\n\nReproduction (host) environment:\n\n- Fedora 40\n- podman 5.3.1\n- Running as a regular user w/ default podman settings\n- The `quay.io/buildah/upstream:latest` container image (`buildah version 1.40.0-dev (image-spec 1.1.0, runtime-spec 1.2.0)`)\n- The `quay.io/buildah/stable:v1.38` container image\n- The `quay.io/buildah/stable:v1.37` container image\n\nSteps to reproduce:\n\n1. Create the following `Containerfile` somewhere in the users homedir\n   ```\n   FROM registry.fedoraproject.org/fedora-minimal:latest as test\n   RUN mkdir -p /var/tmp/test\n   ADD ./Containerfile /var/tmp/test/\n\n   FROM test as final\n   RUN --mount=type=bind,from=test,src=/var/tmp/test,dst=/var/tmp/test,rw \\\n       set -x && \\\n       date > /var/tmp/test/Containerfile && \\\n       cat /var/tmp/test/Containerfile\n   ```\n2. Run `podman run -it --rm -v ./Containerfile:/root/Containerfile:ro,Z quay.io/buildah/stable:v1.38 buildah --storage-driver=vfs build --isolation=chroot /root`\n3. Run the exact same command, but with `quay.io/buildah/stable:v1.37` (or any other earlier version)\n\nUnexpected results:\n\n```\n[1/2] STEP 1/3: FROM registry.fedoraproject.org/fedora-minimal:latest AS test\nTrying to pull registry.fedoraproject.org/fedora-minimal:latest...\nGetting image source signatures\nCopying blob 169491f3e4f7 done   |\nCopying config e6917e6306 done   |\nWriting manifest to image destination\n[1/2] STEP 2/3: RUN mkdir -p /var/tmp/test\n[1/2] STEP 3/3: ADD ./Containerfile /var/tmp/test/\nGetting image source signatures\nCopying blob cde90dcf8c1f skipped: already exists\nCopying blob cec21250b843 done   |\nCopying config 9f9e432f21 done   |\nWriting manifest to image destination\n--> 9f9e432f21cb\n[2/2] STEP 1/2: FROM 9f9e432f21cbb67c928b93d87af3878f3b903cbc2030cc12594f9368829ccc8c AS final\n[2/2] STEP 2/2: RUN --mount=type=bind,from=test,src=/var/tmp/test,dst=/var/tmp/test,rw     set -x &&     date > /var/tmp/test/Containerfile &&     cat /var/tmp/test/Containerfile\nERRO[0025] unlinkat /var/tmp/buildah1274147250/mounts4133407440/bind3931917386: device or resource busy\nError: building at STEP \"RUN --mount=type=bind,from=test,src=/var/tmp/test,dst=/var/tmp/test,rw set -x &&     date > /var/tmp/test/Containerfile &&     cat /var/tmp/test/Containerfile\": resolving mountpoints for container \"bb08d8062b4c17b75108492838e53d3236abce647447c8f5bec72cebfcb8ca1b\": setting up overlay of \"/var/tmp/buildah1274147250/mounts4133407440/bind3931917386\": mount overlay:/var/tmp/buildah1274147250/mounts4133407440/overlay/981784139/merge, data: lowerdir=/var/tmp/buildah1274147250/mounts4133407440/bind3931917386,upperdir=/var/tmp/buildah1274147250/mounts4133407440/overlay/981784139/upper,workdir=/var/tmp/buildah1274147250/mounts4133407440/overlay/981784139/work,userxattr: invalid argument\n```\n\nExpected results (`from v1.37`):\n\n```\n[1/2] STEP 1/3: FROM registry.fedoraproject.org/fedora-minimal:latest AS test\nTrying to pull registry.fedoraproject.org/fedora-minimal:latest...\nGetting image source signatures\nCopying blob 169491f3e4f7 done   |\nCopying config e6917e6306 done   |\nWriting manifest to image destination\n[1/2] STEP 2/3: RUN mkdir -p /var/tmp/test\n[1/2] STEP 3/3: ADD ./Containerfile /var/tmp/test/\nGetting image source signatures\nCopying blob cde90dcf8c1f skipped: already exists\nCopying blob b50f8aabd929 done   |\nCopying config 71ea00d65f done   |\nWriting manifest to image destination\n--> 71ea00d65f89\n[2/2] STEP 1/2: FROM 71ea00d65f8949486c4441a13b231fd4992b2be2c4170e97a0b9baae11244f71 AS final\n[2/2] STEP 2/2: RUN --mount=type=bind,from=test,src=/var/tmp/test,dst=/var/tmp/test,rw     set -x &&     date > /var/tmp/test/Containerfile &&     cat /var/tmp/test/Containerfile\nWARN[0000] couldn't find \"/var/lib/containers/storage/vfs/dir/7d684fe50918fe44941621b1721c8ee345f7884e2887f8cae36608bacb38e0e8/tmp/test\" on host to bind mount into container\n+ date\n+ cat /var/tmp/test/Containerfile\nWed Feb 12 18:17:34 UTC 2025\n[2/2] COMMIT\nGetting image source signatures\nCopying blob cde90dcf8c1f skipped: already exists\nCopying blob b50f8aabd929 skipped: already exists\nCopying blob 11db3e39f474 done   |\nCopying config 83de1e9298 done   |\nWriting manifest to image destination\n--> 83de1e9298fe\n83de1e9298feac0ce7e01e89b840e42ecd3901a4a67d1b998b3bdbe176fd3a69\n```\n\nDebug output from v1.38 is below (v1.40.0-dev output is substantially similar):\n\n[buildah_v1.38_debug.log.txt](https://github.com/user-attachments/files/18772409/buildah_v1.38_debug.log.txt)\n\n\n***Note:*** Also attempted with the following `Containerfile` with similar results:\n\n```\nFROM registry.fedoraproject.org/fedora-minimal:latest as test\n\nADD ./Containerfile /test/\nRUN chmod 777 /test/Containerfile\n\n#####\n\nFROM test as final\n\nRUN --mount=type=bind,from=test,src=/test,dst=/test,rw \\\n    set -x && \\\n    date > /test/Containerfile && \\\n    cat /test/Containerfile\n```",
+    "comments": [
+        {
+            "user": "cevich",
+            "body": "Poking through the debuglog and the code, I'm thinking perhaps this problem is stemming from within containers/storage based on `convertToOverlay()` getting an error back from `overlay.MountWithOptions()`.  I didn't dig too deep into the storage code, but the `,userxattr` suffix on the end of the debug messages made my ears stand up: \"Why would that be present or even relevant for a VFS \"bind\" mount?\"\n\n```\ntime=\"2025-02-12T18:19:46Z\" level=debug msg=\"Error building at step\n{Env:[container=oci ...cut...: resolving mountpoints for container\n...cut...: setting up overlay of \\\"/var/tmp/buildah3627628243/mounts2014160263/bind3820943893\\\": \nmount overlay:\n...cut...,\nworkdir=/var/tmp/buildah3627628243/mounts2014160263/overlay/1907194961/work,userxattr: invalid argument\"\n```"
+        },
+        {
+            "user": "ssams",
+            "body": "stumbled across what appears to be the same issue in a build (also using VFS storage driver), to me it seems the problem starts to appear with buildah version _1.37.6_:\n\n```\ntime=\"2025-02-21T09:00:59Z\" level=error msg=\"unlinkat /var/tmp/buildah1222469549/mounts3222934611/bind1342232015: device or resource busy\"\nError: building at STEP \"RUN --mount=type=bind,source=requirements.txt,target=/tmp/pip-tmp/requirements.txt [...]\": resolving mountpoints for container \"8a8dd1c7104a71218d2e85f1b657facd2a45051f9c0ccf56a267ed85046d6d06\": setting up overlay of \"/var/tmp/buildah1222469549/mounts3222934611/bind1342232015\": mount overlay:/var/tmp/buildah1222469549/mounts3222934611/overlay/1549299006/merge, data: lowerdir=/var/tmp/buildah1222469549/mounts3222934611/bind1342232015,upperdir=/var/tmp/buildah1222469549/mounts3222934611/overlay/1549299006/upper,workdir=/var/tmp/buildah1222469549/mounts3222934611/overlay/1549299006/work,userxattr: invalid argument\n```\n\nthis is with `buildah version 1.37.6 (image-spec 1.1.0, runtime-spec 1.2.0)` running via container [registry.redhat.io/rhel9/buildah:9.5-1738643435](https://catalog.redhat.com/software/containers/rhel9/buildah/61959576ce09ff98ccc36337?q=buildah&architecture=amd64&image=67a1a0d7a3b3994b19c24265&container-tabs=overview).\n\neverything works as expected with `buildah version 1.37.5 (image-spec 1.1.0, runtime-spec 1.2.0)` via [registry.redhat.io/rhel9/buildah:9.5-1737479141](https://catalog.redhat.com/software/containers/rhel9/buildah/61959576ce09ff98ccc36337?q=buildah&architecture=amd64&image=678fdf3deff8b84236190c60&container-tabs=overview)"
+        },
+        {
+            "user": "cevich",
+            "body": "Interesting, and thanks for providing details.  Knowing this behavior crept in via a patch release is actually really helpful.  I just checked, and it was 1.37.5 that fixed the issue for me, which makes sense based on your experience.\n\nChecking the git history, there are only [17 commits between 1.37.5 and 1.37.6](https://github.com/containers/buildah/compare/v1.37.5..v1.37.6).  Of these, almost half are merge or changelog update commits.  So that narrows things down quite a bit!"
+        },
+        {
+            "user": "cevich",
+            "body": "Based on the string `setting up overlay of` in the message, I believe the problem is somewhere in/around `convertToOverlay()` which first appeared in 2c7003508a (between .5 and .6).  Curiously as near as I can tell, the `containers/storage` module was last updated **in** 1.37.5, so that's probably not the root cause.\n\nThere are several conditionals that would all emit a similar message, but I think this is coming from the the 4th one, dealing with a failure from `overlay.MountWithOptions()`. However, it's also possible this error is a red-herring, and the problem is really coming from `GetBindMount()`, where `convertToOverlay()` shouldn't even be used for a VFS mount (clearly we're not reproducing with a `mountedImage`):\n\n```golang\nfunc GetBindMount(...cut...\n        ...cut...\n\n        overlayDir := \"\"\n        if mountedImage != \"\" || mountIsReadWrite(newMount) {\n                if newMount, overlayDir, err = convertToOverlay(newMount, store, mountLabel, tmpDir, 0, 0); err != nil {\n                        return newMount, \"\", \"\", \"\", err\n                }\n        }\n\n        succeeded = true\n        return newMount, mountedImage, intermediateMount, overlayDir, nil\n}\n```"
+        },
+        {
+            "user": "ssams",
+            "body": "didn't get to look at the details of the commit, but it sounds very plausible to me. at least I can confirm that removing the `rw` option makes the mount itself succeed in my case, with the default read-only bind mount it would work. which also further hints towards these changes around read-write mounts."
+        },
+        {
+            "user": "ssams",
+            "body": "and I noticed that I may have shortened the output in my earlier comment a bit much, so in case it could be helpful, the apparently problematic line in my build is: `--mount=type=bind,source=third_party/,target=/tmp/pip-tmp/third_party/,rw` (so in my case it's mounted from the host, not from an earlier build stage). as indicated in the last comment, removing the `rw` makes the mount work, so `--mount=type=bind,source=third_party/,target=/tmp/pip-tmp/third_party/` works."
+        },
+        {
+            "user": "cevich",
+            "body": "All good data points, thanks again for sharing.  For VFS I don't think it matters if the source is another stage or w/in the context dir, both should just resolve to directories on the \"host\" side.  SELinux could be to blame, however the way I was reproducing it, nested w/in `quay.io/buildah/stable`, rules that out."
+        },
+        {
+            "user": "cevich",
+            "body": "Something interesting one of my colleagues noticed:\n\nIf you do a `sudo dmesg -HW` on the host then run the reproducer, there's an overlay error from the kernel at the exact same time as buildah tries the volume mount during the build.  This is significant because with `--storage-driver=vfs`, the expectations is that overlay shouldn't be involved at all.\n\nBy my reading of `internal/volumes/volumes.go` to date, in the case of VFS, either `GetBindMount()` should never call `convertToOverlay()` or that function shouldn't be calling `overlay.MountWithOptions()` (which is overlay specific)."
+        },
+        {
+            "user": "cevich",
+            "body": "@nalind I think we need your expert eyes on this, it also affects `main` IIRC.  Myself and @dashea have exhausted our brick-wall collision quota trying to understand and figure out the correct fix.  Significantly, this issue afflicts all/most cases of using buildah in a CI environment to produce an image.  So potentially konflux is impacted, as is GitLab CI, and similar container-based automation environments."
+        },
+        {
+            "user": "nalind",
+            "body": "Read-write bind mounts get converted into overlays to match the expectation that writes to them get discarded.  This was part of the patch set that we backported to multiple branches for CVE-2024-11218.\nIt looks like the kernel is pointing out that the upper directory we attempt to use there, since we're in a container, is also on an overlay filesystem, which it doesn't allow.  Forcing the storage driver to be vfs instead of the overlay-with-fuse-overlayfs default we have in storage.conf in the image discards the bit of configuration that would have caused fuse-overlayfs to be used, and that would have allowed it to succeed here."
+        },
+        {
+            "user": "cevich",
+            "body": "Thanks for taking a look at this Nalin, I appreciate it.  So it is as I/we feared, overlay is being forced.  My understanding/belief is this would also be reproducible if the VFS driver was configured in `storage.conf` rather than on the command line.  There are certainly CI environments (like gitlab) where fuse-overlay isn't supported.\n\nAs a fix, is it possible to detect if VFS is being used in `convertToOverlay()`?  If so, would it be correct for that function to create yet another temporary directory, copy the \"lower\" content, then arrange for it to be thrown away?  Or is there a better way to handle this?"
+        },
+        {
+            "user": "dkhater-redhat",
+            "body": "following this as we are running into this issue as well-\n\n```\"/home/build/.local/share/containers/storage/vfs/dir/56ea6acb37115a17b8188bc2601914e9fe64077ed0a70d0a4deb5554c56ad23b\": mount overlay:/var/tmp/buildah3838130017/mounts3684384049/overlay/2916328100/merge, data: lowerdir=/home/build/.local/share/containers/storage/vfs/dir/56ea6acb37115a17b8188bc2601914e9fe64077ed0a70d0a4deb5554c56ad23b,upperdir=/var/tmp/buildah3838130017/mounts3684384049/overlay/2916328100/upper,workdir=/var/tmp/buildah3838130017/mounts3684384049/overlay/2916328100/work,userxattr: invalid argument```\n\n\n\n"
+        },
+        {
+            "user": "cgwalters",
+            "body": ">  So potentially konflux is impacted,\n\nJust for the record I discovered Konflux has a fork in https://github.com/konflux-ci/buildah-container/ - notice the buildah submodule there is ~4 months old at this time.\n"
+        },
+        {
+            "user": "cgwalters",
+            "body": "> It looks like the kernel is pointing out that the upper directory we attempt to use there, since we're in a container, is also on an overlay filesystem, which it doesn't allow. \n\nDon't we want to encourage people to provide an \"emptydir\" (in kube terms) i.e. transient non-overlayfs volume? Or honestly use `podman run --read-only-tmpfs` so we get `/tmp` and `/var/tmp` as non-overlayfs by default. Then c/storage (?) can detect this case and automatically use `/var/tmp` for the uppers."
+        },
+        {
+            "user": "cevich",
+            "body": "> Don't we want to encourage people to provide an \"emptydir\" (in kube terms) \n\nThis is perfectly valid and I agree this is probably a better way to run nested builds.  However, two things:\n\n1. This worked previously, so it's a regression.  It impacts several RHEL release branches as well 😭 \n2. \"Encouragement\" is best provided in new major versions, or otherwise in the form of blogs and documentation 😉 "
+        },
+        {
+            "user": "cgwalters",
+            "body": "Yes I agree (though I'm not the one writing the patches for this so it's easy to do 😄 )\n\nOne observation I would have is I think few of us have nested builds near the top of mind, it's certainly not in my day-to-day usage. But probably one thing that would make sense (tying together with my comment above) is to do \"reverse dependency testing\" by running the Konflux buildah task against proposed updates to buildah. The Konflux buildah task is a beast but it is how many things get built for production so we certainly need it to continue to work. "
+        },
+        {
+            "user": "cevich",
+            "body": "> But probably one thing that would make sense (tying together with my comment above) is to do \"reverse dependency testing\" by running the Konflux buildah task against proposed updates to buildah.\n\nThis is a really good suggestion.  While konflux may be the eventual destination, there's no reason why the current tests couldn't have caught this.  It runs chroot tests and it runs VFS tests.  It must simply be missing a test that tries to rw mount from a previous layer.\n\nEdit: There's possibly a secondary avenue as well - `containers/image_build` actually produces the `quay/buildah` images, but doesn't test them very well.  CI in that repo builds every day, and fires off e-mails on failure.  I'll see if I can find a half-hour to add these tests."
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "cevich",
+            "body": "X-ref: https://github.com/containers/buildah/pull/6126\n(so it's more obvious)"
+        },
+        {
+            "user": "Vince-FIS",
+            "body": "What's the status of this Issue and the associated PR? It was approved at some point and then seemingly abandoned.\n\nWe run into the same problem in our CI and are interested in a solution to the problem, are there any plans to get this PR back on track in the near future?"
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "buildah",
+            "number": 5975
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "image_build",
+            "number": 44
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "buildah",
+            "number": 6126
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "buildah",
+            "number": 5952
+        },
+        {
+            "organization": "konflux-ci",
+            "repository": "buildah-container",
+            "number": 134
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "buildah",
+            "number": 5456
+        }
+    ]
+}

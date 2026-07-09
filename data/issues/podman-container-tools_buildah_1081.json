@@ -1,0 +1,79 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "buildah",
+    "number": 1081,
+    "type": "issue",
+    "title": "can't inspect cgroup limits within a build",
+    "state": "closed",
+    "labels": [
+        "locked - please file new issue/PR"
+    ],
+    "user": "bparees",
+    "body": "One of our tests attempts to set memory/cpu limits on the docker build being performed and attempts to confirm the values by running a script as one of the RUN commands, where the script itself inspects the cgroup limits:\n\nhttps://github.com/openshift/origin/blob/master/test/extended/testdata/builds/build-quota/.s2i/bin/assemble\n\nThis is failing under buildah due to permissions issues:\n\n```\n          2018-10-05T03:43:54.900581678Z MEMORY=cat: /sys/fs/cgroup/memory/memory.limit_in_bytes: Permission denied\n          2018-10-05T03:43:54.902597615Z MEMORYSWAP=cat: /sys/fs/cgroup/memory/memory.memsw.limit_in_bytes: Permission denied\n          2018-10-05T03:43:54.904834655Z QUOTA=/tmp/scripts/assemble: line 13: /sys/fs/cgroup/cpu,cpuacct/cpu.cfs_quota_us: Permission denied\n          2018-10-05T03:43:54.904996984Z cat: /sys/fs/cgroup/cpu,cpuacct/cpu.cfs_quota_us: Permission denied\n          2018-10-05T03:43:54.995823041Z SHARES=PERIOD=cat: /sys/fs/cgroup/cpu,cpuacct/cpu.shares: Permission denied\n          2018-10-05T03:43:54.9975429Z cat: /sys/fs/cgroup/cpu,cpuacct/cpu.cfs_period_us: Permission denied\n```",
+    "comments": [
+        {
+            "user": "rhatdan",
+            "body": "SELinux is preventing it.  I believe."
+        },
+        {
+            "user": "rhatdan",
+            "body": "Nope it looks like podman and buildah can?\n```\npodman run fedora cat /sys/fs/cgroup/memory/memory.limit_in_bytes\n9223372036854771712\n```\n```\nbuildah bud ~\nSTEP 1: FROM fedora\nSTEP 2: RUN cat /sys/fs/cgroup/memory/memory.limit_in_bytes\n9223372036854771712\nSTEP 3: COMMIT containers-storage:[overlay@/var/lib/containers/storage+/var/run/containers/storage:overlay.mountopt=nodev]@2a120441bc09faa7a7c683bb66b8e3187891532ce40fc30d6aa01e24e65162f3\nGetting image source signatures\nSkipping fetch of repeat blob sha256:888cf76dff2b5266ded71f295eb5d891b04ac2f11cfa7e50dc4dea86e753aca8\nCopying blob sha256:a17633bd8ec191199638477af1e5d778eda5ca765ed79edaa96ac3c940f64298\n 120 B / 120 B [============================================================] 0s\nCopying config sha256:f2e6934a5cab8199efa94ed4b1ec66ac41be79725830e38d7a23b7c8007dbd76\n 1.54 KiB / 1.54 KiB [======================================================] 0s\nWriting manifest to image destination\nStoring signatures\n--> 2a120441bc09faa7a7c683bb66b8e3187891532ce40fc30d6aa01e24e65162f3\n```"
+        },
+        {
+            "user": "rhatdan",
+            "body": "Can you give me a Dockerfile where you see the failures?"
+        },
+        {
+            "user": "bparees",
+            "body": "it's this dockerfile:\nhttps://github.com/openshift/origin/blob/master/test/extended/testdata/builds/build-quota/Dockerfile\n\nso you should be able to clone the origin repo and attempt to build that whole build-quota directory.  That is what the test does.  Of course I would not be surprised if this behaves differently when you are simply running buildah directly, vs when we are running it inside a pod in openshift.\n"
+        },
+        {
+            "user": "rhatdan",
+            "body": "Only two reasons I can think of for permission denied, would be if SELinux is blocking.\n\nON Fedora where I am testing I see these rules\n```\nsesearch -A -s container_t -t cgroup_t -p read -c file\nallow container_t cgroup_t:file { append create getattr ioctl link lock open read rename setattr unlink write }; [ container_manage_cgroup ]:True\nallow container_t cgroup_t:file { getattr ioctl lock open read };\n```\nWhich means by default we allow container_t to read cgroup_t, even with container_manage_cgroup boolean turned off.\n\nThe other reason would be if their is a non priv user running when the process tries to read the content.\nBut it looks like I can read these files when I am not root.  But if these files were in a different UserNamespace?\n"
+        },
+        {
+            "user": "nalind",
+            "body": "When using chroot isolation, we currently mask off `/sys/fs/cgroup` and `/sys/fs/selinux`, so this isn't information that a RUN instruction would be able to read.  I'm not sure how I'd feel about changing that."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@nalind that would not give them permission denied, though."
+        },
+        {
+            "user": "bparees",
+            "body": "Alternatively, if we're confident that the containers buildah is launching inside the pod's container are going to be subjected to the pod's cgroup limits, we can do away with this test.\n\nThe reason we had the test originally is because we wanted to ensure the build logic had properly looked up the pod container's cgroup limits, and successfully applied them to the containers it was launching directly via the docker daemon.\n\nSince we're not spawning containers directly via the docker daemon anymore, i assume this is no longer a concern and that the containers buildah launches will be constrained by the pod's limits?\n\n\n"
+        },
+        {
+            "user": "rhatdan",
+            "body": "That is correct.  We don't create separate containers, so this test should no longer apply."
+        },
+        {
+            "user": "bparees",
+            "body": "Ok, i'm willing to delete the test, do you want this issue left open to track why we can't read those paths though?\n"
+        },
+        {
+            "user": "nalind",
+            "body": "I would like to look at this some more, yes, at least while we're running builds with privileges."
+        },
+        {
+            "user": "bparees",
+            "body": "@rhatdan things like the JVM now attempt to inspect cgroup limits to set heap sizes correctly.  If a JVM is launching inside a buildah container (e.g. \"RUN java foobar\"), will it be able to read the information it needs to set the heap size correctly?  Will it correctly pick up the pod's memory limit?\n\nAlso we do things like this in our java based s2i builders:\nhttps://github.com/openshift-s2i/s2i-wildfly/blob/master/14.0/s2i/bin/assemble#L300\n\nwhich again we use to drive the heap settings in the jvm.  So those invocations are going to be broken if we don't address this.  So i think the urgency might be higher than i indicated earlier.\n"
+        },
+        {
+            "user": "rhatdan",
+            "body": "Should be able to look at cgroups now."
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "buildah",
+            "number": 1130
+        },
+        {
+            "organization": "openshift",
+            "repository": "builder",
+            "number": 26
+        }
+    ]
+}

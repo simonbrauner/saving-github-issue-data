@@ -1,0 +1,56 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "buildah",
+    "number": 5617,
+    "type": "issue",
+    "title": "sbom scanning fails to remount context",
+    "state": "open",
+    "labels": [
+        "stale-issue"
+    ],
+    "user": "keturn",
+    "body": "**Description**\n\n`buildah build --sbom trivy` fails with an \"operation not permitted\" error.\n\n**Steps to reproduce the issue:**\n\nrun buildah under gitlab-runner with its executor pointed to rootless podman… yeah, I know, that might not be the most convenient reproduction plan.\n\n[[link to failing build](https://gitlab.com/keturn/pytorch-container/-/jobs/7259427237)]\n\n**Describe the results you received:**\n\n```\n[5/5] COMMIT registry.gitlab.com/keturn/pytorch-container:main\nerror running subprocess: remounting \"/var/tmp/buildah2005083198/mnt/rootfs/.context0\" in mount namespace with flags 0x1 instead of 0x0: operation not permitted\nError: committing container for step {…}: running scanning command [trivy filesystem -q /.rootfs --format cyclonedx --output /.scans/scan0.json]: exit status 1\n```\n\n**Describe the results you expected:**\n\nbuild completes without error\n\n**Output of `rpm -q buildah` or `apt list buildah`:**\n\n```\nbuildah-1.36.0-1.fc40.x86_64\n```\n\n**Output of `buildah version`:**\n\n```\nVersion:         1.36.0\nGo Version:      go1.22.3\nImage Spec:      1.1.0\nRuntime Spec:    1.2.0\nCNI Spec:        1.0.0\nlibcni Version:  \nimage Version:   5.31.0\nGit Commit:      \nBuilt:           Mon May 27 13:11:54 2024\nOS/Arch:         linux/amd64\nBuildPlatform:   linux/amd64\n```\n\n**Output of `podman version` if reporting a `podman build` issue:**\n\nnot a podman build issue, but buildah is executing under the podman runtime:\n```\nClient:       Podman Engine\nVersion:      5.2.0-dev\nAPI Version:  5.2.0-dev\nGo Version:   go1.22.2\nGit Commit:   b8d95a5893572b37c8257407e964ad06ba87ade6\nBuilt:        Tue Jun 18 12:28:29 2024\nOS/Arch:      linux/amd64\n```\n…`-dev`? oh geez\n\n**Output of `cat /etc/*release`:**\n\nIt's `quay.io/buildah/stable:latest`.\n\n<details>\n<summary>Fedora 40</summary>\n\n```\nFedora release 40 (Forty)\nNAME=\"Fedora Linux\"\nVERSION=\"40 (Container Image)\"\nID=fedora\nVERSION_ID=40\nVERSION_CODENAME=\"\"\nPLATFORM_ID=\"platform:f40\"\nPRETTY_NAME=\"Fedora Linux 40 (Container Image)\"\nANSI_COLOR=\"0;38;2;60;110;180\"\nLOGO=fedora-logo-icon\nCPE_NAME=\"cpe:/o:fedoraproject:fedora:40\"\nDEFAULT_HOSTNAME=\"fedora\"\nHOME_URL=\"https://fedoraproject.org/\"\nDOCUMENTATION_URL=\"https://docs.fedoraproject.org/en-US/fedora/f40/system-administrators-guide/\"\nSUPPORT_URL=\"https://ask.fedoraproject.org/\"\nBUG_REPORT_URL=\"https://bugzilla.redhat.com/\"\nREDHAT_BUGZILLA_PRODUCT=\"Fedora\"\nREDHAT_BUGZILLA_PRODUCT_VERSION=40\nREDHAT_SUPPORT_PRODUCT=\"Fedora\"\nREDHAT_SUPPORT_PRODUCT_VERSION=40\nSUPPORT_END=2025-05-13\nVARIANT=\"Container Image\"\nVARIANT_ID=container\nFedora release 40 (Forty)\nFedora release 40 (Forty)\n```\n\n</details>\n\n\n**Output of `uname -a`:**\n\n```\nLinux f53aa9e40bf8 5.15.0-113-generic #123-Ubuntu SMP Mon Jun 10 08:16:17 UTC 2024 x86_64 GNU/Linux\n```\n\n**Output of `cat /etc/containers/storage.conf`:**\n\nmostly the container's defaults, just `graphroot` changed.\n\n```\n[storage]\ndriver = \"overlay\"\nrunroot = \"/run/containers/storage\"\ngraphroot = \"/cache/containers/storage\"\n[storage.options]\nadditionalimagestores = [\n\"/var/lib/shared\",\n\"/usr/lib/containers/storage\",\n]\npull_options = {enable_partial_images = \"true\", use_hard_links = \"false\", ostree_repos=\"\"}\n[storage.options.overlay]\nmount_program = \"/usr/bin/fuse-overlayfs\"\nmountopt = \"nodev,fsync=0\"\n```\n",
+    "comments": [
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "keturn",
+            "body": "stalebot, I can still reproduce this failure"
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@nalind PTAL"
+        },
+        {
+            "user": "nalind",
+            "body": "1.36 predates #5544, and that changed some of the code paths that would be involved here.  It corrected an error that cropped up when we tried to make a bind-mount read-only if it had certain other mount flags already set on its source that weren't being re-requested during the remount call.\n\nA quick skim of the \"docker\" executor code in gitlab-runner doesn't turn up any unusual flags being used when creating containers, so I'm guessing there are volumes or bind mounts involved, because those can provide surprises of the type that affected secrets, and I wouldn't be _that_ surprised if the build context was provided in a volume, as it's what the OpenShift builder does.\n\nIf I run an unprivileged buildah container as my unprivileged user on a Fedora 40 system like so:\n```bash\nmkdir /tmp/tests\ncat > /tmp/tests/Dockerfile << EOF\nFROM registry.fedoraproject.org/fedora:40\nRUN dnf -y distro-sync\nEOF\npodman run --device /dev/fuse --rm -it -v /tmp/tests:/root/buildcontext:Z -v /var/lib/containers quay.io/buildah/stable:v1.36.0 sh -c 'dnf -y install trivy; buildah build --layers --sbom trivy --sbom-output=/tmp/sbom.json /root/buildcontext'\n```\n\n...I get the described error with quay.io/buildah/stable:v1.36.0, but not with quay.io/buildah/stable:v1.37.0.\n\nThat fix is a little mistaken in that it's setting some bits in a mount(2) call's mountflags parameter by directly using the f_flags value a statfs(2) call returned, and those values aren't always interchangeable.  For flags like \"nodev\"/\"nosuid\"/\"noexec\", the bits to set are the same ones we get back, but for flags like \"relatime\" they're quite different.  That said, I didn't spot this at the time, and I'm leaning toward keeping the current code if it isn't actively breaking for anyone.\n\nSo, I guess the important question is: are people still hitting this problem with the 1.37 image?"
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "ricardobranco777",
+            "body": "FWIW, these are the openQA results for the `sbom` test with latest buildah 1.40.1 on latest Tumbleweed with latest kernel, using both crun & runc:\n\n- crun w/ SELinux: https://openqa.opensuse.org/tests/5103112\n- runc w/ SELinux: https://openqa.opensuse.org/tests/5103111\n- crun w/o SELinux: https://openqa.opensuse.org/tests/5103248\n- runc w/o SELinux: https://openqa.opensuse.org/tests/5103249\n\nWe disabled the `sbom` test anyway because we had issues on non-SELinux SLES due to possible issues in the 3rd party images used."
+        },
+        {
+            "user": "ricardobranco777",
+            "body": "Tracking in https://bugzilla.opensuse.org/show_bug.cgi?id=1244601"
+        },
+        {
+            "user": "alexalbr",
+            "body": "@nalind I have the same problem with buildah version 1.39.4 running in Openshift with Openshift Pipelines\n\nThis is the executed command\n\n```bash\n          buildah --storage-driver=vfs bud \\\n           --format=oci \\\n          --tls-verify=true --no-cache \\\n          --sbom-scanner-image=<private registry>/anchore/syft \\\n          --sbom-scanner-command=\"syft scan dir:{ROOTFS} --output cyclonedx-json={OUTPUT}\" \\\n          --sbom-merge-strategy=merge-cyclonedx-by-component-name-and-version \\\n          --sbom-image-output /sbom.json \\\n          --sbom-output container-sbom.json \\\n          --log-level=debug \\\n          -f Dockerfile -t name .\n```\nIn the debug log i can see following lines\n\n```bash\ntime=\"2025-09-09T10:43:43Z\" level=debug msg=\"bind mounting \\\"/.context0\\\" on \\\"/var/tmp/buildah4222070984/mnt/rootfs/.context0\\\" [ro private rbind]\"\ntime=\"2025-09-09T10:43:43Z\" level=debug msg=\"bind mounted \\\"/var/tmp/buildah4222070984/mnt/buildah-bind-target-0\\\" to \\\"/var/tmp/buildah4222070984/mnt/rootfs/.context0\\\"\"\ntime=\"2025-09-09T10:43:43Z\" level=debug msg=\"\\\"/var/tmp/buildah4222070984/mnt/rootfs/.context0\\\" is apparently not really mounted, skipping\"\n```\n\nand at the end the error message:\n\n`error running subprocess: remounting \"/var/tmp/buildah4222070984/mnt/rootfs/.context0\" in mount namespace with flags 0x1 instead of 0x0: permission denied\n`\n"
+        },
+        {
+            "user": "alexalbr",
+            "body": "The build was executed in an NFS persistent volume. A build on a folder without an NFS backend worked."
+        }
+    ],
+    "cross_references": []
+}

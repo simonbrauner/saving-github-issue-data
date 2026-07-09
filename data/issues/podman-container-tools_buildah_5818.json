@@ -1,0 +1,99 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "buildah",
+    "number": 5818,
+    "type": "issue",
+    "title": "do we need to run buildah containers always with BUILDAH_ISOLATION = chroot",
+    "state": "open",
+    "labels": [],
+    "user": "himmatss",
+    "body": "Hi,\n\nI have a buildah container image (quay.io/buildah/stable:latest) running with default setting as a \"BUILDAH_ISOLATION = chroot\"  in Kubernetes. However, I am wondering is this really required to run the buildah as a container ? \n\nCan someone pleas explain this ,\nhttps://github.com/containers/buildah/blob/main/docs/buildah-build.1.md\n_\"--isolation type\n\nControls what type of isolation is used for running processes as part of RUN instructions. Recognized types include oci (OCI-compatible runtime, the default), rootless (OCI-compatible runtime invoked using a modified configuration, with --no-new-keyring added to its create invocation, reusing the host's network and UTS namespaces, and creating private IPC, PID, mount, and user namespaces; the default for unprivileged users), and chroot (an internal wrapper that leans more toward chroot(1) than container technology, reusing the host's control group, network, IPC, and PID namespaces, and creating private mount and UTS namespaces, and creating user namespaces only when they're required for ID mapping).\n\nNote: You can also override the default isolation type by setting the BUILDAH_ISOLATION environment variable. export BUILDAH_ISOLATION=oci\"_",
+    "comments": [
+        {
+            "user": "nalind",
+            "body": "In many cases, a container that's run using the image will not be given enough privileges for `buildah run` or the handling of RUN instructions in Dockerfiles in `buildah build` to be able to launch a container using an actual runtime like crun or runc.  The chroot-based method is severely limited in functionality compared to crun or runc, but in return it exercises fewer privileges than they might, so it works (or \"works\") in a number of cases where they might not.  If your environment provides enough privileges to not have to use chroot, feel free to override it."
+        },
+        {
+            "user": "himmatss",
+            "body": "Thanks @nalind for your reply. \nThe documentation says the default value is \"oci\" for the BUILDAH_ISOLATION but in the dockerfile of the image quay.io/buildah/stable:latest ; it appears to be having the BUILDAH_ISOLATION=chroot\nhttps://github.com/containers/image_build/blob/main/podman/Containerfile\nhttps://github.com/containers/image_build/blob/main/buildah/Containerfile"
+        },
+        {
+            "user": "nalind",
+            "body": "Yes, the container image has the environment variable set in it to override the compiled-in default."
+        },
+        {
+            "user": "chmeliik",
+            "body": "I have a similar need to run buildah in Kubernetes with better isolation.\n\n> If your environment provides enough privileges to not have to use chroot, feel free to override it.\n\nWhat privileges are those? How can I check if the environment provides them?"
+        },
+        {
+            "user": "nalind",
+            "body": "For handling `RUN` instructions, it's a combination of\n\n* Being able to create a user namespace with multiple IDs mapped into it, or being started as UID 0 and having CAP_SYS_ADMIN, so that it doesn't need to do those things to set up a namespace where those things are true.  If you're writing the pod spec, `hostUsers: false` may provide some of this.\n* Being able to create bind and overlay mounts for volumes (this generally requires CAP_SYS_ADMIN) that it provides.\n* Being able to chroot into the rootfs to make changes inside of it (CAP_SYS_CHROOT).\n* Being able to configure networking for a namespace that it creates if \"host\" networking isn't specified.  There's no reason to not use \"host\" networking when we're in a container, because from buildah's point of view, the container's network _is_ the host network, but that's configurable, and the hard-coded defaults don't assume being run inside of a container.\n* Being able to successfully execute a command using runc, or crun, or a comparable runtime that can be invoked similarly.  That last part introduces some requirements of its own that we don't have control over.\n\nSome of these operations can also be denied by the seccomp filter, or by the SELinux policy (or other mandatory access control rules), and it's entirely possible that I'm still forgetting some things.  For me, it tends to be a trial-and-error process."
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "chmeliik",
+            "body": "I've had some time to play with it. I ended up with a Pod definition that seemingly makes nested containerization possible with `BUILDAH_ISOLATION=oci`\n\n<details>\n<summary>buildah-pod.yaml (click to expand)</summary>\n\n```yaml\napiVersion: v1\nkind: Pod\nmetadata:\n  generateName: buildah-\n  labels:\n    buildah-isolation-test: \"true\"\n  annotations:\n    # /dev/fuse fixes:\n    #\n    # fuse: device not found, try 'modprobe fuse' first\n    #\n    # Wouldn't be needed with STORAGE_DRIVER=vfs\n    io.kubernetes.cri-o.Devices: /dev/fuse\nspec:\n  restartPolicy: Never\n  volumes:\n     - name: workdir\n       emptyDir: {}\n\n  initContainers:\n    - name: create-dockerfile\n      image: quay.io/containers/buildah:v1.38.1\n      volumeMounts:\n        - name: workdir\n          mountPath: /workdir\n      workingDir: /workdir\n      command: [\"bash\", \"-c\"]\n      args:\n        - |-\n          cat << EOF > Dockerfile\n          FROM docker.io/library/alpine:latest\n\n          RUN echo \"hello world\"\n          EOF\n\n  containers:\n    - name: buildah\n      image: quay.io/containers/buildah:v1.38.1\n      volumeMounts:\n        - name: workdir\n          mountPath: /workdir\n      workingDir: /workdir\n      env:\n        - name: BUILDAH_ISOLATION\n          value: oci\n        - name: STORAGE_DRIVER\n          value: overlay\n      command: [\"bash\", \"-c\"]\n      # unshare fixes:\n      #\n      # error running container: from /usr/bin/crun ... opening file `/sys/fs/cgroup/cgroup.subtree_control` for writing: Read-only file system\n      #\n      # --mount fixes:\n      #\n      # Error: mount /var/lib/containers/storage/overlay:/var/lib/containers/storage/overlay, flags: 0x1000: operation not permitted\n      #\n      # --map-root-user fixes:\n      #\n      # unshare: unshare failed: Operation not permitted\n\n      # --net=host fixes:\n      #\n      # error running container: from /usr/bin/crun ...: open `/proc/sys/net/ipv4/ping_group_range`: Read-only file system\n      #\n      # --pid=host fixes:\n      #\n      # error running container: from /usr/bin/crun ...: mount `proc` to `proc`: Operation not permitted\n      args:\n        - |-\n          # can also add --pid --fork to unshare\n          unshare --map-root-user --mount -- buildah build --net=host --pid=host .\n      securityContext:\n        capabilities:\n          add:\n            # SETFCAP fixes:\n            #\n            # unshare: write failed /proc/self/uid_map: Operation not permitted\n            - SETFCAP\n        seLinuxOptions:\n          # container_runtime_t fixes:\n          #\n          # error running container: from /usr/bin/crun ...: mount `devpts` to `dev/pts`: Permission denied\n          type: container_runtime_t\n```\n\n</details>\n\nTest with:\n\n```bash\nkubectl delete pod -l buildah-isolation-test=true\nkubectl create -f buildah-pod.yaml\nsleep 5\nkubectl logs -l buildah-isolation-test=true --tail=-1 --follow\n```\n\n@nalind could you share your thoughts on the security implications of the settings I had to use:\n* `--net=host --pid=host` for buildah\n  * You mentioned `--net=host` would be OK to use, does the same apply for `--pid=host`?\n  * Could also be combined with `unshare --pid --fork`, which may help mitigate potential implications of `--pid=host`?\n* `SETFCAP` for the pod to enable `unshare --map-root-user`\n* `container_runtime_t` SELinux label for the pod to get around ``mount `devpts` to `dev/pts`: Permission denied`` from crun"
+        },
+        {
+            "user": "nalind",
+            "body": "When attempting to nest a container, the \"host\" namespaces are those being used by the container.  If it runs, great.\nAside: with kernel 5.11 or on RHEL 8.5 or later, you shouldn't need to bother with fuse-overlayfs.  The kernel's overlay implementation is available and should be fine if storage is an emptyDir volume (or more specifically, not on an overlay filesystem, which is what the container rootfs is on), so you can probably add an emptyDir volume and drop anything that's there purely to make /dev/fuse available to the pod."
+        },
+        {
+            "user": "cgwalters",
+            "body": "Here's what I'm using as a one-liner reference example that seems to work right now rootless (it will also work rootful but I think it needs more security for that, see below):\n\n```\n$ podman run -v /var/lib/containers --security-opt=label=disable --cap-add=all --rm -ti\n  quay.io/centos-bootc/centos-bootc:stream10 \\\n  podman run --rm -ti --net=host --cgroups=disabled \\\n    busybox echo hello\n```\n\nNow of these alone, having to do `--security-opt=label=disable` on the outer container seems like a really important thing to fix. I find that surprising offhand...it looks like this must be something under `dontaudit` as I don't see a corresponding avc denial.\n\nAs far as security I'd emphasive from my PoV, as long as the outer container is invoked with a user namespace (as Nalin mentions, `hostUsers: false` from the pod spec) that provides a really key security level. Using `unshare --map-root-user` inside the container is suboptimal in that it's trying to constrain subprocesses of the inner container from inside it.\n"
+        },
+        {
+            "user": "chmeliik",
+            "body": "Thanks for the suggestions!\n\nAdding `hostUsers: false` didn't break anything, added that to the Pod spec 👍 (also started a repo for this to track the changes better https://github.com/chmeliik/buildah-isolation-test)\n\nI tried removing the unshare command and adding `--cgroupns=host` to the buildah command, but that still failed on ``opening file `/sys/fs/cgroup/cgroup.subtree_control` for writing: Read-only file system``. So I'm keeping unshare for now.\n\nUnfortunately, mounting `/var/lib/containers` doesn't seem to work for me, neither locally with `podman run` nor in Kubernetes. I still get this error despite the kernels seemingly being new enough (`5.14.0-284.100.1.el9_2.x86_64` on the Kubernetes node, `6.12.10-100.fc40.x86_64` locally):\n\n```\n... using mount program /usr/bin/fuse-overlayfs: unknown argument ignored: lazytime\nfuse: device not found, try 'modprobe fuse' first\n```\n\n> Now of these alone, having to do --security-opt=label=disable on the outer container seems like a really important thing to fix.\n\nI found the labeling scary as well. It seems to work with [`type:container_runtime_t`](https://github.com/chmeliik/buildah-isolation-test/blob/7435dffb16ae9aaa9e3fa7c8b60cb0fb385a2641/buildah-pod.yaml#L86) too, but I don't actually know what that means and how much better that is"
+        },
+        {
+            "user": "chmeliik",
+            "body": "> ... using mount program /usr/bin/fuse-overlayfs: unknown argument ignored: lazytime\nfuse: device not found, try 'modprobe fuse' first\n\nWait, maybe that's just the config in the quay.io/containers/buildah image"
+        },
+        {
+            "user": "nalind",
+            "body": "> Unfortunately, mounting `/var/lib/containers` doesn't seem to work for me, neither locally with `podman run` nor in Kubernetes. I still get this error despite the kernels seemingly being new enough (`5.14.0-284.100.1.el9_2.x86_64` on the Kubernetes node, `6.12.10-100.fc40.x86_64` locally):\n> \n> ```\n> ... using mount program /usr/bin/fuse-overlayfs: unknown argument ignored: lazytime\n> fuse: device not found, try 'modprobe fuse' first\n\nThe image contains an `/etc/containers/storage.conf` which is configured to use fuse-overlayfs.  You'll need to comment out the `mount_program` setting and remove the \"fsync=0\" argument from the `mountopt` setting to update the configuration to not use fuse-overlayfs."
+        },
+        {
+            "user": "chmeliik",
+            "body": "That helped! 🎉 \n\nAny thoughts on having to set `type:container_runtime_t`? I found it also works with `type:container_engine_t`, which one would be more appropriate?"
+        },
+        {
+            "user": "nalind",
+            "body": "Outside of a container, it's usually labeled `container_runtime_exec_t`, so I would expect `container_runtime_t` to be the preferred domain to be run in."
+        },
+        {
+            "user": "cgwalters",
+            "body": "Yes I think using `--security-opt=label=type:container_runtime_t` helps here. One thing that surprises me when I look is that the *inner* process is running with `spc_t` - that may be triggered by the `--cap-add=all`? Anyways I think from a security point of view by specifying just `type` here we still get the level (I think) based separation - the stuff at the end. The useful property of the SELinux policy here is to ensure that two distinct containers can't touch each other's state (and to provide host protection too).\n"
+        },
+        {
+            "user": "chmeliik",
+            "body": "> Adding hostUsers: false didn't break anything, added that to the Pod spec 👍\n\nDerp, I don't think it _did_ anything at all. The cluster I was using to test probably doesn't enable the `UserNamespacesSupport` feature gate (https://kubernetes.io/docs/tasks/configure-pod-container/user-namespaces/#before-you-begin). And its nodes don't meet the [requirements](https://kubernetes.io/docs/concepts/workloads/pods/user-namespaces/#before-you-begin) anyway.\n\nI'll try to get a cluster with user namespaces actually enabled.\n\nIn any case, it seems it's possible to make `BUILDAH_ISOLATION=oci` work *without* user namespaces, but requires\n* `unshare` usage\n* `SETFCAP` on the Pod to enable unshare\n* the `container_runtime_t` label on the Pod\n\nThat still seems preferable to using `BUILDAH_ISOLATION=chroot` without those things, what do you think?"
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 25241
+        },
+        {
+            "organization": "coreos",
+            "repository": "rpm-ostree",
+            "number": 5324
+        },
+        {
+            "organization": "redhat-appstudio",
+            "repository": "infra-deployments",
+            "number": 6127
+        },
+        {
+            "organization": "microshift-io",
+            "repository": "microshift",
+            "number": 56
+        }
+    ]
+}

@@ -1,0 +1,79 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "buildah",
+    "number": 3382,
+    "type": "issue",
+    "title": "Efficient building for CI with distributed cache and direct registry tagging",
+    "state": "closed",
+    "labels": [
+        "stale-issue",
+        "locked - please file new issue/PR"
+    ],
+    "user": "george-harness",
+    "body": "Building images in the context of CI build execution are very often completely fully or partially repetitive. Unlike a development environment where every next execution is in the same environment from where already cached layers could be obtained - in CI the cache to works, it needs to be distributed.\n\nWhat can be done better (assuming that --cache-from is already implemented):\n1. Store the layers in remote object storage to obtain from multiple environments.\n2. Avoid obtaining layers that are not needed when the command was changed. If we download the cache images in advance we will download layers that might not be used during the build if the command changed.\n2. Avoid the need of tracking predecessor images. That is actually not a trivial task as it might seem. In the context of a PR-based development process (non-linear execution) and/or multi-stage image build pushing and maintaining a list of all images that will provide a comprehensive list of layers for cache purposes is a tedious problem to solve.\n3. In CI is common to build images to push to a registry without local use. If the image has no changes at all, it will be great optimization this to result in no downloading at all, but simply tagging the image accordingly directly in the registry.",
+    "comments": [
+        {
+            "user": "TomSweeneyRedHat",
+            "body": "Ping @rhatdan @nalind @fatherlinux @mtrmac @vrothberg "
+        },
+        {
+            "user": "nalind",
+            "body": "Hi!  Thanks for reaching out.\n\nAt the moment, we don't have any form of `--cache-from` implemented; a first attempt would probably pull the specified image, at which point we can reuse its layers, but not much else.  The cache evaluation logic currently uses the history in a candidate image's config blob as the main point of comparison to what we think we're about to do the work of creating, and pulling the indicated image only gives us the config blob for the image produced by the final instruction in the build that produced it.  If the indicated cache image is the result of where we are plus a dozen steps, the current logic doesn't have a candidate for every intermediate step to match against, so it's unlikely to ever match the indicated cache image.\n\nI like the idea of being able to use a distributed cache, whether for layer contents or images as a notional whole.  How we'd wire one in through our dependencies which handle most of our image reading/writing/pulling/pushing is not something I've personally sat down and tried to figure out, so I'd welcome any insights you can share."
+        },
+        {
+            "user": "george-harness",
+            "body": "The usual approach for a cache is to abstract the problem to a (key, value) storage. That is even more true when we have distributed cache.\n\nSay this is available from interface like:\n```\nLayerProvider {\n Layer get(key);\n void set(key, value);\n}\n```\n\nWe need to find a reliable way to create a key for every layer that we would like to add to/obtain from the cache. It seems to me that it would be relatively easy to come up with the key for the layer by simply hashing the base layer sha and the current command.\n\nUsing this approach will eliminate the need for iterating over layers belonging to images that could be expensive in the context of distributed cache. It also will eliminate the need to track predecessor images, which in the context of CI could be non-trivial.\n\nNote that we can implement the LayerProvider interface on top of the container registry repo and any S3 object storage etc allowing for flexibility for the users. For the local cache it might require some adaptation, but would be as easy as creating a map between the key and the local layers to implement the same interface for it.\n\nI have no clear idea about how 4. (the noop tagging) can be solved. Calculating a complete image key without obtaining involved layers seems significantly harder. Maybe if we extend the provider interface with\n\n```\nLayerProvider {\n  LayerMeta getMeta(key);\n ...\n}\n```\n\nWe might be able to store enough detail to evaluate if the commands will produce the same layer - say hash for the files that are copied for a copy command for example."
+        },
+        {
+            "user": "george-harness",
+            "body": "@nalind, @TomSweeneyRedHat, team\n\nI put a very raw (it works) implementation of phase 1 of the approach I proposed above: https://github.com/harness/buildah/commit/0d11da9b7c4caec21d358637282b7a7f00ad0fb1\n\nIt essentially creates a LayerProvider object that creates a map between layerKey and cacheID. When the cacheID is needed it calculates in a symmetrical way the key for the layer that needs to be built and looks up in the map.\n\nI need to put the manifest and a few other properties before we make this distributed, as I said this is very raw just to give you an idea and opportunity for early feedback.\n\nThanks in advance\n\n\n\n"
+        },
+        {
+            "user": "george-harness",
+            "body": "For my second phase of distributed cache, I need to be able to \"package\" the layer for storing and I also should be able to load this package and install it in the local store. I will appreciate some starting pointers.\n"
+        },
+        {
+            "user": "george-harness",
+            "body": "@nalind @TomSweeneyRedHat @rhatdan @fatherlinux @mtrmac @vrothberg\n\nI start working on phase 2 - creating file_layer_provider - it supposes to store the layers (layer image) into a file location. It will be helpful mostly for testing, but also it will allow for distributed cache through shared volumes.\n\nmy current state is in https://github.com/harness/buildah/tree/file_local_layer_provider\n\nI would really appreciate it if someone with experience gives me some more detailed guidance on how to build that.\n\npolicyContext, destinationRef, options, that is a lot to wrap my head around by myself.\n\nP.S. Can we finalize the previous PR."
+        },
+        {
+            "user": "george-harness",
+            "body": "the BlobCache (pkg/blobcache/blobcache.go) seems like a great idea and combining it with the directory can do exactly what I need to create distribute file system cache.\n\nUnfortunately, line 509 makes a call back to the base destination (I assume to obtain the BlobInfo).\n\nnewBlobInfo, err := d.destination.PutBlob(ctx, stream, inputInfo, cache, isConfig)\n\nThis seems to completely invalidate the point of having cache for the blobs, because the original will make its own copy as well.\n\nWhat can be done to eliminate that issue?"
+        },
+        {
+            "user": "mtrmac",
+            "body": "Are you differentiating between cache of build products, as layers (expanded filesystems), and cache of compressed blobs?"
+        },
+        {
+            "user": "george-harness",
+            "body": "No. I am storing all intermittent images in a separate file system location that could be an external volume (to allow distributed cache). As part of this though I copy a lot of images that share a lot of layers and other blobs. This is why deduplication of the blobs is critically important."
+        },
+        {
+            "user": "george-harness",
+            "body": "@mtrmac you can check what I am doing at https://github.com/harness/buildah/tree/file_local_layer_provider.\n\nI just merged the latest code I have."
+        },
+        {
+            "user": "mtrmac",
+            "body": "@george-harness I’m afraid I’m unfamiliar with these parts of the codebase and for the most part not the one to discuss the design with. I’m just somewhat familiar with the blob cache, and the point of that is to avoid re-pushing layers of parent images to a registry (no FS scan, no tarball creation, no compression and the relevant CPU usage), even if the built product is pushed to a registry different from the parent. But pushing the image to the registry is the essential part; it’s not at all a mistake that that does happen.\n\nQuickly skimming `FileLayerProvider`, I suppose that could work for a prototype, but for a production version it seems way too expensive to copy _full images_ using the `dir:` transport’s format, every time, with no deduplication."
+        },
+        {
+            "user": "george-harness",
+            "body": "@mtrmac Let me know if I understood this correctly.\n\nThe blob cache is not there to be an alternative of the final storage, but to preserve an intermittent state of the blob, this way the next time the same blob is requested these work is not done again? The same blob cache can be added on top of multiple destinations and the work will be saved if the preparation work is the same?\n\nI have several options:\n1. Extend the blob cache to support alternative scenario. Essentially not making the call to the original destination. Relatively easy to do with a flag. \n   1.a Calculate the blobInfo in the blob cache\n   1.b. Extending the Description interface to provide BlobInfo independently of the PutBlob - seems a big change in a lot of libraries.\n2. Change the directory transport to be noop for a PutBlob.\n   2.a. It also coming from containers/image it seems a big change.\n   2.b. I can create a copy/paste version of it to accommodate for the noop behavior.\n3. Create a my own destination that combines the functionality from directory and blob cache - a lot of copy/paste\n\n I see a lot of the same people in the containers/image, i hope you own it as well.\n\nTeam @nalind @TomSweeneyRedHat @rhatdan @fatherlinux @mtrmac @vrothberg, please advice.\n\n"
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "flouthoc",
+            "body": "> Building images in the context of CI build execution are very often completely fully or partially repetitive. Unlike a development environment where every next execution is in the same environment from where already cached layers could be obtained - in CI the cache to works, it needs to be distributed.\n\n`--cache-from` is now implemented with contemporary `--cache-to` which allows end users to distribute expensive cache intermediate to different sources and re-use them in CI builds here: https://github.com/containers/buildah/pull/4118\n\nI'm closing this issue but we can always re-open if something is unresolved :) \n\nAlso issue heavily overlaps with https://github.com/containers/buildah/issues/620\n\nThanks"
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "opendevstack",
+            "repository": "ods-pipeline-image",
+            "number": 2
+        }
+    ]
+}

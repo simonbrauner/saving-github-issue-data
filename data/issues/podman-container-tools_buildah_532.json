@@ -1,0 +1,205 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "buildah",
+    "number": 532,
+    "type": "issue",
+    "title": "Buildah images not so small?",
+    "state": "closed",
+    "labels": [
+        "locked - please file new issue/PR"
+    ],
+    "user": "tdudgeon",
+    "body": "**Description**\n\nOne of the key points of buildah is that it allows you to build small images without lots of extra fluff like yum and python. What I'm finding is that the images buildah creates are bigger than the traditional docker images, even though they don't contain this extra fluff. \nWhat is happening here?\n\n**Steps to reproduce the issue:**\n\nThis is all done on a new Centos7 cloud image with docker and buildah installed from RPMs.\n\nFirst let's define our target.\n```\n$ docker pull centos:7\n$ docker images | grep centos\ndocker.io/centos          7                   2d194b392dd1        2 weeks ago         195 MB\n```\nThe Docker images is 195MB in size.\n\nNow let's create a minimal image with only coreutils and bash packages added (the dockere image has both of these present). Here is the script I used:\n```\n#!/bin/bash\n\nset -x\n\n# build a minimal image\nnewcontainer=$(buildah from scratch)\nscratchmnt=$(buildah mount $newcontainer)\n\n# install the packages\nyum install --installroot $scratchmnt bash coreutils --releasever 7 --setopt install_weak_deps=false -y\nyum clean all -y --installroot $scratchmnt --releasever 7\n\nsudo buildah config --cmd /bin/bash $newcontainer\n\n# set some config info\nbuildah config --label name=centos-base $newcontainer\n\n# commit the image\nbuildah unmount $newcontainer\nbuildah commit $newcontainer centos-base\n``` \n\nRun this script:\n```\n$ sudo ./buildah-base.sh\n```\nNow let's look at the image that is built:\n```\n$ sudo buildah images\nIMAGE ID             IMAGE NAME                                               CREATED AT             SIZE\n8379315d3e3e         docker.io/library/centos-base:latest                     Mar 25, 2018 17:08     212.1 MB\n```\n\nHey! The image is 212MB in size, bigger than the Docker image. And looking into it confirms it does have yum or python installed.\nWhy is it bigger, not smaller?\n\n\n\n\n",
+    "comments": [
+        {
+            "user": "pixdrift",
+            "body": "I don't think this is a direct comparison. If you track down the centos 7 base image, it looks like it's built using a base filesystem tarball rather than using yum to install the base system.\n\nThe centos 7 docker image on docker hub links to the dockerfile, the base filesystem tarball is in the repo:\nhttps://github.com/CentOS/sig-cloud-instance-images/blob/02904503939756f540cfaa3fbafbf280e8a11bef/docker/Dockerfile\n\nThere are likely other unnecessary files stripped out of the centos images."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@nalind @mtrmac Isn't this also an issue of compressed versus uncompressed?"
+        },
+        {
+            "user": "tdudgeon",
+            "body": "@pixdrift Yes, of course its not an exact comparison as they were built differently.\nBut its not what I was expecting.\nThe image built with buildah contains just the minimal scratch image (clocking in at  a measly 1.77 KB for me) plus the bash and coreutils packages (which takes it up to 212 MB).\nThe centos Dockerhub image contains those same bash and coreutils packages plus python and yum, and maybe other things too. And despite these extra things it comes in at a smaller size."
+        },
+        {
+            "user": "mtrmac",
+            "body": "https://github.com/CentOS/sig-cloud-instance-build/blob/master/docker/centos-7.ks also does a few more cleanups."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@tdudgeon Could you check to see where the extra size is coming from?  \nOn the buildah container do\n\ndu -sM /*\n\nTo show if there is any weird space being used."
+        },
+        {
+            "user": "rhatdan",
+            "body": "Could this be the CLanguage bindings?"
+        },
+        {
+            "user": "mtrmac",
+            "body": "It might be helpful to start with determining whether the difference in size is due to the container _contents_, or due to the _tooling_.\n\nIs the ratio between `du -sc /` and the size reported by `docker images`/`buildah images` roughly equal (i.e. the content is the difference), or significantly different (i.e. the tooling is the difference?)"
+        },
+        {
+            "user": "pixdrift",
+            "body": "Not a direct comparison, but another data point. Used the provided script to build from Oracle Linux 7 repo.\n\n```\n# buildah images\nIMAGE ID             IMAGE NAME                                               CREATED AT             SIZE\n95cc7dba2f97         docker.io/library/buildah-ol7:latest                     Mar 26, 2018 22:28     177.4 MB\n```\n\nThen pushed to the docker-daemon using `buildah push`\n```\n# docker images\nREPOSITORY                    TAG                 IMAGE ID            CREATED             SIZE\nbuildah                       ol7                 95cc7dba2f97        4 minutes ago       182 MB\n```\n\nSo there is a minor discrepancy in reported size, but in this case buildah is less than docker. Need to _build_ in docker too for comparison."
+        },
+        {
+            "user": "pixdrift",
+            "body": "I built the centos:7 container from the upstream Dockerfile using `buildah bud`:\n```\n# buildah images\nIMAGE ID             IMAGE NAME                                               CREATED AT             SIZE\n102faebad41b         <none>                                                   Mar 26, 2018 23:15     194.5 MB\n```\n\nPushed to docker:\n```\n# docker images\nREPOSITORY                    TAG                 IMAGE ID            CREATED             SIZE\ncentos                        7                   ea2fac082cce        3 minutes ago       195 MB\n```\n\nLooks like the tooling difference. The kickstart used to build the centos 7 filesystem image posted by @mtrmac shows the initial package selection is quite different."
+        },
+        {
+            "user": "pixdrift",
+            "body": "@tdudgeon\n\nPulling apart the ks file posted above, and looking in the image, it looks like the documentation (~4MB) and locale-archive  (~99MB) is what is causing the size issues. If you force your locale in the yum installer and specify nodocs, you will get a significantly smaller base image:\n\n```\n# docker images\nREPOSITORY                    TAG                 IMAGE ID            CREATED             SIZE\nbuildah                       stripped            4ddfc8034046        6 minutes ago       56.4 MB\n```\n\nUpdated buildah script:\n```\n#!/bin/bash\n\nset -x\n\n# build a minimal image\nnewcontainer=$(buildah from scratch)\nscratchmnt=$(buildah mount $newcontainer)\n\n# install the packages\nyum install --installroot $scratchmnt bash coreutils --releasever 7 --setopt=install_weak_deps=false --setopt=tsflags=nodocs --setopt=override_install_langs=en_US.utf8 -y\nyum clean all -y --installroot $scratchmnt --releasever 7\n\nsudo buildah config --cmd /bin/bash $newcontainer\n\n# set some config info\nbuildah config --label name=centos-base $newcontainer\n\n# commit the image\nbuildah unmount $newcontainer\nbuildah commit $newcontainer centos-base\n```\n\nInterested to know if this works ok from your CentOS source, and what kind of result you get with regard to size."
+        },
+        {
+            "user": "tdudgeon",
+            "body": "@pixdrift Hey that makes a big difference. In my case it builds an image that is 91.56 MB in size. Much smaller than the original 212.1 MB (though still a fair bit bigger than your one of 56.4 MB)."
+        },
+        {
+            "user": "pixdrift",
+            "body": "@tdudgeon I suspect the difference in size is due to package dependency creep in the included packages. The build I was using may be from a 7.2/7.3 repo (was a random dev instance I had). Will have  a closer look tomorrow and point it at 7.4. In total, I believe there were 20 rpms installed."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@tdudgeon Is Buildah now smaller the docker build?"
+        },
+        {
+            "user": "rhatdan",
+            "body": "@ipbabble Might be worth a blog on how to handle languages and make smaller images."
+        },
+        {
+            "user": "tdudgeon",
+            "body": "@rhatdan Yes, the centos:7 image on Docker Hub is 195 MB whilst my latest equivalent with buildah is 91.56 MB. So just under half the size."
+        },
+        {
+            "user": "rhatdan",
+            "body": "WooHoo.\nBTW Size is one important factor, but another factor customers look at is the number of packages/files inside of a container.  They are looking to limit attack surface, with the theory that the fewer files/executables in the image the harder it is to exploit a container.\nSo you might want to get a count of RPMs install"
+        },
+        {
+            "user": "tdudgeon",
+            "body": "The Docker Hub centos:7 image has 143 packages.\nThe one built by buildah has 64 packages.\nBut I had to `yum install rpm` so that I could count them, so that should really be 63."
+        },
+        {
+            "user": "mohammedzee1000",
+            "body": "You guys might also want to take a look at the atomic image https://github.com/CentOS/atomic-container.\n\nIt is built using microdnf and is already as small as 78 mb"
+        },
+        {
+            "user": "pixdrift",
+            "body": "@mohammedzee1000, Thanks for the suggestion, this image uses essentially the same package selection as I have outlined above with the os release, microdnf and systemd added.. then some manual cleanup of the resulting filesystem. \n\n```\n%packages --excludedocs --nobase --nocore --instLangs=en\nbash\ncentos-release\nmicrodnf\nsystemd\n```\n\nI am interested to know how my OL7 image ended up so much smaller (package count and size) than CentOS, I can only assume dependency changes.\n\n@tdudgeon, can you post an RPM list from your container and I will put together a comparison? The yum installation log from buildah should be enough and won't require modifications to the image contents.\n"
+        },
+        {
+            "user": "giuseppe",
+            "body": "you can save some space removing the locales you don't need.  This should be quite safe to do:\n\n```\nrm $scratchmnt/usr/lib/locale/locale-archive*\nfind $scratchmnt/usr/share/locale/ \\! -name '*en*' -exec rm -rf \\{\\} \\;\n```\n"
+        },
+        {
+            "user": "pixdrift",
+            "body": "@giuseppe, this is redundant if you use the yum parameter I have provided above (`--setopt=override_install_langs=en_US.utf8`) because alternate locales aren't installed. \n\nThe locale-archive when specifying the language in yum is 1.1M instead of the default 100M, this is the primary change that saved the space for @tdudgeon "
+        },
+        {
+            "user": "pixdrift",
+            "body": "Resulting **OL7** package list from my posted buildah script above (image size: 56.4MB)\n```\n(1/40): basesystem-10.0-7.0.1.el7.noarch.rpm\n(2/40): bash-4.2.46-29.el7_4.x86_64.rpm\n(3/40): ca-certificates-2017.2.14-71.el7.noarch.rpm\n(4/40): chkconfig-1.7.4-1.el7.x86_64.rpm\n(5/40): coreutils-8.22-18.0.1.el7.x86_64.rpm\n(6/40): filesystem-3.2-21.el7.x86_64.rpm\n(7/40): gawk-4.0.2-4.el7_3.1.x86_64.rpm\n(8/40): glibc-2.17-196.el7.x86_64.rpm\n(9/40): glibc-common-2.17-196.el7.x86_64.rpm\n(10/40): gmp-6.0.0-15.el7.x86_64.rpm\n(11/40): grep-2.20-3.el7.x86_64.rpm\n(12/40): info-5.1-4.el7.x86_64.rpm\n(13/40): keyutils-libs-1.5.8-3.el7.x86_64.rpm\n(14/40): krb5-libs-1.15.1-8.el7.x86_64.rpm\n(15/40): libacl-2.2.51-12.el7.x86_64.rpm\n(16/40): libattr-2.4.46-12.el7.x86_64.rpm\n(17/40): libcap-2.22-9.el7.x86_64.rpm\n(18/40): libcom_err-1.42.9-10.0.1.el7.x86_64.rpm\n(19/40): libffi-3.0.13-18.el7.x86_64.rpm\n(20/40): libgcc-4.8.5-16.el7.x86_64.rpm\n(21/40): libselinux-2.5-11.el7.x86_64.rpm\n(22/40): libsepol-2.5-6.el7.x86_64.rpm\n(23/40): libstdc++-4.8.5-16.el7.x86_64.rpm\n(24/40): libtasn1-4.10-1.el7.x86_64.rpm\n(25/40): libverto-0.2.5-4.el7.x86_64.rpm\n(26/40): ncurses-5.9-14.20130511.el7_4.x86_64.rpm\n(27/40): ncurses-base-5.9-14.20130511.el7_4.noarch.rpm\n(28/40): ncurses-libs-5.9-14.20130511.el7_4.x86_64.rpm\n(29/40): nspr-4.13.1-1.0.el7_3.x86_64.rpm\n(30/40): nss-softokn-freebl-3.28.3-8.el7_4.x86_64.rpm\n(31/40): openssl-libs-1.0.2k-8.0.1.el7.x86_64.rpm\n(32/40): p11-kit-0.23.5-3.el7.x86_64.rpm\n(33/40): p11-kit-trust-0.23.5-3.el7.x86_64.rpm\n(34/40): pcre-8.32-17.el7.x86_64.rpm\n(35/40): popt-1.13-16.el7.x86_64.rpm\n(36/40): redhat-release-server-7.4-18.0.1.el7.x86_64.rpm\n(37/40): sed-4.2.2-5.el7.x86_64.rpm\n(38/40): setup-2.8.71-7.el7.noarch.rpm\n(39/40): tzdata-2017b-1.el7.noarch.rpm\n(40/40): zlib-1.2.7-17.el7.x86_64.rpm\n```\n\nThe same when using **RHEL 7.4** (image size: 57.08 MB):\n```\n(1/40): basesystem-10.0-7.el7.noarch.rpm\n(2/40): bash-4.2.46-29.el7_4.x86_64.rpm\n(3/40): ca-certificates-2017.2.14-71.el7.noarch.rpm\n(4/40): chkconfig-1.7.4-1.el7.x86_64.rpm\n(5/40): coreutils-8.22-18.el7.x86_64.rpm\n(6/40): filesystem-3.2-21.el7.x86_64.rpm\n(7/40): gawk-4.0.2-4.el7_3.1.x86_64.rpm\n(8/40): glibc-2.17-196.el7_4.2.x86_64.rpm\n(9/40): glibc-common-2.17-196.el7_4.2.x86_64.rpm\n(10/40): gmp-6.0.0-15.el7.x86_64.rpm\n(11/40): grep-2.20-3.el7.x86_64.rpm\n(12/40): info-5.1-4.el7.x86_64.rpm\n(13/40): keyutils-libs-1.5.8-3.el7.x86_64.rpm\n(14/40): krb5-libs-1.15.1-8.el7.x86_64.rpm\n(15/40): libacl-2.2.51-12.el7.x86_64.rpm\n(16/40): libattr-2.4.46-12.el7.x86_64.rpm\n(17/40): libcap-2.22-9.el7.x86_64.rpm\n(18/40): libcom_err-1.42.9-10.el7.x86_64.rpm\n(19/40): libffi-3.0.13-18.el7.x86_64.rpm\n(20/40): libgcc-4.8.5-16.el7_4.2.x86_64.rpm\n(21/40): libselinux-2.5-11.el7.x86_64.rpm\n(22/40): libsepol-2.5-6.el7.x86_64.rpm\n(23/40): libstdc++-4.8.5-16.el7_4.2.x86_64.rpm\n(24/40): libtasn1-4.10-1.el7.x86_64.rpm\n(25/40): libverto-0.2.5-4.el7.x86_64.rpm\n(26/40): ncurses-5.9-14.20130511.el7_4.x86_64.rpm\n(27/40): ncurses-base-5.9-14.20130511.el7_4.noarch.rpm\n(28/40): ncurses-libs-5.9-14.20130511.el7_4.x86_64.rpm\n(29/40): nspr-4.13.1-1.0.el7_3.x86_64.rpm\n(30/40): nss-softokn-freebl-3.28.3-8.el7_4.x86_64.rpm\n(31/40): openssl-libs-1.0.2k-8.el7.x86_64.rpm\n(32/40): p11-kit-0.23.5-3.el7.x86_64.rpm\n(33/40): p11-kit-trust-0.23.5-3.el7.x86_64.rpm\n(34/40): pcre-8.32-17.el7.x86_64.rpm\n(35/40): popt-1.13-16.el7.x86_64.rpm\n(36/40): redhat-release-server-7.4-18.el7.x86_64.rpm\n(37/40): sed-4.2.2-5.el7.x86_64.rpm\n(38/40): setup-2.8.71-7.el7.noarch.rpm\n(39/40): tzdata-2018d-1.el7.noarch.rpm\n(40/40): zlib-1.2.7-17.el7.x86_64.rpm\n```\n\nInterested to know why CentOS 7 is larger using the same process."
+        },
+        {
+            "user": "ipbabble",
+            "body": "Ack. On PTO but will take a look as soon as possible.\n\nBeen looking at this for RadAnalytics issues too.\n\nWilliam\n\nOn Tue, Mar 27, 2018 at 6:57 AM Daniel J Walsh <notifications@github.com>\nwrote:\n\n> @ipbabble <https://github.com/ipbabble> Might be worth a blog on how to\n> handle languages and make smaller images.\n>\n> —\n> You are receiving this because you were mentioned.\n> Reply to this email directly, view it on GitHub\n> <https://github.com/projectatomic/buildah/issues/532#issuecomment-376498323>,\n> or mute the thread\n> <https://github.com/notifications/unsubscribe-auth/ABPpgaOUldcqatj1AlfrF1b8noF5bcBbks5tiikzgaJpZM4S6OS->\n> .\n>\n-- \nSent from Gmail Mobile on iPhone\n"
+        },
+        {
+            "user": "pixdrift",
+            "body": "Something strange is definitely happening. I just ran the same script as above on a fresh CentOS 7.4 build.. and I also got a 91.57MB result, which is 40MB bigger than either **RHEL 7** or **OL 7**. The package list is the same number (40).. so something is odd. Going to go through and compare images now. Here is the package list from the **CentOS 7.4** image.\n\n```\n(1/40): basesystem-10.0-7.el7.centos.noarch.rpm\n(2/40): centos-release-7-4.1708.el7.centos.x86_64.rpm\n(3/40): bash-4.2.46-29.el7_4.x86_64.rpm\n(4/40): filesystem-3.2-21.el7.x86_64.rpm\n(5/40): gawk-4.0.2-4.el7_3.1.x86_64.rpm\n(6/40): chkconfig-1.7.4-1.el7.x86_64.rpm\n(7/40): ca-certificates-2017.2.14-71.el7.noarch.rpm\n(8/40): grep-2.20-3.el7.x86_64.rpm\n(9/40): info-5.1-4.el7.x86_64.rpm\n(10/40): keyutils-libs-1.5.8-3.el7.x86_64.rpm\n(11/40): gmp-6.0.0-15.el7.x86_64.rpm\n(12/40): libacl-2.2.51-12.el7.x86_64.rpm\n(13/40): libattr-2.4.46-12.el7.x86_64.rpm\n(14/40): libcap-2.22-9.el7.x86_64.rpm\n(15/40): libcom_err-1.42.9-10.el7.x86_64.rpm\n(16/40): libffi-3.0.13-18.el7.x86_64.rpm\n(17/40): krb5-libs-1.15.1-8.el7.x86_64.rpm\n(18/40): libselinux-2.5-11.el7.x86_64.rpm\n(19/40): coreutils-8.22-18.el7.x86_64.rpm\n(20/40): libsepol-2.5-6.el7.x86_64.rpm\n(21/40): libgcc-4.8.5-16.el7_4.2.x86_64.rpm\n(22/40): libverto-0.2.5-4.el7.x86_64.rpm\n(23/40): libtasn1-4.10-1.el7.x86_64.rpm\n(24/40): libstdc++-4.8.5-16.el7_4.2.x86_64.rpm\n(25/40): ncurses-5.9-14.20130511.el7_4.x86_64.rpm\n(26/40): nspr-4.13.1-1.0.el7_3.x86_64.rpm\n(27/40): ncurses-libs-5.9-14.20130511.el7_4.x86_64.rpm\n(28/40): nss-softokn-freebl-3.28.3-8.el7_4.x86_64.rpm\n(29/40): ncurses-base-5.9-14.20130511.el7_4.noarch.rpm\n(30/40): p11-kit-0.23.5-3.el7.x86_64.rpm \n(31/40): p11-kit-trust-0.23.5-3.el7.x86_64.rpm\n(32/40): popt-1.13-16.el7.x86_64.rpm\n(33/40): sed-4.2.2-5.el7.x86_64.rpm\n(34/40): pcre-8.32-17.el7.x86_64.rpm\n(35/40): setup-2.8.71-7.el7.noarch.rpm\n(36/40): zlib-1.2.7-17.el7.x86_64.rpm\n(37/40): tzdata-2018d-1.el7.noarch.rpm\n(38/40): glibc-2.17-196.el7_4.2.x86_64.rpm\n(39/40): openssl-libs-1.0.2k-8.el7.x86_64.rpm\n(40/40): glibc-common-2.17-196.el7_4.2.x86_64.rpm\n```\n"
+        },
+        {
+            "user": "pixdrift",
+            "body": "Problem in CentOS was yum cache data not being cleaned up correctly. In my case it was epel repo. This could be solved by using '--disablerepo=epel' to the yum command, but people may want to install packages from here as part of the image creation.\n\nI have an updated script here which uses rm to clean up the yum cache, and it brings the CentOS 7 image down below 57MB.\nhttps://gitlab.com/pixdrift/buildah-scripts/blob/master/el7.minimal.sh"
+        },
+        {
+            "user": "TomSweeneyRedHat",
+            "body": "@pixdrift  @tdudgeon FYI, I just posted a little blog on this issue at http://www.projectatomic.io/blog/2018/04/open-source-what-a-concept/.  Thanks a bunch for inspiring it and for your contributions here!"
+        },
+        {
+            "user": "pixdrift",
+            "body": "@TomSweeneyRedHat, thanks for posting the article. It should be noted that I identified two further things in this thread that are worth mentioning in the blog post.\n1. The ~40MB that is keeping the image at 92MB is the yum cache for epel. If the method of cache cleanup is changed to rm (rather than yum clean in the posted script), the image size reliably comes back at around 57MB for OL7, RHEL7 and CentOS 7.\n2.  The option `--setopt=install_weak_deps=false` doesn't reduce the size of _this_ image in my testing, so I have removed it to avoid unnecessary complexity.\n\nUpdated script is here:\nhttps://gitlab.com/pixdrift/buildah-scripts/blob/master/el7.minimal.sh"
+        },
+        {
+            "user": "rhatdan",
+            "body": "@pixdrift I think the --setop=install_weak_deps might have some effect on a Fedora system.  I don't believe RHEL or CENTOS Support week dependencies."
+        },
+        {
+            "user": "pixdrift",
+            "body": "Thanks @rhatdan, that helps explain it. I would expect a Fedora script to do the same (create a minimal base image) would be using `dnf` at this point in time, so the option may no longer be relevant there either.. unless the `setopt` option remained the same. I don't spend much time out of EL, but will take a look for interest's sake."
+        },
+        {
+            "user": "tdudgeon",
+            "body": "Just for completeness, I tried rebuilding the base centos7 image but with the extra `rm -rf $scratchmnt/var/cache/yum` command suggested by @pixfrift to clean up the cache and the image size drops from 91.6 MB to 57.15 MB. Not bad seeing as we started at 212 MB!\n\nThanks all!"
+        },
+        {
+            "user": "gbraad",
+            "body": "Maybe an idea to use https://github.com/GoogleCloudPlatform/container-diff as it recently got support for RPM, but it can help with comparing containers even just on file level."
+        },
+        {
+            "user": "TomSweeneyRedHat",
+            "body": "@pixdrift yep, noted the additional input from you.  I didn't want to add it to the blog post as I've found a blog length of about 4 pages in a word processor software is about as long as you want.  So I tried to show the initial breadcrumbs in the blog and then gave a couple of pointers and a tease to this issue here so they could dive even deeper.  I do very much appreciate your contributions here though, it's been some really great work."
+        },
+        {
+            "user": "rhatdan",
+            "body": "I might take a stab at a blog on this from a security point of view."
+        },
+        {
+            "user": "pixdrift",
+            "body": "Would there be value capturing some of these buildah scripts for base OS container builds in `contrib`?"
+        },
+        {
+            "user": "rhatdan",
+            "body": "Sure maybe an examples directory."
+        },
+        {
+            "user": "TomSweeneyRedHat",
+            "body": "@pixdrift I was thinking about that, didn't know if it made sense there, examples and/or tutorials.  But I definitely wanted to save at least the final result somewhere after the dust settled."
+        },
+        {
+            "user": "pixdrift",
+            "body": "The following may also be interesting to people following this thread:\nhttps://gitlab.com/pixdrift/buildah-scripts/blob/master/el7.ansible.minimal.sh\n\nThis example uses `pip` from the host (python2-pip) to install Python packages into the container, so the container doesn't need `pip` and its dependencies installed or any compilers installed to build source packages from pypi.\n\nIn this example the pip module is ansible (which could have just as easily been installed as an rpm), but it's really to demonstrate building containers to run Python code as it is a use case I see repeated in EL7 environments.  In this case I am developing an apb-base style image using buildah to run Ansible playbooks.\n\nThe resulting image in this case which includes python + Ansible 2.5.0 and all required dependencies is around 150MB. Leaving pip outside the container looks to save around 10MB (depending on method).. and more if compilers etc. are required.\n\nStill determining if there is any impact to the pip installation on the host, but looks good so far."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@pixdrift Want to write a blog describing this?"
+        },
+        {
+            "user": "rhatdan",
+            "body": "Blogs have been written explaining this."
+        },
+        {
+            "user": "tdudgeon",
+            "body": "Just for the record I finally got round to writing this up as a blog post:\nhttps://www.informaticsmatters.com/blog/2018/05/31/smaller-containers-part-3.html\n@pixdrift @rhatdan @TomSweeneyRedHat and others - thanks for your help!"
+        },
+        {
+            "user": "TomSweeneyRedHat",
+            "body": "Excellent news @tdudgeon , thanks for sharing!"
+        },
+        {
+            "user": "pixdrift",
+            "body": "I should probably (finally) mention I did do a write up (months ago) that included the same process for EL8, with comparisons to the Red Hat UBI images. In case someone is stumbling across this thread and looking for additional content on the subject, I posted it here, with the README.md describing the outcomes:\n\nhttps://gitlab.com/pixdrift/buildah-scripts"
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "minishift",
+            "repository": "minishift",
+            "number": 2226
+        },
+        {
+            "organization": "rook",
+            "repository": "rook",
+            "number": 1714
+        },
+        {
+            "organization": "kubernetes-sigs",
+            "repository": "node-feature-discovery",
+            "number": 131
+        },
+        {
+            "organization": "fatherlinux",
+            "repository": "ubi-micro",
+            "number": 3
+        }
+    ]
+}

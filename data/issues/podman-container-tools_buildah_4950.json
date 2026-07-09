@@ -1,0 +1,56 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "buildah",
+    "number": 4950,
+    "type": "issue",
+    "title": "buildah bud doesn't use cached layers when combined with multi stage build and --label somelabel=somevalue",
+    "state": "open",
+    "labels": [
+        "stale-issue"
+    ],
+    "user": "Romain-Geissler-1A",
+    "body": "**Description**\n\nWhile testing one of our OCI build tool against both docker and podman, I noticed that the tests of my tool are one order of magnitude slower on podman rather than docker. Trying to find a minimal reproducer, it seems related to multi-stage builds combined with labels passed on the command line (if labels are directly written in the containerfile, it's ok). In the following reproducer, I expect the layer with `sleep 3` to be cached after a first run, but it is not, leading to always rebuilding images completely. In my real case, this `sleep 3` is actually a `dnf install` command.\n\n**Steps to reproduce the issue:**\n1. Start a container with the very latest buildah: `rgeissler@ncerndobedev6097:~> podman run -t -i --rm --privileged --pull=always quay.io/buildah/upstream   `\n2. Then create a minimal containerfile:\n```\n[root@eb194bf8dfa3 /]# mkdir /build-context\n[root@eb194bf8dfa3 /]# cat > /build-context/Dockerfile <<END_OF_DOCKERFILE\nFROM fedora AS useless_stage_1\nFROM useless_stage_1 AS stage_2\n\nRUN sleep 3\nEND_OF_DOCKERFILE\n```\n\n3. Build this image once, enable layer caching, and with an explicit label provided on the command line. It builds fine, doing a `sleep 3`:\n\n```\n[root@eb194bf8dfa3 /]# buildah bud --layers=true --label somelabel=somevalue /build-context/\n[1/2] STEP 1/1: FROM fedora AS useless_stage_1\nResolved \"fedora\" as an alias (/etc/containers/registries.conf.d/000-shortnames.conf)\nTrying to pull registry.fedoraproject.org/fedora:latest...\nGetting image source signatures\nCopying blob ad5077952f52 done   |\nCopying config 919a420d29 done   |\nWriting manifest to image destination\n--> 5c4fc42cf62f\n[2/2] STEP 1/3: FROM 5c4fc42cf62ffa7e1649f932ad3b90bb0f39739531291fd204b2021007f3a4ce AS stage_2\n[2/2] STEP 2/3: RUN sleep 3\n--> 999f19301ff6\n[2/2] STEP 3/3: LABEL \"somelabel\"=\"somevalue\"\n[2/2] COMMIT\n--> f8c8d0a71f64\nf8c8d0a71f64f6c14e46c0de8f61bcabfd4c39a71ea8b99cdd26ccaeda765c56\n```\n\n4. Re-run the exact same command, hoping that this time cache is used and `sleep 3` is not run. However it's not using cached layer for the sleep command:\n\n```\n[root@eb194bf8dfa3 /]# buildah bud --layers=true --label somelabel=somevalue /build-context/\n[1/2] STEP 1/1: FROM fedora AS useless_stage_1\n--> b075ebbee3a6\n[2/2] STEP 1/3: FROM b075ebbee3a6450ba3eebbc14319cfe187e4c98dc47c4cb4facb0be7ba798795 AS stage_2\n[2/2] STEP 2/3: RUN sleep 3\n--> a7223a7828a9\n[2/2] STEP 3/3: LABEL \"somelabel\"=\"somevalue\"\n[2/2] COMMIT\n--> 61615826c9b7\n61615826c9b7a5091f111b15e22a9ad3178ae565ea6b3a65f8f96f4516eae490\n```\n\n5. Re-running the same build twice, but without explicit `--label` flag on the command line uses a cached build during the second invokation:\n\n```\n[root@eb194bf8dfa3 /]# buildah bud --layers=true /build-context/\n[1/2] STEP 1/1: FROM fedora AS useless_stage_1\n--> 919a420d29c6\n[2/2] STEP 1/2: FROM 919a420d29c6f5ae0bdc8d1872387d3a878d7f69debce9e24f3f2e0506b2ba0d AS stage_2\n[2/2] STEP 2/2: RUN sleep 3\n[2/2] COMMIT\n--> f5684459425d\nf5684459425d3f88134b202c6dece0c0e2a2b91860d3bc29a536ad5b2c138e7a\n[root@eb194bf8dfa3 /]# buildah bud --layers=true /build-context/\n[1/2] STEP 1/1: FROM fedora AS useless_stage_1\n--> 919a420d29c6\n[2/2] STEP 1/2: FROM 919a420d29c6f5ae0bdc8d1872387d3a878d7f69debce9e24f3f2e0506b2ba0d AS stage_2\n[2/2] STEP 2/2: RUN sleep 3\n--> Using cache f5684459425d3f88134b202c6dece0c0e2a2b91860d3bc29a536ad5b2c138e7a\n--> f5684459425d\nf5684459425d3f88134b202c6dece0c0e2a2b91860d3bc29a536ad5b2c138e7a\n```\n\n6. Adding direction the `LABEL` inside the original containerfile results in the build using cache correctly immediately at the first run:\n\n```\n[root@eb194bf8dfa3 /]# echo 'LABEL \"somelabel\"=\"somevalue\"' >>/build-context/Dockerfile\n[root@eb194bf8dfa3 /]# buildah bud --layers=true /build-context/\n[1/2] STEP 1/1: FROM fedora AS useless_stage_1\n--> 919a420d29c6\n[2/2] STEP 1/3: FROM 919a420d29c6f5ae0bdc8d1872387d3a878d7f69debce9e24f3f2e0506b2ba0d AS stage_2\n[2/2] STEP 2/3: RUN sleep 3\n--> Using cache f5684459425d3f88134b202c6dece0c0e2a2b91860d3bc29a536ad5b2c138e7a\n--> f5684459425d\n[2/2] STEP 3/3: LABEL \"somelabel\"=\"somevalue\"\n[2/2] COMMIT\n--> 2d4b8f439951\n2d4b8f43995156779b1d852b08f419347d9607e72a77d8e35d1f2c3d80ea8f49\n```\n\n**Describe the results you received:**\n\nLayer cache is not always used.\n\n\n**Describe the results you expected:**\n\nIn the above described scenarios, I would expect that layer cache is always used.\n\n\n**Output of `rpm -q buildah` or `apt list buildah`:**\n\n```\nbuildah-1.31.0-1.20230731174246479315.main.43.g8af2dc4ea.x86_64\n```\n\n**Output of `buildah version`:**\n\n```\nVersion:         1.32.0-dev\nGo Version:      go1.20.6\nImage Spec:      1.1.0-rc.4\nRuntime Spec:    1.1.0\nCNI Spec:        1.0.0\nlibcni Version:\nimage Version:   5.27.0-dev\nGit Commit:\nBuilt:           Mon Jul 31 17:47:23 2023\nOS/Arch:         linux/amd64\nBuildPlatform:   linux/amd64\n```\n\n**Output of `cat /etc/*release`:**\n\n```\nFedora release 38 (Thirty Eight)\nNAME=\"Fedora Linux\"\nVERSION=\"38 (Container Image)\"\nID=fedora\nVERSION_ID=38\nVERSION_CODENAME=\"\"\nPLATFORM_ID=\"platform:f38\"\nPRETTY_NAME=\"Fedora Linux 38 (Container Image)\"\nANSI_COLOR=\"0;38;2;60;110;180\"\nLOGO=fedora-logo-icon\nCPE_NAME=\"cpe:/o:fedoraproject:fedora:38\"\nDEFAULT_HOSTNAME=\"fedora\"\nHOME_URL=\"https://fedoraproject.org/\"\nDOCUMENTATION_URL=\"https://docs.fedoraproject.org/en-US/fedora/f38/system-administrators-guide/\"\nSUPPORT_URL=\"https://ask.fedoraproject.org/\"\nBUG_REPORT_URL=\"https://bugzilla.redhat.com/\"\nREDHAT_BUGZILLA_PRODUCT=\"Fedora\"\nREDHAT_BUGZILLA_PRODUCT_VERSION=38\nREDHAT_SUPPORT_PRODUCT=\"Fedora\"\nREDHAT_SUPPORT_PRODUCT_VERSION=38\nSUPPORT_END=2024-05-14\nVARIANT=\"Container Image\"\nVARIANT_ID=container\nFedora release 38 (Thirty Eight)\nFedora release 38 (Thirty Eight)\n```\n\n**Output of `uname -a`:**\n\n```\nLinux eb194bf8dfa3 5.14.0-162.6.1.el9_1.x86_64 #1 SMP PREEMPT_DYNAMIC Fri Sep 30 07:36:03 EDT 2022 x86_64 GNU/Linux\n```\n\n",
+    "comments": [
+        {
+            "user": "Romain-Geissler-1A",
+            "body": "Note: in my case I have this issue in real life, using podman 4.4. from RHEL 9."
+        },
+        {
+            "user": "flouthoc",
+            "body": "Thanks for reporting I can reproduce this issue."
+        },
+        {
+            "user": "flouthoc",
+            "body": "@Romain-Geissler-1A Issue is happening because history is being created incorrectly for the first stage, meanwhile till I diagnose the root cause and create a patch for this a workaround is \n\n```Dockerfile\nFROM fedora AS useless_stage_1\nRUN echo \"dummy stmt\"\n\nFROM useless_stage_1 AS stage_2\nRUN sleep 3\n```\n"
+        },
+        {
+            "user": "Romain-Geissler-1A",
+            "body": "Thanks for the hint.\n\nActually I had already updated my build tool (it's a tool that generates Dockerfile automatically, that's why it sometimes generate degenerated cases like this) so that we no longer pass --label flags on the command line, but we directly write LABEL statements directly in the generated dockerfile."
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@flouthoc any update?"
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "flouthoc",
+            "body": "I think @nalind is working on this issue, just changed my assignment."
+        },
+        {
+            "user": "nalind",
+            "body": "I think this was fixed in #6314, which stopped causing a cache miss when --label is used, since those values were only being baked into the final image anyway."
+        },
+        {
+            "user": "dmaes",
+            "body": "The same thing happens when using annotations instead of labels"
+        }
+    ],
+    "cross_references": []
+}

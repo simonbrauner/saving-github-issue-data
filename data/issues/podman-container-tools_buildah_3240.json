@@ -1,0 +1,48 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "buildah",
+    "number": 3240,
+    "type": "issue",
+    "title": "bud: Only squash final image when using --layers ",
+    "state": "closed",
+    "labels": [
+        "locked - please file new issue/PR"
+    ],
+    "user": "r10r",
+    "body": "Hi there,\n\nI'm currently playing with buildah to build a multi-stage image and noticed that \n`buildah bud --layers --squash` does not work as expected (by me).\n\nUsing `--layers` together with `--squash` will squash every layer - \nthis takes a lot of time and exhaust disk space quite fast.\nI think that only the final image should be squashed.\n\nHow do you think about changing the current behaviour ?\n\n```\n[root@k8s-cluster8-controller ruben]# buildah --version\nbuildah version 1.20.1 (image-spec 1.0.1-dev, runtime-spec 1.0.2-dev)\n```",
+    "comments": [
+        {
+            "user": "mikepurvis",
+            "body": "I think the behaviour you want is what you'll get if you use neither flag.\n\nMy pattern has been to use `--layers` when debugging a build where I want to skip expensive upfront steps and shorten the testing cycle, but otherwise the default behaviour is what I want in all other cases (publishing, CI output, etc).\n\nSquashing every layer including stuff above your \"from\" line feels like it would be mostly for deployment cases where you don't care at all about reuse and just want the smallest possible image no matter what."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@mikepurvis is correct."
+        },
+        {
+            "user": "r10r",
+            "body": "@mikepurvis Thanks for sharing your view. \n\n> My pattern has been to use --layers when debugging a build where I want to skip expensive upfront steps and shorten the  testing cycle ...\n\nYou're right - that's my primary goal too.  \n\nI know it's possible to squash the build manually:\n\n```bash\nc=$(buildah from $image)\nbuildah commit --squash $c $squashed_image\nbuildah delete $c\nbuildah rmi $image\n```\n\nBut I wonder if there is a good reason to use `--layers`  together with `--squash`?\nMy first step when using buildah was to enable both options, but the build took a long time\nand finally aborted because the disk was full.\n\nI think they should be either mutually exclusive or play together nicely.\nMaybe a `--squash-final` flag is an option ?\n\n\n"
+        },
+        {
+            "user": "r10r",
+            "body": "@rhatdan that was quick - is this the wrong place for suggestions ?"
+        },
+        {
+            "user": "TomSweeneyRedHat",
+            "body": "@r10r one of @rhatdan 's favorite things to do is to close issues.  I'll reopen and we can continue the discussion.  Please close it once we wrap up.\n\nSo just taking a step back.  `buildah bud --squash` squashes all layers into one layer. Note this differs from `podman build --squash`.  The `podman build --squash` option only squashes the new layers created during the build.  If an image was used that had pre-existing layers, those layers would not be squashed.\n\n`--layers` caches intermediate images during the builds.\n\nSo doing both `--squash` and `--layers` is probably not something you want to do outside of a CPU/disk write test.  :smile:  It should get everything down into one layer but may take it's time depending on the images/layers involved.    Others might have a good use case for doing both at the same time, but I'm drawing a blank at the time.  I know we have tests for both being used at the same time so there must have been a reason to not prevent that.\n\nFinally, there is also a `podman build --squash-all` option.  That option does that same thing as `buildah bud --squash`, it squashes everything down to one layer.\n\nClear as mud?\n\n"
+        },
+        {
+            "user": "mikepurvis",
+            "body": "FWIW, I really like the `buildah` flags for this— IMO the defaults make a lot more sense than the Docker ones, and in particular, they encourage `Containerfile`s to be written for readability rather than with an obsession over what is or isn't going to generate a new layer."
+        },
+        {
+            "user": "r10r",
+            "body": "@TomSweeneyRedHat Clear as water!  Thanks for this good explanation and for taking your time! \n\n\n"
+        },
+        {
+            "user": "r10r",
+            "body": "@mikepurvis  Yes that makes sense.  Thanks for sharing your thoughts.\n\nI realized that it's easy to avoid squashing altogether when using `COPY --from={image}` to copy build artifacts from other stages in the build. This allows a clean build setup, and even allows using the `--jobs` flag to parallelize the build.\n\nI know it's out of scope  - but I'd like to share a shortened version of the Dockerfile finally.  \n\n```Dockerfile\n# About: Build of the `exim` mailserver for a legacy debian (sqeeze).\n# This involves building several static libraries from upstream (including openssl) and some more customization. \n\n# common build image\nFROM debian/eol:squeeze AS build-base\nRUN apt-get update\nRUN apt-get install -yy build-essential\n\n# build each static library in a separate stage\nFROM build-base AS libidn\nARG LIBIDN_SRC\nRUN mkdir /tmp/build\nWORKDIR /tmp/build\nCOPY $LIBIDN_SRC .\nRUN tar -xf $(basename $LIBIDN_SRC) --strip-components=1\nRUN ./configure\nRUN make\nRUN make install\n\nFROM build-base AS libunistring\n# [...]\n\nFROM build-base AS libidn2\n# [...]\n\nFROM build-base AS openssl\n# [...]\n\n\n# build exim with static libraries\nFROM build-base AS exim-build\nRUN apt-get install -yy libpcre3-dev libdb4.8-dev libspf2-dev libsasl2-dev \\\nlibpam0g-dev libpq-dev libsqlite3-dev libldap2-dev libperl-dev ca-certificates git\n\n# copy libraries from previous stages\nCOPY --from=libidn /usr/local/ /usr/local/\nCOPY --from=libidn2 /usr/local/ /usr/local/\nCOPY --from=libunistring /usr/local/ /usr/local/\nCOPY --from=openssl /usr/local/ /usr/local/\n\nRUN mkdir /tmp/exim-src\nWORKDIR /tmp/exim-src\nCOPY $EXIM_SRC .\nRUN tar -xf $(basename $EXIM_SRC) --strip-components 1\nCOPY exim.Makefile Local/Makefile\nRUN make makefile\nRUN make\n\n# install exim runtime dependencies, cleanup and copy binary from exim-build stage\nFROM debian/eol:squeeze\nRUN apt-get update\nRUN apt-get install -yy libpcre3 libdb4.8 libspf2-2 libsasl2-2 libpam0g libpq5 libsqlite3-0 libldap-2.4-2\nRUN apt-get clean -qq\nRUN rm -rf /var/lib/apt/lists/*\nCOPY --from=exim-build /tmp/exim-src/build-Linux-x86_64/exim /usr/sbin\n"
+        }
+    ],
+    "cross_references": []
+}

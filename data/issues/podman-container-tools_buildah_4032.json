@@ -1,0 +1,127 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "buildah",
+    "number": 4032,
+    "type": "issue",
+    "title": "FR: Support ssh:// protocol",
+    "state": "open",
+    "labels": [
+        "stale-issue"
+    ],
+    "user": "bendem",
+    "body": "Currently, it is possible to build an image from a git repository by prefixing the context argument with `git://` or postfixing with `.git`. Sadly, this uses the raw git protocol without authentication. Most users want the https protocol or git over ssh (git+ssh).\n\nSince the clone is delegated to the git command, you need to specify either `ssh://` or `git+ssh://` to use that protocol. Neither of those prefixes is recognized by buildah.\n\nI have added the relevant lines in the code (types.go, `strings.HasPrefix(url, \"git+ssh://\")` in the two places required), but I'm not able to comprehend the code further. It looks from my testing like the cloning happens in an isolated namespace which doesn't have access either to ~/.ssh or to the `SSH_AUTH_SOCK`, whether `--ssh` is used or not.\n\nWould love to hear what others think about this and whether it would be possible to allow building images from ssh repositories.\n\n```\n> buildah build --debug 'git+ssh://git@github.com/containers/buildah.git'\nDEBU[0000] cloning \"git+ssh://git@github.com/containers/buildah.git\" to \"/var/tmp/buildah1505040640\"\nerror prepping temporary context directory: cloning \"git+ssh://git@github.com/containers/buildah.git\" to \"/var/tmp/buildah1505040640\":\nCloning into '/var/tmp/buildah1505040640'...\nBad owner or permissions on /etc/ssh/ssh_config.d/05-redhat.conf\nfatal: Could not read from remote repository.\n\nPlease make sure you have the correct access rights\nand the repository exists.\n: exit status 128\nDEBU[0000] exit status 128\n```\n\n```\nVersion:         1.27.0-dev\nGo Version:      go1.17.7\nImage Spec:      1.0.2-dev\nRuntime Spec:    1.0.2-dev\nCNI Spec:        1.0.0\nlibcni Version:  v1.1.1\nimage Version:   5.21.2-dev\nGit Commit:      fb28761c\nBuilt:           Fri Jun  3 14:31:44 2022\nOS/Arch:         linux/amd64\nBuildPlatform:   linux/amd64\n```\n\n",
+    "comments": [
+        {
+            "user": "rhatdan",
+            "body": "@nalind @flouthoc PTAL"
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "flouthoc",
+            "body": "@bendem Does your patch works when you run with `sudo` or `root` user ? I think issues is with running `git` from unshared session."
+        },
+        {
+            "user": "bendem",
+            "body": "Indeed, it does work when using root. The git clone works ~, It's failing due to iptables errors, but I'm guessing that's an entirely different problem~ (iptables error is fixed by `--network=host` because WSL)."
+        },
+        {
+            "user": "bendem",
+            "body": "Patch in case people want it:\n\n```patch\nFrom a0eb30551cb4b910523392a851a72816e409aadf Mon Sep 17 00:00:00 2001\nFrom: Benjamin Demarteau <benjamin.demarteau@liege.be>\nDate: Mon, 11 Jul 2022 10:23:40 +0200\nSubject: [PATCH] support building ssh:// urls\n\n---\n define/types.go | 3 ++-\n 1 file changed, 2 insertions(+), 1 deletion(-)\n\ndiff --git a/define/types.go b/define/types.go\nindex 07d90081..1e412a92 100644\n--- a/define/types.go\n+++ b/define/types.go\n@@ -117,6 +117,7 @@ func TempDirForURL(dir, prefix, url string) (name string, subdir string, err err\n        if !strings.HasPrefix(url, \"http://\") &&\n                !strings.HasPrefix(url, \"https://\") &&\n                !strings.HasPrefix(url, \"git://\") &&\n+               !strings.HasPrefix(url, \"ssh://\") &&\n                !strings.HasPrefix(url, \"github.com/\") &&\n                url != \"-\" {\n                return \"\", \"\", nil\n@@ -129,7 +130,7 @@ func TempDirForURL(dir, prefix, url string) (name string, subdir string, err err\n        if err != nil {\n                return \"\", \"\", fmt.Errorf(\"error parsing url %q: %w\", url, err)\n        }\n-       if strings.HasPrefix(url, \"git://\") || strings.HasSuffix(urlParsed.Path, \".git\") {\n+       if strings.HasPrefix(url, \"git://\") || strings.HasPrefix(url, \"ssh://\") || strings.HasSuffix(urlParsed.Path, \".git\") {\n                combinedOutput, gitSubDir, err := cloneToDirectory(url, name)\n                if err != nil {\n                        if err2 := os.RemoveAll(name); err2 != nil {\n--\n2.31.1\n```"
+        },
+        {
+            "user": "bendem",
+            "body": "For reference, docker checks URLs a bit different and thus doesn't support `git+ssh` either. URL has to start with `git@`, `git://` or being an http url ending with `.git` + ref/subfolder.\n\nhttps://github.com/docker/cli/blob/8dd94d382409b7384d210a2ed84b52f0d4a12995/vendor/github.com/docker/docker/builder/remotecontext/urlutil/urlutil.go#L79"
+        },
+        {
+            "user": "rhatdan",
+            "body": "Please open a PR with your patch."
+        },
+        {
+            "user": "bendem",
+            "body": "The change is both incomplete and trivial. I'm unable to make it work rootless or add tests. Feel free to take it as your own.\n\nIf you really want, I can open a PR, but I won't be able to take it any further than this so it will just sit there."
+        },
+        {
+            "user": "flouthoc",
+            "body": "I think issue is more like that user inside `unshare` session cannot access the global ssh config and altering file on host just for making it work for buildah  rootless looks weird to me, I'll try playing with this patch @bendem does this feature works on docker ? But even if it works its not a surprise since everything is accessed from `root` user there which is same when buildah is invoked from `root` user."
+        },
+        {
+            "user": "bendem",
+            "body": "It only works in docker if your git server uses git as the connecting user since you the only URL format that will use git+ssh is \n`git@$server[#ref][:directory]`.\n\ni.e. `docker build -t buildah 'git@github.com:containers/buildah.git#main:/contrib/docker'`\n\nref: https://github.com/docker/cli/blob/master/vendor/github.com/docker/docker/builder/remotecontext/urlutil/urlutil.go#L78"
+        },
+        {
+            "user": "bendem",
+            "body": "Opened https://github.com/docker/buildx/issues/1209"
+        },
+        {
+            "user": "bendem",
+            "body": "Docker side mentions me that `+` in urls is deprecated (no source) and that they support (doesn't actually work) `ssh://`, which makes more sense in my opinion too."
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@bendem @flouthoc What is going on with this issue?"
+        },
+        {
+            "user": "bendem",
+            "body": "Nothing, I don't have the knowledge to implement this, but it's still an open feature request."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@flouthoc WDYT?"
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "bendem",
+            "body": "Still valid."
+        },
+        {
+            "user": "flouthoc",
+            "body": "> I think issue is more like that user inside `unshare` session cannot access the global ssh config and altering file on host just for making it work for buildah rootless looks weird to me, I'll try playing with this patch @bendem does this feature works on docker ? But even if it works its not a surprise since everything is accessed from `root` user there which is same when buildah is invoked from `root` user.\n\nThis is blocked because of this reason but lets wait for reply on docker issue first and see how it goes there: https://github.com/docker/buildx/issues/1209"
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "rhatdan",
+            "body": "Looks like not much is happening here."
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@flouthoc PTAL"
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "docker",
+            "repository": "buildx",
+            "number": 1209
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "buildah",
+            "number": 4103
+        }
+    ]
+}

@@ -1,0 +1,55 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "buildah",
+    "number": 1920,
+    "type": "issue",
+    "title": "buildah bud removes existing images from the registry",
+    "state": "closed",
+    "labels": [
+        "kind/bug",
+        "locked - please file new issue/PR"
+    ],
+    "user": "bbodiya-akamai",
+    "body": "<!--\nIf you are reporting a new issue, make sure that we do not have any duplicates\nalready open. You can ensure this by searching the issue list for this\nrepository. If there is a duplicate, please close your issue and add a comment\nto the existing issue instead.\n\nIf you suspect your issue is a bug, please edit your issue description to\ninclude the BUG REPORT INFORMATION shown below. If you fail to provide this\ninformation within 7 days, we cannot debug your issue and will close it. We\nwill, however, reopen it if you later provide the information.\n\n---------------------------------------------------\nBUG REPORT INFORMATION\n---------------------------------------------------\nUse the commands below to provide key information from your environment:\nYou do NOT have to include this information if this is a FEATURE REQUEST\n-->\n\n**Description**\nbuildah bud sometimes removes images that were referenced in a build, even when they were already present in the local registry before the build occurred.\n\n**Steps to reproduce the issue:**\n1. Create a Dockerfile for the first stage of the build, and build it using buildah bud.\n```\n$ cat Dockerfile.image_removal_bug1\nFROM alpine\nRUN touch /stage1\n\n$ BUILDAH_ISOLATION=rootless buildah bud -f Dockerfile.image_removal_bug1 -t stage1 .\nSTEP 1: FROM alpine\nSTEP 2: RUN touch /stage1\nSTEP 3: COMMIT stage1\nGetting image source signatures\nCopying blob 03901b4a2ea8 skipped: already exists\nCopying blob 507b3012320c done\nCopying config 3b8c8f8123 done\nWriting manifest to image destination\nStoring signatures\n3b8c8f8123055bdbc9d324d457bfa00ac72f57bc906d7b9a8985d88841f75f2d\n```\n2. Note that the image was successfully added to the registry:\n```\n$ BUILDAH_ISOLATION=rootless buildah images\nREPOSITORY                 TAG      IMAGE ID       CREATED         SIZE\nlocalhost/stage1           latest   ebf4cd4d0f67   3 seconds ago   5.85 MB\ndocker.io/library/alpine   latest   961769676411   7 weeks ago     5.85 MB\n```\n2. Create a second Dockerfile that references the tag from the first stage in a FROM line.  Build it once.\n```\n$ cat Dockerfile.image_removal_bug2\nFROM stage1 as stage2.1\nFROM alpine as stage2.2\nCOPY --from=stage2.1 /stage1 /stage2\n\n$ BUILDAH_ISOLATION=rootless buildah bud -f Dockerfile.image_removal_bug2 -t stage2 .\nSTEP 1: FROM stage1 AS stage2.1\nebf4cd4d0f673260fc9b0c0701fb61fd3d5032afe0877d624d10bf938a01ad84\nSTEP 2: FROM alpine AS stage2.2\nSTEP 3: COPY --from=stage2.1 /stage1 /stage2\nSTEP 4: COMMIT stage2\nGetting image source signatures\nCopying blob 03901b4a2ea8 skipped: already exists\nCopying blob 719d842e52c2 done\nCopying config 06d963c4ce done\nWriting manifest to image destination\nStoring signatures\n06d963c4ce895dfa85ab896f02416230a77b52380d40854b0f41b8da1ad6c0e9\n```\n4. Notice that stage1 is no longer in the registry.\n```\n$ BUILDAH_ISOLATION=rootless buildah images\nREPOSITORY                 TAG      IMAGE ID       CREATED         SIZE\nlocalhost/stage2           latest   06d963c4ce89   3 seconds ago   5.85 MB\ndocker.io/library/alpine   latest   961769676411   7 weeks ago     5.85 MB\n```\n5. Further note, that this only seems to occur when a tag is referenced in a FROM line, in a stage with no real modifications to the image.  As a counter-example, the following two Dockerfiles do not cause stage1 to be removed:\n```\n$ cat Dockerfile.image_removal_bug-workaround1\nFROM alpine as stage2\nCOPY --from=stage1 /stage1 /stage2\n\n$ cat Dockerfile.image_removal_bug-workaround2\nFROM stage1 as stage2.1\nRUN touch /stage2.1\nFROM alpine as stage2.2\nCOPY --from=stage2.1 /stage1 /stage2\n```\n\n**Describe the results you received:**\nThe build for stage2 was successful, but removed the tag from stage1, causing subsequent builds that referenced stage1 to fail.\n\n**Describe the results you expected:**\nAs with docker build, I expected the build for stage2 to complete, and the image/tag from stage1 to remain in the registry.\n\n**Output of `buildah version`:**\n\n```\nVersion:         1.12.0-dev\nGo Version:      go1.10.4\nImage Spec:      1.0.1-dev\nRuntime Spec:    1.0.1-dev\nCNI Spec:        0.4.0\nlibcni Version:  v0.7.1\nGit Commit:      13330a45\nBuilt:           Thu Oct 10 13:04:00 2019\nOS/Arch:         linux/amd64\n```\n\n**Output of `cat /etc/*release`:**\n\n```\nDISTRIB_ID=Ubuntu\nDISTRIB_RELEASE=18.04\nDISTRIB_CODENAME=bionic\nDISTRIB_DESCRIPTION=\"Ubuntu 18.04.3 LTS\"\nNAME=\"Ubuntu\"\nVERSION=\"18.04.3 LTS (Bionic Beaver)\"\nID=ubuntu\nID_LIKE=debian\nPRETTY_NAME=\"Ubuntu 18.04.3 LTS\"\nVERSION_ID=\"18.04\"\nHOME_URL=\"https://www.ubuntu.com/\"\nSUPPORT_URL=\"https://help.ubuntu.com/\"\nBUG_REPORT_URL=\"https://bugs.launchpad.net/ubuntu/\"\nPRIVACY_POLICY_URL=\"https://www.ubuntu.com/legal/terms-and-policies/privacy-policy\"\nVERSION_CODENAME=bionic\nUBUNTU_CODENAME=bionic\n```\n\n**Output of `uname -a`:**\n\n```\nLinux 01274e57e7a3 4.4.0-151-generic #178-Ubuntu SMP Tue Jun 11 08:30:22 UTC 2019 x86_64 x86_64 x86_64 GNU/Linux\n```\n\n**Output of `cat /etc/containers/storage.conf`:**\nI suspect this might not be relevant, since running with BUILDAH_ISOLATION=rootless, and with vfs.  But for completeness:\n```\n# storage.conf is the configuration file for all tools\n# that share the containers/storage libraries\n# See man 5 containers-storage.conf for more information\n\n# The \"container storage\" table contains all of the server options.\n[storage]\n\n# Default Storage Driver\ndriver = \"overlay\"\n\n# Temporary storage location\nrunroot = \"/var/run/containers/storage\"\n\n# Primary read-write location of container storage\ngraphroot = \"/var/lib/containers/storage\"\n\n[storage.options]\n# AdditionalImageStores is used to pass paths to additional read-only image stores\n# Must be comma separated list.\nadditionalimagestores = [\n]\n\n# Size is used to set a maximum size of the container image.  Only supported by\n# certain container storage drivers (currently overlay, zfs, vfs, btrfs)\nsize = \"\"\n\n# OverrideKernelCheck tells the driver to ignore kernel checks based on kernel version\noverride_kernel_check = \"true\"\n```\n",
+    "comments": [
+        {
+            "user": "TomSweeneyRedHat",
+            "body": "Well, that's an interesting issue.  @bbodiya-akamai thanks for reporting it with the details.  We'll take a look."
+        },
+        {
+            "user": "caiges",
+            "body": "This looks like the build is treating the preexisting image as an intermediary image which is reaped during the post-build cleanup. I have a working fix but want to clean up the implementation. "
+        },
+        {
+            "user": "graywolf",
+            "body": "Would like to add that I've hit this as well. I have very simple reproduction example:\n\n```\n+   $ ./repro\n+ podman pull busybox\nTrying to pull docker.io/library/busybox...\nGetting image source signatures\nCopying blob 91f30d776fb2 done\nCopying config c7c37e472d done\nWriting manifest to image destination\nStoring signatures\nc7c37e472d31c1685b48f7004fd6a64361c95965587a951692c5f298c6685998\n+ buildah images\nREPOSITORY                  TAG      IMAGE ID       CREATED      SIZE\ndocker.io/library/busybox   latest   c7c37e472d31   5 days ago   1.45 MB\n+ buildah bud -f Dockerfile.a -t example.org/a .\nSTEP 1: FROM busybox\nSTEP 2: RUN touch /foo\nSTEP 3: COMMIT example.org/a\nGetting image source signatures\nCopying blob 50761fe126b6 skipped: already exists\nCopying blob 270a45dee6d8 done\nCopying config d4a3500ac9 done\nWriting manifest to image destination\nStoring signatures\n--> d4a3500ac95\nd4a3500ac955aa52ee460f4e3d478996bf19a4927aac353c8ab2a91ac3c1709f\n+ buildah images\nREPOSITORY                  TAG      IMAGE ID       CREATED                  SIZE\nexample.org/a               latest   d4a3500ac955   Less than a second ago   1.45 MB\ndocker.io/library/busybox   latest   c7c37e472d31   5 days ago               1.45 MB\n+ buildah bud -f Dockerfile.b -t example.org/b .\nSTEP 1: FROM example.org/a\n--> d4a3500ac95\nSTEP 2: FROM scratch\nSTEP 3: COMMIT example.org/b\nGetting image source signatures\nCopying blob 5f70bf18a086 done\nCopying config 0fde735d95 done\nWriting manifest to image destination\nStoring signatures\n--> 0fde735d95c\n0fde735d95c31ef322347cfadd1eebf312454125c3c85d06afd43341ebc91ff9\n+ buildah images\nREPOSITORY                  TAG      IMAGE ID       CREATED                  SIZE\nexample.org/b               latest   0fde735d95c3   Less than a second ago   2.06 KB\ndocker.io/library/busybox   latest   c7c37e472d31   5 days ago               1.45 MB\n\n+   $ cat repro\n#!/bin/sh\nset -eux\n\npodman pull busybox\n\nbuildah images\nbuildah bud -f Dockerfile.a -t example.org/a .\nbuildah images\nbuildah bud -f Dockerfile.b -t example.org/b .\nbuildah images\n\n$ cat Dockerfile.a\nFROM busybox\n\nRUN touch /foo\n\n$ cat Dockerfile.b\nFROM example.org/a\n\nFROM scratch\n```\n\nIn my use case there seems to be trivial work around, and that is changing `Dockerfile.b` into\n\n```\n+   $ cat Dockerfile.b\nFROM example.org/a\n\nRUN touch /foo\n\nFROM scratch\n```\n\nthat leads to expected\n\n```\n+   $ buildah images\nREPOSITORY                  TAG      IMAGE ID       CREATED          SIZE\nexample.org/b               latest   117ab4e1f885   43 seconds ago   2.06 KB\nexample.org/a               latest   6bf65cb23d6d   46 seconds ago   1.45 MB\ndocker.io/library/busybox   latest   c7c37e472d31   5 days ago       1.45 MB\n```"
+        },
+        {
+            "user": "rhatdan",
+            "body": "@caiges Did you ever finish the fix?\n\n@bbodiya-akamai @graywolf is this still an issue?"
+        },
+        {
+            "user": "caiges",
+            "body": "@rhatdan I made progress but didn't finish. I can take another stab at it."
+        },
+        {
+            "user": "rhatdan",
+            "body": "Great."
+        },
+        {
+            "user": "graywolf",
+            "body": "> @bbodiya-akamai @graywolf is this still an issue?\n\nYes."
+        },
+        {
+            "user": "bbodiya-akamai",
+            "body": "> @bbodiya-akamai @graywolf is this still an issue?\n\nYes, I'm still seeing it on 1.19.2"
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "buildah",
+            "number": 3025
+        }
+    ]
+}

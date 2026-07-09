@@ -1,0 +1,129 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "buildah",
+    "number": 607,
+    "type": "issue",
+    "title": "buildah bud 'RUN' incorrectly executing entrypoint",
+    "state": "closed",
+    "labels": [
+        "locked - please file new issue/PR"
+    ],
+    "user": "pixdrift",
+    "body": "**Description**\nWhen an entry point is configured in a Dockerfile executed by `buildah bud`, the `RUN` commands in the Dockerfile triggers execution of the configured `ENTRYPOINT` value.\n\nCredit to @adelton for initial report and reproducer.\n\n**Steps to reproduce the issue:**\n1. `buildah bud` the following Docker file\n```\nFROM centos:7\nRUN uuidgen > /build-id-pre-entrypoint\nENTRYPOINT [ \"/non/existent/entrypoint\" ]\nRUN uuidgen > /build-id-post-entrypoint\n```\n\nResult:\n```\nSTEP 1: FROM centos:7\nSTEP 2: RUN uuidgen > /build-id-pre-entrypoint\nSTEP 3: ENTRYPOINT [ \"/non/existent/entrypoint\" ]\nSTEP 4: RUN uuidgen > /build-id-post-entrypoint\ncontainer_linux.go:348: starting container process caused \"exec: \\\"/non/existent/entrypoint\\\": stat /non/existent/entrypoint: no such file or directory\"\nerror building at step {Env:[PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin] Command:run Args:[uuidgen > /build-id-post-entrypoint] Flags:[] Attrs:map[] Message:RUN uuidgen > /build-id-post-entrypoint Original:RUN uuidgen > /build-id-post-entrypoint}: exit status 1\n```\n\n**Describe the results you received:**\nSecond `RUN` command in Dockerfile executes using `ENTRYPOINT` configured in previous step\n\n`RUN` command in Dockerfile should not execute using `ENTRYPOINT` when built with `buildah bud`.\n\n**Describe the results you expected:**\nSuccessful `RUN` execution without use of configured `ENTRYPOINT` to match Docker behaviour.\n\n**Output of `rpm -q buildah` or `apt list buildah`:**\n\n```\nbuildah-0.16-201804191042.gite008b73.el7.x86_64\n```\n\n**Output of `buildah version`:**\n\n```\nVersion:       0.16\nGo Version:    go1.8.3\nImage Spec:    1.0.0\nRuntime Spec:  1.0.0\nGit Commit:    e008b73\nBuilt:         Thu Apr 19 21:58:48 2018\nOS/Arch:       linux/amd64\n```\n\n**Output of `cat /etc/*release`:**\n\n```\nCentOS Linux release 7.4.1708 (Core) \n```",
+    "comments": [
+        {
+            "user": "pixdrift",
+            "body": "Execution of same Dockerfile with `docker build` (expected behaviour):\n```\n# docker build budrun\nSending build context to Docker daemon 2.048 kB\nStep 1/4 : FROM centos:7\n ---> e934aafc2206\nStep 2/4 : RUN uuidgen > /build-id-pre-entrypoint\n ---> Running in 29118e9d1b6a\n\n ---> 15d4206ea973\nRemoving intermediate container 29118e9d1b6a\nStep 3/4 : ENTRYPOINT /non/existent/entrypoint\n ---> Running in 2b595e7f6b67\n ---> bd7259a96e4c\nRemoving intermediate container 2b595e7f6b67\nStep 4/4 : RUN uuidgen > /build-id-post-entrypoint\n ---> Running in 3b76b323cee4\n\n ---> ffdc67989d22\nRemoving intermediate container 3b76b323cee4\nSuccessfully built ffdc67989d22\n```"
+        },
+        {
+            "user": "pixdrift",
+            "body": "This looks related to entrypoint change that fixed 'buildah run' behaviour.\nhttps://github.com/projectatomic/buildah/commit/15e1054820a0442ce179ca44ddd870b8ff56fa8c\n  \nCode block here:\nhttps://github.com/projectatomic/buildah/blob/15e1054820a0442ce179ca44ddd870b8ff56fa8c/run.go#L331-L343\n  \nLooks like `buildah bud` calls the same run fuction\nhttps://github.com/projectatomic/buildah/blob/83d7d100df1c048d34b6efd6ac7b8d0305ad03f1/imagebuildah/build.go#L422\n\nInterested in advice @rhatdan @TomSweeneyRedHat on how this should be approached. It needs to be determined how the `run` was called (by `buildah bud RUN` or `buildah run`) and the behaviour of the entrypoint append adjusted accordingly.\n\nTo summarise the desired behaviour as I understand it:\n`RUN` commands defined in Dockerfiles should never use entrypoint\n`buildah run` execution uses entrypoint if it is configured\n"
+        },
+        {
+            "user": "rhatdan",
+            "body": "I believe buldah run and RUN command should use the exact same behaviour.  buildah run is just supposed to be an BASH version of the Dockerfile RUN.  @nalind do you agree.  \n\nI agree that we need to match Docker functionality, though."
+        },
+        {
+            "user": "pixdrift",
+            "body": "@rhatdan, the modification made was to make `buildah run` match `docker run` by passing parameters to the entrypoint. I also expected `RUN` and `${tool} run` to behave the same, and was surprised by this issue, I will wait for @nalind's response. Happy to do any further testing/validation."
+        },
+        {
+            "user": "rhatdan",
+            "body": "Well podman run should match docker run, but buildah run should match Dockerfile RUN.  "
+        },
+        {
+            "user": "pixdrift",
+            "body": "@rhatdan, if that's the case I can create a PR to back out the change that was implemented to resolve issue https://github.com/projectatomic/buildah/issues/564\n\n-edit-\n\nThis was the PR https://github.com/projectatomic/buildah/pull/577"
+        },
+        {
+            "user": "pixdrift",
+            "body": "Can confirm that revert of 97a0790def2935571469f9cc3d5018a61cfd390b returns behaviour to `buildah bud RUN = buildah run`\n\nReproducer confirmed fixed after reverted commit:\n```\nSTEP 1: FROM centos:7\nSTEP 2: RUN uuidgen > /build-id-pre-entrypoint\nSTEP 3: ENTRYPOINT [ \"/non/existent/entrypoint\" ]\nSTEP 4: RUN uuidgen > /build-id-post-entrypoint\nSTEP 5: COMMIT containers-storage:[overlay@/var/lib/buildah/storage+/var/run/buildah/storage:overlay.override_kernel_check=true]@7aa1c7373614ce494ae927fa537ca39907af442c237351d698f342400d5f16a3\nGetting image source signatures\nSkipping fetch of repeat blob sha256:43e653f84b79ba52711b0f726ff5a7fd1162ae9df4be76ca1de8370b8bbf9bb0\nCopying blob sha256:2e5b477c32ec15a7fa755b6538d94e4d13396734b95c503a5b22618b7e059678\n 270 B / 270 B [============================================================] 0s\nCopying config sha256:e467b3f2801c661a5d30f4519ef7ca0bc3c8dc1c999da84ab10639101e323248\n 1.15 KiB / 1.15 KiB [======================================================] 0s\nWriting manifest to image destination\nStoring signatures\n7aa1c7373614ce494ae927fa537ca39907af442c237351d698f342400d5f16a3\n```\n"
+        },
+        {
+            "user": "pixdrift",
+            "body": "@adelton, this should be resolved. Can you re-test?"
+        },
+        {
+            "user": "rhatdan",
+            "body": "Closing issue.  @adelton Please reopen if you disagree."
+        },
+        {
+            "user": "pixdrift",
+            "body": "@rhatdan @TomSweeneyRedHat, can this be re-opened? there is a lingering issue here.\n\nThere as a small issue I couldn't narrow down and I have finally created a reproducer for it. This works off the following assumption of desired behaviour mentioned above.\n\n```\nbuildah run = Dockerfile RUN\npodman run = docker run\n```\n\nThe following Docker file (intentionally broken syntax on last line):\n```\nFROM centos:7\nRUN uuidgen > /build-id-pre-entrypoint\nENTRYPOINT [ \"/non/existent/entrypoint\" ]\nRUN\n```\n\n**buildah bud result:**\n```\nSTEP 1: FROM centos:7\nSTEP 2: RUN uuidgen > /build-id-pre-entrypoint\nSTEP 3: ENTRYPOINT [ \"/non/existent/entrypoint\" ]\nSTEP 4: RUN\n/bin/sh: -c: option requires an argument\nerror building at step {Env:[PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin] Command:run Args:[] Flags:[] Attrs:map[] Message:RUN  Original:RUN}: exit status 2\n```\nThis `Dockerfile RUN` attempts to run an empty value, and _doesn't_ insert the `entrypoint` if `run` parameter isn't provided, resulting in an error.\n\nThe following is a buildah shell file to replicate the Dockerfile above:\n```\n#!/bin/bash\nset -ex\ncontainer=$(buildah from centos:7)\nbuildah run ${container} uuidgen > /build-id-pre-entrypoint\nbuildah config --entrypoint \"/non/existent/entrypoint\" ${container}\nbuildah run ${container}\n```\n\n**Execution result:**\n```\n++ buildah from centos:7\n+ container=centos-working-container-11\n+ buildah run centos-working-container-11 uuidgen\n+ buildah config --entrypoint /non/existent/entrypoint centos-working-container-11\n+ buildah run centos-working-container-11\n/bin/sh: /non/existent/entrypoint: No such file or directory\n```\n\nRather than match the behaviour of Dockerfile RUN and produce an error about a missing parameter, it attempts to execute the configured `entrypoint`. To maintain consistency it should instead error, consistent with `Dockerfile RUN` error 'option requires argument`."
+        },
+        {
+            "user": "rhatdan",
+            "body": "What does docker build do?"
+        },
+        {
+            "user": "pixdrift",
+            "body": "`Docker build` output to confirm `buildah bud` behaviour is expected:\n```\nSending build context to Docker daemon 2.048 kB\nStep 1/4 : FROM centos:7\n ---> e934aafc2206\nStep 2/4 : RUN uuidgen > /build-id-pre-entrypoint\n ---> Using cache\n ---> 1aad3bf6658d\nStep 3/4 : ENTRYPOINT /non/existent/entrypoint\n ---> Using cache\n ---> 79b11d169bcd\nStep 4/4 : RUN \n ---> Running in 6ec1cde430f2\n\n/bin/sh: -c: option requires an argument\nThe command '/bin/sh -c' returned a non-zero code: 2\n```\n\n```\n# docker --version\nDocker version 1.13.1, build 774336d/1.13.1\n```"
+        },
+        {
+            "user": "rhatdan",
+            "body": "Thanks.  @pixdrift Can you try to fix this?"
+        },
+        {
+            "user": "pixdrift",
+            "body": "@rhatdan, the way I interpret this is that `buildah run` should _never_ execute `entrypoint`, or at least, I can't see a scenario where it should?\n\nIf that is the consensus, happy to try and resolve it."
+        },
+        {
+            "user": "rhatdan",
+            "body": "Yes I agree.  Another way to look at this is we should make `buildah run CTR` always require a command."
+        },
+        {
+            "user": "pixdrift",
+            "body": "Agreed. Looking at the code `cmd` may also behave the same way, expanding the tests to check this also."
+        },
+        {
+            "user": "pixdrift",
+            "body": "As suspected, `cmd` has the same issue.\n```\nSTEP 1: FROM centos:7\nSTEP 2: RUN uuidgen > /build-id-pre-entrypoint\nSTEP 3: CMD [ \"/non/existent/command\" ]\nSTEP 4: RUN\n/bin/sh: -c: option requires an argument\n```\n\n```\n++ buildah from centos:7\n+ container=centos-working-container-12\n+ buildah run centos-working-container-12 uuidgen\n+ buildah config --cmd /non/existent/command centos-working-container-12\n+ buildah run centos-working-container-12\ncontainer_linux.go:348: starting container process caused \"exec: \\\"/non/existent/command\\\": stat /non/existent/command: no such file or directory\"\n```"
+        },
+        {
+            "user": "pixdrift",
+            "body": "Concerned #656 is a bit savage and may break a feature I haven't used. As for these specific test cases... this is behaviour after PR #656 \n\n**buildah bud cmd:**\n```\nSTEP 1: FROM centos:7\nSTEP 2: RUN uuidgen > /build-id-pre-entrypoint\nSTEP 3: CMD [ \"/non/existent/command\" ]\nSTEP 4: RUN\n/bin/sh: -c: option requires an argument\nerror building at step {Env:[PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin] Command:run Args:[] Flags:[] Attrs:map[] Message:RUN  Original:RUN}: exit status 2\n# echo $?\n1\n```\n\n**buildah bud entrypoint:**\n```\nSTEP 1: FROM centos:7\nSTEP 2: RUN uuidgen > /build-id-pre-entrypoint\nSTEP 3: ENTRYPOINT [ \"/non/existent/entrypoint\" ]\nSTEP 4: RUN\n/bin/sh: -c: option requires an argument\nerror building at step {Env:[PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin] Command:run Args:[] Flags:[] Attrs:map[] Message:RUN  Original:RUN}: exit status 2\n# echo $?\n1\n```\n\n**buildah run cmd:**\n```\n++ buildah from centos:7\n+ container=centos-working-container-19\n+ buildah run centos-working-container-19 uuidgen\n+ buildah config --cmd /non/existent/command centos-working-container-19\n+ buildah run centos-working-container-19\nargs must not be empty\n# echo $?\n1\n```\n\n**buildah run entrypoint:**\n```\n++ buildah from centos:7\n+ container=centos-working-container-18\n+ buildah run centos-working-container-18 uuidgen\n+ buildah config --entrypoint /non/existent/entrypoint centos-working-container-18\n+ buildah run centos-working-container-18\nargs must not be empty\n# echo $?\n1\n\n# buildah commit centos-working-container-18 wc18\n# buildah push wc18 docker-daemon:wc18:latest\n\n# docker run wc18\n/bin/sh: /non/existent/entrypoint: No such file or directory\n```\n\n-edit-\n\nUpdated last example to show docker run behaviour shows entrypoint is executed."
+        },
+        {
+            "user": "kbaegis",
+            "body": "One thing I've been noticing is that ENV may not be inherited from the parent image. IDK if that helps, but please let me know if you're noticing this as well. "
+        },
+        {
+            "user": "pixdrift",
+            "body": "@kbaegis, thanks for the feedback, can you give a specific example?\n\nIs the issue you are seeing that the `RUN` command in a Dockerfile isn't using the `ENV` configured in the source image? Do you have a reproducer/test you can provide? and can you confirm that the behaviour differs from `docker build `(if it does?)"
+        },
+        {
+            "user": "TomSweeneyRedHat",
+            "body": "@kbaegis +1 to @pixdrift's comments.  Saw you IRC after you'd left the channel this weekend.  That should work, but I'm not sure that I've tried it.  If you've a concrete example, that would be very helfpul.  Please do open an issue if you feel it's warranted, it sounds like it is."
+        },
+        {
+            "user": "pixdrift",
+            "body": "@kbaegis, I setup a test for `ENV` configured in both the same Dockerfile and an image sourced using `FROM` and in both cases ENV behaved correctly, and the behaviour in `buildah bud` matched that of `docker build`.\n\nIf you can provide a specific reproducer I can take a closer look. I am going to add this `ENV` scenario to the `bud` CI tests.\n\n-edit-\n\nAdded #688 to test the ENV scenarios."
+        },
+        {
+            "user": "pixdrift",
+            "body": "This was resolved by #656 and new tests added to CI."
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "buildah",
+            "number": 600
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "buildah",
+            "number": 611
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "buildah",
+            "number": 614
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "buildah",
+            "number": 656
+        }
+    ]
+}

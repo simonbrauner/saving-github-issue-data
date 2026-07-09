@@ -1,0 +1,65 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "buildah",
+    "number": 3589,
+    "type": "issue",
+    "title": "panic: chown /home/snowdrop/.local/share/containers/storage/overlay/l: operation not permitted",
+    "state": "closed",
+    "labels": [
+        "stale-issue",
+        "locked - please file new issue/PR"
+    ],
+    "user": "cmoulliard",
+    "body": "## Issue\n\nOS: `Centos 7`\nLinux kernel version: `3.10.0-1160.42.2.el7.x86_64`\n\nThe following error is reported :\n```\n[snowdrop@h01-121 poc]$ go run bud.go\nWARN[0000] Failed to decode the keys [\"storage.options.override_kernel_check\"] from \"/etc/containers/storage.conf\".\nERRO[0000] error creating buildah storage !\npanic: chown /home/snowdrop/.local/share/containers/storage/overlay/l: operation not permitted\n```\nby go when `storage.getStore()` is called\n```\n\tstoreOptions, err := storage.DefaultStoreOptions(unshare.IsRootless(), unshare.GetRootlessUID())\n\n\tstore, err := storage.GetStore(storeOptions)\n\tif err != nil {\n\t\tlogrus.Error(\"error creating buildah storage !\")\n\t\tpanic(err)\n\t}\n```\n\n## Go Main example\n```\npackage main\n\nimport (\n\t\"bytes\"\n\t\"context\"\n\t\"fmt\"\n\t\"github.com/containers/buildah\"\n\t\"github.com/containers/buildah/define\"\n\t\"github.com/containers/buildah/imagebuildah\"\n\t\"github.com/containers/storage\"\n\t\"github.com/containers/storage/pkg/unshare\"\n\trspec \"github.com/opencontainers/runtime-spec/specs-go\"\n\t\"github.com/sirupsen/logrus\"\n\t\"io/ioutil\"\n\t\"os\"\n\t\"path/filepath\"\n\t\"time\"\n)\n\nfunc main() {\n\tctx := context.TODO()\n\tdirname, err := os.UserHomeDir()\n\tif err != nil {\n\t\tlogrus.Fatal( err )\n\t}\n\ttempdir, err := ioutil.TempDir(dirname, \"buildah-poc-\")\n\t//rootDir := filepath.Join(tempdir, \"root\")\n\t//runrootDir := filepath.Join(tempdir, \"runroot\")\n\tcontextDir := filepath.Join(tempdir, \"context\")\n\n\tdateStamp := fmt.Sprintf(\"%d\", time.Now().UnixNano())\n\tbuildahImage := fmt.Sprintf(\"conformance-buildah:%s-%d\", dateStamp, 1)\n\n\tvar transientMounts []string\n\n\toutput := &bytes.Buffer{}\n\toptions := define.BuildOptions{\n\t\tContextDirectory: contextDir,\n\t\tCommonBuildOpts:  &define.CommonBuildOptions{},\n\t\tNamespaceOptions: []define.NamespaceOption{{\n\t\t\tName: string(rspec.NetworkNamespace),\n\t\t\tHost: true,\n\t\t}},\n\t\tTransientMounts:         transientMounts,\n\t\tOutput:                  buildahImage,\n\t\tOutputFormat:            buildah.Dockerv2ImageManifest,\n\t\tOut:                     output,\n\t\tErr:                     output,\n\t\tLayers:                  true,\n\t\tNoCache:                 true,\n\t\tRemoveIntermediateCtrs:  true,\n\t\tForceRmIntermediateCtrs: true,\n\t}\n\n\t// initialize storage for buildah\n\tstoreOptions, err := storage.DefaultStoreOptions(unshare.IsRootless(), unshare.GetRootlessUID())\n\n\tstore, err := storage.GetStore(storeOptions)\n\tif err != nil {\n\t\tlogrus.Error(\"error creating buildah storage !\")\n\t\tpanic(err)\n\t}\n\n\tid, ref, err := imagebuildah.BuildDockerfiles(ctx, store, options, \"Dockerfile\")\n\tif err == nil && options.Manifest != \"\" {\n\t\tlogrus.Debugf(\"manifest list id = %q, ref = %q\", id, ref.String())\n\t}\n}\n```",
+    "comments": [
+        {
+            "user": "rhatdan",
+            "body": "I have a feeling that containers/storage will no longer run on a kernel as old as is in RHEL7."
+        },
+        {
+            "user": "cmoulliard",
+            "body": "Is a root path needed as the error occurs within a non root path `panic: chown /home/vagrant/buildah-poc-3880267168/root/overlay/l: operation not permitted` ?"
+        },
+        {
+            "user": "cmoulliard",
+            "body": "FYI: The `buildah bud` command works on the same machine and should be similar to what I try to\n\n```\n[vagrant@centos7 poc]$ buildah bud -f Dockerfile .\nSTEP 1: FROM alpine\nGetting image source signatures\nCopying blob a0d0a0d46f8b done\nCopying config 14119a10ab done\nWriting manifest to image destination\nStoring signatures\nSTEP 2: CMD [\"echo\", \"Hello StackOverflow!\"]\nSTEP 3: COMMIT\nGetting image source signatures\nCopying blob e2eb06d8af82 skipped: already exists\nCopying blob 5f70bf18a086 done\nCopying config 30db644528 done\nWriting manifest to image destination\nStoring signatures\n30db64452865a24a3295273e86d29400534f2e5caa551033229f0c349ae41da7\n30db64452865a24a3295273e86d29400534f2e5caa551033229f0c349ae41da7\n[vagrant@centos7 poc]$ \n```"
+        },
+        {
+            "user": "cmoulliard",
+            "body": "Problem is fixed If I execute the code using `sudo`\n\n```\nsudo ./out/bud\nWARN[0000] Failed to decode the keys [\"storage.options.override_kernel_check\"] from \"/etc/containers/storage.conf\". \n✔ docker.io/library/alpine:latest\n```\n\nQuestion: Can buildah be executed as non root to perform a `bud` ?\n"
+        },
+        {
+            "user": "rhatdan",
+            "body": "Yes. it enters the user namespace.\n\nTry buildah unshare ./out/bud or podman unshare ./out/bud"
+        },
+        {
+            "user": "nalind",
+            "body": "The buildah CLI does this when it detects that it needs to (by calling `unshare.MaybeReexecUsingUserNamespace(false)` in `before()` in `main.go`), but the sample program does not.  The sample program also needs to be calling `buildah.InitReexec()` at the top of `main()`."
+        },
+        {
+            "user": "cmoulliard",
+            "body": "> The buildah CLI does\n\nMany thanks. I updated my code to include -->\n```\nfunc main() {\n\n\tif buildah.InitReexec() {\n\t\treturn\n\t}\n\tunshare.MaybeReexecUsingUserNamespace(false)\n```"
+        },
+        {
+            "user": "cmoulliard",
+            "body": "May I suggest that buildah then report a more user friendly message such as \"Root privileged permission is needed when you execute buildah <CMD> or code as reported here\" ?"
+        },
+        {
+            "user": "rhatdan",
+            "body": "This error is down in container storage.  @nalind shouldn't this have happened on the mount not on the chown?"
+        },
+        {
+            "user": "nalind",
+            "body": "@rhatdan the `idtools.MkdirAllAs(path.Join(home, linkDir))` call in `drivers/overlay.Init()` happens before we start testing for kernel features."
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "rhatdan",
+            "body": "Since this is not a buildah issue, but a vendoring of buildah, I don't see a way for us to fix this. So I am going to close this issue.  Reporter has figured out a way to make it work."
+        }
+    ],
+    "cross_references": []
+}

@@ -1,0 +1,150 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "buildah",
+    "number": 836,
+    "type": "pull_request",
+    "title": "Add --isolation chroot",
+    "state": "closed",
+    "labels": [
+        "locked - please file new issue/PR"
+    ],
+    "user": "nalind",
+    "body": "Add an `IsolationChroot` that trades flexibility and isolation for being able to do what it does in a host environment that's already been isolated to the point where we're not allowed to set up some of that isolation (using the host's cgroup, ipc, network, and pid namespaces, which generally means we don't have privileges for configuring cgroups, and we can't control things like networking and the size of /dev/shm), producing a result that leans more toward chroot(1) than runc(1) does.\n",
+    "comments": [
+        {
+            "user": "rhatdan",
+            "body": "@giuseppe @mheon @wking @umohnani8 @TomSweeneyRedHat PTAL"
+        },
+        {
+            "user": "giuseppe",
+            "body": "from a quick glance it looks good, but it is a lot of new code :-)  I'll review more in details.  There were recently a lot of improvements in runc to run from an isolated environment.\nWhat are the issues you have encountered?  What is the reference environment that Buildah will run from?  I see we are setting up an intermediate mount namespace, so it seems that at least the default seccomp policy for a Docker/Podman container was tweaked.\n"
+        },
+        {
+            "user": "rhatdan",
+            "body": "@giuseppe what is blocked by seccomp?  Our version allows mount/umount syscalls?"
+        },
+        {
+            "user": "giuseppe",
+            "body": "That is nice, I didn't see that changed with docker 1.13.  It was blocked on docker 1.12 (same for `unshare`).\n\nThat is helpful, so root in the container can re-gain capabilities in a new userNS and still be able to map all the uids/gids without requiring `newuid`/`newgidmap`"
+        },
+        {
+            "user": "giuseppe",
+            "body": "I am only wondering if there is anything that we could (and it is worth) to fix in the runtime to work in a container environment.  For instance, runc itself uses `chroot` when the container doesn't use a `mount` namespace."
+        },
+        {
+            "user": "rhatdan",
+            "body": "I think that is valid to research but for now, I think we move forward with chroot, so we can get buildah running under OpenShift sooner rather then later."
+        },
+        {
+            "user": "TomSweeneyRedHat",
+            "body": "fwiw @nalind, unhappy tests"
+        },
+        {
+            "user": "giuseppe",
+            "body": "I am only worried that it will be a lot of new stuff to maintain as it is almost a new runtime (although we could replace the new code with the OCI variant once it is fully working).  I've done a quick test with dropping all the namespaces from the OCI configuration and runc requires only a small change to run the container (drop a control that `/proc` is an invalid destination where chroot is used)."
+        },
+        {
+            "user": "giuseppe",
+            "body": "said so, I don't want to hold this PR if this can get unprivileged builds faster into OpenShift.\n\nIf you'd like to consider the alternative way I suggested, these are the changes I added to `run.go` (it is an old patch I've used for playing with the FUSE filesystem+dropping namespaces) to get buildah running in a container.\n\nFor simplicity I've hardcoded `rootless` to `true`.\n\nIn addition to the patch I needed:\n\n- this change in runc: https://github.com/opencontainers/runc/pull/1832\n- and I've manually created an userNS with the full range `0 0 4294967295` so that root could gain again all the capabilities in the namespace before running buildah.  This should be also possible to add to the new re-exec code.\n\n```\ndiff --git a/run.go b/run.go\nindex 97d247fd..50b5b2f8 100644\n--- a/run.go\n+++ b/run.go\n@@ -797,6 +797,7 @@ func setupNamespaces(g *generate.Generator, namespaceOptions NamespaceOptions, i\n \n // Run runs the specified command in the container's root filesystem.\n func (b *Builder) Run(command []string, options RunOptions) error {\n+\trootless := true\n \tvar user specs.User\n \tp, err := ioutil.TempDir(\"\", Package)\n \tif err != nil {\n@@ -817,6 +818,44 @@ func (b *Builder) Run(command []string, options RunOptions) error {\n \tgp := generate.New()\n \tg := &gp\n \n+\tif rootless {\n+\t\tg.RemoveMount(\"/dev/pts\")\n+\t\tdevPts := specs.Mount{\n+\t\t\tDestination: \"/dev/pts\",\n+\t\t\tType:        \"devpts\",\n+\t\t\tSource:      \"devpts\",\n+\t\t\tOptions:     []string{\"nosuid\", \"noexec\", \"newinstance\", \"ptmxmode=0666\", \"mode=0620\"},\n+\t\t}\n+\t\tg.AddMount(devPts)\n+\n+\t\tg.RemoveMount(\"/sys\")\n+\t\tsysMnt := specs.Mount{\n+\t\t\tDestination: \"/sys\",\n+\t\t\tType:        \"bind\",\n+\t\t\tSource:      \"/sys\",\n+\t\t\tOptions:     []string{\"nosuid\", \"noexec\", \"nodev\", \"ro\", \"rbind\"},\n+\t\t}\n+\t\tg.AddMount(sysMnt)\n+\n+\t\tg.RemoveMount(\"/proc\")\n+\t\tprocMnt := specs.Mount{\n+\t\t\tDestination: \"/proc\",\n+\t\t\tType:        \"bind\",\n+\t\t\tSource:      \"/proc\",\n+\t\t\tOptions:     []string{\"nosuid\", \"noexec\", \"nodev\", \"rw\", \"rbind\"},\n+\t\t}\n+\t\tg.AddMount(procMnt)\n+\n+\t\tg.RemoveMount(\"/dev/mqueue\")\n+\t\tmqueueMnt := specs.Mount{\n+\t\t\tDestination: \"/dev/mqueue\",\n+\t\t\tType:        \"bind\",\n+\t\t\tSource:      \"/dev/mqueue\",\n+\t\t\tOptions:     []string{\"nosuid\", \"noexec\", \"nodev\", \"rw\", \"rbind\"},\n+\t\t}\n+\t\tg.AddMount(mqueueMnt)\n+\t}\n+\n \tfor _, envSpec := range append(b.Env(), options.Env...) {\n \t\tenv := strings.SplitN(envSpec, \"=\", 2)\n \t\tif len(env) > 1 {\n@@ -854,8 +893,10 @@ func (b *Builder) Run(command []string, options RunOptions) error {\n \t\t}\n \t}()\n \n-\tsetupMaskedPaths(g)\n-\tsetupReadOnlyPaths(g)\n+\tif !rootless {\n+\t\tsetupMaskedPaths(g)\n+\t\tsetupReadOnlyPaths(g)\n+\t}\n \n \tg.SetRootPath(mountPoint)\n \n@@ -875,7 +916,7 @@ func (b *Builder) Run(command []string, options RunOptions) error {\n \t\treturn err\n \t}\n \n-\tif configureUTS {\n+\tif !rootless && configureUTS {\n \t\tif options.Hostname != \"\" {\n \t\t\tg.SetHostname(options.Hostname)\n \t\t} else if b.Hostname() != \"\" {\n@@ -900,9 +941,16 @@ func (b *Builder) Run(command []string, options RunOptions) error {\n \n \t// Now grab the spec from the generator.  Set the generator to nil so that future contributors\n \t// will quickly be able to tell that they're supposed to be modifying the spec directly from here.\n+\tif rootless {\n+\t\tg.ClearLinuxNamespaces()\n+\t}\n \tspec := g.Spec()\n \tg = nil\n \n+\tif rootless {\n+\t\tspec.Linux.Resources = nil\n+\t}\n+\n \t// Remove capabilities if not running as root\n \tif user.UID != 0 {\n \t\tvar caplist []string\n@@ -1075,6 +1123,8 @@ func runUsingRuntimeMain() {\n }\n \n func runUsingRuntime(options RunOptions, configureNetwork bool, configureNetworks []string, spec *specs.Spec, rootPath, bundlePath, containerName string) (wstatus unix.WaitStatus, err error) {\n+\trootless := true\n+\n \t// Lock the caller to a single OS-level thread.\n \truntime.LockOSThread()\n \n@@ -1170,6 +1220,9 @@ func runUsingRuntime(options RunOptions, configureNetwork bool, configureNetwork\n \t// Build the commands that we'll execute.\n \tpidFile := filepath.Join(bundlePath, \"pid\")\n \targs := append(append(append(options.Args, \"create\", \"--bundle\", bundlePath, \"--pid-file\", pidFile), moreCreateArgs...), containerName)\n+\tif rootless {\n+\t\targs = append(append(append(options.Args, \"--rootless=true\", \"create\", \"--bundle\", bundlePath, \"--pid-file\", pidFile, \"--no-new-keyring\"), moreCreateArgs...), containerName)\n+\t}\n \tcreate := exec.Command(runtime, args...)\n \tcreate.Dir = bundlePath\n \tstdin, stdout, stderr := getCreateStdio()\n```\n\n"
+        },
+        {
+            "user": "nalind",
+            "body": "bot, retest this please"
+        },
+        {
+            "user": "rhatdan",
+            "body": "@nalind Please comment on @giuseppe question."
+        },
+        {
+            "user": "nalind",
+            "body": "I don't know what @giuseppe is asking.  Right now we expect to be able to set ID mappings when launching a process (we've mapped the user's own ID to 0 for ourselves so that we can set things up, but we don't map it into the namespace we're setting up for the process that we're starting), and the rootless mode changes don't do that."
+        },
+        {
+            "user": "giuseppe",
+            "body": "I was asking if we can use `runc --rootless=true`, the flag was added recenly that will skip configuring cgroups and tweak the OCI configuration to simplify this PR as I think the runtime should be able to support this setup.  If we don't want to map the current UID inside of the process userNS we could use runc to set up a new userNS as a subset of the one we created?\n\nI opened a PR for runc for the issue I've encountered when using chroot instead of a mount namespace, but the PR is waiting for review.  Anyway, this is something we could come back at later if it is going to cause delays."
+        },
+        {
+            "user": "nalind",
+            "body": "It sounds like `runc --rootless=true` is closer to being usable for this case (some of the mountpoint changes made above are things we already have to do when namespaces are set to \"host\"), but it's not there yet.  I don't see `--isolation oci` going away as the default, so that's fine."
+        },
+        {
+            "user": "giuseppe",
+            "body": "> but it's not there yet\n\nwhat more would we miss from `runc --rootless=true`?"
+        },
+        {
+            "user": "nalind",
+            "body": "Until https://github.com/opencontainers/runc/pull/1832 is merged, it will refuse to bind mount `/proc` into the chroot for us.  The current rootless implementation doesn't set supplemental groups, or accept masked or read-only directories in the configuration.  I'm not sure I'm willing/able to give those up."
+        },
+        {
+            "user": "rhatdan",
+            "body": "Well we could always drop support for \"chroot\" if/when runc gets enough support, over time.  \n"
+        },
+        {
+            "user": "rh-atomic-bot",
+            "body": ":umbrella: The latest upstream changes (presumably b956493) made this pull request unmergeable. Please resolve the merge conflicts."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@nalind Needs a rebase."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@rh-atomic-bot r+"
+        },
+        {
+            "user": "rh-atomic-bot",
+            "body": ":pushpin: Commit a49490e has been approved by `rhatdan`\n\n<!-- @rh-atomic-bot r=rhatdan a49490e27681da409cdb53fd0253d036634e89bf -->"
+        },
+        {
+            "user": "rh-atomic-bot",
+            "body": ":hourglass: Testing commit a49490e with merge 0d7b079..."
+        },
+        {
+            "user": "rh-atomic-bot",
+            "body": ":broken_heart: Test failed - [status-papr](https://s3.amazonaws.com/aos-ci/ghprb/projectatomic/buildah/0d7b079f8979e6a54fa9b448931d67b847589dd6.1533059098044533248/index.html)"
+        },
+        {
+            "user": "rhatdan",
+            "body": "@rh-atomic-bot retry"
+        },
+        {
+            "user": "nalind",
+            "body": "@rh-atomic-bot retry"
+        },
+        {
+            "user": "rhatdan",
+            "body": "@rh-atomic-bot r+"
+        },
+        {
+            "user": "rh-atomic-bot",
+            "body": ":pushpin: Commit 40f462f has been approved by `rhatdan`\n\n<!-- @rh-atomic-bot r=rhatdan 40f462f8fa7cd357fc78762632facc8c84ee3377 -->"
+        },
+        {
+            "user": "rh-atomic-bot",
+            "body": ":hourglass: Testing commit 40f462f with merge 7cb7863..."
+        },
+        {
+            "user": "rh-atomic-bot",
+            "body": ":broken_heart: Test failed - [status-papr](https://s3.amazonaws.com/aos-ci/ghprb/projectatomic/buildah/7cb7863b5599fed71ede031f3f05ae3a97763088.1533132131557547776/index.html)"
+        },
+        {
+            "user": "nalind",
+            "body": "@rh-atomic-bot retry"
+        },
+        {
+            "user": "rh-atomic-bot",
+            "body": ":hourglass: Testing commit 40f462f with merge 59d2a89..."
+        },
+        {
+            "user": "rh-atomic-bot",
+            "body": ":sunny: Test successful - [status-papr](https://s3.amazonaws.com/aos-ci/ghprb/projectatomic/buildah/59d2a895720e70528258da0d5527142addde02ef.1533136494772879360/index.html)\nApproved by: rhatdan\nPushing 59d2a895720e70528258da0d5527142addde02ef to master..."
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "buildah",
+            "number": 873
+        }
+    ]
+}

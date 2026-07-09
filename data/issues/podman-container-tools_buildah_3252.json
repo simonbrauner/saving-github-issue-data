@@ -1,0 +1,57 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "buildah",
+    "number": 3252,
+    "type": "issue",
+    "title": "Multi-platform images: copy from platform",
+    "state": "closed",
+    "labels": [
+        "stale-issue",
+        "locked - please file new issue/PR"
+    ],
+    "user": "andrew-aladev",
+    "body": "**Description**\n\nI want just to extract current platform chroot from image (uses another platform), but buildah can't find it based on current platform.\n\n```docker\nFROM x86_64-unknown-linux-gnu_prefix AS prefix\nFROM scratch\nCOPY --from=prefix /usr/i686-unknown-linux-gnu/ /\n```\n\n```bash\nbuildah bud --platform=\"linux/i686\" .\n```\n\n```\nerror creating build container: short-name \"x86_64-unknown-linux-gnu_prefix\" did not resolve to an alias and no unqualified-search registries are defined in \"\"\n```\n\nThis issue can be fixed by using `--platform=\"linux/amd64\"` instead of `--platform=\"linux/i686\"`, but I am not agree with using another platform type.\n\n**How to reproduce**\n\n`gentoo/stage3` comes with 32 bit `ld` and `libc`, trying to use it:\n\n```docker\nFROM docker.io/gentoo/stage3 as data\nFROM docker.io/i386/busybox\nCOPY --from=data /lib/*-2.32.so /tmp/\nRUN /tmp/ld-2.32.so /tmp/libc-2.32.so\n```\n\n**Describe the results you received:**\n\n```bash\nbuildah bud --platform=\"linux/amd64\" .\n```\n\nEverything is fine, but image platform is wrong.\n\n```bash\nbuildah bud --platform=\"linux/i386\" .\n```\n\n```\nerror creating build container: Error choosing an image from manifest list docker://gentoo/stage3:latest: no image found in manifest list for architecture i386, variant \"\", OS linux\n```\n\n**Output of `buildah version`:**\n\n```\nbuildah version 1.20.1 (image-spec 1.0.1-dev, runtime-spec 1.0.2-dev)\n```\n\nThis issue is reproducible for any OS.\n\nI think this issue is related to #1590, it looks like `FROM --platform` will be the best solution.",
+    "comments": [
+        {
+            "user": "rhatdan",
+            "body": "Currently there is no docker.io/gentoo/stage3:latest  \"linux/i386\" image on docker.io which is why the command is failing?  \n\nYou would like to allow the second command to specify the platform, so something like\n\n```\nFROM docker.io/gentoo/stage3 as data\nFROM --platform=\"linux/i386\" docker.io/i386/busybox\nCOPY --from=data /lib/*-2.32.so /tmp/\nRUN /tmp/ld-2.32.so /tmp/libc-2.32.so\n```\n"
+        },
+        {
+            "user": "rhatdan",
+            "body": "I am not sure this worked, but it did not blow up.\n\n```\n$ buildah bud --layers=false -f /tmp/Dockerfile /tmp\nSTEP 1: FROM docker.io/gentoo/stage3 AS data\n--> b17ee8a69d1\nSTEP 2: FROM docker.io/i386/busybox\nTrying to pull docker.io/i386/busybox:latest...\nGetting image source signatures\nCopying blob d3376651214e done  \nCopying config 30bf2a4039 done  \nWriting manifest to image destination\nStoring signatures\nSTEP 3: COPY --from=data /lib/*-2.32.so /tmp/\nSTEP 4: RUN /tmp/ld-2.32.so /tmp/libc-2.32.so\nGNU C Library (Gentoo 2.32-r7 p6) stable release version 2.32.\nCopyright (C) 2020 Free Software Foundation, Inc.\nThis is free software; see the source for copying conditions.\nThere is NO warranty; not even for MERCHANTABILITY or FITNESS FOR A\nPARTICULAR PURPOSE.\nCompiled by GNU CC version 10.2.0.\nlibc ABIs: UNIQUE IFUNC ABSOLUTE\nFor bug reporting instructions, please see:\n<https://bugs.gentoo.org/>.\nSTEP 5: COMMIT\nGetting image source signatures\nCopying blob d36cb77d8923 skipped: already exists  \nCopying blob b798bb3fdec2 done  \nCopying config 554ab34793 done  \nWriting manifest to image destination\nStoring signatures\n--> 554ab347935\n554ab34793512f35be9024fa7ce49a6b1390c2f6a1b65b433185329bc4f2d5da\n```"
+        },
+        {
+            "user": "andrew-aladev",
+            "body": "I think `from --platform as ...` will be better.\n\n```docker\nFROM --platform=\"linux/amd64\" docker.io/gentoo/stage3 as data\nFROM docker.io/i386/busybox\n```\n\n```bash\nbuildah bud --platform=\"linux/i386\" --layers=false -f /tmp/Dockerfile /tmp\n```\n\nIt will mean that our image uses `i386` platform only, `amd64` image used just for some data extraction. For now this command fails."
+        },
+        {
+            "user": "rhatdan",
+            "body": "I don't think this makes much sense, from the command line you are overriding the first FROM command all other commands can not be overridden, I guess you could play with ARGS if you wanted other from lines to be overridden."
+        },
+        {
+            "user": "andrew-aladev",
+            "body": "We have to pass `platform` somehow because `FROM scratch` for example has no platform by default.\n\n```\nFROM scratch\nbuildah bud --platform=\"linux/i386\"\n```\n\nIt will provide image with platform `architecture: \"i386\"` instead of default `architecture: \"amd64\"` as we may want.\n\nBut when we are trying to add another image as data source, it fails, because it tries to use first defined architecture:\n\n```\nFROM scratch\nFROM docker.io/gentoo/stage3 as data\nbuildah bud --platform=\"linux/i386\"\n```\n\n> no image found in manifest list for architecture i386\n\nSo I think we need `platform` for `FROM`.\n\nThe only one possible dirty hack for today is to use `buildah from` + `buildah mount` + `bud ---volume dir` for data."
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "rhatdan",
+            "body": "So what happens when I do\n\nFROM scratch --platform=\"linux/arm64\"\nbuildah bud --platform=\"linux/i386\"\n"
+        },
+        {
+            "user": "rhatdan",
+            "body": "The override of scratch seems to work now\n```\n$ buildah bud --arch arm64 -f - . <<< \"FROM scratch\"\nSTEP 1: FROM scratch\nSTEP 2: COMMIT\nGetting image source signatures\nCopying blob 5f70bf18a086 [--------------------------------------] 0.0b / 0.0b\nCopying config 46f9f6c0e2 done  \nWriting manifest to image destination\nStoring signatures\n--> 46f9f6c0e2c\n46f9f6c0e2c370dd0f28c1e5d7511dd7e27b82a2aa53f5977cf5566abb28f4ee\nbuildah (block) $ buildah inspect 46f9f6c0e2c370dd0f28c1e5d7511dd7e27b82a2aa53f5977cf5566abb28f4ee | grep -i arch\n    \"Config\": \"{\\\"created\\\":\\\"2021-06-26T10:19:16.962424972Z\\\",\\\"architecture\\\":\\\"arm64\\\",\\\"os\\\":\\\"linux\\\",\\\"config\\\":{\\\"Env\\\":[\\\"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin\\\"],\\\"Labels\\\":{\\\"io.buildah.version\\\":\\\"1.21.1\\\"}},\\\"rootfs\\\":{\\\"type\\\":\\\"layers\\\",\\\"diff_ids\\\":[\\\"sha256:5f70bf18a086007016e948b04aed3b82103a36bea41755b6cddfaf10ace3c6ef\\\"]},\\\"history\\\":[{\\\"created\\\":\\\"2021-06-26T10:19:16.96297096Z\\\",\\\"created_by\\\":\\\"/bin/sh\\\"}]}\",\n        \"architecture\": \"arm64\",\n        \"architecture\": \"arm64\",\n```\n"
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "andrew-aladev",
+            "body": "Thank you, it works now."
+        }
+    ],
+    "cross_references": []
+}

@@ -1,0 +1,53 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "buildah",
+    "number": 3309,
+    "type": "issue",
+    "title": "builddah build still failing on unpacking rpm package",
+    "state": "closed",
+    "labels": [
+        "stale-issue",
+        "locked - please file new issue/PR"
+    ],
+    "user": "tsailiming",
+    "body": "<!--\nIf you are reporting a new issue, make sure that we do not have any duplicates\nalready open. You can ensure this by searching the issue list for this\nrepository. If there is a duplicate, please close your issue and add a comment\nto the existing issue instead.\n\nIf you suspect your issue is a bug, please edit your issue description to\ninclude the BUG REPORT INFORMATION shown below. If you fail to provide this\ninformation within 7 days, we cannot debug your issue and will close it. We\nwill, however, reopen it if you later provide the information.\n\n---------------------------------------------------\nBUG REPORT INFORMATION\n---------------------------------------------------\nUse the commands below to provide key information from your environment:\nYou do NOT have to include this information if this is a FEATURE REQUEST\n-->\n\n**Description**\n\nDoing a yum update on Centos8-stream base image results in the following\n\nUpgrading        : filesystem-3.8-4.el8.0.1.x86_64                      2/203\nError unpacking rpm package filesystem-3.8-4.el8.0.1.x86_64\nInstalling       : cracklib-dicts-2.9.6-15.el8.x86_64                   3/203 \nerror: unpacking of archive failed on file /proc: cpio: chown failed - Inappropriate ioctl for device\nerror: filesystem-3.8-4.el8.0.1.x86_64: install failed\n\n\n\n**Steps to reproduce the issue:**\n1. buildah bud  -f Dockerfile -t openshift-squid:test\n\nMy Dockerfile\n```\nFROM quay.io/centos/centos:stream8\n\nRUN yum clean all -y && yum -y update && yum install -y squid && yum clean all -y\n```\n\n\n**Describe the results you received:**\n```\nFailed:\n  filesystem-3.8-4.el8.x86_64          filesystem-3.8-4.el8.0.1.x86_64         Error: Transaction failed\n\n\nerror building at STEP \"RUN yum clean all -y && yum -y update && yum install -y squid && yum clean all -y\": error while running runtime: exit status 1\n```\n\n**Describe the results you expected:**\nThis should work based. Based on past issues, this should have already been fixed.\n\nTried with this and same error. \n```\nbuildah bud --cap-add CAP_SETFCAP -f Dockerfile -t openshift-squid:test\n```\n**Output of `rpm -q buildah` or `apt list buildah`:**\n\n```\n$ rpm -qa | grep buildah\nbuildah-1.21.0-1.fc34.x86_64\n```\n\n**Output of `buildah version`:**\n\n```\n$ buildah --version\nbuildah version 1.21.0 (image-spec 1.0.1-dev, runtime-spec 1.0.2-dev)\n```\n\n**Output of `cat /etc/*release`:**\n\n```\n$ cat /etc/fedora-release \nFedora release 34 (Thirty Four)\n```\n\n**Output of `uname -a`:**\n\n```\n$ uname -a\nLinux build.local 5.12.10-300.fc34.x86_64 #1 SMP Thu Jun 10 14:21:36 UTC 2021 x86_64 x86_64 x86_64 GNU/Linux\n```\n\n**Output of `cat /etc/containers/storage.conf`:**\n\n```\n$ cat /etc/containers/storage.conf | grep -v ^#\n[storage]\ndriver = \"overlay\"\nrunroot = \"/run/containers/storage\"\ngraphroot = \"/var/lib/containers/storage\"\n\n[storage.options]\nadditionalimagestores = [\n]\n\n[storage.options.overlay]\nmountopt = \"nodev,metacopy=on\"\n[storage.options.thinpool]\n\n```\n",
+    "comments": [
+        {
+            "user": "tsailiming",
+            "body": "Using this worked. \n````\n# buildah --version\nbuildah version 1.19.8 (image-spec 1.0.1-dev, runtime-spec 1.0.2-dev)\n\n# rpm -qa | grep buildah\nbuildah-1.19.7-2.module+el8.4.0+11311+9da8acfb.x86_64\n\n# cat /etc/redhat-release \nRed Hat Enterprise Linux release 8.3 (Ootpa)\n\n# uname -a\nLinux ansible.home.com 4.18.0-240.el8.x86_64 #1 SMP Wed Sep 23 05:13:10 EDT 2020 x86_64 x86_64 x86_64 GNU/Linux\n````"
+        },
+        {
+            "user": "rhatdan",
+            "body": "@nalind Any ideas?"
+        },
+        {
+            "user": "nalind",
+            "body": "When run in rootless mode, crun and runc are giving us a /proc that's owned by an unmapped user (which appears as 65534:65534) rather than by the in-container root user, so if we attempt to upgrade the filesystem package, RPM fails because it can't set the permissions on /proc to match the 0:0 specified in the package's payload.\n\n@tsailiming, are you running as root or as a non-root user?"
+        },
+        {
+            "user": "tsailiming",
+            "body": "I tried with root and it worked on my fc34 box.   On RHEL 8.3, it was already running as root. \n\n\n"
+        },
+        {
+            "user": "rhatdan",
+            "body": "So there is nothing we can do to fix this in rootless mode.  I think the filesystem package would need to be able to handle this.  Or we just mark this package as a failure in rootless mode installs.  There is no way for us to change the permissions of /proc in rootless mode.  It will always we undefined.\n\n$ podman run alpine ls -ld /proc\ndr-xr-xr-x  405 nobody   nobody           0 Jun 18 15:22 /proc\n\n@giuseppe Any thoughts on this?\n"
+        },
+        {
+            "user": "giuseppe",
+            "body": "> @giuseppe Any thoughts on this?\n\n`proc` is owned by root in initial namespace, so root in a user namespace doesn't own it.  I don't think there is anything runc/crun can do about it, the issue can be easily reproduced just with unshare:\n\n```\n$ unshare -rmp -f --mount-proc=/proc ls -ldn /proc\ndr-xr-xr-x. 458 65534 65534 0 Jun 21 10:53 /proc\n\n$ unshare -rmp -f --mount-proc=/proc touch /proc\ntouch: setting times of '/proc': Permission denied\n```"
+        },
+        {
+            "user": "rhatdan",
+            "body": "You can not mount /proc after creating the user namespace?"
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "rhatdan",
+            "body": "Since there is no way for us to fix, this needs to be fixed in the filesystem package."
+        }
+    ],
+    "cross_references": []
+}

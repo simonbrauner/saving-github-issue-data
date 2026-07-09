@@ -1,0 +1,64 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "buildah",
+    "number": 6903,
+    "type": "issue",
+    "title": "Buildah 1.44.0 fails to pull images with opaque whiteouts when running in a privileged user namespace",
+    "state": "closed",
+    "labels": [
+        "kind/bug"
+    ],
+    "user": "chmeliik",
+    "body": "### Issue Description\n\nWe run buildah under an `unshare --map-root-user --map-auto --mount` namespace. In version 1.44.0, this causes buildah to fail when pulling images whose layers contain opaque whiteouts:\n```text\nError: creating build container: unable to copy from source docker://quay.io/devfile/python@sha256:54924a2ee4a2ef17028ae076ce38e59b3f4054353a5c9f9318dfaee60377532c: writing blob: adding layer with blob \"sha256:778656c04542093db6d3b6e07bffbcf6ec4b24709276be7cdf177fcb3666663a\"/\"\"/\"sha256:d326469892d974408d96f1e02d64dce10d20f88613688af11e99e3e22523beeb\": unpacking failed (error: exit status 1; output: time=\"2026-06-09T19:55:43Z\" level=warning msg=\"Failed to read CAP_SYS_ADMIN presence for the current process\"\ntime=\"2026-06-09T19:55:43Z\" level=warning msg=\"Failed to read current user namespace mappings\"\noperation not permitted)\n```\n\nThe same thing occurs when running buildah in a podman `--privileged` container\n\nAccording to my debugging, the root cause is a bug in `go.podman.io/storage` that got exposed by ce7811fde18de3770905b0331f3b873d8e8b8f93:\n- The [`storage-untar` re-exec handler](https://github.com/podman-container-tools/container-libs/blob/1cd91c5bfe88613e511cb1da46355612b8309837/storage/pkg/chrootarchive/archive_unix.go#L49) calls `chroot()` first before calling `unshare.IsRootless()` to decide what xattr name to use for the opaque whiteout (`user.overlay.opaque` vs `trusted.overlay.opaque`)\n- `chroot()` does something that causes `IsRootless()` to fail both of the secondary checks (`CAP_SYS_ADMIN` presence, full user mappings), so it returns `false`\n- Attempts to set `trusted.overlay.opaque` even though we're not real root => operation not permitted\n\nPrior to v1.44.0, it worked fine, because something in `init()` called `unshare.IsRootless()` before the chroot happened, so the correct value was already cached by then. But now it's not called until after the chroot.\n\n### Steps to reproduce the issue\n\nSteps to reproduce the issue\n1. Create a Containerfile to install buildah and dependencies:\n\n<details><summary>expand</summary>\n\n```Dockerfile\nFROM registry.access.redhat.com/ubi10/go-toolset:1.26.3 AS go-build\n\nARG BUILDAH_TAG=v1.44.0\n\nUSER 0\n\n# Install dependencies for compiling buildah\nRUN dnf -y install \\\n        bzip2 \\\n        glib2-devel \\\n        gpgme-devel \\\n        libassuan-devel \\\n        libseccomp-devel\n\nWORKDIR /build\n\nRUN git clone --branch=$BUILDAH_TAG https://github.com/podman-container-tools/buildah && \\\n    cd buildah && \\\n    make bin/buildah\n\n\nFROM registry.access.redhat.com/ubi10/ubi-minimal:10.1\n\nUSER 0\n\nRUN microdnf -y install \\\n        containers-common-extra \\\n        gpgme \\\n        libassuan \\\n        libseccomp \\\n        util-linux-core\n\nCOPY --from=go-build /build/buildah/bin/buildah /usr/local/bin/buildah\n\nCOPY <<EOF /etc/containers/storage.conf\n[storage]\ndriver = \"overlay\"\n\n[storage.options.overlay]\nmountopt = \"nodev\"\nEOF\n\n# Set up mapping for unshare\nRUN echo \"root:1:65535\" | tee /etc/sub{uid,gid}\n\nENV BUILDAH_ISOLATION=chroot\n\nVOLUME /var/lib/containers/storage\n# work around https://github.com/podman-container-tools/buildah/issues/6892\nVOLUME /var/tmp\n```\n\n</details>\n\n2. build it: `buildah build -t buildah:1.44.0 .`\n3. try to pull an image with opaque whiteouts:\n    ```bash\n    podman run --rm --privileged buildah:1.44.0 buildah pull quay.io/devfile/python:slim@sha256:54924a2ee4a2ef17028ae076ce38e59b3f4054353a5c9f9318dfaee60377532c\n    # results in error message above\n    ```\n4. optionally, repeat without `--privileged` but with `unshare`:\n    ```bash\n    podman run --rm buildah:1.44.0 unshare --map-root-user --map-auto --mount -- buildah pull quay.io/devfile/python:slim@sha256:54924a2ee4a2ef17028ae076ce38e59b3f4054353a5c9f9318dfaee60377532c\n    # same error\n    ```\n\n### Describe the results you received\n\nError when pulling image\n\n### Describe the results you expected\n\nSuccessfully pull image\n\n### buildah version output\n\n```yaml\nVersion:         1.44.0\nGo Version:      go1.26.3 (Red Hat 1.26.3-4.el10_2)\nImage Spec:      1.1.1\nRuntime Spec:    1.3.0\nimage Version:   5.40.0\nGit Commit:      30a4189415e5d0a3a0c5971307a6432d8ed1a097\nBuilt:           Tue Jun  9 21:20:31 2026\nOS/Arch:         linux/amd64\nBuildPlatform:   linux/amd64\n```\n\n### buildah info output\n\n```yaml\n{\n    \"host\": {\n        \"Distribution\": {\n            \"distribution\": \"\\\"rhel\\\"\",\n            \"version\": \"10.1\"\n        },\n        \"MemFree\": 2014158848,\n        \"MemTotal\": 33055121408,\n        \"OCIRuntime\": \"crun\",\n        \"SwapFree\": 8571138048,\n        \"SwapTotal\": 8589930496,\n        \"arch\": \"amd64\",\n        \"cpus\": 14,\n        \"hostname\": \"b0b279f01167\",\n        \"kernel\": \"7.0.11-100.fc43.x86_64\",\n        \"os\": \"linux\",\n        \"rootless\": true,\n        \"uptime\": \"38h 6m 32.3s (Approximately 1.58 days)\",\n        \"variant\": \"\"\n    },\n    \"store\": {\n        \"ContainerStore\": {\n            \"number\": 0\n        },\n        \"GraphDriverName\": \"overlay\",\n        \"GraphImageStore\": \"\",\n        \"GraphOptions\": null,\n        \"GraphRoot\": \"/var/lib/containers/storage\",\n        \"GraphStatus\": {\n            \"Backing Filesystem\": \"btrfs\",\n            \"Native Overlay Diff\": \"true\",\n            \"Supports d_type\": \"true\",\n            \"Supports shifting\": \"false\",\n            \"Supports volatile\": \"true\",\n            \"Using metacopy\": \"false\"\n        },\n        \"GraphTransientStore\": false,\n        \"ImageStore\": {\n            \"number\": 0\n        },\n        \"RunRoot\": \"/run/containers/storage\"\n    }\n}\n```\n\n### Provide your storage.conf\n\n```toml\n[storage]\ndriver = \"overlay\"\n```\n\n### Upstream Latest Release\n\nYes\n\n### Additional environment details\n\nHappens only when running **as root** in the user namespace, i.e. `unshare --map-root-user` or `podman run --privileged --user=0`\n\n### Additional information\n\nNote on why it only happens under `podman run --privileged` or `unshare --map-root-user`: I believe it's due to `MaybeReexecUsingUserNamespace` deciding that it's not necessary to re-exec. In an unprivileged namespace, the re-exec sets the special environment variables that make `unshare.IsRootless()` return true right away, without having to fall back to the secondary checks. In a namespace that already has `CAP_SYS_ADMIN`, this doesn't happen.",
+    "comments": [
+        {
+            "user": "chmeliik",
+            "body": "As a workaround until this is fixed, I'm thinking of setting the `_CONTAINERS_USERNS_CONFIGURED=done` env var to make `IsRootless()` return true. As far as I can tell, it shouldn't break our use case. Though obviously we don't want this to be more than a short-term workaround since it's an internal implementation detail and may have unexpected side effects."
+        },
+        {
+            "user": "Luap99",
+            "body": "I guess that should be moved to storage then, we need to call `unshare.IsRootless()` before we chroot there."
+        },
+        {
+            "user": "chmeliik",
+            "body": "> I guess that should be moved to storage then, we need to call `unshare.IsRootless()` before we chroot there.\n\nMakes sense to me. Should I create a similar issue in https://github.com/podman-container-tools/container-libs?"
+        },
+        {
+            "user": "Luap99",
+            "body": "Not needed, I can handle it from here."
+        },
+        {
+            "user": "Luap99",
+            "body": "https://github.com/podman-container-tools/container-libs/pull/908 should fix it"
+        },
+        {
+            "user": "TomSweeneyRedHat",
+            "body": "Thanks @Luap99. So I'm hearing that we'll need to backport this into the Podman-6.0 branch here, bump storage, then vendor into Buildah, create Buildah v1.44.1, then vendor that into Podman, hopefully in time to vendor Buildah v1.44.1 into Podman for an RC of Podman 6.  Holler if I missed anything."
+        },
+        {
+            "user": "Luap99",
+            "body": "> Thanks @Luap99. So I'm hearing that we'll need to backport this into the Podman-6.0 branch here, bump storage, then vendor into Buildah, create Buildah v1.44.1, then vendor that into Podman, hopefully in time to vendor Buildah v1.44.1 into Podman for an RC of Podman 6. Holler if I missed anything.\n\nI have a better idea.\n\nFirst this does not affect podman as there should be `unshare.IsRootless()` on its init path somewhere still so no podman updates needed.\n\nAs for storage well what I proposed is the correct thing for all library users. However the most simple fix is adding a\n```\ninit() {\n_ = unshare.IsRootless()\n}\n``` \n\nfunction into buildah again, I can do that against the the 1.44 branch then no extra vendor from container-libs needed which should be much simpler and less work for us."
+        },
+        {
+            "user": "TomSweeneyRedHat",
+            "body": "Works for me, thanks @Luap99 \n"
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "container-libs",
+            "number": 908
+        },
+        {
+            "organization": "konflux-ci",
+            "repository": "konflux-build-cli",
+            "number": 137
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "buildah",
+            "number": 6923
+        }
+    ]
+}

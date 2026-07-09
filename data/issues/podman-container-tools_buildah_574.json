@@ -1,0 +1,119 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "buildah",
+    "number": 574,
+    "type": "issue",
+    "title": "copy drops setuid bit",
+    "state": "closed",
+    "labels": [
+        "copy slow",
+        "locked - please file new issue/PR"
+    ],
+    "user": "joejulian",
+    "body": "**Description**\n\nWhen I issue a buildah copy of a directory tree created using debootstrap, the setuid bit is dropped causing sudo to not work.\n\nI can work around this with a `buildah mount`, `cp -a`, `buildah umount`\n\n**Steps to reproduce the issue:**\n1. create a directory tree with files that have the setuid bit set\n2. buildah copy that tree\n\n**Describe the results you received:**\nsetuid bits were lost\n\n**Describe the results you expected:**\nsetuid bits would be retained\n\n**Output of `rpm -q buildah` or `apt list buildah`:**\n\nThis is not installed by package manager (no package for Arch).\n\n**Output of `buildah version`:**\n\n```\nVersion:       0.15\nGo Version:    go1.10\nImage Spec:    1.0.0\nRuntime Spec:  1.0.0\nGit Commit:    cd999fa\nBuilt:         Tue Mar 27 10:28:54 2018\nOS/Arch:       linux/amd64\n```\n\n**Output of `cat /etc/*release`:**\n\n```\nLSB_VERSION=1.4\nDISTRIB_ID=Arch\nDISTRIB_RELEASE=rolling\nDISTRIB_DESCRIPTION=\"Arch Linux\"\nNAME=\"Arch Linux\"\nPRETTY_NAME=\"Arch Linux\"\nID=arch\nID_LIKE=archlinux\nANSI_COLOR=\"0;36\"\nHOME_URL=\"https://www.archlinux.org/\"\nSUPPORT_URL=\"https://bbs.archlinux.org/\"\nBUG_REPORT_URL=\"https://bugs.archlinux.org/\"\n```\n\n**Output of `uname -a`:**\n\n```\nLinux questor 4.14.13-1-ARCH #1 SMP PREEMPT Wed Jan 10 11:14:50 UTC 2018 x86_64 GNU/Linux\n```\n\n**Output of `cat /etc/containers/storage.conf`:**\n\n```\nNo such file or directory\n```\n",
+    "comments": [
+        {
+            "user": "TomSweeneyRedHat",
+            "body": "@joejulian thanks for the problem report, we'll take a look at it."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@joejulian Do you know if this works correctly in a Dockerfile? Using `docker build`"
+        },
+        {
+            "user": "rhatdan",
+            "body": "@nalind Any ideas?  "
+        },
+        {
+            "user": "pixdrift",
+            "body": "I have reproduced to test if it was an issue with `var` being mounted `nosuid`, but issue persists when `nosuid` isn't configured.\n\nBasic reproducer:\n`buildah --debug add ${newcontainer} /usr/bin/passwd /passwd_setuid`\n\nThe debug output is the following:\n`DEBU[0000] CopyFileWithTar(/usr/bin/passwd, /var/lib/containers/storage/overlay/53039fe01d8fee33b79b9ff83d95a74e49e36d07b83decf884c5086be0906339/merged/passwd_setuid)`\n\nHaven't confirmed the docker behaviour.\n\nI suspect if there is an issue it may be here somewhere when the file mode is copied:\nhttps://github.com/containers/storage/blob/5d52f079f1709f0408a6c086c603d259b0e5da3e/pkg/archive/archive.go#L1137-L1142\n\n-edit-\nSorry, jumping at shadows. Checked hdr values before and after and they remained unchanged. Looking at the permissions in hdr.Mode look correct too. I'll keep looking."
+        },
+        {
+            "user": "rhatdan",
+            "body": "Well on Linux\n```\nfunc chmodTarEntry(perm os.FileMode) os.FileMode {\n\treturn perm // noop for unix as golang APIs provide perm bits correctly\n}\n```\nchmodTarEntry is a noop."
+        },
+        {
+            "user": "rhatdan",
+            "body": "Which leaves us with\nos.FileMode(hdr.Mode)\n\nLooks like a bug in go.\n\n```\ncat /tmp/t.go\npackage main\n\nimport (\n\t\"fmt\"\n\t\"os\"\n)\n\nfunc main() {\n\tmode := int(0755)\n\tfmt.Println(os.FileMode(mode))\n\tmode = int(04755)\n\tfmt.Println(os.FileMode(mode))\n}\n```\n\ngo run /tmp/t.go \n-rwxr-xr-x\n-rwxr-xr-x\n\n"
+        },
+        {
+            "user": "pixdrift",
+            "body": "It looks like it may be here in the go source\nhttps://github.com/golang/go/blob/master/src/os/types.go#L66-L74\n\nCan't get it to pick up setuid here"
+        },
+        {
+            "user": "pixdrift",
+            "body": "It looks like `hdr.Mode` makes it through the process even though `os.FileMode` doesn't display as expected.\n```\nDEBU[0000] hdr.Mode before: 35309 / 1000100111101101 / -rwxr-xr-x \nDEBU[0000] hdr.Mode after: 35309 / 1000100111101101 / -rwxr-xr-x \n```"
+        },
+        {
+            "user": "rhatdan",
+            "body": "Well that would mean the untar should work, or we were looking at a red herring?"
+        },
+        {
+            "user": "joejulian",
+            "body": "@rhatdan No, I did not know but just tested. Docker's copy also does not retain setuid."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@pixdrift Could you see if you can use that mode to change the mode on a file to setuid?"
+        },
+        {
+            "user": "pixdrift",
+            "body": "@rhatdan not 100% clear on your suggestion, but the binary going into the hdr.Mode suggests that the result should be setuid. I tried to follow it through the untar process but had trouble determining where the execution went. I notice that the untar process takes options and was wondering if the untar process itself was stripping the setuid bit.\n\nI tested copying setuid file into the mounted container using `cp -a` (@joejulian also mentioned this above), the setuid bit survives, so it's definitely something in the buildah cp.\n\nI must admit I am stuck determining where it is dropped in the archive code, and if dropping it is intentional. As @joejulian has mentioned, this looks like it is standard docker behaviour too, but I am intrigued as to why.\n\nhdr contents looks ok when it hits here, it's then written out by tar.NewWriter\nhttps://github.com/containers/storage/blob/5d52f079f1709f0408a6c086c603d259b0e5da3e/pkg/archive/archive.go#L1148\n\nNot sure what the etiquette is to ask for someone to assist.. nalind perhaps? (because I see they have contributed elsewhere in the archiver code)\n\n"
+        },
+        {
+            "user": "rhatdan",
+            "body": "@vbatts @runcom WDYT?"
+        },
+        {
+            "user": "vbatts",
+            "body": "hmm. I'm not sure that it's in the archive layers, but might be. I think the `os.FileMode` behavior smells funny. \n\n```golang\npackage main\n\nimport (\n        \"fmt\"\n        \"os\"\n)\n\nfunc main() {\n        mode := int(0755)\n        fmt.Println(os.FileMode(mode))\n        fmt.Println((mode))\n        mode = int(04755)\n        fmt.Println(os.FileMode(mode))\n        fmt.Println((mode))\n}\n```\n\n```\n$ go run f.go\n-rwxr-xr-x\n493\n-rwxr-xr-x\n2541\n```\n\n"
+        },
+        {
+            "user": "rhatdan",
+            "body": "We should open an issue with Golang for this."
+        },
+        {
+            "user": "optechdvb",
+            "body": "This issue is still present on 18.06.1-ce \n\ncontainer1:latest has embedded target rootfs image.\n\n```\nFROM container1:latest as sdk\n\nFROM ubuntu\nCOPY --from=sdk /target-roots/ /target-rootfs/\n```\n\nSUID and SGID bits not observed in resulting container\n\n\nHas this been pursued further with Golang? Has a defect been filed?"
+        },
+        {
+            "user": "rhatdan",
+            "body": "No update on this one."
+        },
+        {
+            "user": "rhatdan",
+            "body": "Any chance newer versions of golang fixed this?"
+        },
+        {
+            "user": "rhatdan",
+            "body": "go run /tmp/t.go \n-rwxr-xr-x\n493\n-rwxr-xr-x\n2541\n\nI guess not"
+        },
+        {
+            "user": "rhatdan",
+            "body": "go version\ngo version go1.12.5 linux/amd64\n"
+        },
+        {
+            "user": "renich",
+            "body": "I am suffering from this as well. Can't use sudo due to this."
+        },
+        {
+            "user": "jamescassell",
+            "body": "I also ran into this one... without this fixed, making minimal images with multi-stage Dockerfile's is broken due to incorrect file capabilities. (Didn't test docker, but sounds like it's also broken.)"
+        },
+        {
+            "user": "rhatdan",
+            "body": "@nalind Is there a way we could special case this?"
+        },
+        {
+            "user": "nalind",
+            "body": "My experience with `docker build` CE 19.03.12 is that the setuid and setgid bits are stripped from content copied from the build context (the sticky bit, which is nearby, is preserved).  The setuid and setgid bits are preserved when content is copied from another build stage with \"COPY --from\", or extracted from an archive by the \"ADD\" instruction.\n\nI think 18.06 from Fedora's moby-engine package preserved them in all cases.  We're running conformance tests using 19.03, though, and it's the newest CE version I can find, so we're probably going to have to match the 19.03 behavior for builds that use Dockerfiles, even though I personally think that always preserving them is the more correct thing to do.\n\nBut for `buildah add`, we can default to preserving them, since it doesn't have a notion of a build context directory.  Self-assigning, since I'm already in that area."
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "buildah",
+            "number": 2560
+        }
+    ]
+}

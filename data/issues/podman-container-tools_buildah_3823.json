@@ -1,0 +1,158 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "buildah",
+    "number": 3823,
+    "type": "pull_request",
+    "title": "buildkit: add support for exporting build output with `--output` or `-o`",
+    "state": "closed",
+    "labels": [
+        "approved",
+        "lgtm",
+        "buildkit",
+        "4.1",
+        "locked - please file new issue/PR"
+    ],
+    "user": "flouthoc",
+    "body": "Allows end-users to export final build content or rootfs to external formats.\n\nBy default, a local container image is created from the build result. The --output (or -o) flag allows you to override this behavior, and a specify a custom exporter. For example, custom exporters allow you to export the build artifacts as files on the local filesystem instead of a Container image, which can be useful for generating local binaries, code generation etc.\n\nThe value for --output is a CSV-formatted string defining the exporter type and options. Currently, local and tar exporters are supported. The local exporter writes the resulting build files to a directory on the client side. The tar exporter is similar but writes the files as a single tarball (.tar).\n\n```console\nbuildah build --output type=local,dest=dir-rootfs .\nbuildah build --output type=tar,dest=rootfs.tar .\nbuildah build -o dir .\n```\nReference: https://docs.docker.com/engine/reference/commandline/build/#custom-build-outputs\n\nCloses: https://github.com/containers/buildah/issues/3789",
+    "comments": [
+        {
+            "user": "openshift-ci[bot]",
+            "body": "[APPROVALNOTIFIER] This PR is **APPROVED**\n\nThis pull-request has been approved by: *<a href=\"https://github.com/containers/buildah/pull/3823#\" title=\"Author self-approved\">flouthoc</a>*\n\nThe full list of commands accepted by this bot can be found [here](https://go.k8s.io/bot-commands?repo=containers%2Fbuildah).\n\nThe pull request process is described [here](https://git.k8s.io/community/contributors/guide/owners.md#the-code-review-process)\n\n<details >\nNeeds approval from an approver in each of these files:\n\n- ~~[OWNERS](https://github.com/containers/buildah/blob/main/OWNERS)~~ [flouthoc]\n\nApprovers can indicate their approval by writing `/approve` in a comment\nApprovers can cancel approval by writing `/approve cancel` in a comment\n</details>\n<!-- META={\"approvers\":[]} -->"
+        },
+        {
+            "user": "nalind",
+            "body": "This is the sort of thing that we've historically done in the image library and then exposed via the `-t` flag, as copying images is a big part of what the image library does, and I could definitely see a `-o` implementation leaning on that as well.\nThere's a \"tarball\" `ImageTransport`, that currently only implements an `ImageSource` that imports rootfs tarballs, that this would specifically appear to complement.  The current PR isn't implemented that way, and that limits our ability to reuse this functionality anywhere else."
+        },
+        {
+            "user": "flouthoc",
+            "body": "> This is the sort of thing that we've historically done in the image library and then exposed via the `-t` flag, as copying images is a big part of what the image library does, and I could definitely see a `-o` implementation leaning on that as well. There's a \"tarball\" `ImageTransport`, that currently only implements an `ImageSource` that imports rootfs tarballs, that this would specifically appear to complement. The current PR isn't implemented that way, and that limits our ability to reuse this functionality anywhere else.\n\n@nalind I agree with this, actually i thought of it but i was reluctant of moving this function to `c/image` cause I was not able to think of lot of use-cases outside of the build output generation. Since it looked like a buildah local to me hence i opted to keep it here but we can move this function to `c/image` in future if more cases show up or now as well whatever sounds best."
+        },
+        {
+            "user": "TomSweeneyRedHat",
+            "body": "If you think there's a chance you'd want to move some of this code in the future to c/image, I'd do it now.  Far less pain.  Regardless, I'd move it based on Nalin's comments."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@vrothberg @mtrmac Thoughts?"
+        },
+        {
+            "user": "mtrmac",
+            "body": "> This is the sort of thing that we've historically done in the image library and then exposed via the `-t` flag, as copying images is a big part of what the image library does, and I could definitely see a `-o` implementation leaning on that as well.\n> There's a \"tarball\" `ImageTransport`, that currently only implements an `ImageSource` that imports rootfs tarballs, that this would specifically appear to complement. The current PR isn't implemented that way, and that limits our ability to reuse this functionality anywhere else.\n\nI definitely see an elegance in turning this option into just a “commit” to a special transport — because various options could be reused, and the Buildah code could be simpler.\n\nOTOH there are also downsides:\n- It would also allow the user to specify the other commit options/flags/features that modify the config, while the config is not produced by this tarball output. It would be extra code to reject all of that (… admittedly this PR should _also_ be rejecting all of those options with `--output` (unless `-t` is used?)).\n- The c/image references are a bit stateless, making it somewhat ugly to create a reference “to stdout”. Buildah is already dealing with that for the tarball input format, OTOH, so that would not be a new concern.\n- Note that c/image really has no concept of layer _contents_; and no facility for layer editing. I.e. to output a single tarball, it would have to be Buildah (via it’s `CommitOptions.Squash` code that would turn a multi-layer image into a tarball content.  (Alternatively, the tarball transport’s destination could reimplement all of that, by extracting the tarballs, implementing whiteouts, and then creating a tarball out of the result, but that would be a lot of unwarranted complexity at probably much worse performance than `extractRootfs` doing a `Mount`). Essentially, all the c/image tarball transport would do is to stream the Buildah-created tarball from a Buildah-created temporary file (one that is necessary to implement `containerImageRef.NewImageSource`) to the specified destination, hopefully without introducing a _second_ temporary file; while the current special-cased implementation can stream data from `archive.Tar` directly. So using a tarball transport would be an extra cost.\n\n---\n\nOverall I don’t really have a strong opinion about using a c/image transport.\n\nI do, however, feel somewhat strongly (unjustifiably strongly for a Buildah outsider, perhaps) that the code to produce these tarballs should be shared with the code that produces tarballs in squashed images (at least including `containerImageRef.extractRootfs` — see how it differs from this PR’s implementation — possibly more). At least the “producer” half of `buildCustomOutput` should not exist IMHO.\n\nTurning the `--output` option into just a transport reference would clearly be a way to do that. Doing it some other way, to preserve the streaming implementation without temporary files, might well be worthwhile — it’s a code size / long-term maintenance effort vs. performance tradeoff."
+        },
+        {
+            "user": "flouthoc",
+            "body": "@mtrmac I am fine to share as much code as possible with https://github.com/containers/buildah/blob/main/image.go#L153 `extractRootfs`. @nalind WDYT ?"
+        },
+        {
+            "user": "rhatdan",
+            "body": "@flouthoc Any progress on this?"
+        },
+        {
+            "user": "flouthoc",
+            "body": "I'll fix the requested nits, thanks @mtrmac "
+        },
+        {
+            "user": "rhatdan",
+            "body": "@flouthoc What is going on with this one?"
+        },
+        {
+            "user": "flouthoc",
+            "body": "Picking this up again, i don't know how i missed this. :\\"
+        },
+        {
+            "user": "flouthoc",
+            "body": "@mtrmac @nalind Addressed all feedbacks and also switched to a new approach after discussion above https://github.com/containers/buildah/pull/3823#issuecomment-1073546133 we are now reusing `containerImageRef.extractRootfs` https://github.com/containers/buildah/blob/main/image.go#L153 and no new implementation is added for extracting `Rootfs`\n\nPTAL\n\n"
+        },
+        {
+            "user": "rhatdan",
+            "body": "@mtrmac @nalind PTAL\nWould like to get this in before the RCs"
+        },
+        {
+            "user": "flouthoc",
+            "body": "Fixed all the nits @rhatdan @nalind"
+        },
+        {
+            "user": "nalind",
+            "body": "How will `podman-remote` be able to wire this up?"
+        },
+        {
+            "user": "flouthoc",
+            "body": "@nalind I think it can be used by `podman-remote` only when output is exported on shared-mount path with the host. Initially this can be `NO-OP` for remote but can be enabled when `host`->`machine` sharing starts working on `macOS`."
+        },
+        {
+            "user": "nalind",
+            "body": "> @nalind I think it can be used by `podman-remote` only when output is exported on shared-mount path with the host. Initially this can be `NO-OP` for remote but can be enabled when `host`->`machine` sharing starts working on `macOS`.\n\nJust so long as this doesn't lead to letting people who are accessing a server that only offers them the podman API using this to overwrite configuration files on the host."
+        },
+        {
+            "user": "rhatdan",
+            "body": "Probably should be rejected for now."
+        },
+        {
+            "user": "flouthoc",
+            "body": "> Just so long as this doesn't lead to letting people who are accessing a server that only offers them the podman API using this to overwrite configuration files on the host.\n\n@nalind Yeah this might be not possible since there is no way to transfer files from server to host so its a `no-op` for `podman-remote` as of now so this scenario is not possible.\n\n> Probably should be rejected for now.\n\n@rhatdan Do you mean putting this as `no-op` for `podman-remote` or getting this feature into `podman` only when it works for remote ? "
+        },
+        {
+            "user": "flouthoc",
+            "body": "@rhatdan @nalind resolved all nits PTAL. Just `podman-remote` discussion is remaining but I think it can be `no-op` for now and we can discuss it podman side."
+        },
+        {
+            "user": "rhatdan",
+            "body": "Yes for podman-remote, I think we should reject it until we have a solid solution for it.  The problem with that is on a MAC and Windows.  We can discuss this at Water Cooler, to make us all understand the issue."
+        },
+        {
+            "user": "rhatdan",
+            "body": "LGTM"
+        },
+        {
+            "user": "flouthoc",
+            "body": "We found one discrepancy in buildkit's behavior and its discussed and documented here: https://github.com/containers/buildah/pull/3823#discussion_r853821897, as of now I am not sure why that discrepancy exists and i'm unable to think of a reason to have that in buildah. I think we can keep that comment open and I'll address that in future in a followup PR if that becomes a problem. "
+        },
+        {
+            "user": "mtrmac",
+            "body": "> Yes for podman-remote, I think we should reject it until we have a solid solution for it. The problem with that is on a MAC and Windows. We can discuss this at Water Cooler, to make us all understand the issue.\n\nFor the record, the water cooler discussion pointed out that the remote load/save implementations stream a tarball, e.g. https://github.com/containers/podman/blob/712c3bb226a84c8a5593d62648975611cea7839d/pkg/domain/infra/tunnel/images.go#L259 . OTOH build is somewhat special, as an outsider I’m not sure that is viable here.\n\nIIRC we didn’t discuss the intermediate situation, but just not implementing this on remote in the first version (or do we have to explicitly filter that option out in the server?) seems easiest."
+        },
+        {
+            "user": "mtrmac",
+            "body": "> We found one discrepancy in buildkit's behavior and its discussed and documented here: [#3823 (comment)](https://github.com/containers/buildah/pull/3823#discussion_r853821897), as of now I am not sure why that discrepancy exists and i'm unable to think of a reason to have that in buildah. I think we can keep that comment open and I'll address that in future in a followup PR if that becomes a problem.\n\nSet-UID executables are Serious Stuff. I’m _very uncomfortable_ with shipping that feature without making a detailed decision, as well as with the idea of shipping one behavior (and having users possibly test that and rely on that), and possibly later changing that.\n\n(I have no idea what the right behavior is here, neither from the compatibility perspective nor from the security perspective. I just really dislike to the idea of “this is hard, let’s declare success anyway” in this aspect.\n\nAs a possible point of comparison, what does `podman copy` do when copying out other-UID/set-UID/otherwise unusual files out of a container? Shouldn’t that be consistent with this code?)"
+        },
+        {
+            "user": "flouthoc",
+            "body": "@mtrmac Thanks for review resolved all the nits. For this ( https://github.com/containers/buildah/pull/3823#issuecomment-1104239909 ) i agree however i really don't understand the disparity with the buildkits output for `root` and `rootless` invocation if we decide to differ from buildkit here we can close down on one consistent behavior. I'll discuss this with @nalind whenever he is back and do the needful. "
+        },
+        {
+            "user": "flouthoc",
+            "body": "@nalind Resolved all issues but this one is still left https://github.com/containers/buildah/pull/3823#discussion_r853821897"
+        },
+        {
+            "user": "flouthoc",
+            "body": "@nalind PTanotherL this should be good now."
+        },
+        {
+            "user": "nalind",
+            "body": "Two nits, otherwise LGTM."
+        },
+        {
+            "user": "flouthoc",
+            "body": "@rhatdan @nalind needs /lgtm"
+        },
+        {
+            "user": "rhatdan",
+            "body": "/lgtm\n/hold\n@flouthoc did you open a bug/question on why buildkit does this change between rootless and rootful?"
+        },
+        {
+            "user": "flouthoc",
+            "body": "@rhatdan not yet but will open it by tommorow or monday just want to document the findings together so i can list them in the issue. "
+        },
+        {
+            "user": "flouthoc",
+            "body": "/hold cancel"
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "buildah",
+            "number": 3799
+        }
+    ]
+}

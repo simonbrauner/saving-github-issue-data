@@ -1,0 +1,143 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "buildah",
+    "number": 5975,
+    "type": "pull_request",
+    "title": "`buildah build`: use the same overlay for the context directory for the whole build",
+    "state": "closed",
+    "labels": [
+        "kind/feature",
+        "approved",
+        "lgtm",
+        "locked - please file new issue/PR"
+    ],
+    "user": "nalind",
+    "body": "#### What type of PR is this?\n\n/kind feature\n\n#### What this PR does / why we need it:\n\nChange how we handle bind mounts of the build context directory from using a different upper for each read-write mount into it, to using one that lasts the duration of the full build.\n\nWe broke workflows which wrote content to the build context in one stage and then attempted to use archive or layout locations in the build context in a subsequent stage when we fixed CVE-2024-11218, and this should get them working again.  Because that content was often addressed using relative path names which are no longer correct for the written location, we try to compensate by rewriting some types of references and straight-up rejecting some others.\n\n#### How to verify it\n\nNew integration test!  And some updated ones, too!\n\n#### Which issue(s) this PR fixes:\n\nProposed fix for #5952.\n\n#### Special notes for your reviewer:\n\n#### Does this PR introduce a user-facing change?\n\n```release-note\nChanges \"written\" to the build context directory during `buildah build` `RUN --mount=type=bind` instructions are no longer discarded between instructions, but when the build completes, whether it completes successfully or not.\n```",
+    "comments": [
+        {
+            "user": "cgwalters",
+            "body": "Trying to test this, but unrelated to the contents of this PR, I get the same problem trying git main:\n\n```\n$ ./bin/buildah from busybox\nbusybox-working-container\n$ ./bin/buildah run busybox-working-container echo true\nerror running container: did not get container start message from parent: EOF\nError: setup network: pasta failed with exit code 1:\nCouldn't open network namespace /proc/126984/ns/net: Permission denied\n```\n\n```\nDEBU[0000] Running [\"/usr/bin/crun\" \"create\" \"--bundle\" \"/var/tmp/buildah1984752272\" \"--pid-file\" \"/var/tmp/buildah1984752272/pid\" \"--no-new-keyring\" \"buildah-buildah1984752272\"] \nDEBU[0000] waiting for parent start message             \nDEBU[0000] pasta arguments: --config-net --dns-forward 169.254.1.1 -t none -u none -T none -U none --no-map-gw --quiet --netns /proc/126381/ns/net --map-guest-addr 169.254.1.2 \nDEBU[0000] \"/var/tmp/buildah1984752272/mnt/buildah-bind-target-10\" is apparently not really mounted, skipping \nDEBU[0000] \"/var/tmp/buildah1984752272/mnt/rootfs\" is apparently not really mounted, skipping \nDEBU[0000] \"/var/tmp/buildah1984752272/mnt\" is apparently not really mounted, skipping \nerror running container: did not get container start message from parent: EOF\nDEBU[0000] Error building at step {Env:[PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin] Command:run Args:[touch /blah] Flags:[] Attrs:map[] Message:RUN touch /blah Heredocs:[] Original:RUN touch /blah}: setup network: pasta failed with exit code 1:\nCouldn't open network namespace /proc/126381/ns/net: Permission denied \nError: building at STEP \"RUN touch /blah\": setup network: pasta failed with exit code 1:\nCouldn't open network namespace /proc/126381/ns/net: Permission denied\n```\n\nIs there something I need to do here to sync up the buildah binary with the default network config? Odd..."
+        },
+        {
+            "user": "cgwalters",
+            "body": "Nevermind of course after I posted my \"wait these are weird denials\" mental flag tripped and of course it's SELinux; a `chcon --reference /usr/bin/buildah bin/buildah` fixes it."
+        },
+        {
+            "user": "cgwalters",
+            "body": "OK so this works for me:\n\n```\nFROM registry.access.redhat.com/ubi9/ubi:latest  as builder\nRUN --mount=type=bind,src=.,rw,dst=/buildcontext \\\n  dnf -y install skopeo && skopeo copy docker://busybox oci:/buildcontext/out.oci\n\nFROM oci:./out.oci\n# Need to reference builder here to force ordering.\nRUN --mount=type=bind,from=builder,src=.,target=/var/tmp true\n```\n\nSo that's already a lot cleaner, thanks!\n\n---\n\nThere is an important note here that this does break compatibility with the [previous dockerfiles](https://github.com/containers/buildah/issues/5952#issuecomment-2622495832), I get:\n\n```\nError: building at STEP \"RUN --mount=type=bind,rw=true,src=.,dst=/buildcontext,bind-propagation=shared dnf -y install skopeo && skopeo copy docker://busybox oci:/buildcontext/out.oci\": resolving mountpoints for container \"7f7333013ba83fbe05c78aad0ef4edd17663317f4daa775e549ac11d28412a90\": rw: must not provide an argument for option\n```\n\nLooks like changing `rw=true` to just `rw` fixes things. Not sure if that's intentional or not? It does look like there's no mention of `rw=true` in the upstream Dockerfile syntax.\n\n---\n\nNow that I dig in a bit more, one unfortunate thing here is that the need to use the `RUN` to force ordering...has meant this whole time we're subject to all the \"injected content\" bugs like https://github.com/containers/buildah/issues/4242 and https://github.com/containers/buildah/issues/5950 etc.\n\nWhen I unpack and inspect the resulting image, we have this final layer with\n```\ndrwxr-xr-x 0/0               0 2025-02-06 16:44 etc/\n-rwx------ 0/0               0 2025-02-06 16:44 etc/hostname\n-rwx------ 0/0               0 2025-02-06 16:44 etc/hosts\n-rwx------ 0/0               0 2025-02-06 16:44 etc/resolv.conf\ndrwxr-xr-x 0/0               0 2025-02-06 16:44 proc/\ndrwxr-xr-x 0/0               0 2025-02-06 16:44 run/\ndrwxr-xr-x 0/0               0 2025-02-06 16:44 sys/\ndrwxr-xr-x 0/0               0 2025-02-06 16:44 var/\ndrwxr-xr-t 0/0               0 2025-02-06 16:44 var/tmp/\n```\n\nwith floating timestamps. That said hmm, actually in this case actually it works to do `buildah build --timestamp=<pinned>` and that won't also change all the timestamps on the inherited layers. So that's a good mitigation.\n\nBut the sad thing is that these things just keep piling on...now for me we have a *new* one of these in Konflux which is [injecting content_sets](https://github.com/konflux-ci/build-definitions/pull/1771) which also has no attempt made to generate timestamp-reproducible data right now either (and it uses buildah too, so it inherits that, but we still need to ensure the timestamps of the files that we *actually* write and aren't synthetic container runtime artifacts are canonicalized too)\n\nSo in the end, I think we'll definitely try to \n\n"
+        },
+        {
+            "user": "nalind",
+            "body": "> There is an important note here that this does break compatibility with the [previous dockerfiles](https://github.com/containers/buildah/issues/5952#issuecomment-2622495832), I get:\n> \n> ```\n> Error: building at STEP \"RUN --mount=type=bind,rw=true,src=.,dst=/buildcontext,bind-propagation=shared dnf -y install skopeo && skopeo copy docker://busybox oci:/buildcontext/out.oci\": resolving mountpoints for container \"7f7333013ba83fbe05c78aad0ef4edd17663317f4daa775e549ac11d28412a90\": rw: must not provide an argument for option\n> ```\n> \n> Looks like changing `rw=true` to just `rw` fixes things. Not sure if that's intentional or not? It does look like there's no mention of `rw=true` in the upstream Dockerfile syntax.\n\nNot being strict about the arguments for `--mount` contributed to CVE-2024-9407.  I added more checks in that area in #5925, and they would have landed in v1.39.0."
+        },
+        {
+            "user": "nalind",
+            "body": "@containers/buildah-maintainers PTAL"
+        },
+        {
+            "user": "cevich",
+            "body": "Would this address #5988 also or is that something different?"
+        },
+        {
+            "user": "TomSweeneyRedHat",
+            "body": "LGTM\n@nalind Looks like the branch needs an update. \n"
+        },
+        {
+            "user": "nalind",
+            "body": "This is going to exacerbate #5988 for people who are running into it.\n/hold"
+        },
+        {
+            "user": "dustymabe",
+            "body": "hey @nalind is there any way to unblock this? this is still an important use case for us on the CoreOS side. "
+        },
+        {
+            "user": "nalind",
+            "body": "I'm working through adding something like https://github.com/containers/buildah/issues/5988#issuecomment-2718307144, but other things have been clamoring for attention in the meanwhile."
+        },
+        {
+            "user": "packit-as-a-service[bot]",
+            "body": "Ephemeral COPR build failed. @containers/packit-build please check."
+        },
+        {
+            "user": "nalind",
+            "body": "Would like to get #6126 merged along with this.\n/unhold"
+        },
+        {
+            "user": "dustymabe",
+            "body": "Is this just blocked on code review at this point? Or something else?"
+        },
+        {
+            "user": "nalind",
+            "body": "@dustymabe I'd say that's accurate."
+        },
+        {
+            "user": "openshift-ci[bot]",
+            "body": "[APPROVALNOTIFIER] This PR is **APPROVED**\n\nThis pull-request has been approved by: *<a href=\"https://github.com/containers/buildah/pull/5975#pullrequestreview-2676036928\" title=\"Approved\">flouthoc</a>*, *<a href=\"https://github.com/containers/buildah/pull/5975#\" title=\"Author self-approved\">nalind</a>*\n\nThe full list of commands accepted by this bot can be found [here](https://go.k8s.io/bot-commands?repo=containers%2Fbuildah).\n\nThe pull request process is described [here](https://git.k8s.io/community/contributors/guide/owners.md#the-code-review-process)\n\n<details >\nNeeds approval from an approver in each of these files:\n\n- ~~[OWNERS](https://github.com/containers/buildah/blob/main/OWNERS)~~ [flouthoc,nalind]\n\nApprovers can indicate their approval by writing `/approve` in a comment\nApprovers can cancel approval by writing `/approve cancel` in a comment\n</details>\n<!-- META={\"approvers\":[]} -->"
+        },
+        {
+            "user": "TomSweeneyRedHat",
+            "body": "@nalind this has conflicts now, and I'm not sure you have addressed the lst bits of comments from @mtrmac "
+        },
+        {
+            "user": "nalind",
+            "body": "@mtrmac I don't think there's an ordering dependency between the two, but admittedly, it's been a while."
+        },
+        {
+            "user": "mtrmac",
+            "body": "/lgtm\n\nthen, this one has had more approving reviews."
+        },
+        {
+            "user": "openshift-ci[bot]",
+            "body": "@mtrmac: changing LGTM is restricted to collaborators\n\n<details>\n\nIn response to [this](https://github.com/containers/buildah/pull/5975#issuecomment-3488186025):\n\n>/lgtm\n>\n>then, this one has had more approving reviews.\n\n\nInstructions for interacting with me using PR comments are available [here](https://git.k8s.io/community/contributors/guide/pull-requests.md).  If you have questions or suggestions related to my behavior, please file an issue against the [kubernetes-sigs/prow](https://github.com/kubernetes-sigs/prow/issues/new?title=Prow%20issue:) repository.\n</details>"
+        },
+        {
+            "user": "TomSweeneyRedHat",
+            "body": "LGTM"
+        },
+        {
+            "user": "TomSweeneyRedHat",
+            "body": "/lgtm"
+        },
+        {
+            "user": "jlebon",
+            "body": "Awesome to see this merge! Looking forward to be able to drop the `-v $PWD:/buildcontext` hack everywhere. Hmm, I think this also allows dropping `--security-opt=label=disable` in cases where it was added just for that.\n\nAnyway, it looks like this was a lot of non-trivial work, but it's very much appreciated! (And hopefully in the future we can lean more into this and have nicer semantics for the pattern described in https://github.com/containers/buildah/issues/5952.)"
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "buildah",
+            "number": 5951
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "buildah",
+            "number": 5952
+        },
+        {
+            "organization": "coreos",
+            "repository": "bootupd",
+            "number": 764
+        },
+        {
+            "organization": "konflux-ci",
+            "repository": "buildah-container",
+            "number": 134
+        },
+        {
+            "organization": "coreos",
+            "repository": "fedora-coreos-config",
+            "number": 3348
+        },
+        {
+            "organization": "coreos",
+            "repository": "fedora-coreos-config",
+            "number": 3628
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "buildah",
+            "number": 6126
+        }
+    ]
+}

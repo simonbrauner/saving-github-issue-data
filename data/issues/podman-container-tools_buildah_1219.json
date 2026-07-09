@@ -1,0 +1,68 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "buildah",
+    "number": 1219,
+    "type": "issue",
+    "title": "Dangling symlink traversal failure when using bud with layer cache",
+    "state": "closed",
+    "labels": [
+        "locked - please file new issue/PR"
+    ],
+    "user": "pkubatrh",
+    "body": "<!--\nIf you are reporting a new issue, make sure that we do not have any duplicates\nalready open. You can ensure this by searching the issue list for this\nrepository. If there is a duplicate, please close your issue and add a comment\nto the existing issue instead.\n\nIf you suspect your issue is a bug, please edit your issue description to\ninclude the BUG REPORT INFORMATION shown below. If you fail to provide this\ninformation within 7 days, we cannot debug your issue and will close it. We\nwill, however, reopen it if you later provide the information.\n\n---------------------------------------------------\nBUG REPORT INFORMATION\n---------------------------------------------------\nUse the commands below to provide key information from your environment:\nYou do NOT have to include this information if this is a FEATURE REQUEST\n-->\n\n**Description**\nImage build fails when building an image using the layer cache from a Dockerfile while adding a symlink that will be dangling at build time due to the target not being located in the context directory.\n\n**Steps to reproduce the issue:**\n1.cat << EOF >Dockerfile\nFROM fedora\nCOPY run-mysqld /tmp/\nEOF\n2. ln -s /bin/run-mysqld run-mysqld\n3. buildah bud --layers .\n4. buildah bud --layers .\n\n**Describe the results you received:**\nSecond `buildah bud` fails with:\n```\nerror checking if cached image exists from a previous build: error checking if copied files match: error resolving symlinks and comparing modified times: \"/tmp/reproducer/run-mysqld\": error checking if modified time of resolved symbolic link is greater: error walking file tree \"/tmp/reproducer/run-mysqld\": error evaluating symlink \"run-mysqld\": lstat /bin: no such file or directory\n: exit status 1\n```\n\n**Describe the results you expected:**\nBuildah sees that the symlink is dangling and does not try to check the target\n\n**Output of `rpm -q buildah` or `apt list buildah`:**\n\nbuildah-1.5-2.gite94b4f9.fc28.x86_64\n\n**Output of `buildah version`:**\n\nVersion:         1.5\nGo Version:      go1.10.5\nImage Spec:      1.0.0\nRuntime Spec:    1.0.0\nCNI Spec:        0.4.0\nlibcni Version:  \nGit Commit:      \nBuilt:           Thu Jan  1 01:00:00 1970\nOS/Arch:         linux/amd64",
+    "comments": [
+        {
+            "user": "TomSweeneyRedHat",
+            "body": "@umohnani8 might this have been cleaned up with your latest changes to the layer code?"
+        },
+        {
+            "user": "umohnani8",
+            "body": "@TomSweeneyRedHat no it wouldn't. It is failing because bud expects the symlink to exist so it can compare the timestamps to know whether to use from cache or not. Didn't think of a dangling symlink case. I guess the fix would be to ignore it if it is dangling and run the build process again i.e not use cached layers? Not sure what docker does."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@pkubatrh Does Docker handle this?"
+        },
+        {
+            "user": "pkubatrh",
+            "body": "@rhatdan @umohnani8 It does, although I do not know what happens inside.\n\nThe docker reproducer is a little different as it fails when only the symlink is copied in so I have put the symlink into a directory and copy in the whole dir content instead (which is closer to my actual use case anyway):\n\n```\n$ cat << EOF >Dockerfile\nFROM fedora\nCOPY test /tmp/\nEOF\n$ mkdir test; ln -s /bin/run-mysqld test/run-mysqld\n$ docker-binary build .\nSending build context to Docker daemon 3.072 kB\nStep 1/2 : FROM fedora\n ---> 8c568f104326\nStep 2/2 : COPY test /tmp/\n ---> f161571d5986\nRemoving intermediate container ac9572bed681\nSuccessfully built f161571d5986\n$ docker-binary build .\nSending build context to Docker daemon 3.072 kB\nStep 1/2 : FROM fedora\n ---> 8c568f104326\nStep 2/2 : COPY test /tmp/\n ---> Using cache\n ---> f161571d5986\nSuccessfully built f161571d5986\n$ docker-binary run --rm -ti f161571d5986 bash -c \"ls -al /tmp\"\ntotal 16\ndrwxrwxrwt. 1 root root 4096 Dec  6 06:21 .\ndrwxr-xr-x. 1 root root 4096 Dec  6 06:23 ..\n-rwx------. 1 root root 1292 Nov  6 06:48 ks-script-xc5fzv4d\nlrwxrwxrwx. 1 root root   15 Dec  6 06:20 run-mysqld -> /bin/run-mysqld\n```\n\nThis still fails when using buildah against the same sources:\n\n```\n$ buildah bud  --layers .\nSTEP 1: FROM fedora\nGetting image source signatures\nCopying blob sha256:d0483bd5a55488f5ba6383a5cc8553d5101864f03acd07eabc5df7563c3692cf\n 83.23 MiB / 83.23 MiB [====================================================] 3s\nCopying config sha256:8c568f1043264e34f0a8774587266565c7e5e54e9ea6b97ab459086d18ac5175\n 2.29 KiB / 2.29 KiB [======================================================] 0s\nWriting manifest to image destination\nStoring signatures\nSTEP 2: COPY test /tmp/\n--> 152240725baccae54ea4a6abd8fe2d00d3375648d74767c6176d1e91d3acfbd5\nSTEP 3: COMMIT \n$ buildah bud  --layers .\nSTEP 1: FROM fedora\nSTEP 2: COPY test /tmp/\nerror checking if cached image exists from a previous build: error checking if copied files match: error resolving symlinks and comparing modified times: \"/tmp/testing/test\": error checking if modified time of resolved symbolic link is greater: error walking file tree \"/tmp/testing/test\": error evaluating symlink \"test/run-mysqld\": lstat /bin: no such file or directory\n: exit status \n```"
+        },
+        {
+            "user": "rhatdan",
+            "body": "@umohnani8 @TomSweeneyRedHat @pkubatrh Is this still an issue or has it been fixed?"
+        },
+        {
+            "user": "pkubatrh",
+            "body": "@rhatdan Still seeing it in latest master\n\n```\n$ git rev-parse HEAD\n36605c29eb258caa9720dbd42622269a81dd1bfa\n$ cat << EOF >Dockerfile\nFROM fedora\nCOPY test /tmp/\nEOF\n$ mkdir test; ln -s /bin/run-mysqld test/run-mysqld\n$ ./buildah bud --layers .; ./buildah bud --layers .\n...\nSTEP 1: FROM fedora\nSTEP 2: COPY test /tmp/\nerror checking if cached image exists from a previous build: error checking if copied files match: error resolving symlinks and comparing modified times: \"/home/pkubat/go/buildah/src/github.com/containers/buildah/test\": error checking if modified time of resolved symbolic link is greater: error walking file tree \"/home/pkubat/go/buildah/src/github.com/containers/buildah/test\": error evaluating symlink \"test/run-mysqld\": lstat /bin: no such file or directory\n: exit status 1\n```"
+        },
+        {
+            "user": "rhatdan",
+            "body": "@TomSweeneyRedHat is this the code you were working on for handling symlinks?"
+        },
+        {
+            "user": "TomSweeneyRedHat",
+            "body": "Yes and I need to revisit."
+        },
+        {
+            "user": "umohnani8",
+            "body": "fixed in #1519 "
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 2567
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "buildah",
+            "number": 1519
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "buildah",
+            "number": 1006
+        }
+    ]
+}

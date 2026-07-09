@@ -1,0 +1,84 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "buildah",
+    "number": 1983,
+    "type": "issue",
+    "title": "buildah throws lots of errors lsetfilecon Operation not supported",
+    "state": "closed",
+    "labels": [
+        "locked - please file new issue/PR"
+    ],
+    "user": "llegolas",
+    "body": "**Description**\n\nOS fedora 31; selinux enforcing/targeted;\nusing the below script with buildah in rootles mode:\n```\ncat fedora-31-base.sh\n#!/usr/bin/env bash\n# Create a container\ncontainer=$(buildah from scratch)\n\n# Mount the container filesystem\nmountpoint=$(buildah mount $container)\n\n# Install a basic filesystem and minimal set of packages\ndnf install --installroot $mountpoint  --releasever 31 glibc-minimal-langpack bash coreutils omping iproute --setopt install_weak_deps=false -y\ndnf clean all --installroot $mountpoint\n\nbuildah config  --cmd /bin/bash $container\nbuildah config --label name=fedora-31-base $container\n\n# Save the container to an image\nbuildah commit $container fedora-31-base\n\n# Cleanup\nbuildah unmount $container\nbuildah rm $container\n\n$ buildah unshare bash fedora-31-base.sh\n.......\n.......\nerror: lsetfilecon: (/usr/share/man/man8/rtpr.8.gz;5dce3f3b, system_u:object_r:man_t:s0) Operation not supported\nerror: lsetfilecon: (/usr/share/man/man8/rtstat.8.gz;5dce3f3b, system_u:object_r:man_t:s0) Operation not supported\n.....................................\n...................................\n```\n**Steps to reproduce the issue:**\n1. as normal user run buildah unshare bash fedora-31-base.sh\n2. \n3.\n\n\n**Describe the results you received:**\nlots of lsetfilecon errors.\nthe resulting image runs OK with podman on the same as far as I can tell.\n\n**Describe the results you expected:**\nno errors \n\n**Output of `rpm -q buildah` or `apt list buildah`:**\n\n```\nbuildah-1.11.4-2.fc31.x86_64\n```\n\n**Output of `buildah version`:**\n\n```\nVersion:         1.11.4\nGo Version:      go1.13.1\nImage Spec:      1.0.1-dev\nRuntime Spec:    1.0.1-dev\nCNI Spec:        0.4.0\nlibcni Version:  \nimage Version:   5.0.0\nGit Commit:      \nBuilt:           Thu Jan  1 02:00:00 1970\nOS/Arch:         linux/amd64\n```\n\n**Output of `cat /etc/*release`:**\n\n```\nFedora release 31 (Thirty One)\n```\n\n**Output of `uname -a`:**\n\n```\nLinux lylith.localdomain 5.3.11-300.fc31.x86_64 #1 SMP Tue Nov 12 19:08:07 UTC 2019 x86_64 x86_64 x86_64 GNU/Linux\n```\n\n**Output of `cat /etc/containers/storage.conf`:**\n\n```\ncat /etc/containers/storage.conf |grep -v ^#\n[storage]\ndriver = \"overlay\"\nrunroot = \"/var/run/containers/storage\"\ngraphroot = \"/var/lib/containers/storage\"\n\n[storage.options]\nadditionalimagestores = [\n]\nsize = \"\"\nmount_program = \"/usr/bin/fuse-overlayfs\"\noverride_kernel_check = \"true\"\nmountopt = \"nodev,metacopy=on\"\n\n[storage.options.thinpool]\nostree_repo = \"\"\nskip_mount_home = \"false\"\n```\n",
+    "comments": [
+        {
+            "user": "TomSweeneyRedHat",
+            "body": "@llegolas can you try your script with a slight modification?    Please try remove `bash` from the last line:  `buildah unshare bash fedora-31-base.sh`, so it would look like `buildah unshare fedora-31-base.sh`\n\n@giuseppe any other thoughts?"
+        },
+        {
+            "user": "llegolas",
+            "body": "@TomSweeneyRedHat  'buildah unshare bash...' is not part of the script.\nThis is how I invoke it.\nIf i remove 'bash' from the command and call the script like\n```\n$  buildah unshare fedora-31-base.sh\nERRO exec: \"fedora-31-base.sh\": executable file not found in $PATH \nERRO (unable to determine exit status)            \nERRO exit status 1                         \n```\nwith bash like\n```\n$  buildah unshare bash fedora-31-base.sh\n...\n...\nerror: lsetfilecon: (/usr/share/crypto-policies/FIPS/libreswan.txt;5dd060dc, system_u:object_r:usr_t:s0) Operation not supported\nerror: lsetfilecon: (/usr/share/crypto-policies/FIPS/libssh.config;5dd060dc, system_u:object_r:usr_t:s0) Operation not supported\nerror: lsetfilecon: (/usr/share/crypto-policies/FIPS/libssh.txt;5dd060dc, system_u:object_r:usr_t:s0) Operation not supported\n...\n```\n\nas reported\n\nAhh I see what you mean. Actually the whole heredoc part of the report is broken and the line you talk about indeed is not part of the script (and never was). I correct the initial post. "
+        },
+        {
+            "user": "TomSweeneyRedHat",
+            "body": "@llegolas thanks for the follow up, this makes a bit more sense now."
+        },
+        {
+            "user": "llegolas",
+            "body": "Could it be problem with fuse-overlayfs? I think I managed to reproduce it w/o buildah unvoled at all\n\n```\n$ ls\nlower  merged  upper  workdir\n$ fuse-overlayfs -o debug,lowerdir=lower/,upperdir=upper/,workdir=workdir/,rw,nodev,noatime,user_id=0,group_id=0,default_permissions,allow_other merged/\n$ chcon system_u:object_r:httpd_config_t:s0 merged/file\nchcon: failed to change context of 'merged/file' to ‘system_u:object_r:httpd_config_t:s0’: Operation not supported\n$\n```"
+        },
+        {
+            "user": "rhatdan",
+            "body": "No this is not a file system issue.  In the case of fuse-overlay, it is creating a fuse file system. Fuse file systems do not accept XATTRS so when you attempt to chcon on it, it gets an unsupported error since chcon can not write the XATTR.\n\nUsually in containers we attempt to disable SELinux code, so that it does not attempt to set labels.  But in the case of buildah mount and dnf install above, it is running on the host (Not in a container) and the dnf command sees that SELinux is enabled so it is attempting to lay down the SELinux labels.\n\nSince fuse does not support them, you get the error.  \n\nI am wondering if their is a flag to dnf/rpm to tell it not to do selinux labeling."
+        },
+        {
+            "user": "llegolas",
+            "body": "That's easy: just added --setopt=tsflags=nocontexts to the dnf line like that (removed the docs too):\n```\ndnf install --installroot $mountpoint  --releasever 31 --disablerepo=* --enablerepo=fedora glibc-minimal-langpack bash coreutils omping iproute --setopt=install_weak_deps=false --setopt=tsflags=nocontexts,nodocs -y\n```\nThere are no errors now. \nIt would be good if this gets documented somewhere.\n\nI'm totally not sure why it worked back in the times of fedora 29. It could have been the storage driver but i can't remember for my live what the setup was before the reinstall."
+        },
+        {
+            "user": "rhatdan",
+            "body": "I think this would work fine in Rootfull mode, but would not work in rootless.  Since on Rootful, you are allowed to lay down labels on Overlayfs, but in rootless mode, you are using fuse-overlay, which would not allow labels."
+        },
+        {
+            "user": "llegolas",
+            "body": "I just did some tests so to recap.\nThe above script produces errors in both rootful and rootless mode with only difference being that in rootful it is executed w/o 'buildah unshare'. the Storage.conf is basically the same for root and ordinary user just some UID/GID remapping and different containers/storage location and is using fuse-overlayfs.\n\nModifying the script slightly. Adding to the 'dnf install' line\n```\n..... --setopt=tsflags=nocontexts...\n```\nfixes the behaviour as now no security contexts are tried to apply at all."
+        },
+        {
+            "user": "giuseppe",
+            "body": "fuse-overfayfs support xattrs, but it looks like it doesn't even get the request for setting the xattrs.\n\nProbably the request is blocked by SELinux before reaching the file system"
+        },
+        {
+            "user": "llegolas",
+            "body": "@giuseppe @rhatdan any ideas how can I try to repro? For instance I have no selinux alerts in the logs. Setting selinux mode from enforcing to permissive (setenforce 0) has no affect. I'll try disabling selinux altogether next. "
+        },
+        {
+            "user": "llegolas",
+            "body": "On centos 8 the above script runs (rootless and rootfull) w/o the lsetfilecon errors using yum instead for dnf of course.\nstorage.config the same as on f31."
+        },
+        {
+            "user": "llegolas",
+            "body": "I managed to narrow it a bit down.\nthe script from above works fine on vanilla f29 and f30 (both updated to the latest as of today).\nIt breaks with f31 booted with both f30 and f31 kernels kernel-core-5.3.11-100.fc29.x86_64 and kernel-core-5.3.11-300.fc31.x86_64 respectively.\n\nSeem like problem is somewhere in userspace."
+        },
+        {
+            "user": "rhatdan",
+            "body": "I would figure something changed in dnf/yum that is causing this.  The labels will not be allowed to be applied, because the mount point has a label assigned to it.  SELinux does not allow a label on a file system that that already has a label assigned via the mount context options.\n\nmerged type overlay (rw,relatime,`context=\"system_u:object_r:container_file_t:s0:c338,c1006\"`,lowerdir=/var/lib/containers/storage/overlay/880de1b82361c780df9920d3b70546c4d868659661fc7f2ad2e026fe08d1b415/empty,upperdir=/var/lib/containers/storage/overlay/880de1b82361c780df9920d3b70546c4d868659661fc7f2ad2e026fe08d1b415/diff,workdir=/var/lib/containers/storage/overlay/880de1b82361c780df9920d3b70546c4d868659661fc7f2ad2e026fe08d1b415/work)\n"
+        },
+        {
+            "user": "rhatdan",
+            "body": "If this works in F30 and F31, then dnf/rpm was not doing the setfilecon in those situations.\nEverything ends up working, since the setfilecon is not a failure mode.  Adding the  `--setopt=tsflags=nocontexts` turns off the noice.  I do not know who on the dnf team to ask, if something changed."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@llegolas is this still an issue?"
+        },
+        {
+            "user": "llegolas",
+            "body": "@rhatdan yes, it is still like that but as you said it has to do something with dnf/rpm. Maybe I can close this one and/or reference it in [DNF github page](https://github.com/rpm-software-management/dnf)? The no ```nocontexts ``` trick works for me, yet what bugs me on is the lack of documentation around the change of the behaviour unless it is unintentional."
+        },
+        {
+            "user": "rhatdan",
+            "body": "I believe this is fixed by always masking over /sys/fs/selinux,  Reopen if I am mistaken."
+        }
+    ],
+    "cross_references": []
+}

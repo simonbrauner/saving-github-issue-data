@@ -1,0 +1,66 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "buildah",
+    "number": 1452,
+    "type": "issue",
+    "title": "Allow adding files to image with deterministic creation time",
+    "state": "closed",
+    "labels": [
+        "locked - please file new issue/PR"
+    ],
+    "user": "hendrikhalkow",
+    "body": "Hello, we should consider building a feature into buildah that allows adding files to an image with a deterministic time stamp. If we had this, we can run the same code with the same input data twice that produces the exact same image digest. It could work like this:\n\n    buildah add --creation-time=\"1970-00-00 00:00:00\" \"${container}\" \"${file}\"\n\nor with the mount option:\n\n    buildah mount --creation-time=\"1970-00-00 00:00:00\" \"${image}\"\n    dnf install --installroot  ...\n\nor via commit that doesn't only omit timestamps, but also change all creation time stamps:\n\n    buildah commit --omit-timestamps --creation-time=\"1970-00-00 00:00:00\" ...\n\nAs a fourth option, we this feature can be kept in an external tool like libfaketime.\n\nThe rationale behind this is that I want to build truly reproducible images that create the same image digest from the same Git commit hash in every case. Does anybody else have a need for that feature and if so, which of the four options would you prefer? Or do you have better ideas?",
+    "comments": [
+        {
+            "user": "rhatdan",
+            "body": "@nalind WDYT?  I am fine with this."
+        },
+        {
+            "user": "rhatdan",
+            "body": "Might be better to set this in buildah from and buildah bud.\n\nbuildah from --epoch-time ...\nbuildah bud --epoch-time\n\n@hendrikhalkow Are you interested in working on this?"
+        },
+        {
+            "user": "hendrikhalkow",
+            "body": "Hi @rhatdan I'd love to, but I am pretty new to Go programming, so it would require quite some guidance. Maybe we achieve better results when somebody else implements it. As of now, I can help with concept work.\n\nI like the idea setting it in `buildah from` or `buildah bud`. So let me rephrase how you think this would work:\n\nRunning the following script twice would create exactly the same image with identical hashed, assuming the installation sources have not changed.\n\n```zsh\nctr=\"$( buildah from --epoch-time '1970-01-01 00:00:00Z' scratch )\"\nmnt=\"$( buildah mount \"${ctr}\" )\"\ndnf install --installroot=\"${mnt}\" ...\n\n# remove some files that make our files non-reproduceable\npushd \"${mnt}\"\nrm -rf ./etc/machine-id ./lib/.build-id ...\npopd\n\n# what would the creation time of these files be?\nls -la \"${mnt}\"\n\n# If we have have `from --epoch-time, do we still need `commit --omit-timestamps`?\nbuildah commit --omit-timestamps \"${ctr}\" image\n```\n\nAt which point would the actual magic happen? When the files are written into the mounted directory or when the container is committed into an image?"
+        },
+        {
+            "user": "rhatdan",
+            "body": "I talked to @nalind About this a while ago, but we did not go forward on it.\n@ashley-cui Could you take a look at this.  Talk to @nalind about it."
+        },
+        {
+            "user": "rhatdan",
+            "body": "```\n       --omit-timestamp bool-value\n\n       Set  the  create timestamp to epoch 0 to allow for deterministic builds (defaults to false).  By default, the created timestamp is changed and written into the image manifest with every commit, causing the image's sha256 hash\n       to be different even if the sources are exactly the same otherwise.  When --omit-timestamp is set to true, the created timestamp is always set to the epoch and therefore not changed, allowing the image's sha256 to remain  the\n       same.\n```\nWe have this feature."
+        },
+        {
+            "user": "hendrikhalkow",
+            "body": "Hi @ashley-cui, @rhatdan, `--omit-timestamp` is about the image itself, but not the file within the image. The problem I am trying to solve is to create a unique mapping from the Git commit of my source code to the resulting image for which I need to create the exact same image with every build run for the same commit.\n\nImagine during the build, I run `dnf install whatever`. Or I have an external build process that is able to produce exactly the same artifact with every run, but with different creation time stamp. The simplest case is this:\n\n```sh\n#!/bin/sh\nctr=\"$( buildah from registry.access.redhat.com/ubi8/ubi-minimal )\"\nmnt=\"$( buildah mount \"${ctr}\" )\"\n# Simulate our artifact\ntouch \"${mnt}/a\"\nbuildah commit --omit-timestamp \"${ctr}\" \"${1}\"\n```\n\nRun this script twice with like `buildah unshare ./build.sh i0` and `buildah unshare ./build.sh i1`. \nNow how do I ensure that the resulting image is still the same? The resulting images differ with every run although the content of the files are exactly equal. The reason is just that the timestamp is different.\n\nI worked around this with a conditional push in my build pipeline and I compare my images like this:\n\n```sh\nmnt0=\"$( buildah mount \"${ctr0}\" )\"\nmnt1=\"$( buildah mount \"${ctr1}\" )\"\ndiff -r \"${mnt0}\" \"${mnt1}\"\n```\n\nI also tried to solve it with the `faketime` command which worked on Fedora but not on RHEL because the package isn't available there and I wanted to stay with official packages.\n\nSo I thought it might be a great idea when buildah can do this, e.g. by passing the desired epoch time for the files into `buildah commit` or by extending the --omit-timestamp parameter to the files."
+        },
+        {
+            "user": "rhatdan",
+            "body": "I believe we can do this now, reopen if I am mistaken."
+        },
+        {
+            "user": "hendrikhalkow",
+            "body": "So how do we do this?"
+        },
+        {
+            "user": "rhatdan",
+            "body": "Oops it looks like it is only in buildah-commit\n```\nman buildah commit\n...\n\n       --omit-timestamp bool-value\n\n       Set  the create timestamp to epoch 0 to allow for deterministic builds (defaults to false).  By default, the created timestamp is changed and writ‐\n       ten into the image manifest with every commit, causing the image's sha256 hash to be different even if the sources are exactly the same  otherwise.\n       When  --omit-timestamp  is  set to true, the created timestamp is always set to the epoch and therefore not changed, allowing the image's sha256 to\n       remain the same.\n```\nI will add support to buildah bud."
+        },
+        {
+            "user": "rhatdan",
+            "body": "After we have support for this in buildah bud, the next step would be to get support into the storage driver to record all times as epoch 0.  Then all files in the layers created could be created as epoch 0."
+        },
+        {
+            "user": "rhatdan",
+            "body": "This one has been fixed."
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "buildah",
+            "number": 2516
+        }
+    ]
+}

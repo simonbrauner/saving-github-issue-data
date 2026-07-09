@@ -1,0 +1,44 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "buildah",
+    "number": 1439,
+    "type": "issue",
+    "title": "Image build failed on COPY, VOLUME, WORKDIR instruction use symlinks",
+    "state": "closed",
+    "labels": [
+        "locked - please file new issue/PR"
+    ],
+    "user": "Lagrang",
+    "body": "(Edited just to make the buildah example be happy in md)\n**Description**\n\n`buildah bud` failed on Dockerfile with WORKDIR instruction: ensuring container path \"/usr/local/hbase/bin\": mkdir /var/lib/containers/storage/btrfs/subvolumes/8325b8065650778d4abbb211b130511525e668b8b45e0df0f1c3563646c4c674/usr/local/hbase: file exists\n\nI find out, that root cause is symlinks: COPY, VOLUME, WORKDIR instructions cannot handle it.\nCOPY not support symlink as target and fails with error:\n`\nCOPY --chown=hbase:hadoop conf/hbase-env.sh      conf/log4j.properties      conf/hadoop-metrics2-hbase.properties      conf/hbase-policy.xml      $HBASE_CONF_DIR/}: error creating directory \"/var/lib/containers/storage/btrfs/subvolumes/8b473a99a4b0bcc89d0b3a70a25414431dd5063a0987c084c134efcd78be56cb/etc/hbase\": chown /var/lib/containers/storage/btrfs/subvolumes/8b473a99a4b0bcc89d0b3a70a25414431dd5063a0987c084c134efcd78be56cb/etc/hbase: no such file or directory\n`\n\nVOLUME which point to symlink overwrite target folder permissions to root and cause folder inaccessible for container.\n\n**Steps to reproduce the issue:**\n1. Dockerfile from this [repo](https://gitlab.com/hutils/containers/tree/09121d3b7f85e6033b7354c903d209cd815d96d3/hbase/2.x)\n2. Run \n```\n    sudo buildah bud --no-cache \\\n             --build-arg HBASE_VERSION=2.1.2 \\\n             --build-arg HADOOP_VERSION=2.8.5 \\\n             -t hbase .\n```\n**Describe the results you received:**\n`Command:workdir Args:[/usr/local/hbase/bin] Flags:[] Attrs:map[] Message:WORKDIR $BASE_INSTALL_PATH/hbase/bin Original:WORKDIR $BASE_INSTALL_PATH/hbase/bin}: error ensuring container path \"/usr/local/hbase/bin\": mkdir /var/lib/containers/storage/btrfs/subvolumes/8325b8065650778d4abbb211b130511525e668b8b45e0df0f1c3563646c4c674/usr/local/hbase: file exists`\n\n**Output of `rpm -q buildah` or `apt list buildah`:**\n\n```\nbuildah/bionic,now 1.8-1~dev~ubuntu18.04~ppa8 amd64 [installed]\nbuildah/bionic 1.8-1~dev~ubuntu18.04~ppa8 i386\n```\n\n**Output of `buildah version`:**\n\n```\nVersion:         1.8-dev\nGo Version:      go1.10.4\nImage Spec:      1.0.0\nRuntime Spec:    1.0.0\nCNI Spec:        0.4.0\nlibcni Version:  \nGit Commit:      \nBuilt:           Mon Mar 25 02:03:14 2019\nOS/Arch:         linux/amd64\n```\n\n**Output of `cat /etc/*release`:**\n\n```\nDISTRIB_ID=Ubuntu\nDISTRIB_RELEASE=18.10\nDISTRIB_CODENAME=cosmic\nDISTRIB_DESCRIPTION=\"Ubuntu 18.10\"\nNAME=\"Ubuntu\"\nVERSION=\"18.10 (Cosmic Cuttlefish)\"\nID=ubuntu\nID_LIKE=debian\nPRETTY_NAME=\"Ubuntu 18.10\"\nVERSION_ID=\"18.10\"\nHOME_URL=\"https://www.ubuntu.com/\"\nSUPPORT_URL=\"https://help.ubuntu.com/\"\nBUG_REPORT_URL=\"https://bugs.launchpad.net/ubuntu/\"\nPRIVACY_POLICY_URL=\"https://www.ubuntu.com/legal/terms-and-policies/privacy-policy\"\nVERSION_CODENAME=cosmic\nUBUNTU_CODENAME=cosmic\n```\n\n**Output of `uname -a`:**\n\n```\nLinux lagrang 4.18.0-16-generic #17-Ubuntu SMP Fri Feb 8 00:06:57 UTC 2019 x86_64 x86_64 x86_64 GNU/Linux\n```\n\n**Output of `cat /etc/containers/storage.conf`:**\n\n```\n# storage.conf is the configuration file for all tools\n# that share the containers/storage libraries\n# See man 5 containers-storage.conf for more information\n\n# The \"container storage\" table contains all of the server options.\n[storage]\n\n# Default Storage Driver\n#driver = \"overlay\"\ndriver=\"btrfs\"\n\n# Temporary storage location\nrunroot = \"/var/run/containers/storage\"\n\n# Primary read-write location of container storage\ngraphroot = \"/var/lib/containers/storage\"\n\n[storage.options]\n# AdditionalImageStores is used to pass paths to additional read-only image stores\n# Must be comma separated list.\nadditionalimagestores = [\n]\n\n# Size is used to set a maximum size of the container image.  Only supported by\n# certain container storage drivers (currently overlay, zfs, vfs, btrfs)\nsize = \"\"\n\n# OverrideKernelCheck tells the driver to ignore kernel checks based on kernel version\noverride_kernel_check = \"true\"\n```\n",
+    "comments": [
+        {
+            "user": "TomSweeneyRedHat",
+            "body": "@Lagrang I'm able to duplicate the issue using your Dockerfile and other related files.  My first immediate thought was something in the processing from the --no-cache flag was potentially causing the issue, but that doesn't appear to be the case.\n\nI'm going to see if I can create a less intensive Dockerfile that  recreates the issue.  If you by chance have one, please let me know."
+        },
+        {
+            "user": "karelyatin",
+            "body": "Also seeing similar issue(WORKDIR + symlink), more details https://bugs.launchpad.net/tripleo/+bug/1824952"
+        },
+        {
+            "user": "TomSweeneyRedHat",
+            "body": "OK it looks like the COPY is just writing to the specified location and not first checking to see if it's a symlink.  I've come up with a Dockerfile that reproduces the error below.  Now to try and figure where and how to fix.  I confirmed with Docker, it respects the symlink.\n\n```\n# cat ~/Dockerfile.symtarget\nFROM alpine\n\nENV HBASE_HOME=\"/usr/local/hbase\"\nENV HBASE_CONF_DIR=\"/etc/hbase\"\n\nRUN mkdir $HBASE_HOME\nRUN ln -s $HBASE_HOME $HBASE_CONF_DIR\n\nCOPY Dockerfile.symtarget $HBASE_CONF_DIR\n\n# buildah bud -t tom -f ~/Dockerfile.symtarget .\n```"
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 2753
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "buildah",
+            "number": 1443
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "buildah",
+            "number": 2621
+        }
+    ]
+}

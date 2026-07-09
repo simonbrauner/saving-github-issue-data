@@ -1,0 +1,63 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "buildah",
+    "number": 850,
+    "type": "issue",
+    "title": "buildah bud --file, -f regression / change in behaviour",
+    "state": "closed",
+    "labels": [
+        "locked - please file new issue/PR"
+    ],
+    "user": "pixdrift",
+    "body": "**Description**\nFrom the `buildah bud` documentation, it is suggested that the `--file / -f` switch can take multiple Dockerfiles and the context is optional.\n\n> Specifies a Dockerfile which contains instructions for building the image, either a local file or an http or https URL. If more than one Dockerfile is specified, FROM instructions will only be accepted from the first specified file.\n>\n> If a build context is not specified, and at least one Dockerfile is a local file, the directory in which it resides will be used as the build context.\n\nIt appears that changes to buildah have made context _required_ which in turn has made the multiple Dockerfile feature less intuitive.\n\nOne of the benefits of building using multiple Dockerfiles (or slices/shards/snippets) is code re-use, ie. Multiple Dockerfiles can share a subset of code stored in a separate file. As the option currently works, the context is required and all additional files that are provided are relative paths in the provided context.\n\n**Steps to reproduce the issue:**\nA use case I was expecting to use this feature for was\n```\ncontainer1/Dockerfile\ncontainer2/Dockerfile\ncommon/Dockerfile\n```\n\nIn this scenario, I was expecting to be able to execute (from the root) so the conainerX executes first and then the contents of common is appended:\n```\nbuildah bud -f container1/Dockerfile -f common/Dockerfile\nbuildah bud -f container2/Dockerfile -f common/Dockerfile\n```\nThis results in:\n```\n# buildah bud -f container1/Dockerfile -f common/Dockerfile\nno context directory or URL specified\n```\n\nIf you provide a context directory as it is now required, it uses this for the base path of images supplied using `-f`:\n```\n# buildah bud -f common/Dockerfile container1\nerror reading \"/root/multi/container1/common/Dockerfile\": open /root/multi/container1/common/Dockerfile: no such file or directory\n```\n\nTo make this work, it's somewhat counter intuitive. The context needs to be set, and the Dockerfile specified as the first `-f`, then a drop back to the parent directory. It does work, but it would be much cleaner without the context requirement.\n```\nbuildah bud -f Dockerfile -f ../common/Dockerfile container1\n```\n\n**Describe the results you received:**\nErrors / issues when executing `buildah bud -f` and specifying multiple images without context.\n\n**Describe the results you expected:**\nAbility to build containers from Dockerfiles using shared elements/includes as described in the buildah documentation for `buildah bud -f`.\n\n**Output of `rpm -q buildah`:**\n\n```\nbuildah-1.2-201807041005.gita59fb7a.el7.x86_64\n```\n\n**Output of `buildah version`:**\n\n```\nVersion:         1.2-dev\nGo Version:      go1.9.4\nImage Spec:      1.0.0\nRuntime Spec:    1.0.0\nCNI Spec:        0.3.1\nlibcni Version:  v0.6.0\nGit Commit:      a59fb7a\nBuilt:           Wed Jul  4 21:01:24 2018\nOS/Arch:         linux/amd64\n```\n\n**Output of `cat /etc/*release`:**\n\n```\nCentOS Linux release 7.5.1804 (Core)\n```",
+    "comments": [
+        {
+            "user": "pixdrift",
+            "body": "I also wanted to raise in this thread the possibility of inclusion of an `INCLUDE` feature in the Dockerfile parser (`bud`), to essentially achieve the same as above. This has been raised / rejected several times in Docker/moby issues, but interested to know if there is any precedent in Buildah for support of additional features in the Dockerfile, or if `bud` is purely for compatibility with existing features.\n\nProposal discussions for INCLUDE in Docker/Moby:\nhttps://github.com/moby/moby/issues/735\nhttps://github.com/moby/moby/pull/12749\n\nI don't really see this as including a entire existing Dockerfiles (ie. with their own FROM), more to include common code blocks/snippets. I have achieved the same using native `buildah run` and `source` to pull in common code blocks, but would still be interested in comments on the above idea."
+        },
+        {
+            "user": "TomSweeneyRedHat",
+            "body": "I've created a new issue #851 for the INCLUDE discussion/enhancement.  Let's work through that there.  A good idea me thinks."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@pixdrift I thought we still had the feature to be able to grab a Dockerfile from anywhere, which I liked.  The only change we were supposed to make was to force the specification of the context dir, matching Docker.  Allowing specification of Multiple Dockerfiles and having them not be relative to the Context dir, seems like a good idea."
+        },
+        {
+            "user": "TomSweeneyRedHat",
+            "body": "I've poked at this a bit, I'm not sure what (if?) we should adjust here.  I created two directories at root: container1 and container 2.  I put a Dockerfile in each and ran this Buildah command from /root:\n\n```\n# buildah bud -f container2/Dockerfile container1\nerror reading \"/root/container1/container2/Dockerfile\": open /root/container1/container2/Dockerfile: no such file or directory\n```\nThen I ran the equivalent Docker command:\n\n```\n# docker build -f container2/Dockerfile container1\nunable to prepare context: The Dockerfile (/root/container2/Dockerfile) must be within the build context (container1)\n```\nFurther, if you add the '..' to the container2/Dockerfile, Buildah works, but Docker still fails.\n\n```\n# buildah bud -f ../container2/Dockerfile container1\nSTEP 1: FROM busybox\n{removed output for brevity}\n\n# docker build -f ../container2/Dockerfile container1\nunable to prepare context: unable to evaluate symlinks in Dockerfile path: lstat /container2: no such file or directory\n```\nCurrently we're prepending the context directory onto the Dockerfile in Buildah.  I could stop doing that but that would be a different behavior then Docker.  Happy to stop prepending, but thought I'd double check first.  Rather than that, I could prop up the error a bit to add a reference to the context directory to the verbiage.\n\nThoughts?\n"
+        },
+        {
+            "user": "TomSweeneyRedHat",
+            "body": "@rhatdan @nalind thoughts on what should happen here?  In specific what I described in my last comment?  I think it's OK as is, but would like to hear your opinions."
+        },
+        {
+            "user": "rhatdan",
+            "body": "Well @vrothberg just got support for Dockerfile.in, to allow users to specify a dockerfile with a \n#include PATHTODockefile\n\nbuildah executes cpp to preprocess and suck the include file into the Dockerfile. That is half of what this Issue requests.\n\nBut I would like the Dockerfile to be pathbased and not require the path to be based on the context directory\n\nbuildah bud -f container2/Dockerfile ~\nI would expect would look in the subdir of my current dir, and not in ~/container2/Dockerfile.\n\n```\n# podman build -f Dockerfile.suse  ~/dwalsh\nerror reading \"/root/dwalsh/Dockerfile.suse\": open /root/dwalsh/Dockerfile.suse: no such file or directory\n# podman build -f ./Dockerfile.suse  ~/dwalsh\nerror reading \"/root/dwalsh/Dockerfile.suse\": open /root/dwalsh/Dockerfile.suse: no such file or directory\n# podman build -f ~/Dockerfile.suse  ~/dwalsh\nSTEP 1: FROM opensuse:tumbleweed\n podman build -f $PWD/Dockerfile.suse  ~/dwalsh\nSTEP 1: FROM opensuse:tumbleweed\n```\n\nSo it looks like it is relative if unless the path starts with a /? I just checked buildah bud works the same way."
+        },
+        {
+            "user": "TomSweeneyRedHat",
+            "body": "@rhatdan Yeah my question was only on the first part of this issue.  The work that @vrotherberg did with the Dockerfile.in files covers the issue that I spun off from this.\n\nBasically `'buildah bud` prepends the context directory to the filename pased in via the '--file' parameter unless the filename either starts with '/' or '~/'.  It looks like Docker uses the context directory as the starting point to do a find of the file passed in and errors if it doesn't find it.  So this works:\n\nbuildah bud -f ~/containers2/Dockerfile /root/container1\n\nand this does not:\ndocker build -f  ~/containers2/Dockerfile /root/container1\n\nSo I'll see if I can stop the prepending of the context directory to the value passed in via the --file parameter.  That way the value passed in to the --file parameter will use the current directory if it's a relative directory value, or just the value if it's fully specified.  I like that.  Holler if that doesn't work."
+        },
+        {
+            "user": "rhatdan",
+            "body": "Perhaps we could do both.  Search relative to the current directory if the path is specified if the file does not exist, then search relative to the context directory.\n\n"
+        },
+        {
+            "user": "rhatdan",
+            "body": "Since @TomSweeneyRedHat patch has merged, closing this issue."
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "buildah",
+            "number": 851
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "buildah",
+            "number": 905
+        }
+    ]
+}

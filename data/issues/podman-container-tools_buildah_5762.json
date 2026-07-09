@@ -1,0 +1,81 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "buildah",
+    "number": 5762,
+    "type": "issue",
+    "title": "ARG inheritance works in Docker, but not Podman",
+    "state": "closed",
+    "labels": [
+        "stale-issue",
+        "locked - please file new issue/PR"
+    ],
+    "user": "srgoni",
+    "body": "<!--\nIf you are reporting a new issue, make sure that we do not have any duplicates\nalready open. You can ensure this by searching the issue list for this\nrepository. If there is a duplicate, please close your issue and add a comment\nto the existing issue instead.\n\nIf you suspect your issue is a bug, please edit your issue description to\ninclude the BUG REPORT INFORMATION shown below. If you fail to provide this\ninformation within 7 days, we cannot debug your issue and will close it. We\nwill, however, reopen it if you later provide the information.\n\n---------------------------------------------------\nBUG REPORT INFORMATION\n---------------------------------------------------\nUse the commands below to provide key information from your environment:\nYou do NOT have to include this information if this is a FEATURE REQUEST\n-->\n\n**Description**\n\n<!--\nBriefly describe the problem you are having in a few paragraphs.\n-->\nDocker provides limited inheritance of Dockerfile ARGs between build stages, as described here: https://docs.docker.com/build/building/variables/#scoping\n\n> Once a build argument is declared or consumed in a stage, it's automatically inherited by child stages.\n\nThis contradicts the Dockerfile reference https://docs.docker.com/reference/dockerfile/#scope - which states:\n\n> An ARG instruction goes out of scope at the end of the build stage where it was defined. To use an argument in multiple stages, each stage must include the ARG instruction.\n\nPodman behaves according to the latter statement, making the examples given in the other document incompatible.\n\n**Steps to reproduce the issue:**\n\nTry to build a Containerfile with the following contents (copied from [the Docker manual](https://docs.docker.com/build/building/variables/#scoping)):\n\n```docker\n# syntax=docker/dockerfile:1\nFROM alpine AS base\n# Declare the build argument in the build stage\nARG NAME=\"joe\"\n\n# Create a new stage based on \"base\"\nFROM base AS build\n# The NAME build argument is available here\n# since it's declared in a parent stage\nRUN echo \"hello $NAME!\"\n```\n\n**Describe the results you received:**\n\n`podman build` prints:\n```\n[2/2] STEP 2/2: RUN echo \"hello $NAME!\"\nhello !\n```\n\n**Describe the results you expected:**\n\n`docker build` would print:\n```\n[2/2] STEP 2/2: RUN echo \"hello $NAME!\"\nhello joe!\n```\n\n**Output of `rpm -q buildah` or `apt list buildah`:**\n\n```\nbuildah/testing,unstable,now 1.37.2+ds1-3 amd64 [installed,automatic]\n```\n\n**Output of `buildah version`:**\n\n```\nVersion:         1.37.2\nGo Version:      go1.22.7\nImage Spec:      1.1.0\nRuntime Spec:    1.2.0\nCNI Spec:        1.0.0\nlibcni Version:  \nimage Version:   5.32.2\nGit Commit:      \nBuilt:           Thu Jan  1 01:00:00 1970\nOS/Arch:         linux/amd64\nBuildPlatform:   linux/amd64\n```\n\n**Output of `podman version` if reporting a `podman build` issue:**\n\n```\nClient:       Podman Engine\nVersion:      5.2.2\nAPI Version:  5.2.2\nGo Version:   go1.23.1\nBuilt:        Thu Jan  1 01:00:00 1970\nOS/Arch:      linux/amd64\n```\n\n**Output of `cat /etc/*release`:**\n\n```\nPRETTY_NAME=\"Debian GNU/Linux trixie/sid\"\nNAME=\"Debian GNU/Linux\"\nVERSION_CODENAME=trixie\nID=debian\nHOME_URL=\"https://www.debian.org/\"\nSUPPORT_URL=\"https://www.debian.org/support\"\nBUG_REPORT_URL=\"https://bugs.debian.org/\"\n```\n\n**Output of `uname -a`:**\n\n```\nLinux 6.10.9-amd64 #1 SMP PREEMPT_DYNAMIC Debian 6.10.9-1 (2024-09-08) x86_64 GNU/Linux\n```\n\n**Output of `cat /etc/containers/storage.conf`:**\n\n```\ncat: /etc/containers/storage.conf: No such file or directory\n```\n",
+    "comments": [
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "srgoni",
+            "body": "Update: The Docker documentation was amended by https://github.com/moby/buildkit/pull/5381 and no longer shows contradictory information.\n\nPodman buildah should be updated to support argument inheritance in the same way as Docker buildkit."
+        },
+        {
+            "user": "rhatdan",
+            "body": "Interested in opening a PR?"
+        },
+        {
+            "user": "srgoni",
+            "body": "Interested, yes, but I'm not familiar with the Podman source code and have no idea where to start."
+        },
+        {
+            "user": "rhatdan",
+            "body": "The place to start would be Buildah not Podman, Podman vendors in buildah to do all of its container image building.\n\nBuildah is a smaller code base."
+        },
+        {
+            "user": "srgoni",
+            "body": "As far as I can see, arguments are resolved in https://github.com/openshift/imagebuilder/blob/master/builder.go#L290 per stage.\n\nAs buildah seems to defer to openshift/imagebuilder to do all the heavy lifting, should I open an issue (or possibly PR) on this repository instead?"
+        },
+        {
+            "user": "nalind",
+            "body": "I expect the fix would eventually be made there, yes."
+        },
+        {
+            "user": "srgoni",
+            "body": "This looks much more complicated after all. I suppose it would be better to not try to resolve arguments during initial parsing, but record resolved arguments on the fly and them make them available to dependent build stages.\n\n1. While building each stage, record processed arguments in a map\n2. At the end of the build, keep the final argument map\n3. Share this map with child stages before their build starts\n\nThis requires that child stages must wait until their parent finishes, but from what I can see in https://github.com/containers/buildah/blob/main/imagebuildah/executor.go#L908 , they would all run in parallel, and it's not obvious to me how dependencies between stages are guaranteed? Could you help explain how this works?"
+        },
+        {
+            "user": "srgoni",
+            "body": "Ok, so... processed arguments are already recorded in `Stage.Builder.Args`.\n\nProposal:\n\n1. Add the field `Executor.argResult` of type `map[string]map[string]string`\n2. At the end of a stage build, copy `Stage.Builder.Args` to `Executor.argResult[stageName]` (with locking)\n3. Add an additional return value to `Executor.waitForStage` of type `map[string]string`, which is copied from `Executor.argResult[stageName]` (with locking)\n5. At the beginning of a stage build, add the returned map from `waitForStage` to `Stage.Builder.Args`\n6. Other places where `waitForStage` is used can just discard the args\n\n_Edit:_ I submitted a PR based on this idea from my personal GH account. It's completely untested and needs some finetuning."
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "nalind",
+            "body": "This should be fixed by #6203."
+        },
+        {
+            "user": "nalind",
+            "body": "... which just landed on the main branch.  Closing."
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "buildah",
+            "number": 5845
+        },
+        {
+            "organization": "openshift",
+            "repository": "imagebuilder",
+            "number": 304
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "buildah",
+            "number": 6103
+        }
+    ]
+}

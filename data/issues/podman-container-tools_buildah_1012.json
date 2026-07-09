@@ -1,0 +1,158 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "buildah",
+    "number": 1012,
+    "type": "pull_request",
+    "title": "unshare: Fix running errors in non-privileged container",
+    "state": "closed",
+    "labels": [
+        "locked - please file new issue/PR"
+    ],
+    "user": "zhouhao3",
+    "body": "When running buildah in a non-privileged container in k8s, the following error occurs:\n\n```\nroot# buildah images\nError during unshare(CLONE_NEWUSER): Invalid argument\nERRO[0000] error parsing PID \"\": strconv.Atoi: parsing \"\": invalid syntax\nERRO[0000] (unable to determine exit status)\n```\n\nThis patch is to fix this error.\n\nSigned-off-by: Zhou Hao <zhouhao@cn.fujitsu.com>",
+    "comments": [
+        {
+            "user": "zhouhao3",
+            "body": "Fixes #1011 \nThis is a modification method that I can think of, and there may be a better way.\n@TomSweeneyRedHat @rhatdan @nalind @giuseppe PTAL"
+        },
+        {
+            "user": "rhatdan",
+            "body": "@giuseppe PTAL"
+        },
+        {
+            "user": "TomSweeneyRedHat",
+            "body": "Build/Tests issues hopefully fixed with #1020"
+        },
+        {
+            "user": "zhouhao3",
+            "body": "@giuseppe PTAL"
+        },
+        {
+            "user": "giuseppe",
+            "body": "why is `unshare` failing?  Is the kernel too old?\n\nThe tests we are dropping are valid ones, are you able to build a container once you drop these tests in a container?  It'd probably fail on `buildah run` if you haven't `CAP_SYS_ADMIN`"
+        },
+        {
+            "user": "zhouhao3",
+            "body": " > Is the kernel too old?\n\nOutput of uname -a:\n```\nLinux zz-ubuntu-78f657b855-ljrx8 3.10.0-862.11.6.el7.x86_64 #1 SMP Tue Aug 14 21:49:04 UTC 2018 x86_64 x86_64 x86_64 GNU/Linux\n```\n> It'd probably fail on buildah run if you haven't CAP_SYS_ADMIN\n\nOnly this one command can't be executed, but other commands can still be executed.\n\n> are you able to build a container once you drop these tests in a container?\n\nThis modification guarantees that other commands can be executed, but the same problem will occur with the run command. I wonder if there are other solutions?"
+        },
+        {
+            "user": "giuseppe",
+            "body": "> This modification guarantees that other commands can be executed, but the same problem will occur with the run command. I wonder if there are other solutions?\n\ncould you try to use the chroot isolation?  Does that work?"
+        },
+        {
+            "user": "zhouhao3",
+            "body": ">could you try to use the chroot isolation? Does that work?\n\n\nI tried it and it still went wrong.\n```\nroot@zz-ubuntu-78f657b855-ljrx8:~# buildah run --isolation=chroot 747d sh\nError during unshare(CLONE_NEWUSER): Invalid argument\n                                                     error parsing PID \"\": strconv.Atoi: parsing \"\": invalid syntax\n```"
+        },
+        {
+            "user": "theinrichs",
+            "body": "I run into the same problem with my fedora 28 machine and Kernel `4.18.9-200.fc28.x86_64`\nIsolation `rootless` and `chroot` throw the same error\n\n```\nError during unshare(CLONE_NEWUSER): Operation not permitted\ntime=\"2018-09-27T09:01:10Z\" level=error msg=\"error parsing PID \\\"\\\": strconv.Atoi: parsing \\\"\\\": invalid syntax\"\ntime=\"2018-09-27T09:01:10Z\" level=error msg=\"(unable to determine exit status)\"\n```"
+        },
+        {
+            "user": "giuseppe",
+            "body": "using the chroot isolation and having this patch solve the issue? "
+        },
+        {
+            "user": "giuseppe",
+            "body": "In any case, CAP_SYS_ADMIN is required to setup the environment for launching a container.  If user namespaces are not available, you'll probably need a privileged container "
+        },
+        {
+            "user": "theinrichs",
+            "body": "With the fix I don't run into the error. Buildah starts in a container but then exits with \n```\nerror running container: error creating new mount namespace for [/bin/sh -c apt-get update     && apt-get install -y curl unzip procps     && apt-get clean autoclean     && apt-get autoremove -y     && rm -rf /var/lib/{apt,dpkg,cache,log}/]: operation not permitted\n```\nThis only works if I start buildah with `buildah --storage-driver=vfs bud --isolation=rootless` and a hostmount into the container."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@theinrichs if you are running buildah inside of a container we are recommending that you use \n--isolation chroot\nRather then using Namespaces. Since you are already in a container, adding additional container separation adds little and causes the issues you are seeing."
+        },
+        {
+            "user": "theinrichs",
+            "body": "Thanks @rhatdan . --isolation chroot still gives me\n`Error during unshare(CLONE_NEWUSER): Operation not permitted`"
+        },
+        {
+            "user": "giuseppe",
+            "body": "That happens because the container has not enough capabilities and chroot as well needs them.  You should add CAP_SYS_ADMIN. "
+        },
+        {
+            "user": "rhatdan",
+            "body": "@giuseppe I think chroot was created to not need CAP_SYS_ADMIN so we can run buildah inside of locked down containers.  I believe @nalind does this.\n\n@q384566678 Looks like the tests passed?  "
+        },
+        {
+            "user": "rhatdan",
+            "body": "@q384566678 Were  you able to get buildah to run in k8s with --isolation  chroot without having to add SYS_ADMIN?  If yes can we close this PR."
+        },
+        {
+            "user": "zhouhao3",
+            "body": "> Were you able to get buildah to run in k8s with --isolation chroot without having to add SYS_ADMIN?\n\n@rhatdan No, running the following command without modifying the code will still cause an error.\n\n```\nroot@zz-ubuntu-78f657b855-ljrx8:~# buildah run --isolation=chroot 747d sh\nError during unshare(CLONE_NEWUSER): Invalid argument\nERRO[0000] error parsing PID \"\": strconv.Atoi: parsing \"\": invalid syntax \nERRO[0000] (unable to determine exit status) \n```"
+        },
+        {
+            "user": "rhatdan",
+            "body": "So buildah is always attempting to create a USERNS even when root.\nIt should definitely not do that."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@giuseppe is this true ^^"
+        },
+        {
+            "user": "giuseppe",
+            "body": "it creates the userns if it doesn't have enough capabilities.  Even the chroot isolation needs these capabilities to configure the `podman run` environment.  Creating an user namespace gives CAP_SYS_ADMIN limited to that namespace.  So either userNS are supported or the container should already have enough capabilities that a new userNS is not required."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@giuseppe So you reject this PR?"
+        },
+        {
+            "user": "giuseppe",
+            "body": "yes, I think it won't solve the problem of running buildah in a non-privileged container when user namespaces are not available."
+        },
+        {
+            "user": "lollipopman",
+            "body": "I am getting the same error trying to build as a non priveleged user on a debian box, is there a way to grant this capability to a user?:\n```bash\n~| uname -a\nLinux blowpop 4.17.0-3-amd64 #1 SMP Debian 4.17.17-1 (2018-08-18) x86_64 GNU/Linux\n~| buildah -v\nbuildah version 1.5-dev (image-spec 1.0.0, runtime-spec 1.0.0)\n~| buildah from ${1:-fedora}\nError during unshare(CLONE_NEWUSER): Operation not permitted\nERRO[0000] error parsing PID \"\": strconv.Atoi: parsing \"\": invalid syntax \nERRO[0000] (unable to determine exit status)\n```"
+        },
+        {
+            "user": "giuseppe",
+            "body": "@lollipopman on Ubuntu/Debian userNS for unprivileged users are disabled by default.  You need to enable user namespaces for unprivileged users with (as root):\n\n`echo 1 > /proc/sys/kernel/unprivileged_userns_clone`.\n\n\n\n"
+        },
+        {
+            "user": "lollipopman",
+            "body": "@giuseppe thanks, that fixed it for me, it would be great if buildah could detect whether they are enabled and issue a better error message."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@lollipopman Great idea.  Also we should update the man pages, and installation docs."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@lollipopman Could you open an Issue to fix this."
+        },
+        {
+            "user": "zhouhao3",
+            "body": ">yes, I think it won't solve the problem of running buildah in a non-privileged container when user namespaces are not available.\n\nSo this is still an unresolved issue, we need to find a way to solve this problem."
+        },
+        {
+            "user": "lollipopman",
+            "body": "@rhatdan issue created, https://github.com/containers/buildah/issues/1068"
+        },
+        {
+            "user": "TomSweeneyRedHat",
+            "body": "Thanks @lollipopman "
+        },
+        {
+            "user": "rhatdan",
+            "body": "@q384566678 There is no way for a non priv user to create multiple UIDs without UserNS.  I think some tools have faked this out, but I am not sure it is worth hacking on this, since we have UserNS>"
+        },
+        {
+            "user": "gvreddym",
+            "body": "is this issue resolved?\nI am still getting same error on Openshift4 and Jenkins with below build command \n\nbuildah bud --device /dev/fuse --isolation=chroot runtime=crun --format=oci --tls-verify=true --layers -f ${WORKSPACE}/Dockerfile .\n\nError\ntime=\"2021-07-27T07:06:44Z\" level=warning msg=\"error reading allowed ID mappings: error reading subuid mappings for user \\\"1000200000\\\" and subgid mappings for group \\\"1000200000\\\": No subuid ranges found for user \\\"1000200000\\\" in /etc/subuid\"\ntime=\"2021-07-27T07:06:44Z\" level=warning msg=\"Found no UID ranges set aside for user \\\"1000200000\\\" in /etc/subuid.\"\ntime=\"2021-07-27T07:06:44Z\" level=warning msg=\"Found no GID ranges set aside for user \\\"1000200000\\\" in /etc/subgid.\"\nError during unshare(CLONE_NEWUSER): Invalid argument\ntime=\"2021-07-27T07:06:49Z\" level=error msg=\"error parsing PID \\\"\\\": strconv.Atoi: parsing \\\"\\\": invalid syntax\"\ntime=\"2021-07-27T07:06:49Z\" level=error msg=\"(unable to determine exit status)\""
+        },
+        {
+            "user": "rhatdan",
+            "body": "Looks like openshift needs to be loosened up to run builds.  You might want to look at the openshift builder.  It uses Buildah under the covers."
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "buildah",
+            "number": 1167
+        }
+    ]
+}

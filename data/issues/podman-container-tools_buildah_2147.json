@@ -1,0 +1,35 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "buildah",
+    "number": 2147,
+    "type": "issue",
+    "title": "digest test: needs a complete rewrite",
+    "state": "closed",
+    "labels": [
+        "locked - please file new issue/PR"
+    ],
+    "user": "edsantiago",
+    "body": "`tests/digest.bats` is confusing, misleading, and unreliable.\n\nFirst, per Nalin, the goal of this test:\n\n>We're checking that a given image can be pulled, used as a base image for a build, and that a new image that we build using that pulled image as a base can successfully be pushed to somewhere other than local storage, when the image is:\n>\n >  * a v2s1 image referenced using its digest\n >  * a v2s1 image where one of the entries is a duplicate that gets discarded when it's converted to v2s2\n> * a v2s1 image referenced using its tag\n> * a v2s2 image referenced using its digest (incorrectly - this is also a v2s1 image, alpine@sha256:25fd8fc1aefcc8ae46aae23daefcd7dcb97f676fa0bc72bb0bf7cfb75df4f22e is a better candidate)\n> * a v2s2 image referenced using its tag (incorrectly - this is the same v2s1 image, alpine:3.1 is a better candidate, though it's a manifest list now, so the test won't pass on non-amd64 systems without tweaks.\n> * a v2s2 image referenced using its repository name, with neither a tag nor a digest. It's a manifest list, so the test won't pass on non-amd64 systems without tweaks.\n\nThe problems I see:\n\n* as admitted above, the actual tests are wrong: several of the tests labeled \"s2\" are actually s1. This took me __far__ too long today to actually figure out.\n* In addition, the current test script does not actually confirm `schemaVersion`. If a test is labeled \"s2\", it should darn well confirm that it is testing what it should be testing.\n* Nor does the test script confirm that the image it's testing as \"duplicate layers\" actually has duplicate layers\n* Some of the images are fetched by SHA, but others by name, making them moving targets\n* And they're fetched from all sorts of different registries, some of which are unreliable, which gives us flaky tests\n* And at least one of the images is HUGE, a monster, which of course slows everything down\n* ~~Oh, I forgot: Nalin says \"somewhere other than local storage\" but the test doesn't actually test that: it only pushes to local storage.~~ Sorry, my misunderstanding. Per @nalind, `dir:XXX` exercises all the desired code paths - I misunderstood \"local storage\".\n\nI believe that all images used in this test should be consistent, constant, guaranteed immutable, under our control, and from one and only one registry (presumably quay.io) (which, yes, is unreliable but SPOF is better than MPOF).\n\nTo that end, I propose something like this: a git-committed script that generates the desired images and pushes them to a repo. This script would be run only manually and only if/when the `digest.bats` test needs a new example image. The example below tries to create an image suitable for the `from-by-digest-s1-a-discarded-layer` test:\n```bash\n# Create a v2s1 image. We can't actually do that with buildah; the only way\n# seems to be to create a v2s2, dir-push it as v2s1, then reload it.\ncid=$(buildah from scratch)\nbuildah commit $cid foo1\n\n# Same thing (duplicate layer)\ncid2=$(buildah from foo1)\nbuildah commit $cid2 foo2\n\ncid3=$(buildah from foo2)\nmp=$(buildah mount $cid3)\ntouch $mp/file1\nbuildah umount $cid3\n\nbuildah commit $cid3 foo3\n\nTMPDIR=$(mktemp --tmpdir -d $(basename $0).XXXXXXX)\n\nbuildah push --format v2s1 foo3 dir:${TMPDIR}/foo3\n\n# Clean up\nbuildah rm -a\nbuildah rmi foo3 foo2 foo1\n\n# Reload the image\n(cd $TMPDIR && buildah pull dir:foo3)\n\n# We should now have a 'localhost/foo3' image with SchemaVersion 1\necho \"The following number should be '1':\"\nbuildah-imgtype -expected-manifest-type '*' -show-manifest  localhost/foo3 | jq .schemaVersion\n\n# FIXME: we should also check that there are two duplicate fsLayers\nbuildah-imgtype -expected-manifest-type '*' -show-manifest  localhost/foo3 | jq .fsLayers|grep blobSum|sort|uniq -c\n\n# Assuming the two tests above pass, we could then push this image to quay.io\n\n# Clean up\nrm -rf ${TMPDIR}\n```\nYes, it can (and should) be cleaned up. This is a simple checkpoint before I wrap up for the week, to (a) remind me when I pick this up again, and (b) offer an early chance for everyone to comment or shoot down as appropriate.",
+    "comments": [
+        {
+            "user": "edsantiago",
+            "body": "@nalind @cevich @TomSweeneyRedHat  comments/feedback welcome"
+        },
+        {
+            "user": "cevich",
+            "body": "@edsantiago your bullet-points in the description are all on-the-money.  Please feel free to do what's needed with libpod repositories on quay.  Historically it's been far more reliable than either fedoraproject.org or docker.io (whatever the cause).\n\nThere's also local registry available.  After #2115 merges, it is [setup here](https://github.com/containers/buildah/blob/master/contrib/cirrus/lib.sh#L259) and [populated/validate here](https://github.com/containers/buildah/blob/master/contrib/cirrus/lib.sh#L235).  Failure of that service will quickly fail tests, so it's even \"safer\" than quay.\n\nThe tests are executed from [the 'integration' case here](https://github.com/containers/buildah/blob/master/contrib/cirrus/test.sh#L44), feel free to export any variables/values needed for automation -> test communication.  For example querying and passing in an image digest value which could change if your build script is re-run (assuming that's still needed in the tests).\n\nHTH"
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "buildah",
+            "number": 2115
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "buildah",
+            "number": 2159
+        }
+    ]
+}

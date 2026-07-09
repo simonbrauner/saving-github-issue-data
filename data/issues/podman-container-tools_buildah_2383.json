@@ -1,0 +1,158 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "buildah",
+    "number": 2383,
+    "type": "issue",
+    "title": "RFE: buildah commit --layer",
+    "state": "closed",
+    "labels": [
+        "kind/feature",
+        "stale-issue",
+        "locked - please file new issue/PR"
+    ],
+    "user": "jpic",
+    "body": "Context: I implemented docker-like build-step hash-based caching in my little build tool that runs buildah.\n\n![2020-05-30-232846_876x148_scrot](https://user-images.githubusercontent.com/94636/83339389-9f21a880-a2cd-11ea-8faf-0c85c6b870a7.png)\n\nCurrently, it works by commiting after each build step with a hash of the action, so that it can run later from there with buildah from:\n\n![2020-05-30-233355_882x242_scrot](https://user-images.githubusercontent.com/94636/83339456-51f20680-a2ce-11ea-8671-f6734f739415.png)\n![2020-05-30-233428_879x306_scrot](https://user-images.githubusercontent.com/94636/83339460-633b1300-a2ce-11ea-984b-6316c0631c60.png)\n\nHowever, this results in layer images being present in podman image ls. Not an actual problem, but it would be nice to be able to commit layers that would not appear in podman images ls.",
+    "comments": [
+        {
+            "user": "TomSweeneyRedHat",
+            "body": "@jpic thanks for the request/issue.  It seems like a good add to me, but I would be interested in hearing from @mtrmac and @nalind about the possibilities."
+        },
+        {
+            "user": "jpic",
+            "body": "Thank you @TomSweeneyRedHat for your invitation,\nI'm pretty happy with my implementation now, so I'll try to describe what it does, even thought it's pretty crude, just to give an idea:\n\n- calculate the hash of each action given the previous action hash or the image that will be used in buildah from in the case of the first action,\n- get the list of the layers for a target image (ie. yourorg/yourproduct) by name,\n- iterate over each build action hash prior to building, and find the last one that has a layer,\n- all layers that do not match the build plan are deleted (invalidated), pretty important to keep the disk space from filling up\n- start from the last matching layer, or from the base image, with `buildah from`\n- after each action, commit a layer (in my case, an image with `:layer-actionhash`)\n\nThe main issue with this implementation is that layers are not shared between images, this is something buildah layers could try to solve.\n\nSo, for me, it needs a command to commit a layer, another one to delete it (if buildah doesn't manage invalidation by itself), a command to list them, and being still able to start from a layer.\n\nThere's one thing I didn't solve very well is that my build system also allows actions to execute in parallel (ie. pip & npm), in which case it'll probably create a layer with a hash from both which would kind of defeat the point, but otherwise being able to merge layers could be an idea, I'm not really there yet."
+        },
+        {
+            "user": "jpic",
+            "body": "For parallel layer build, I think being able to reparent a layer would do the trick. Building layers in parallel would be easy I guess just start two commands in different containers based on the same layer image. But then two layers with the same parent will result of that operation.\n\nI'm also thinking about multi-stage build would look like, but I don't really like the part where we just copy some files over from a temp container into the build container: I'm still looking forward to finding a more efficient solution such as layer merging."
+        },
+        {
+            "user": "jpic",
+            "body": "Hi all,\n\nMy implementation is confirmed to work on different projects, however, the time taken to commit each layer is pretty long.\n\nAm I really using the same API buildah bud uses when building Dockerfile ?\n\nMeanwhile, is it going to be faster with btrfs or zfs or something else anyway ?\n\nTrying to reduce sluggyness of this feature\n\nThank you very much"
+        },
+        {
+            "user": "rhatdan",
+            "body": "@nalind @mtrmac @vrothberg PTAL"
+        },
+        {
+            "user": "jpic",
+            "body": "It turns out you would really need a basic CRUD on layers, ie.:\n\n- `buildah layers ls`: when your build tool checks for which layer to start from\n- `buildah from layername`: to start from a layer\n- `buildah layers commit layername`: to commit a layer\n- `buildah layers delete layername`: to delete a layer, useful for development of the build tool"
+        },
+        {
+            "user": "rhatdan",
+            "body": "@nalind @TomSweeneyRedHat @saschagrunert @vrothberg PTAL"
+        },
+        {
+            "user": "rhatdan",
+            "body": "@jpic Interesting. \n\nDo you have a REPO we could play with this on?"
+        },
+        {
+            "user": "rhatdan",
+            "body": "@pixdrift PTAL"
+        },
+        {
+            "user": "jpic",
+            "body": "@rhatdan you can play with https://yourlabs.io/oss/shlax.git :\n\n- install with `pip3 install -e .[test,cli]`\n- build with `./shlaxfile.py build`\n- test with `py.test -sv tests`"
+        },
+        {
+            "user": "jpic",
+            "body": "In case it didn't work for you (sorry about that), the container build recipe looks like this:\n\n```py\nshlax = Container(\n    build=Buildah(\n        Packages('python38', 'buildah', 'unzip', 'findutils', upgrade=False),\n        Copy('setup.py', 'shlax', '/app'),\n        Pip('/app'),\n        base='quay.io/podman/stable',\n        commit='shlax',\n    ),\n)\n```\n\nThis is what it looks like on my machine with cache hits:\n\n![2020-10-27-173154_1342x200_scrot](https://user-images.githubusercontent.com/94636/97332928-4a358e80-187b-11eb-91e3-10e451892214.png)\n\nMaybe should silent errors in the \"Invalidating old layers\" code.\n\nSo if I change the above build script to add the \"most\" package it will invalidate all layers:\n\n![2020-10-27-172742_1434x341_scrot](https://user-images.githubusercontent.com/94636/97332478-ca0f2900-187a-11eb-9a29-4e992dd9f54a.png)\n\nBut reuse the local package cache (what a relief ..):\n\n![2020-10-27-173502_1412x802_scrot](https://user-images.githubusercontent.com/94636/97333275-aef0e900-187b-11eb-93da-fb536fc0343a.png)\n\nSame story of course with a python package, for example adding the \"django\" package will make the build start from the Pip layer:\n\n![2020-10-27-173858_1435x240_scrot](https://user-images.githubusercontent.com/94636/97333797-3b9ba700-187c-11eb-951a-c0e904e3f373.png)\n\nBut it won't hit the network because it shares the same cache as my local pip command which is shared with the Pip action, you can see how it commits the layer at the end:\n\n![2020-10-27-173958_1427x623_scrot](https://user-images.githubusercontent.com/94636/97333915-6423a100-187c-11eb-9514-b6328537577c.png)\n\nAnd cleaner code which proceeds to umounts of mounts made by different actions, and commit:\n\n![2020-10-27-174023_1146x315_scrot](https://user-images.githubusercontent.com/94636/97334023-81586f80-187c-11eb-870b-97387f520f45.png)\n\n:tophat: "
+        },
+        {
+            "user": "jpic",
+            "body": "I'm deeply sorry, but you will not be able to do the best stuff with the master version, otherwise you could play by parallelizing npm and pip or by composing your containers in a Pod model like this https://gist.github.com/jpic/e6d9e5ba6d6cff868c9279fd279a4dca"
+        },
+        {
+            "user": "jpic",
+            "body": "Actually, I need to somehow add \"layer merging\" support to be able to run two parallel build operations based on the same parent layer for this to work:\n\n```py\n\n        Async(\n            Pip('/app[server]', 'djcli'),\n            Npm('install', 'build'),\n        ),\n```\n\nlayer merge would be awesome"
+        },
+        {
+            "user": "rhatdan",
+            "body": "@jpic is this still something you are working on?  Interested in?"
+        },
+        {
+            "user": "jpic",
+            "body": "Yes, I guess I'm going to be building and deploying containers for a while it seems, it's a lot more convenient than VServer so I guess I'm not [going back](https://github.com/jpic/bashworks/blob/master/vps/functions.sh) ever."
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "jpic",
+            "body": "Is there even something to do here? Would there be any way to add performance one way or another compared to commiting the final image? If not during build time, maybe during uploads/downloads?"
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "jpic",
+            "body": "Just released v0.3.0 of shlax, which includes 90 commits made over a year. Using images as layers \"works\", but still don't look nearly as efficient as docker layers."
+        },
+        {
+            "user": "rhatdan",
+            "body": "Sadly no one has had time to look into this."
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "mtrmac",
+            "body": "I’m probably just dumb, but can someone explain what _exactly_ the RFE is or how this differs from ordinary builds, please?\n\nIs it to expose the cache/image-reuse code in `imagebuildah/stage_executor` (see `useCache`) to non-Containerfile builds? Is it to change how that cache works? Something else?"
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@flouthoc PTAL"
+        },
+        {
+            "user": "flouthoc",
+            "body": "@jpic Sorry If i did not understand I think `buildah bud` already caches the layers is there any reason to explicitly handle the layers. Do you think image layer cache is not working properly or we can improve that.I feel working with layers directly might be too verbose for users but i could be wrong.\n"
+        },
+        {
+            "user": "jpic",
+            "body": "I'm not using buildah bud because I don't find Dockerfile to be a good\nlanguage and it's not extensible, I prefer to use other buildah commands\ninstead, in which case I currently have to commit the whole image instead\nof actual layers.\n"
+        },
+        {
+            "user": "flouthoc",
+            "body": "@jpic thanks a lot for explaining your use-case i think use-case  is very much specific rather than generalized since as a cli tool most users will shy away from handling layers by themselves but I could be wrong. I would love other maintainers opinion on this RFE cc @vrothberg @giuseppe @nalind @mtrmac @rhatdan "
+        },
+        {
+            "user": "mtrmac",
+            "body": "To me, https://github.com/containers/buildah/issues/2383#issuecomment-636944835 really feels like something that should be calling a Go library (and reusing/extending the existing cache implementation, not having a completely separate database on top).\n\nThe ability to use Buildah’s infrastructure to cache build steps would be clearly useful for _other_ image build approaches, e.g. the OpenShift s2i strategies, the define-images-by-Ansible approach, or whatever else might come in the future (e.g. the new template-based build language tentatively discussed somewhere else in the repo).\n\n(Or maybe it already exists? I didn’t look into OpenShift’s builder right now.)\n\nAn in-process Go library seems to me to be a much better _first_ API mechanism for such a not-quite-trivial API surface (allowing for strong typing, large option structures, machine-visible error reporting) than a CLI command set (limited to text and having to process complex data via screen-scraping, or building the same Go API and building a file read/write mechanism on top of that API.\n\nOnce that Go library exists, if someone wanted to expose that as a CLI (in or outside of Buildah), \\*shrug\\* why not — but to me it seems to be a weird place to start.\n\n[That actually applies to the proposed “layer CRUD” CLI as well; if those operations already exist in c/storage, it should be possible to wrap them in a CLI — but a CLI seems like such an inconvenient way to call those fairly complex Go APIs).\n\n---\n\nA `buildah reuse-layer` (like a `buildah commit`, but use an existing layer data instead of changes from a live container), or some other way to build a new image just by assembling pre-existing layers, does seem like a possibly worthwhile feature (@vrothberg didn’t source containers need something like that?) — but IMHO significantly less interesting than the generalized caching support because it is lower-level.\n\n---\n\nDoesn’t `buildah bud` also only reuse layers based on image history, i.e doesn’t it also keep images around? What’s the actual concern about keeping images around? The image metadata is IIRC pretty small, so it’s just a cluttered output that could be solved by some CLI option to not list untagged images (or, well, piping to `grep -v`), or something like that?"
+        },
+        {
+            "user": "vrothberg",
+            "body": "> @vrothberg didn’t source containers need something like that?\n\n`buildah source add $IMAGE $SOURCE` adds $SOURCE as a new layer to $IMAGE with $IMAGE being a path (i.e., dir transport). But it's still experimental and not used in production at all.  Once the chicken-egg problem of better OCI artifact support is addressed, we can push things further. Quay.io and Docker Hub will soon-ish support more artifacts which allows for trying things out in the wild."
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@vrothberg any update on this?"
+        },
+        {
+            "user": "vrothberg",
+            "body": "@rhatdan not to my knowledge.  I am not sure this RFE is on my plate though."
+        },
+        {
+            "user": "flouthoc",
+            "body": "In the light of https://github.com/containers/buildah/issues/2383#issuecomment-915829949 and https://github.com/containers/buildah/issues/2383#issuecomment-916358925 I think we should close this RFE and reopen if few more cases like this show up."
+        },
+        {
+            "user": "jpic",
+            "body": "> An in-process Go library seems to me to be a much better first API mechanism for such a not-quite-trivial API surface (allowing for strong typing, large option structures, machine-visible error reporting) than a CLI command set (limited to text and having to process complex data via screen-scraping, or building the same Go API and building a file read/write mechanism on top of that API.\n\nI'm not sure, another approach, that seems to be more successful in software development in general, is to implement something useful and then refactor it into a library.\n\n> a CLI seems like such an inconvenient way to call those fairly complex Go APIs\n\nI understand that the API specifications do not seem absolutely clear: a few iterations seem necessary to figure it out, and that would obviously be easier if you don't have to propagate an iteration over both a CLI in a repo and a lib in another repo, unless you plan on implementing the library in a completely different repo and maintaining whatever `buildah bud` uses in parallel here, but wouldn't that result in effort and code duplication?\n\n> Once that Go library exists, if someone wanted to expose that as a CLI (in or outside of Buildah), *shrug* why not — but to me it seems to be a weird place to start.\n\nAs far as I understand, `buildah bud` is CRUD'ing layers already so the code is already here? it's just not exposed through CLI, and probably could after a bit of refactoring.\n\nOverall I think a core dev could bring in much more precise information after spending a couple of hours creating a poc exposing existing layer management go functions to a CLI, even without arguments using just environment variables in the mean time, in a branch (it'd take days for me and I can't at the moment)."
+        }
+    ],
+    "cross_references": []
+}

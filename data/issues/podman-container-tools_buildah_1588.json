@@ -1,0 +1,134 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "buildah",
+    "number": 1588,
+    "type": "pull_request",
+    "title": "Apply SHELL during image build time",
+    "state": "closed",
+    "labels": [
+        "locked - please file new issue/PR"
+    ],
+    "user": "EricHripko",
+    "body": "# Overview\nThis PR fixes the behaviour of `SHELL` by making sure that it applies during image build time in addition to existing functionality. Resolves #1581.\n\n# Testing\n4 new tests added:\n- default shell + OCI format\n- default shell + Docker format\n- custom shell + OCI format\n- custom shell + Docker format\n\nOutput:\n```\n ✓ bud-shell during build in Docker format\n ✓ bud-shell during build in OCI format\n ✓ bud-shell changed during build in Docker format\n ✓ bud-shell changed during build in OCI format\n...\n296 tests, 10 failures, 5 skipped\n```\n10 tests that are failing (as far as I can see) rely on an image registry being setup at `localhost`. Therefore, I don't think they're caused by my changes.\n\n# Signing\nSigned-off-by: Eric Hripko <ehripko@bloomberg.net>",
+    "comments": [
+        {
+            "user": "rh-atomic-bot",
+            "body": "Can one of the admins verify this patch?\nI understand the following commands:\n- `bot, add author to whitelist`\n- `bot, test pull request`\n- `bot, test pull request once`"
+        },
+        {
+            "user": "rhatdan",
+            "body": "Thanks @EricHripko Looks great \nLGTM\nCould you check if this works properly if you do this via Bash instead of Dockerfile?\n\n```\n# ctr=$(buildah from --format docker fedora)\n#  buildah config --shell '/bin/sh -c' $ctr \n#  buildah run $ctr  echo \"SHELL=$0\"\n```"
+        },
+        {
+            "user": "EricHripko",
+            "body": "Hi @rhatdan! Thank you for looking at this :+1: \n\nI tried to get this to work, but I am struggling with some shell expansion. Namely, I get the following:\n```\n   #|     FAIL: buildah --debug=false run ubuntu-working-container echo SHELL=/usr/lib/bats/bats-exec-test\n   #| expected: 'SHELL=/bin/bash'\n   #|   actual: 'SHELL=/usr/lib/bats/bats-exec-test\n```\nIt seems that host shell insists on expanding `$0` before it gets inside a working container:\n```\n$ buildah run ubuntu-working-container echo \"SHELL=$0\"\nSHELL=bash\n# ^- should be /bin/sh\n```\nI've tried various escaping tricks, but it seems like the only 'proper' way to do this is to do something like `buildah run ubuntu-working-container sh -c 'echo SHELL=$0'`. Unfortunately, at this point we are no longer testing the default shell :slightly_frowning_face:\n\nDo you have any suggestions on how to get this working?"
+        },
+        {
+            "user": "rhatdan",
+            "body": "I can not get it to work either.  But how about this patch, which I believe will cover both use cases.\n\nhttps://paste.fedoraproject.org/paste/~To3nUps4Ti4KuzHKkthTA\n\n"
+        },
+        {
+            "user": "rhatdan",
+            "body": "With my patch I am getting.\n```\n# ./buildah config --shell 'bash -c' $ctr \n# ./buildah run $ctr  'echo $0'\n/usr/bin/bash\n# ./buildah config --shell 'sh -c' $ctr \n# ./buildah run $ctr  'echo $0'\n/usr/bin/sh\n```"
+        },
+        {
+            "user": "EricHripko",
+            "body": "With this patch, we would be always forcing the shell to take effect. This means that cases below would use the shell whilst they didn't previously. \n- `RUN [\"echo\", \"stuff\"]`\n- `buildah run $ctr echo \"stuff\"`\n  ( ^- guess that's why we couldn't get the test going, the code path doesn't allow it currently :see_no_evil: )\n\nThis would be the case for both custom and default shell - and for both Docker and OCI formats too.\nIs this ok?\n"
+        },
+        {
+            "user": "rhatdan",
+            "body": "Well could you check if we match Docker behaviour?"
+        },
+        {
+            "user": "EricHripko",
+            "body": "Shell is indeed not used for JSON format of the `RUN` instruction. As a result, `$0` isn't expanded at all in Docker:\n```\nStep 1/3 : FROM ubuntu\n ---> 94e814e2efa8\nStep 2/3 : RUN echo $0\n ---> Running in 9ab2d72cf9c3\n/bin/sh\nRemoving intermediate container 9ab2d72cf9c3\n ---> 1246e0ad732b\nStep 3/3 : RUN [\"echo\", \"$0\"]\n ---> Running in ba2508344e4a\n$0\nRemoving intermediate container ba2508344e4a\n ---> 5fe7ffc812ef\nSuccessfully built 5fe7ffc812ef\n```\n\nShell also doesn't appear to be used for the second case. This makes the current behaviour (without your patch) of `buildah run` match `docker run`:\n```\n$ docker run --rm ubuntu bash -c 'echo $0'\nbash\n$ docker run --rm ubuntu sh -c 'echo $0'\nsh\n```\n\n"
+        },
+        {
+            "user": "rhatdan",
+            "body": "My goal here is to make \nbuildah run work just like the RUN directive in the Dockerfile.\n`docker run` and `podman run` are much different things.\n\n"
+        },
+        {
+            "user": "rhatdan",
+            "body": "In a Dockerfile, does docker handle\nRUN echo $0\nversus\nRUN [ \"echo\", \"$0\" ]\n\n"
+        },
+        {
+            "user": "EricHripko",
+            "body": "Sorry, I initially misunderstood your question.\nYes, `RUN echo $0` correctly prints the current shell.\n\n__Default shell:__\n```\n...\nStep 2/2 : RUN echo $0\n ---> Running in 94f4a2336321\n/bin/sh\nRemoving intermediate container 94f4a2336321\n ---> c87a94c5de69\nSuccessfully built c87a94c5de69\n```\n\n__Custom shell:__\n```\nStep 2/3 : SHELL [\"/bin/bash\", \"-c\"]\n ---> Running in ee4e3eec0270\nRemoving intermediate container ee4e3eec0270\n ---> 53366cb4cafc\nStep 3/3 : RUN echo $0\n ---> Running in 39bb8fd8ecae\n/bin/bash\nRemoving intermediate container 39bb8fd8ecae\n ---> 1cbbe22fe598\nSuccessfully built 1cbbe22fe598\n```\n\nAnd, as I've mentioned [earlier](https://github.com/containers/buildah/pull/1588#issuecomment-491616094), `RUN [\"echo\", \"$0\"]` doesn't work:\n```\nStep 3/3 : RUN [\"echo\", \"$0\"]\n ---> Running in ba2508344e4a\n$0\nRemoving intermediate container ba2508344e4a\n ---> 5fe7ffc812ef\nSuccessfully built 5fe7ffc812ef\n```"
+        },
+        {
+            "user": "rhatdan",
+            "body": "I guess the bottom line then, does buildah bud work the same way with my patch?  Did my patch break anything, since it will allow `buildah run ...` to work the correct way."
+        },
+        {
+            "user": "EricHripko",
+            "body": "I've tried to apply your patch, but I am getting really different results. Since the patch forces shell interpretation by prepending `sh`, `-c` to a parsed command, only the first argument seems to be passed to the shell. This seems to break multiple things:\n\n- bud\n```\nSTEP 1: FROM docker.io/ubuntu\nSTEP 2: RUN echo $0\n/bin/sh\nSTEP 3: RUN [\"echo\", \"$0\"]\n\nSTEP 4: RUN [\"apt-get\", \"install\", \"vim\"]\napt 1.6.8 (amd64)\nUsage: apt-get [options] command\n...\n^- echo and apt-get is called with no arguments\n```\n\n- run\n```\n$ buildah --format=docker from docker.io/ubuntu\nubuntu-working-container-2\n$ buildah config --shell 'bash -c' ubuntu-working-container-2\n$ buildah run ubuntu-working-container-2 sh -c 'echo $0'\n# \n^- new bash shell is spawned since -c is dropped\n```\n\nDid you make any other changes apart from the ones on pastebin?"
+        },
+        {
+            "user": "rhatdan",
+            "body": "Ok lets merge your version now and look at the buildah run command separately so we can get this fix in."
+        },
+        {
+            "user": "rhatdan",
+            "body": "LGTM"
+        },
+        {
+            "user": "rhatdan",
+            "body": "@TomSweeneyRedHat @giuseppe @vrothberg @nalind PTAL"
+        },
+        {
+            "user": "rhatdan",
+            "body": "@TomSweeneyRedHat @giuseppe @vrothberg @nalind PTAL"
+        },
+        {
+            "user": "TomSweeneyRedHat",
+            "body": "@rhatdan @EricHripko sorry, this one slipped off my stack, reviewing now."
+        },
+        {
+            "user": "TomSweeneyRedHat",
+            "body": "Hold on the merge for a bit, ran into some issues testing that may be self induced, still poking."
+        },
+        {
+            "user": "TomSweeneyRedHat",
+            "body": "Yep, self induced confusion.  \nLGTM"
+        },
+        {
+            "user": "TomSweeneyRedHat",
+            "body": "@rh-atomic-bot r+"
+        },
+        {
+            "user": "rh-atomic-bot",
+            "body": ":pushpin: Commit 1871939 has been approved by `TomSweeneyRedHat`\n\n<!-- @rh-atomic-bot r=TomSweeneyRedHat 18719392922e35e8efc3d31420348df6af0059dd -->"
+        },
+        {
+            "user": "rh-atomic-bot",
+            "body": ":hourglass: Testing commit 1871939 with merge bc9c276..."
+        },
+        {
+            "user": "TomSweeneyRedHat",
+            "body": "And thanks @EricHripko !"
+        },
+        {
+            "user": "rh-atomic-bot",
+            "body": ":sunny: Test successful - [status-papr](https://s3.amazonaws.com/aos-ci/ghprb/projectatomic/buildah/bc9c27675a51e5a96ec7dff94ec27174f4a20d9a.1558539505216286720/index.html), [status-travis](https://travis-ci.org/containers/buildah/builds/535847943?utm_source=github_status&utm_medium=notification)\nApproved by: TomSweeneyRedHat\nPushing bc9c27675a51e5a96ec7dff94ec27174f4a20d9a to master..."
+        },
+        {
+            "user": "rh-atomic-bot",
+            "body": ":sunny: Test successful - [status-papr](https://s3.amazonaws.com/aos-ci/ghprb/projectatomic/buildah/bc9c27675a51e5a96ec7dff94ec27174f4a20d9a.1558539505216286720/index.html), [status-travis](https://travis-ci.org/containers/buildah/builds/535847943?utm_source=github_status&utm_medium=notification)\nApproved by: TomSweeneyRedHat\nPushing bc9c27675a51e5a96ec7dff94ec27174f4a20d9a to master..."
+        },
+        {
+            "user": "rh-atomic-bot",
+            "body": ":sunny: Test successful - [status-papr](https://s3.amazonaws.com/aos-ci/ghprb/projectatomic/buildah/bc9c27675a51e5a96ec7dff94ec27174f4a20d9a.1558539505216286720/index.html), [status-travis](https://travis-ci.org/containers/buildah/builds/535847943?utm_source=github_status&utm_medium=notification)\nApproved by: TomSweeneyRedHat\nPushing bc9c27675a51e5a96ec7dff94ec27174f4a20d9a to master..."
+        },
+        {
+            "user": "rh-atomic-bot",
+            "body": ":sunny: Test successful - [status-papr](https://s3.amazonaws.com/aos-ci/ghprb/projectatomic/buildah/bc9c27675a51e5a96ec7dff94ec27174f4a20d9a.1558539505216286720/index.html), [status-travis](https://travis-ci.org/containers/buildah/builds/535847943?utm_source=github_status&utm_medium=notification)\nApproved by: TomSweeneyRedHat\nPushing bc9c27675a51e5a96ec7dff94ec27174f4a20d9a to master..."
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "buildah",
+            "number": 1581
+        }
+    ]
+}

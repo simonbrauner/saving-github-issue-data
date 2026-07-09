@@ -1,0 +1,74 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "buildah",
+    "number": 3392,
+    "type": "issue",
+    "title": "Confusing error on failure to pull base image using reference name",
+    "state": "closed",
+    "labels": [
+        "locked - please file new issue/PR"
+    ],
+    "user": "cevich",
+    "body": "**Description**\n\n[During periodic execution of buildah system tests on the ***release-1.21*** branch (job logs)](https://cirrus-ci.com/task/5576282244120576?logs=integration_test#L944), a system-test of the Containerfile `FROM foo AS bar` handling failed with a very unhelpful error.\n\n**Steps to reproduce the issue:**\n1. I was not able to reproduce this issue with the released version of buildah 1.21.1\n2. The command run by the test was essentially `buildah bud --layers .` using:\n\n```Dockerfile\nFROM alpine AS base\nRUN touch /1\nENV LOCAL=/1\nRUN find $LOCAL\n\nFROM base\nRUN find $LOCAL\n```\n\n**Describe the results you received:**\n\nThe first `FROM` section worked fine, then due to some unknown/unreproducable condition, an attempt was made to pull the reference-named image (`base`):\n\n```\nerror creating build container: 3 errors occurred while pulling:\n  * Error initializing source docker://base:latest: Error reading manifest latest in quay.io/libpod/base: unauthorized: access to the requested resource is not authorized\n```\n\n**Describe the results you expected:**\n\n1. The reference named image should never ever be pulled from a remote registry.  It would be nice if some additional protection was in place guarantee this.\n2. The reference name image should not appear in any error message, or be clearly annotated (i.e. by sha).  Since this is the name given to the output, not an actual registry image.\n\n**Output of `rpm -q buildah` or `apt list buildah`:**\n\n[Buildah was compiled from source, on the `release-1.21` branch.](https://github.com/containers/buildah/commit/7f9540d2ab9037b7e175a4d1b36e85fc6541aeb5)\n\n**Output of `buildah version`:**\n\n```\nVersion:         1.21.3\nGo Version:      go1.15.11\nImage Spec:      1.0.1-dev\nRuntime Spec:    1.0.2-dev\nCNI Spec:        0.4.0\nlibcni Version:  v0.8.1\nimage Version:   5.12.0\nGit Commit:      7f9540d\nBuilt:           Thu Jul 15 22:11:31 2021\nOS/Arch:         linux/amd64\n```\n\n**Output of `cat /etc/*release`:**\n\nCI VM Image c6032583541653504 for Ubuntu 20.10\n\n**Output of `uname -a`:**\n\nN/A\n\n**Output of `cat /etc/containers/storage.conf`:**\n\nN/A",
+    "comments": [
+        {
+            "user": "cevich",
+            "body": "Edit: I was reading the changelog backwards...this may be a *new* issue, not one already fixed."
+        },
+        {
+            "user": "nalind",
+            "body": "The name that follows `AS` can be used as a base for a subsequent stage (`FROM`) or referred to as a source to use instead of the build context in a `COPY --from` instruction.  In both cases, the image being referred to can be either an alias for the output of a previous stage, named using `FROM ... AS ...` in that previous stage, or any other image.  The `COPY` usage can also accept a zero-based numeric identifier for the stage, numbered implicitly based on the order in which they occur in the Dockerfile."
+        },
+        {
+            "user": "cevich",
+            "body": "Thanks @nalind that's my understanding as well.  So I'm really not sure how this flake happened, and if fixing it will also address subsequent bad behavior (trying to pull remotely)?\n\nFlake-wise: Is it possible we hit some strange storage-failure condition, and that's why buildah went chasing down other source for the 'base' image?\n\nSince you know the code best, if you can think of a way I can artificially induce this failure mode, I'm sure the resultant debug-level messages would help unwind everything else."
+        },
+        {
+            "user": "nalind",
+            "body": "The mention of `quay.io/libpod/base` in `Error initializing source docker://base:latest: Error reading manifest latest in quay.io/libpod/base: unauthorized: access to the requested resource is not authorized` is also confusing, as though the name is being rewritten per mirroring configuration in the test's `registries.conf` file."
+        },
+        {
+            "user": "cevich",
+            "body": "Yes, exactly.\n\nThat's why I think there might also be something in the error-path that's missing/broken.  Maybe a debug statement that needs to become a warning?  The fact that we don't see _any_ prior error identifying the actual cause, is itself concerning.  For example, let's suppose the disk ran out of space.  I wouldn't mind seeing the alias name (or number) in something like:\n\n```\nError initializing source docker://base:latest: No space left on device\n```\n\nEven though the name is still confusing, it's clear something with storage went wrong.  But in the case of this flake, we got naada :cry:  The good thing is I don't *think* this is a common failure-mode.  Seems more like an extremely rare/random occurrence.\n\n@vrothberg you also have a high-level perspective on things, any ideas or input on what could have caused this?\n\n---\n\nNot knowing this code (like, at all), my thinking is there should be some kind of flag identifying \"this <name|number> will only ever be a local-storage reference\".  Associate the name|number + flag, with the Containerfile/Dockerfile parser instance/state.  Then, for all future `COPY --from` and `FROM` references to that name|number, remote fetching should be hard-prevented (in code somehow) because the flag is present."
+        },
+        {
+            "user": "nalind",
+            "body": "That is how it was written.  You may have found a regression."
+        },
+        {
+            "user": "cevich",
+            "body": "Hehe, well I won't take all the credit.  It really was found by a combination of dumb luck and good test coverage."
+        },
+        {
+            "user": "vrothberg",
+            "body": "> @vrothberg you also have a high-level perspective on things, any ideas or input on what could have caused this?\n\nBuildah is attempting to pull `base`.  Since there's no alias, Buildah will walk through `unqualified-search-registries = ['docker.io', 'quay.io', 'registry.fedoraproject.org'] ` and attempt to pull:\n* `docker.io/base` which will be normalized to `docker.io/library/base` which in turn will be rewritten to `quay.io/libpod/base` since that's what `registries.conf` wants in CI [1].\n* `quay.io/base`\n* `registry.fedoraproject.org/base`\n\nNote that `FROM` defaults to using the \"pull if newer\" pull policy in `FROM`, so Buildah attempts to look up an image on a registry.\n\nI agree that Buildah should not attempt to pull an image if `FROM` refers to a previous stage and only use what's in the local storage (i.e., set the pull policy to \"never\").\n\n[1] From `tests/registries.conf`:\n```toml\n [[registry]]                \n prefix=\"docker.io/library\"  \n location=\"quay.io/libpod\"   \n```"
+        },
+        {
+            "user": "vrothberg",
+            "body": "FWIW, I cannot reproduce.  Looking at the debug log (`buildah --debug bud --layers .` with upper Containerfile):\n...\nSTEP 5: FROM 1b886c58bb20b8e3db2f19fa21f1e186654e71aab63482f80a69ba232be035b0                             \nDEBU[0003] Pulling image 1b886c58bb20b8e3db2f19fa21f1e186654e71aab63482f80a69ba232be035b0 (policy: newer)\nDEBU[0003] Looking up image \"1b886c58bb20b8e3db2f19fa21f1e186654e71aab63482f80a69ba232be035b0\" in local containers storage \n...\n\nSince we are \"pulling\" an image by ID, the image will be returned directly (unless we have \"pull always\").  However, the pull policy is still \"neWer\".  Hence, if we attempt to pull by name (in contrast to ID), we will run into the above described behavior."
+        },
+        {
+            "user": "rhatdan",
+            "body": "Buildah should have got the fact that it was using an intermediate name and never gone into libimage at all."
+        },
+        {
+            "user": "cevich",
+            "body": "> FWIW, I cannot reproduce.\n\nYa, I'm not too surprised.  You tried from latest on `release-1.21` branch I presume.  I've never ever seen or heard about this flake, I think we simply caught it by pure, dumb, luck.  It's probably worth some code-analysis to see how it actually could have happened.  It must be a race of some sort, and those sometimes point to deeper underlying problems that need fixing.\n\n> Buildah should have got the fact that it was using an intermediate name and never gone into libimage at all.\n\nI like this idea best, it sets a hard restriction.  Imagine if someone were to inadvertently say `FROM fedora AS evilbadbad`, where `docker.io/library/evilbadbad` contains an exploit to rob all your dogecoin!  Elon would be very, very upest :angry: "
+        },
+        {
+            "user": "vrothberg",
+            "body": "> Buildah should have got the fact that it was using an intermediate name and never gone into libimage at all.\n\nWe still have to look the image up which requires hitting `libimage`.  I think we should set pull-policy to neWer in such a case which is essentially a local image lookup."
+        },
+        {
+            "user": "cevich",
+            "body": "What about (somehow) runtime patching the number|name reference with the image sha (once it's built).  That would at least severely reduce the likelihood of an unintended lookup-clash - should we accidentally hit external repos."
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "buildah",
+            "number": 3393
+        }
+    ]
+}

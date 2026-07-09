@@ -1,0 +1,127 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "buildah",
+    "number": 1709,
+    "type": "issue",
+    "title": "Rootless overlay whiteouts throw error when stored",
+    "state": "closed",
+    "labels": [
+        "locked - please file new issue/PR"
+    ],
+    "user": "computator",
+    "body": "**Description**\n\nDeleting existing files in lower layers causes errors when running buildah/podman in rootless mode and using the overlay storage driver. Deleting the files works fine, but it seems to have issues when it later tries to use the whiteout files and fails with operation not permitted. It also has the same issue when pulling a container where a file from a lower layer is deleted. All of these have no issues when using the vfs driver instead.\n\n**Steps to reproduce the issue:**\n```\n$ ctr=$(buildah from alpine)\n$ buildah run $ctr rm /etc/alpine-release\n$ buildah commit --rm $ctr\nGetting image source signatures\nCopying blob 256a7af3acb1 skipped: already exists\nCopying blob d722205207d3 done\nCopying config eb5739d8d7 done\nWriting manifest to image destination\nStoring signatures\nerror committing container \"alpine-working-container\" to \"\": error copying layers and metadata for container \"5c77e22cdb9772b46833bf727d0c6f0139a5e4fad137286ac432fb6f72a1a520\": Error committing the finished image: error adding layer with blob \"sha256:d722205207d33a3bdaee8e1ab92a2bb66d31ac78dc06fb836b9d46e490dd8faa\": Error processing tar file(exit status 1): operation not permitted\nERRO[0002] exit status 1                                \n$ \n```\n\nYou can see some relevant strace output here from pulling/importing another container with the same issue. You can see it seems to have issues when it tries to create the whiteout node:\n```\nread(0, \"var/cache/apt/.wh.pkgcache.bin\\0\\0\"..., 512) = 512\nlstat(\"/var/cache/apt\", {st_mode=S_IFDIR|0755, st_size=4096, ...}) = 0\nlstat(\"/var/cache/apt/.wh.pkgcache.bin\", 0xc420bf52e8) = -1 ENOENT (No such file or directory)\nmknodat(AT_FDCWD, \"/var/cache/apt/pkgcache.bin\", S_IFCHR|000, makedev(0, 0)) = -1 EPERM (Operation not permitted)\nwrite(2, \"operation not permitted\", 23) = 23\n```\n\n**`buildah info`:**\n\n```\n$ buildah info\n{\n    \"host\": {\n        \"Distribution\": {\n            \"distribution\": \"ubuntu\",\n            \"version\": \"18.04\"\n        },\n        \"MemTotal\": 16775352320,\n        \"MenFree\": 6280101888,\n        \"SwapFree\": 2147479552,\n        \"SwapTotal\": 2147479552,\n        \"arch\": \"amd64\",\n        \"cpus\": 8,\n        \"hostname\": \"computator\",\n        \"kernel\": \"4.15.0-54-generic\",\n        \"os\": \"linux\",\n        \"rootless\": true,\n        \"uptime\": \"4h 40m 4.82s (Approximately 0.17 days)\"\n    },\n    \"store\": {\n        \"ContainerStore\": {\n            \"number\": 0\n        },\n        \"GraphDriverName\": \"overlay\",\n        \"GraphOptions\": null,\n        \"GraphRoot\": \"/home/computator/.local/share/containers/storage\",\n        \"GraphStatus\": {\n            \"Backing Filesystem\": \"extfs\",\n            \"Native Overlay Diff\": \"false\",\n            \"Supports d_type\": \"true\",\n            \"Using metacopy\": \"false\"\n        },\n        \"ImageStore\": {\n            \"number\": 1\n        },\n        \"RunRoot\": \"/run/user/1000\"\n    }\n}\n```",
+    "comments": [
+        {
+            "user": "rhatdan",
+            "body": "@giuseppe Is this a problem with fuse-overlayfs?"
+        },
+        {
+            "user": "giuseppe",
+            "body": "It is trying to use overlay without fuse-overlays.  It works on Ubuntu kernels but something seems to be failing.  @rlifshay could you try using fuse-overlays as we do by default on Fedora? "
+        },
+        {
+            "user": "computator",
+            "body": "If I use fuse-overlayfs it works without issue. I am hoping that this can be fixed so native overlay works. That way it theoretically has better performance and I also don't have to manually download and install fuse-overlayfs on Ubuntu.\n\nI was looking through some code a day or two ago in an attempt to debug this, and this looks like it might be somewhat related:\nhttps://github.com/containers/storage/blob/95718d665e695ab1b233f12308c7e2846871ac90/drivers/overlay/overlay.go#L1046"
+        },
+        {
+            "user": "computator",
+            "body": "I couldn't find a related issue before when I posted this, but I just now ran across this issue: https://github.com/containers/libpod/issues/2998"
+        },
+        {
+            "user": "computator",
+            "body": "Sorry for the repeated posts. It appears as if the kernel overlayfs itself is the only one that can do mknod or set xattrs in a layer for whiteouts or opaque directories when running in rootless mode. Currently we try and directly add the whiteouts with mknod, which only works with root permissions. Possibly we could solve this by detecting this case and using a different strategy. Rather than making the nodes ourselves, we could just delete the corresponding files or directories in the correct layer to cause overlayfs to create the whiteout nodes itself, thus bypassing the permissions issue."
+        },
+        {
+            "user": "giuseppe",
+            "body": "We need to create the whiteouts in the same format the kernel (or the FUSE program) expects them to be, so we cannot tweak it to be in a different format. If we use native overlay we need to create the whiteout files either with `mknod` or mounting an overlay file system and operating on it.\nThe latter is not trivial as it sounds: to create a whiteout we will first need to create the file in the lower layer and then remove it from the mount point; also this operation cannot be done while the file system is mounted so we will need to do two passes for creating whiteouts.\n\nI don't think the extra complexity is worth to to enable a custom Ubuntu kernel patch.\n\nIf you still want to use it, could you open a PR?  It will help to fully understand what are the costs and the complexity for supporting it"
+        },
+        {
+            "user": "computator",
+            "body": "I would like to find a feasible way to solve this if possible, because even if it's only usable in Ubuntu (or possibly everywhere, see third option below), it enables a significant performance increase. I saw a nearly 20% improvement in build time for a large container when using native overlay vs fuse-overlayfs. I have several ideas below and would try implementing one of them myself, but I am not familiar enough with go or the internals of these projects to be able to do so.\n\n- Unless I am missing something, I think creating whiteouts via overlayfs might be a little simpler than you described. The way I understood it, you were saying that to create whiteouts, we would need to create files corresponding to the whiteouts, mount that into an overlayfs, and then delete the files. However, whiteouts are only used to mark existing files in the lower layers as removed. As such, all that would need to be done is mount the lower layer(s) as normal. Since the lower layers already have the files in them, we wouldn't need to create the files. All that would need to be done is delete the existing files in the mounted overlayfs, thus creating whiteouts in the upperdir. This could be done at the same time as, or just before extracting files to a layer (as I believe the current mknod based code does) since extracting the files to the mounted overlayfs also puts them into the upperdir. I believe that this procedure (or a variation of it) would avoid needing the two passes you mentioned.\n\n- If that is still too complicated, what would be the feasibility of using a small external setuid root helper to call mknod to create the necessary whiteouts? Possibly this could be something optional like with the `mount_program` storage setting.\n\n- Another option that might justify the complexity of the first overlayfs/mounting method is to use a setuid root helper to mount overlayfs on non ubuntu distributions, thus allowing all distributions to benefit from the increased performance of native overlayfs.\n\nIf none of these are feasible, buildah (and podman, etc) should probably display a warning when using native overlayfs in rootless mode. In addition it would be nice to have fuse-overlayfs included in the buildah/podman ubuntu packages and enabled by default, rather than having to manually install it."
+        },
+        {
+            "user": "giuseppe",
+            "body": "> I would like to find a feasible way to solve this if possible, because even if it's only usable in Ubuntu (or possibly everywhere, see third option below), it enables a significant performance increase. I saw a nearly 20% improvement in build time for a large container when using native overlay vs fuse-overlayfs. I have several ideas below and would try implementing one of them myself, but I am not familiar enough with go or the internals of these projects to be able to do so.\n\nwhat container are you trying to build?  There should not be such big difference, unless you are trying to do many parallel readdirs or copyups.\n\n> * If that is still too complicated, what would be the feasibility of using a small external setuid root helper to call mknod to create the necessary whiteouts? Possibly this could be something optional like with the `mount_program` storage setting.\n> \n> * Another option that might justify the complexity of the first overlayfs/mounting method is to use a setuid root helper to mount overlayfs on non ubuntu distributions, thus allowing all distributions to benefit from the increased performance of native overlayfs.\n\nI don't think we should use setuid programs to circumvent kernel restrictions."
+        },
+        {
+            "user": "computator",
+            "body": "> what container are you trying to build? There should not be such big difference, unless you are trying to do many parallel readdirs or copyups.\n\nIt's a big container that installs WINE and some other things (https://github.com/rlifshay/dng-converter-ctr), although I would guess that even the smaller performance difference with a more typical container could add up in a CI environment or something.\n\n> I don't think we should use setuid programs to circumvent kernel restrictions.\n\nI can definitely understand why someone might be hesitant to do that, especially if it was the default. However personally I think it would be alright if it was left up to the administrator to explicitly choose to enable and specify such a program. Also, what I was envisioning wouldn't be the same as giving unlimited access to mknod, a definite security risk (and the reason it is restricted to root). Instead, it would be a minimal program that would only make nodes usable as whiteouts and that's it, thus alleviating the security risk. It could even go beyond that, and verify the caller and/or paths to make sure that it was being used as expected."
+        },
+        {
+            "user": "rhatdan",
+            "body": "I would prefer the distributions and upstream kernel to make those decisions.  If Ubuntu is kernel patch is blocking the creation of the whiteout device nodes, then you need to work with them to get it in.  We don't want to add setuid programs to Podman to get around security restrictions, especially when dealing with a patch that even the upstream User Namespace team has not allowed into the upstream kernel.\n\nPlease open an issue with Ubuntu to allow the creation of the device nodes.\n\nAs far as performance issues, I would prefer to fix fuse-overlayfs if possible to make it handle you workload better."
+        },
+        {
+            "user": "giuseppe",
+            "body": "it seems most of the cost in running apt is coming from `fsync`.  In general I think it is safer to disable it for containers, especially if all you do is to build a new image that you'll push immediately, or use a single `sync` call after the container exited.\nI've also started to work on multithreading support, the lookups are still done in single threading mode, but read/write/setattr/sync happen already on different threads and don't block other FUSE requests.\n\nI am working on it here: https://github.com/containers/fuse-overlayfs/pull/88\n\n@rlifshay, the PR seems to improve significantly your test script.  Would it be possible for you to try it out and let me know?"
+        },
+        {
+            "user": "computator",
+            "body": "Yes it seems to help a lot, at least when I also enable the mount options you mention in the PR.\n```\nnorm - 5 iters: 240.72s avg\nnew - 4 iters: 259.23s avg\nnew-opt - 4 iters: 204.28s avg\n```\n\nIt seems as if after our discussions this has really turned into several separate issues:\n - fuse-overlayfs performance\n - warning of potential issues when using native overlayfs without mknod/xattr permissions\n - better error messages when failing due to mknod/xattr permission denied\n - packaging fuse-overlayfs for ubuntu/debian by default"
+        },
+        {
+            "user": "giuseppe",
+            "body": "@rlifshay thanks a lot for the tests.  This is very helpful feedback.\n\nDo you also have a measure for native overlay (as root) on the same host?\n\n>     * packaging fuse-overlayfs for ubuntu/debian by default\n\n@lsm5 could we add fuse-overlayfs as a dependency to the Ubuntu package?"
+        },
+        {
+            "user": "computator",
+            "body": "@giuseppe I ran it with native overlayfs in rootless mode. I was going to do native as root too, but I kept having internet issues. I will probably try again tomorrow and will update you if it's much different.\n```\nnative-rootless - 4 iter: 214.23s avg\n```\n(I just changed my username from rlifshay if anyone is confused)"
+        },
+        {
+            "user": "computator",
+            "body": "I did some more testing with more stable conditions (mostly internet) and a lot less variance:\n```\nnative-root - 5 iter: 192.95s avg\nnative-rootless - 5 iter: 181.96s avg\nfuse - 5 iter: 206.82s avg\nfuse-new - 5 iter: 183.28s avg\n```"
+        },
+        {
+            "user": "rhatdan",
+            "body": "I believe this is fixed in master, reopen if I am mistaken."
+        },
+        {
+            "user": "tobwen",
+            "body": "This still seems to be an issue, I'm getting the same error on `chialab/php:latest` when using _overlay_ from kernel instead of _fuse-overlayfs_.\n\n```\nDEBU[0009] No compression detected\nDEBU[0009] Using original blob without modification\nCopying config efc13c9b83 done\nWriting manifest to image destination\nStoring signatures\nDEBU[0009] Applying tar in /home/tobwen/.local/share/containers/storage/overlay/cb42413394c4059335228c137fe884ff3ab8946a014014309676c25e3ac86864/diff\nDEBU[0009] Applying tar in /home/tobwen/.local/share/containers/storage/overlay/6d0d3d6de1440cd56da7652e938e44c70e4f136c6f6c528c1bea6046a586748e/diff\nDEBU[0009] Applying tar in /home/tobwen/.local/share/containers/storage/overlay/b358ff103a722457496a87057bfce3cd97bed325603416e518a9c0a633199de9/diff\nDEBU[0011] Applying tar in /home/tobwen/.local/share/containers/storage/overlay/538318ad07c672771c5b847a9eee4199eec55f972e6905a48353853b68ba36ed/diff\nDEBU[0011] Applying tar in /home/tobwen/.local/share/containers/storage/overlay/ed2ba9e0c99fa6c70a8a3ec6fa42c7ff952de34a42adc0368994f8e23f12fb74/diff\nDEBU[0011] Applying tar in /home/tobwen/.local/share/containers/storage/overlay/9c45a3949efbac4ec4669b5e966c397680c093fab3ef72d3ecdb7c40742eab18/diff\nDEBU[0011] Applying tar in /home/tobwen/.local/share/containers/storage/overlay/c1b49ca0dc93e03f4d178593cb3ab22740fe7d1a75c00931602a279ea5445836/diff\nDEBU[0012] Error pulling image ref //chialab/php:latest: Error committing the finished image: error adding layer with blob \"sha256:2ef822e4a99961fa41a6c91c5c444dd86e456326c14ac08d939a3e5186b7f554\": Error processing tar file(exit status 1): operation not permitted\n  Error processing tar file(exit status 1): operation not permitted\nError: Error committing the finished image: error adding layer with blob \"sha256:2ef822e4a99961fa41a6c91c5c444dd86e456326c14ac08d939a3e5186b7f554\": Error processing tar file(exit status 1): operation not permitted\n```\n\nIt works when using _fuse-overlayfs_."
+        },
+        {
+            "user": "jayaddison",
+            "body": "Seconding @tobwen's report, this also appears during a `buildah from python:3.9-slim` when using `driver = \"overlay\"` in `storage.conf`:\n\n```sh\n$ buildah --log-level debug from python:3.9-slim\n...\nWriting manifest to image destination\nStoring signatures\nDEBU Applying tar in /mnt/ephemeral/containers/user-storage/overlay/9958376e618d1ca5e7d2d1ba0d48c6994913dee57315f6fda6ac98f387b01165/diff \nDEBU error copying src image [\"docker://python:3.9-slim\"] to dest image [\"docker.io/library/python:3.9-slim\"] err: Error committing the finished image: error adding layer with blob \"sha256:74f86becb84a3ee98802e154c3117092e23fffae5d97369eaf6cacd679362972\": Error processing tar file(exit status 1): operation not permitted \nDEBU error pulling image \"docker://python:3.9-slim\": Error committing the finished image: error adding layer with blob \"sha256:74f86becb84a3ee98802e154c3117092e23fffae5d97369eaf6cacd679362972\": Error processing tar file(exit status 1): operation not permitted \nDEBU unable to pull and read image \"docker.io/library/python:3.9-slim\": Error committing the finished image: error adding layer with blob \"sha256:74f86becb84a3ee98802e154c3117092e23fffae5d97369eaf6cacd679362972\": Error processing tar file(exit status 1): operation not permitted \nError committing the finished image: error adding layer with blob \"sha256:74f86becb84a3ee98802e154c3117092e23fffae5d97369eaf6cacd679362972\": Error processing tar file(exit status 1): operation not permitted\nDEBU shutting down the store                      \nERRO exit status 125\n```"
+        },
+        {
+            "user": "giuseppe",
+            "body": "> This still seems to be an issue, I'm getting the same error on `chialab/php:latest` when using _overlay_ from kernel instead of _fuse-overlayfs_.\n\nwhat kernel version?"
+        },
+        {
+            "user": "KlavsKlavsen",
+            "body": "We have this problem in a CI job, running on Kubernetes - running on Ubuntu 20.04 nodes.. Has this been resolved in Ubuntu 22.04 - or is ubuntu still using some problematic combination of kernel options?"
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "buildah",
+            "number": 1745
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "buildah",
+            "number": 2326
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 9006
+        },
+        {
+            "organization": "ES-Nix",
+            "repository": "podman-rootless",
+            "number": 2
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "buildah",
+            "number": 3384
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 13401
+        }
+    ]
+}

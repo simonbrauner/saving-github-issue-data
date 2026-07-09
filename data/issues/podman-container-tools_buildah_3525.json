@@ -1,0 +1,180 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "buildah",
+    "number": 3525,
+    "type": "pull_request",
+    "title": "build: Cleanup transient mount destinations with every RUN step",
+    "state": "closed",
+    "labels": [
+        "approved",
+        "lgtm",
+        "locked - please file new issue/PR"
+    ],
+    "user": "flouthoc",
+    "body": "Following PR ensures that we cleanup dangling `/run` and dir after every RUN\ncommand and remount with every `RUN` inorder to make sure that it does not \npersists on physical image. Ensureparity with how docker behaves with `.dockerenv`.\n\nCloses: https://github.com/containers/buildah/issues/3523\n",
+    "comments": [
+        {
+            "user": "flouthoc",
+            "body": "/hold"
+        },
+        {
+            "user": "rhatdan",
+            "body": "I think there are other  RUN artifacts then just /run.  We add some inodes in /etc as well."
+        },
+        {
+            "user": "flouthoc",
+            "body": "@rhatdan I think `/etc` is not a problem for the issue which @cgwalters created since other directory are already part of expected file structure instead of `/run` but sure we can clean up those as well if its needed. @cgwalters could you please confirm ?"
+        },
+        {
+            "user": "flouthoc",
+            "body": "cc @nalind"
+        },
+        {
+            "user": "nalind",
+            "body": "This gets us closer to cleaning up everything we leave behind during RUN, but it doesn't get us all the way there."
+        },
+        {
+            "user": "TomSweeneyRedHat",
+            "body": "So, just to make sure, let's assume we have a secret that contains database credentials.  In the Containerfile there are three or more  RUN statements that each relies on those credentials.  The credentials will be available for each instance of RUN?\n\nI'm not sure we have a test for this, it would be nice to add one if not."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@TomSweeneyRedHat I believe each RUN is independent and will recreate the /run/secrets.  This patch is just removing them when the container completes, so that a `buildah commit` will not keep them."
+        },
+        {
+            "user": "flouthoc",
+            "body": "@TomSweeneyRedHat so its exactly as @rhatdan stated every `RUN` is independent and things get recreated on individual run. We are just removing them so nothing persists in image."
+        },
+        {
+            "user": "rhatdan",
+            "body": "My concern with this, without playing with it, is what happens if I want to add /run/foobar or /etc/resolv.conf to my image, can we differentiate between this.\n\nfrom fedora\nrun touch /run/foobar\nadd hosts /etc/hosts\n\nWhat happens in this case?\n"
+        },
+        {
+            "user": "flouthoc",
+            "body": "@rhatdan I have removed `/etc/` from cleanup lists since i am not able to see `/etc` as dangling file in any of the image. Apart from that i tried building and i can see `/run/foobar` in image as it is not part of `bindFiles` list so cleanup will not remove any files manually added by user\n```\nFROM registry.fedoraproject.org/fedora:34\nRUN touch /run/foobar\n```\n@nalind @rhatdan what are some other dangling stuff which we leave behind since i can only see `/run/secrets` and `/run/.containerenv` i dont think `/etc` is dangling at all i can only see that in rootfs"
+        },
+        {
+            "user": "rhatdan",
+            "body": "How about:\ncat Containerfile\nFROM registry.fedoraproject.org/fedora:34\nRUN rm /etc/hosts\nRUN echo hi\nbuildah build -t test1 .\nDoes test1 have an /etc/hosts file within it?\n"
+        },
+        {
+            "user": "flouthoc",
+            "body": "@rhatdan this build fails for me with\n```\nSTEP 2/3: RUN rm /etc/hosts\nrm: cannot remove '/etc/hosts': Device or resource busy\nerror building at STEP \"RUN rm /etc/hosts\": error while running runtime: exit status 1\nERRO[0005] exit status 1    \n```\n\nSo `/etc/hosts` is there but i can't see that on exploded layers commit-ed so i think it does not persists on layers. I cant see it when I try to inspect exploded layers manually."
+        },
+        {
+            "user": "rhatdan",
+            "body": "I guess the best test would be to create a statically linked c program put into an image\n\nCat Containerfile\nfrom scratch\ncopy a.out /\nrun a.out\n\nThen see if the image has anything in it except for a.out.\n"
+        },
+        {
+            "user": "flouthoc",
+            "body": "ps: discussed this with @nalind so we also have to take care of all the other mounts which are not getting cleanedup eg bind mounts\nSo I'll re-skim the code and add more components to this."
+        },
+        {
+            "user": "edsantiago",
+            "body": "I may be misunderstanding the intention behind this PR. I ran this command, and expected null output (or at least only directories, no files). Instead:\n```console\n$ printf \"FROM quay.io/podman/stable:latest\\nRUN podman pull quay.io/libpod/testimage:20210610\\nRUN ls -lR /run\\n\" | ./bin/buildah bud -\nSTEP 1/3: FROM quay.io/podman/stable:latest\nSTEP 2/3: RUN podman pull quay.io/libpod/testimage:20210610\ntime=\"2021-09-21T20:22:17Z\" level=warning msg=\"\\\"/\\\" is not a shared mount, this could cause issues or missing mounts with rootless containers\"\nTrying to pull quay.io/libpod/testimage:20210610...\nGetting image source signatures\nCopying blob sha256:9afcdfe780b4ea44cc52d22e3f93ccf212388a90370773571ce034a62e14174e\nCopying blob sha256:9afcdfe780b4ea44cc52d22e3f93ccf212388a90370773571ce034a62e14174e\nCopying config sha256:9f9ec7f2fdef9168f74e9d057f307955db14d782cff22ded51d277d74798cb2f\nWriting manifest to image destination\nStoring signatures\n9f9ec7f2fdef9168f74e9d057f307955db14d782cff22ded51d277d74798cb2f\nSTEP 3/3: RUN ls -lR /run\n/run:\ntotal 0\ndrwxr-xr-x. 1 root root   0 Sep 21 08:06 console\ndrwx------. 1 root root  14 Sep 21 20:22 containers\ndrwxr-xr-x. 1 root root   0 Jan 26  2021 criu\ndrwx------. 1 root root   0 Sep 21 08:06 cryptsetup\ndrwxr-xr-x. 1 root root   0 Sep 21 08:06 faillock\ndrwxr-x--x. 1 root root  68 Sep 21 20:22 libpod\ndrwxr-xr-x. 1 root root  12 Sep 21 08:06 lock\ndrwxr-xr-x. 1 root root   0 Sep 21 08:06 log\n-rw-r--r--. 1 root root   0 Sep 21 08:06 motd\n....\n/run/containers/storage/overlay-layers:\ntotal 8\n-rw-------. 1 root root  2 Sep 21 20:22 mountpoints.json\n-rw-r--r--. 1 root root 64 Sep 21 20:22 mountpoints.lock\n....\n```\nI tried with buildah @ main (without this patch) and the output looks identical."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@edsantiago during the run the files and directories will be there.  The PR is attempting to make sure they do not get committed to the image.\nSo you would need to mount the final image with something like\nmnt=$(podman image mount IMAGE)\nls -l $/mnt/run\n"
+        },
+        {
+            "user": "edsantiago",
+            "body": "```console\n$ printf \"FROM quay.io/podman/stable:latest\\nRUN podman pull quay.io/libpod/testimage:20210610\\n\" | ./bin/buildah bud -t foo -\n.....\n$ podman run --rm foo ls -laR /run|grep '^-r'\n-rw-r--r--. 1 root root   0 Sep 21 20:45 .containerenv\n-rw-r--r--. 1 root root   0 Sep 21 08:06 motd\n-rw-------. 1 root root   2 Sep 21 20:40 mountpoints.json\n-rw-r--r--. 1 root root  64 Sep 21 20:40 mountpoints.lock\n-rw-r--r--. 1 root root  0 Sep 21 20:40 alive\n-rw-r--r--. 1 root root  0 Sep 21 20:40 alive.lck\n-rw-------. 1 root root  2 Sep 21 20:40 pause.pid\n-rwx------. 1 root root 229 Sep 21 20:40 events.log\n-rw-r--r--. 1 root root   0 Sep 21 20:40 events.log.lock\n```"
+        },
+        {
+            "user": "rhatdan",
+            "body": "Podman puts them back as well.  We are just looking at what goes into the image.  Not what a running container sees.\nAnother way to look at this would be to see what the image looks like when Docker runs it.  /run/.containerenv and /run/secrets should not be there."
+        },
+        {
+            "user": "flouthoc",
+            "body": "@nalind @rhatdan PTAL after struggling with conformance tests i think these following mounts can be cleaned up and changed to a more generic approach rather than cleaning individual directories."
+        },
+        {
+            "user": "openshift-ci[bot]",
+            "body": "[APPROVALNOTIFIER] This PR is **APPROVED**\n\nThis pull-request has been approved by: *<a href=\"https://github.com/containers/buildah/pull/3525#\" title=\"Author self-approved\">flouthoc</a>*, *<a href=\"https://github.com/containers/buildah/pull/3525#pullrequestreview-761828462\" title=\"Approved\">rhatdan</a>*\n\nThe full list of commands accepted by this bot can be found [here](https://go.k8s.io/bot-commands?repo=containers%2Fbuildah).\n\nThe pull request process is described [here](https://git.k8s.io/community/contributors/guide/owners.md#the-code-review-process)\n\n<details >\nNeeds approval from an approver in each of these files:\n\n- ~~[OWNERS](https://github.com/containers/buildah/blob/main/OWNERS)~~ [flouthoc,rhatdan]\n\nApprovers can indicate their approval by writing `/approve` in a comment\nApprovers can cancel approval by writing `/approve cancel` in a comment\n</details>\n<!-- META={\"approvers\":[]} -->"
+        },
+        {
+            "user": "rhatdan",
+            "body": "Don't we know the list of mounts that we added? Can't we just check for those and only remove those?\n@nalind WDYT?"
+        },
+        {
+            "user": "nalind",
+            "body": "> Don't we know the list of mounts that we added? Can't we just check for those and only remove those?\n\nI believe that's what we're doing here, give or take certain exceptions.  The tricky part appears to be in only removing items that were added purely for the sake of RUN."
+        },
+        {
+            "user": "rhatdan",
+            "body": "Yes that is my concern.\n\nIs \nrun echo localhost 126.0.0.1 > /etc/resolv.conf\nSafe?"
+        },
+        {
+            "user": "nalind",
+            "body": "> Yes that is my concern.\n> \n> Is\n> run echo localhost 126.0.0.1 > /etc/resolv.conf\n> Safe?\n\nIf that's a volume mounted file, then I wouldn't expect that content to show up in the image."
+        },
+        {
+            "user": "flouthoc",
+            "body": "@rhatdan that is safe\nEdit: as nalind mention it doesnt shows up in image. But we are not doing anything special to cleanup `/etc` so its expected behaviour."
+        },
+        {
+            "user": "nalind",
+            "body": "~I think this is fallout from #3518, which used `pkg/rusage` as its \"quick\" check to see if `go test` supported a `-race` flag.  It didn't use `-mod=vendor`, and even for a small package, it has some external dependencies that would get pulled down.~\nSorry, wrong PR."
+        },
+        {
+            "user": "flouthoc",
+            "body": "@nalind @rhatdan please let me know if anything else is needed on this PR."
+        },
+        {
+            "user": "rhatdan",
+            "body": "This PR makes it slightly better.\n\n```\n$ cat t.go \npackage main\nimport (\"fmt\")\nfunc main() {\n\tfmt.Println(\"Hello World\")\n}\n$ go build -o t t.go\n$ cat Containerfile\nfrom scratch\ncopy t /t\nrun [ \"/t\" ]\n$ ./bin/buildah bud -t dan .\nSTEP 1/3: FROM scratch\nSTEP 2/3: copy t /t\nSTEP 3/3: run [ \"/t\" ]\nHello World\nCOMMIT dan\nGetting image source signatures\nCopying blob b31164ddec40 done  \nCopying config 82eb390304 done  \nWriting manifest to image destination\nStoring signatures\n--> 82eb3903049\nSuccessfully tagged localhost/dan:latest\n82eb390304938f16dd707f32abaa8464af8d4a25959ab342e25696a540ec56b5\n$ buildah unshare \n# mnt=$(podman image mount dan)\n# find $mnt\n/home/dwalsh/.local/share/containers/storage/overlay/b31164ddec40ddf1e0e42fa9848c17f0bf30fa4f8b9e4e0bcd4c4546f2579df0/merged\n/home/dwalsh/.local/share/containers/storage/overlay/b31164ddec40ddf1e0e42fa9848c17f0bf30fa4f8b9e4e0bcd4c4546f2579df0/merged/dev\n/home/dwalsh/.local/share/containers/storage/overlay/b31164ddec40ddf1e0e42fa9848c17f0bf30fa4f8b9e4e0bcd4c4546f2579df0/merged/etc\n/home/dwalsh/.local/share/containers/storage/overlay/b31164ddec40ddf1e0e42fa9848c17f0bf30fa4f8b9e4e0bcd4c4546f2579df0/merged/etc/hosts\n/home/dwalsh/.local/share/containers/storage/overlay/b31164ddec40ddf1e0e42fa9848c17f0bf30fa4f8b9e4e0bcd4c4546f2579df0/merged/etc/resolv.conf\n/home/dwalsh/.local/share/containers/storage/overlay/b31164ddec40ddf1e0e42fa9848c17f0bf30fa4f8b9e4e0bcd4c4546f2579df0/merged/proc\n/home/dwalsh/.local/share/containers/storage/overlay/b31164ddec40ddf1e0e42fa9848c17f0bf30fa4f8b9e4e0bcd4c4546f2579df0/merged/run\n/home/dwalsh/.local/share/containers/storage/overlay/b31164ddec40ddf1e0e42fa9848c17f0bf30fa4f8b9e4e0bcd4c4546f2579df0/merged/sys\n/home/dwalsh/.local/share/containers/storage/overlay/b31164ddec40ddf1e0e42fa9848c17f0bf30fa4f8b9e4e0bcd4c4546f2579df0/merged/t\n```\nI see /etc/hosts and /etc/resolv.conf in the image.  Also see other main mount points /proc, /sys, /run, /dev and /etc\n"
+        },
+        {
+            "user": "flouthoc",
+            "body": "@rhatdan PR refrains from touching paths starting with `/etc, /dev, /sys, /proc` as unionfs has a `bug or a feature` ( dont know what to call it ) that whenever a file is removed and lower contains similar file a `.wh` or `whiteout` file is added as a replacement. We can cleanup `.wh` but don't know if we should perform cleanup on these paths. @nalind Could you confirm please."
+        },
+        {
+            "user": "nalind",
+            "body": "> @rhatdan PR refrains from touching paths starting with `/etc, /dev, /sys, /proc` as unionfs has a `bug or a feature` ( dont know what to call it ) that whenever a file is removed and lower contains similar file a `.wh` or `whiteout` file is added as a replacement. We can cleanup `.wh` but don't know if we should perform cleanup on these paths. @nalind Could you confirm please.\n\nNo, we wouldn't do that.  If L is the lower layer, and U is the upper layer in a mounted overlay filesystem M, the whiteout is used to mark for the kernel that the file was removed at U and thus shouldn't appear when looking at M.  L can be used as a lower layer for other mounts at the very same time, or it can be on read-only storage, but in either case the design of overlay is such that modifications made in the overlay mount are always, and only, recorded in the upper layer (U)."
+        },
+        {
+            "user": "flouthoc",
+            "body": "@nalind thanks for the detailed explanation. \n\n@rhatdan @nalind then i guess these are the only mounts we can cleanup and i don't think people should face any issues with other paths."
+        },
+        {
+            "user": "rhatdan",
+            "body": "I am not sure we want to hit those other paths anyways, since readonly containers will rely on them\nLGTM."
+        },
+        {
+            "user": "nalind",
+            "body": "This definitely needs a test."
+        },
+        {
+            "user": "cgwalters",
+            "body": "When testing, I've been doing e.g. `skopeo copy containers-storage:localhost/testimage oci:testimage` and then look in `testimage/blobs/sha256` at the tarballs.  I doubt there's a `podman` cli to get the raw stream, but OTOH it probably wouldn't be hard to add."
+        },
+        {
+            "user": "flouthoc",
+            "body": "Added tests\n\n> @rhatdan PR refrains from touching paths starting with `/etc, /dev, /sys, /proc` as unionfs has a `bug or a feature` ( dont know what to call it ) that whenever a file is removed and lower contains similar file a `.wh` or `whiteout` file is added as a replacement. We can cleanup `.wh` but don't know if we should perform cleanup on these paths. @nalind Could you confirm please.\n\nJust for ref: I also experimented with how docker is handling cleanups for transient files in these paths looks like docker is also not doing cleanup at all for these paths as well. Infact first thing they do is create `/etc/hosts` and `/etc/resolve.conf` no matter if they exists on lower or not and both of them is persisted in image as well."
+        },
+        {
+            "user": "rhatdan",
+            "body": "SGTM"
+        },
+        {
+            "user": "flouthoc",
+            "body": "@nalind @rhatdan PTAL"
+        },
+        {
+            "user": "nalind",
+            "body": "I'm always going to be uneasy about deleting data from a rootfs, but the tests pass, so LGTM."
+        },
+        {
+            "user": "rhatdan",
+            "body": "/lgtm\n/hold cancel"
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "buildah",
+            "number": 4242
+        }
+    ]
+}

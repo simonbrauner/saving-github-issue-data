@@ -1,0 +1,545 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "buildah",
+    "number": 1848,
+    "type": "pull_request",
+    "title": "Cirrus: Migrate off of PAPR + Improve testing",
+    "state": "closed",
+    "labels": [
+        "locked - please file new issue/PR"
+    ],
+    "user": "cevich",
+    "body": "Replace PAPR with 'in_podman' / Cirrus-CI based test.  Prepare the groundwork for replacing Homu and Travis with Bors + VM-based testing (set \"optional\" in this PR).   Once this PR is merged, until #2115 is merged: maintainers must carefully/manually merge PRs one-by-one (since the Homu bot will be disabled).",
+    "comments": [
+        {
+            "user": "rhatdan",
+            "body": "Thanks @cevich looking forward to this working. and I am sure @jlebon is looking forward to it also.  :^)"
+        },
+        {
+            "user": "cevich",
+            "body": "okay, basic stuff is all working well, now to actually execute some tests :smile: "
+        },
+        {
+            "user": "cevich",
+            "body": "note to me:   somehow things running in podman are not returning exit codes?"
+        },
+        {
+            "user": "cevich",
+            "body": "@nalind or @rhatdan I need some help here.  For buildah-in-podman (super-privileged as in PAPR) intg. testing in F30 I'm missing something (a CLI option or sysctl or something on the host).  How do I prevent https://cirrus-ci.com/task/6256151280222208?command=integration_test#L3274 ?\n\n(all other tests mostly seem to be running well)\n\nI'm running the container with various values for `$BUILDAH_ISOLATION` from here:  https://github.com/containers/buildah/pull/1848/files#diff-a724b9731c5e35d731b550c9714775e1R189-R206"
+        },
+        {
+            "user": "rhatdan",
+            "body": "This looks like the cgroup file system is being mounted readonly into the container that is running podman, or on the host?"
+        },
+        {
+            "user": "cevich",
+            "body": "I've looked and looked but I cannot see where it's mounting up cgroups anything into the container.  The host is a F30 VM, not too different from what we use in libpod.  Searching,  I find is that `-e \"CGROUP_MANAGER=cgroupfs\"` option from the `in_podman` function I linked.  Could that be triggering test-behavior that shouldn't be enabled?"
+        },
+        {
+            "user": "rhatdan",
+            "body": "Can you ssh into the box?"
+        },
+        {
+            "user": "cevich",
+            "body": "Yes, we have the same `hack/get_ci_vm.sh` script here and ability to 'delete-protect' VMs.  I agree, that seems a reasonable next step.  The other thought I had (though a bit undesirable) is to temporarily skip the offenders to support the migration.  Then pick up immediately on fixing them.  Either way, lemmie grab one of these fetched-up VMs so we can poke it with sharpened sticks..."
+        },
+        {
+            "user": "cevich",
+            "body": "Oh...and this is probably an easy answer:  For F30 w/ `BUILDAH_ISOLATION=chroot STORAGE_DRIVER=vfs STORAGE_OPT=vfs.mountopt=nodev` I see this for a few tests:\n\n```\n[+1642s] # time=\"2019-10-23T17:00:15Z\" level=debug msg=\"[graphdriver] trying provided driver \\\"vfs\\\"\"\n[+1642s] # time=\"2019-10-23T17:00:15Z\" level=error msg=\"error opening storage: vfs driver does not support overlay.mountopt options\"\n```\n\nThat seems like a bug to me (either in test, or elsewhere), eh?"
+        },
+        {
+            "user": "cevich",
+            "body": "Ref, the important beginning parts:\n\n```\n[root@cevich-fedora-cloud-base-30-1-2-1565360543 buildah]# contrib/cirrus/test.sh integration\nrm -f -r buildah imgtype build buildah.static buildah.darwin tests/testreport/testreport\nmake -C docs clean\nmake[1]: Entering directory '/var/tmp/go/src/github.com/containers/buildah/docs'\nrm -f buildah*.1\nmake[1]: Leaving directory '/var/tmp/go/src/github.com/containers/buildah/docs'\n--------------------------------------------------\n+  podman run -i --name in_podman_build24 -e CIRRUS_WORKING_DIR=/var/tmp/go/src/github.com/containers/buildah -e CI=false --net=host --security-opt label=disable --security-opt seccomp=unconfined --cap-add=all -e GOPATH=/var/tmp/go -e IN_PODMAN=false -e DIST=fedora -e CGROUP_MANAGER=cgroupfs -e STORAGE_DRIVER=vfs -e STORAGE_OPT=vfs.mountopt=nodev --network container:registry -v /dev/fuse:/dev/fuse -v /var/tmp/go/src/github.com/containers/buildah:/var/tmp/go/src/github.com/containers/buildah:z --workdir /var/tmp/go/src/github.com/containers/buildah -v /root/auth:/root/auth:ro --rm in_podman_build24:latest contrib/cirrus/test.sh integration\n--------------------------------------------------\n+  make\nGO111MODULE=on go build -mod=vendor -ldflags '-X main.GitCommit=8cbbf6e1 -X main.buildInfo=1571933288 -X main.cniVersion=v0.7.1'  -o buildah -tags \"seccomp selinux     containers_image_ostree\" ./cmd/buildah\n...cut...\n```\n\n(confirming it fails in the same way)"
+        },
+        {
+            "user": "cevich",
+            "body": "...okay, yep, it produces the same `/sys/fs/cgroup/cpuset/buildah-buildah323213061: read-only file system`"
+        },
+        {
+            "user": "cevich",
+            "body": "Ref: command used to execute in papr: https://github.com/containers/buildah/blob/master/.papr.yml#L50-L53"
+        },
+        {
+            "user": "cevich",
+            "body": "trying with a `-v /sys/fs/cgroup:/sys/fs/cgroup`"
+        },
+        {
+            "user": "cevich",
+            "body": "Oh...this is interesting.  Now I get errors finding files the definitely exist:\n\n```\nnot ok 19 blobcache-build-compressed-using-dockerfile-explicit-push\n# (from function `die' in file ./helpers.bash, line 128,\n#  from function `run_buildah' in file ./helpers.bash, line 116,\n#  in test file ./blobcache.bats, line 169)\n#   `run_buildah build-using-dockerfile -t ${target} --pull-always --signature-policy ${TESTSDIR}/policy.json --blob-cache=${blobcachedir} --disable-compression=false ${TESTSDIR}/bud/add-file' failed\n# $ /var/tmp/go/src/github.com/containers/buildah/tests/./../buildah build-using-dockerfile -t new-image --pull-always --signature-policy /var/tmp/go/src/github.com/containers/buildah/tests/./policy.json --blob-cache=/var/tmp/tmp18055b50e8fac66973ce2248/cache --disable-compression=false /var/tmp/go/src/github.com/containers/buildah/tests/./bud/add-file\n# cannot find Containerfile or Dockerfile in context directory: stat /var/tmp/go/src/github.com/containers/buildah/tests/bud/add-file/Dockerfile: no such file or directory\n# [ rc=1 (** EXPECTED 0 **) ]\n```\n\n(ten-billion of similar messages)"
+        },
+        {
+            "user": "rhatdan",
+            "body": "Remove STORAGE_OPT=vfs.mountopt=nodev\nWhy are these tests difference then before?"
+        },
+        {
+            "user": "rhatdan",
+            "body": "Where does this podman command come from?  I don't see it under Buildah?"
+        },
+        {
+            "user": "cevich",
+            "body": "it's not SELinux.  I tried both `permissive` and `setsebool container_manage_cgroup true`."
+        },
+        {
+            "user": "cevich",
+            "body": "> Where does this podman command come from? I don't see it under Buildah?\n\nUgg, trying and failing to give useful links, sorry.  It comes from `contrib/cirrus/lib.sh` if github would behave for me..."
+        },
+        {
+            "user": "cevich",
+            "body": "Papr was doing it like:\n\n```\npodman run --net=host --security-opt label=disable --cap-add all --security-opt seccomp=unconfined -v /etc/yum.repos.d:/etc/yum.repos.d.host:ro\n    -v $PWD:/go/src/github.com/containers/buildah\n    --workdir /go/src/github.com/containers/buildah\n    registry.fedoraproject.org/fedora:30 bash -c sh ./.papr.sh\n```\n\n(which didn't work, so I, err, started adding things :grin: )"
+        },
+        {
+            "user": "cevich",
+            "body": "> Why are these tests difference then before?\n\n@rhatdan I think one of the things we're dealing with is the vast difference in environments and podman.  Papr was last successful running (command above) on a Fedora Atomic 28 host.  So presumably buildah development stuck with what ran and passed there (i.e. using a very old podman).  Now with a F30 host and brand-new-fresh podman, test-vs-host expectations are just not lining up any more.\n\n> Remove STORAGE_OPT=vfs.mountopt=nodev\n\nI'll try again, but IIRC w/o that the tests throw errors complaining about `overlay.mountopts` (despite STORAGE_DRIVER=vfs`)"
+        },
+        {
+            "user": "cevich",
+            "body": "So it seems the `BUILDAH_ISOLATION=chroot` and `rootless` tasks without `STORAGE_OPT=vfs.mountopt=nodev` are what throws\n\n```\n[+1602s] # time=\"2019-10-24T20:30:05Z\" level=debug msg=\"[graphdriver] trying provided driver \\\"vfs\\\"\"\n[+1602s] # time=\"2019-10-24T20:30:05Z\" level=error msg=\"error opening storage: vfs driver does not support overlay.mountopt options\"\n```\n\n`BUILDAH_ISOLATION=` (empty)  task gives the `/sys/fs/cgroup/cpuset/buildah-buildah324011388: read-only file system\\`  cgroup errors. \n\nThere are some other failures mixed in which I'm ignoring for now.  In any case, based on the huge number of tests that do pass, overall this PR is closer than it was on Monday."
+        },
+        {
+            "user": "cevich",
+            "body": "I think maybe the next step is to see if I can manually reproduce the mount-options thing...perhaps there's a bug there."
+        },
+        {
+            "user": "cevich",
+            "body": "@rhatdan I can reproduce the read-only cgroup directory thing locally (F29) using a simplified version of the container used in these tests:\n\n```\n# podman run -it --rm --net=host --security-opt label=disable --security-opt seccomp=unconfined --cap-add=all -e CGROUP_MANAGER=cgroupfs -e STORAGE_DRIVER=vfs -v /dev/fuse:/dev/fuse fedora:latest mkdir /sys/fs/cgroup/cpuset/buildah-buildah364534981\n\nmkdir: cannot create directory '/sys/fs/cgroup/cpuset/buildah-buildah364534981': Read-only file system\n```\n\nI produce the same error using a simplified version of the former PAPR container command:\n\n```\n# podman run -it --rm --net=host --security-opt label=disable --cap-add all --security-opt seccomp=unconfined fedora:latest mkdir /sys/fs/cgroup/cpuset/buildah-buildah364534981\n\nmkdir: cannot create directory '/sys/fs/cgroup/cpuset/buildah-buildah364534981': Read-only file system\n```\n\nand for sanity-sake, the `mkdir` does work directly on my host:\n\n```\n# mkdir /sys/fs/cgroup/cpuset/buildah-buildah364534981\n# rmdir /sys/fs/cgroup/cpuset/buildah-buildah364534981\n```"
+        },
+        {
+            "user": "cevich",
+            "body": "@rhatdan I chatted with Matt about this.  We couldn't get any definitive answers, but he seems to believe it's possible we had a read-write cgroups in podman during the F28 timeframe.  Since these containers are running with super-privileges anyway, he confirmed our best bet is to just volume-mount `/sys/fs/cgroup` read-write in the containers.\n\nI suppose the only other choice here is to dive into a bunch of old tests and re-write as needed.  I'm not prepared for that nor would I feel good asking someone else to do it :face_with_head_bandage: "
+        },
+        {
+            "user": "cevich",
+            "body": "(Rebased + added ***rw*** mounting of cgroups, enabling `container_manage_cgroup`, plus added a few comments)\n\nHopefully fixing the cgroups problem will leave only the `overlay.mountopts` problem to address..."
+        },
+        {
+            "user": "cevich",
+            "body": "@rhatdan the `overlay.mountopt` issue I think is an actual bug.  I'm able to reproduce it easily:\n\n```\n$ sudo podman run --net=host --security-opt label=disable --security-opt seccomp=unconfined --cap-add=all -e CGROUP_MANAGER=cgroupfs -e STORAGE_DRIVER=vfs -v /sys/fs/cgroup:/sys/fs/cgroup:rw -it --rm fedora:latest bash\n\n[root@cevich ~]# dnf install -y buildah\n...cut...\n buildah                        x86_64        1.11.3-2.fc30                         updates        8.6 M\n...cut...\nComplete!\n[root@cevich ~]# buildah from scratch\nvfs driver does not support overlay.mountopt options\n[root@cevich ~]# buildah --storage-driver=vfs from scratch\nworking-container\n```\n\nIIRC we had an issue similar to this in podman, do you remember the details?"
+        },
+        {
+            "user": "rhatdan",
+            "body": "I have a PR to begin fixing this in the works, actually merged into container/storage. \nThe issue is we do not clear the STORAGE_OPTS when STORAGE_DRIVER is set, we do if the user overrides via command line.\n\nYou need to add -e STORAGE_OPTIONS=\"\" and I think everything will work."
+        },
+        {
+            "user": "cevich",
+            "body": "Here's the issue: https://github.com/containers/buildah/issues/1783 and https://github.com/containers/libpod/pull/3240 (in podman)\n\nSo should I be setting `STORAGE_OPT=overlay.mountopt=`?  That just seems wrong (we're not using 'overlay', we're using 'vfs')"
+        },
+        {
+            "user": "rhatdan",
+            "body": "Won't STORAGE_OPTIONS=\"\" work?"
+        },
+        {
+            "user": "cevich",
+            "body": "> Won't STORAGE_OPTIONS=\"\" work?\n\nNope, same deal.  I'm convinced this is simply buildah's flavor of containers/libpod#3240\n\nThe quick-fix there was to comment-out `mountopt = \"nodev,metacopy=on\"` in `/etc/containers/storage.conf`.  \n\nOpened #1945"
+        },
+        {
+            "user": "cevich",
+            "body": "(force-pushed w/ quick-fix to `mountopt` issue + squashed up commits)"
+        },
+        {
+            "user": "cevich",
+            "body": "(rebased w/ addition of /dev/fuse volume-mount to podman command-line)"
+        },
+        {
+            "user": "cevich",
+            "body": "Ooohhh, it seems so close I can feel it.  @rhatdan @nalind these last errors seem like they would be easy to debug given your better knowledge of the tests.  Mind you, these are all running inside podman, and I see repetition of some common errors throughout (not sure if they're significant):\n\n* For [BUILDAH_ISOLATION=\"\"](https://cirrus-ci.com/task/6284275850149888)\n   * [[+1066s] not ok 135 buidah bud --volume](https://cirrus-ci.com/task/6284275850149888?command=integration_test#L891-L929)\n   * [[+1144s] not ok 155 bud with additional device](https://cirrus-ci.com/task/6284275850149888?command=integration_test#L949-L1050)\n   * [[+1810s] not ok 280 user-and-network-namespace](https://cirrus-ci.com/task/6284275850149888?command=integration_test#L1175-L1197)\n   * [[+1836s] not ok 286 user-namespace](https://cirrus-ci.com/task/6284275850149888?command=integration_test#L1203-L1220)\n   * [[+1856s] not ok 288 combination-namespaces](https://cirrus-ci.com/task/6284275850149888?command=integration_test#L1222-L1435)\n   * [[+1861s] not ok 290 overlay specific level](https://cirrus-ci.com/task/6284275850149888?command=integration_test#L1437-L1450)\n   * [[+2206s] not ok 343 run-device](https://cirrus-ci.com/task/6284275850149888?command=integration_test#L1503-L1692)\n* For [BUILDAH_ISOLATION=chroot](https://cirrus-ci.com/task/4876900966596608)\n   * ***SAME/SIMILAR*** [+1105s] not ok 135 buidah bud --volume\n   * [[+1809s] not ok 290 overlay specific level](https://cirrus-ci.com/task/4876900966596608?command=integration_test#L1084-L1094)\n* For [BUILDAH_ISOLATION=rootless](https://cirrus-ci.com/task/6002800873439232)\n   * ...over 10 failures...appears like local test-registry failed.  Re-running..."
+        },
+        {
+            "user": "cevich",
+            "body": "Re-run of [BUILDAH_ISOLATION=rootless](https://cirrus-ci.com/task/4833699786391552) the error I see repeating frequently across many tests is:\n\n```\n[+0809s] # error running container: error creating container for [/bin/sh -c echo this-should-be-cached-but-it-s-not]: time=\"2019-10-28T14:50:44Z\" level=warning msg=\"exit status 1\"\n[+0809s] # time=\"2019-10-28T14:50:44Z\" level=error msg=\"container_linux.go:346: starting container process caused \\\"process_linux.go:446: container init caused \\\\\\\"rootfs_linux.go:58: mounting \\\\\\\\\\\\\\\"/proc\\\\\\\\\\\\\\\" to rootfs \\\\\\\\\\\\\\\"/var/tmp/buildah073351768/mnt/rootfs\\\\\\\\\\\\\\\" at \\\\\\\\\\\\\\\"/proc\\\\\\\\\\\\\\\" caused \\\\\\\\\\\\\\\"operation not permitted\\\\\\\\\\\\\\\"\\\\\\\"\\\"\\n\"\n[+0809s] # container_linux.go:346: starting container process caused \"process_linux.go:446: container init caused \\\"rootfs_linux.go:58: mounting \\\\\\\"/proc\\\\\\\" to rootfs \\\\\\\"/var/tmp/buildah073351768/mnt/rootfs\\\\\\\" at \\\\\\\"/proc\\\\\\\" caused \\\\\\\"operation not permitted\\\\\\\"\\\"\"\n[+0809s] # : exit status 1\n[+0809s] # level=debug msg=\"error building at step {Env:[container=docker PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin  container=docker] Command:run Args:[echo this-should-be-cached-but-it-s-not] Flags:[] Attrs:map[] Message:RUN echo this-should-be-cached-but-it-s-not Original:RUN echo this-should-be-cached-but-it-s-not}: error while running runtime: exit status 1\"\n[+0809s] # error building at STEP \"RUN echo this-should-be-cached-but-it-s-not\": error while running runtime: exit status 1\n[+0809s] # [ rc=1 (** EXPECTED 0 **) ]\n[+0809s] # #/vvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv\n[+0809s] # #| FAIL: exit code is 1; expected 0\n[+0809s] # #\\^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n```\n\nThat seems like maybe a bug in the tests or buildah, if it really is trying to (simulate?) rootless mode."
+        },
+        {
+            "user": "rhatdan",
+            "body": "Looks like the user namespace is not being setup."
+        },
+        {
+            "user": "cevich",
+            "body": "@edsantiago you mentioned that you were looking over some buildah BATs tests or results.  It's likely a long-shot, but sometimes I get lucky:  Are any of the failures above familiar or one's you've seen in the past maybe?"
+        },
+        {
+            "user": "edsantiago",
+            "body": "@cevich sorry, I haven't seen any of those errors before. Nor can I figure out what they mean."
+        },
+        {
+            "user": "cevich",
+            "body": "> I have a PR to begin fixing this in the works, actually merged into container/storage.\n> The issue is we do not clear the STORAGE_OPTS when STORAGE_DRIVER is set, we do if the\n> user overrides via command line.\n>\n> You need to add -e STORAGE_OPTIONS=\"\" and I think everything will work.\n\nWoops, missed this comment.  Thanks @rhatdan  I'll add that to the podman command line."
+        },
+        {
+            "user": "cevich",
+            "body": "no worries @edsantiago thanks for peeking."
+        },
+        {
+            "user": "cevich",
+            "body": "(rebased on master, added a more helpful 'showrun()', new `STORAGE_OPTIONS` var,  and RW `/proc` volume-mount)"
+        },
+        {
+            "user": "cevich",
+            "body": "> Looks like the user namespace is not being setup.\n\n@rhatdan could that be an unintended side-effect of running in a super-privileged container?  (Maybe this is another behavior change vs. the F27 podman version)"
+        },
+        {
+            "user": "cevich",
+            "body": "(removed volume-mount of `/proc` as it caused bad-things(tm) to happen)"
+        },
+        {
+            "user": "rh-atomic-bot",
+            "body": ":umbrella: The latest upstream changes (presumably 751f92e) made this pull request unmergeable. Please resolve the merge conflicts."
+        },
+        {
+            "user": "rh-atomic-bot",
+            "body": ":umbrella: The latest upstream changes (presumably #1954) made this pull request unmergeable. Please resolve the merge conflicts."
+        },
+        {
+            "user": "cevich",
+            "body": "Ahh hmm, okay, so we can pass in_podman if we only test the BUILDAH_ISOLATION=chroot case (I commented out the other ones).  Let me enable the regular VM testing now and see what happens..."
+        },
+        {
+            "user": "cevich",
+            "body": "@nalind @rhatdan good news (y'all have been workin' hard) - I'm down to ---> ONE <--- failing buildah-in-podman test.  It appears to be due to a missing `xz` package which I just added.\n\nI've also got updates in this PR to add regular multi-VM testing for the Fedoras and Ubuntus (replacing Travis), but last I looked those aren't working well.  Since this PR is mainly about migrating off PAPR, would you prefer that I temporarily disable those extra tests so I/We/You can get then passing in a separate PR?\n"
+        },
+        {
+            "user": "rhatdan",
+            "body": "Sure lets get this in and then work on those separately."
+        },
+        {
+            "user": "cevich",
+            "body": "okay, let me clean up the commits to make turning them on/off easier..."
+        },
+        {
+            "user": "cevich",
+            "body": "@rhatdan @nalind To be transparent: The gate test (specifically _validate_) seems to require the PR to be up-to-date with master, or fails without a helpful error message.  I tried my best to troubleshoot this, but the root cause appears as a complex interaction between several scripts, the CI system(s), and Makefile.  I'd like to make a concerted effort to fix this, but am also juggling other competing priority work :confused:  (I may not get to it before others start complaining)"
+        },
+        {
+            "user": "rhatdan",
+            "body": "LGTM\n@nalind @edsantiago @giuseppe @vrothberg @TomSweeneyRedHat PTAL"
+        },
+        {
+            "user": "rhatdan",
+            "body": "@nalind @edsantiago @giuseppe @vrothberg @TomSweeneyRedHat PTAL"
+        },
+        {
+            "user": "TomSweeneyRedHat",
+            "body": "LGTM, but I'm trusting @cevich 's knowledge quite a lot.  \n@jlebon FYI for you and if you've a minute or three, would love an eyeball from you."
+        },
+        {
+            "user": "jlebon",
+            "body": "I'm not very familiar with Cirrus CI but, it looks sane to me offhand. Nice work on this @cevich!"
+        },
+        {
+            "user": "rh-atomic-bot",
+            "body": ":umbrella: The latest upstream changes (presumably c038827) made this pull request unmergeable. Please resolve the merge conflicts."
+        },
+        {
+            "user": "cevich",
+            "body": "Okay, this is almost ready (ignoring the travis failure since we're just replacing papr here).  Trying Ed's other suggestions..."
+        },
+        {
+            "user": "TomSweeneyRedHat",
+            "body": "I'm not sure if the testing-in-podman error is expected?  It's rather generic."
+        },
+        {
+            "user": "cevich",
+            "body": "> I'm not sure if the testing-in-podman error is expected? It's rather generic.\n\nNo, it wasn't expected - due to networking timeout.  I fixed it.  The other items here (besides Travis) are mostly expected.  Taking a peek shortly to confirm..."
+        },
+        {
+            "user": "cevich",
+            "body": "...Travis was also a networking timeout problem, re-running that."
+        },
+        {
+            "user": "cevich",
+            "body": "Okay, we good to go here."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@rh-atomic-bot r+"
+        },
+        {
+            "user": "rh-atomic-bot",
+            "body": ":pushpin: Commit 32c9595 has been approved by `rhatdan`\n\n<!-- @rh-atomic-bot r=rhatdan 32c959520c0ffc31205d7eadc506e6e3edb9a912 -->"
+        },
+        {
+            "user": "rh-atomic-bot",
+            "body": ":hourglass: Testing commit 32c9595 with merge 13afd41..."
+        },
+        {
+            "user": "rh-atomic-bot",
+            "body": ":boom: Test timed out"
+        },
+        {
+            "user": "rhatdan",
+            "body": "@rh-atomic-bot retry"
+        },
+        {
+            "user": "cevich",
+            "body": "@rh-atomic-bot retry"
+        },
+        {
+            "user": "rhatdan",
+            "body": "I wonder if removing Papr is causing homu to blow up?  Might need to force commit."
+        },
+        {
+            "user": "rh-atomic-bot",
+            "body": ":hourglass: Testing commit 32c9595 with merge 6b47de3..."
+        },
+        {
+            "user": "rh-atomic-bot",
+            "body": ":boom: Test timed out"
+        },
+        {
+            "user": "jlebon",
+            "body": "Right, Homu watches for the `required` context, which [PAPR can set](https://github.com/projectatomic/papr/blob/c13f38f32448cd31d858b52704b5715104ac08a0/docs/sample.papr.yml#L106).\n\nNot sure if there's a way to replicate this semantic with Cirrus CI, though if you just want to \"merge when all the checks are green\", it might be easier to move over to Prow like libpod did."
+        },
+        {
+            "user": "cevich",
+            "body": "> Not sure if there's a way to replicate this semantic with Cirrus CI\n\nCirrus touches the new Status API, so a workaround would be to add add a final task to touch `required`, then I think Homu could work.  This isn't a small amount of effort though, and all solutions in this space require giving a bot account repository-write access (somewhere in the chain).  My preference would be to use Github-Actions, but that's only because I don't/can't understand how prow works and native solutions are almost always better than third-parties.\n\nIn any case, I think this is work for a follow-up PR, so we should either ignore or disable Homu for now."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@cevich so you are saying to manually merge?  Will this break humu for all future PRs?"
+        },
+        {
+            "user": "cevich",
+            "body": "> Will this break humu for all future PRs?\n\nYes until fixed or worked around and/or I understand more of Homu's configuration.  Would you prefer that I address/include a fix/workaround in this PR?  (instead of a separate PR)\n\nDetails:\n\nCirrus-CI will automatically run the tests on the target branch after a PR merges.  This is (for example, in libpod CI) how a notification is sent to `#podman` on IRC when post-merge tests fail.  Homu mitigates this post-merge test-failure possibility a different way, since it controls the merging of all PRs, it can first make sure the tests pass after rebasing from the destination branch.\n\nThe down-side of this approach is, since Homu is the gatekeeper, if it ever breaks, nothing gets in.  It's also (necessarily) serializing all merge operations so there's a performance impact on a busy repo (like libpod) with a rapidly moving branch.  I can poke around and see if there's a github-actions way of doing this, that may be a simpler solution."
+        },
+        {
+            "user": "cevich",
+            "body": "Ref: Good explanation of 'evergreen builds': https://github.com/bors-ng/bors-ng#but-dont-githubs-protected-branches-already-do-this\n\nEven with Prow in charge, post-merge testing still fails on occasion, so it's not a perfect solution.  \n\nAssuming this repo. is much lower traffic than libpod, another idea is:  We turn on the 'must be up-to-date' setting for PRs.  That forces them to always merge serially, by placing the rebase effort on PR authors (which is why it's bad for a busy repo)"
+        },
+        {
+            "user": "rhatdan",
+            "body": "Does the must be up2date mean that everyone needs to rebase or can anyone press a button on github to refire the tests?"
+        },
+        {
+            "user": "cevich",
+            "body": "> Does the must be up2date mean that everyone needs to rebase\n\nYes, it is that annoying.  One PR merges and it forces all others to have to rebase/repush (and so, re-test) before merging.  IMHO, it's not too horrible on a low-traffic repo., this one seems close to the edge of too-much.  It's easy to turn on/off though w/o much consequence, so low-cost to try it.\n\nI poked around some more today at other solutions, but can't even really see a way to do this 100% in native github-actions - they all run async/parallel by nature and so need a third-party \"arbitrator\" to (effectively) serialize the stream of merging PRs and handle possible test-failures.\n\nI really wish there was a simple solution (even a half-way \"good enough\" one).  I'm not above kludging Cirrus to behave with Homu - except for not wanting to burden jlebon any more than necessary (including ongoing maintenance).  So I'm willing to try poking at the Prow dragon again, see if I can make sense of what's needed to hook it up.  I'm also willing to keep looking and see if I can learn more / discover other possibilities."
+        },
+        {
+            "user": "cevich",
+            "body": "Hmmm, there does appear to be a public-repo supporting github-app for bors-ng (bors is what Homu is based on): https://github.com/apps/bors\n\nIt's a free-for-opensource github-app that \"someone else\" manages the server/database stuff.  I have a mind to look into that a bit more, since the docs suggest it plays nice with github-actions (and therefor cirrus-ci)."
+        },
+        {
+            "user": "cevich",
+            "body": "Hrmmm, I really like what I'm seeing with https://bors.tech/, it's a much larger and active community, hosts a free service for OSS projects, and supports all the new APIs.  Most importantly WRT Cirrus-CI, they support wild-card matching status names.  So for example, we could make these required:\n\n```testing image:fedora-*```\n```testing image:ubuntu-18*```\n\nbut ignore the status of others (e.g. experimental new tests).  Let me do some more reading/playing, perhaps it could replace Homu here and knowing how it works would let me rig up other repos as well..."
+        },
+        {
+            "user": "rh-atomic-bot",
+            "body": ":umbrella: The latest upstream changes (presumably #2071) made this pull request unmergeable. Please resolve the merge conflicts."
+        },
+        {
+            "user": "cevich",
+            "body": "bors ping"
+        },
+        {
+            "user": "bors[bot]",
+            "body": "pong"
+        },
+        {
+            "user": "cevich",
+            "body": "bors try"
+        },
+        {
+            "user": "cevich",
+            "body": "bors try"
+        },
+        {
+            "user": "cevich",
+            "body": "bors try"
+        },
+        {
+            "user": "cevich",
+            "body": "bors try"
+        },
+        {
+            "user": "cevich",
+            "body": "@rhatdan status: I've enabled the Bors-ng app on this repo, and added a commit to this PR to configure it initially.  I'm using the 'bors try' command to verify all the scripts and tests will run successfully.  Assuming I can get it working and after this PR merges, we can disable Homu and [start using the new bors commands.](https://bors.tech/documentation/)"
+        },
+        {
+            "user": "cevich",
+            "body": "bors try-"
+        },
+        {
+            "user": "cevich",
+            "body": "bors try"
+        },
+        {
+            "user": "rhatdan",
+            "body": "SGTM"
+        },
+        {
+            "user": "cevich",
+            "body": "bors try"
+        },
+        {
+            "user": "bors[bot]",
+            "body": "## try\n\n# Timed out"
+        },
+        {
+            "user": "cevich",
+            "body": "bors try"
+        },
+        {
+            "user": "bors[bot]",
+            "body": "## try\n\n# Build succeeded\n  * [continuous-integration/travis-ci/push](https://travis-ci.org/containers/buildah/builds/637502054?utm_source=github_status&utm_medium=notification)"
+        },
+        {
+            "user": "cevich",
+            "body": "@rhatdan okay I think we're good to go here.  I believe if you make a comment saying only 'bors merge' it should do exactly that (after running tests again, and assuming they pass).  If we go forward with bors, that will be the new '/lgtm'.  There are other criteria that can be configured for merging, but I think we can leave them up to future work."
+        },
+        {
+            "user": "rhatdan",
+            "body": "bors merge"
+        },
+        {
+            "user": "cevich",
+            "body": "/me watches intently"
+        },
+        {
+            "user": "TomSweeneyRedHat",
+            "body": "cevich, once the dust setles, can you put together a little cheat sheet on the new 'bors' commands please?  Maybe add it to contributors.md for posterity?  "
+        },
+        {
+            "user": "cevich",
+            "body": "@TomSweeneyRedHat sure, happy to, and the setup needs to be better documented as well as how to get to the settings page on the server-side, where permissions are defined."
+        },
+        {
+            "user": "bors[bot]",
+            "body": "# Timed out"
+        },
+        {
+            "user": "cevich",
+            "body": "All I know is...the 'make validation' breaks like this on occasion, without giving much/any clues as to why :confounded: \n\nWhen I last simulated a 'bors merge' (using 'bors try') it worked fine :disappointed: "
+        },
+        {
+            "user": "cevich",
+            "body": "```\n...\n\n[+0010s] ./tests/tools/build/golangci-lint run\n[+0768s] level=error msg=\"Deadline exceeded: try increase it by passing --deadline option\"\n```\n\nBasically it sat there waiting or doing something for over 10-minutes then gave up.\n\nAnyone know how we increase the verbosity coming from `make validate`?"
+        },
+        {
+            "user": "rhatdan",
+            "body": "bors merge"
+        },
+        {
+            "user": "rhatdan",
+            "body": "@vrothberg Any ideas on the timeout? ^^"
+        },
+        {
+            "user": "bors[bot]",
+            "body": "# Timed out"
+        },
+        {
+            "user": "cevich",
+            "body": "@rhatdan @vrothberg So this is not something I like about bors.  It's waiting a full two-hours for the underlying checks to pass, even if they fail after 20-minutes.  In this specific case it's the gate job failing (I know by clicking the red X mark in:\n\n```\n@bors Merge #1848 …                                       verified  X  932f6d4\n```\n\nLooking at the output, it is the `make validate` which is timing out, after about 10-minutes (must be setting somewhere to control this and verbosity?)\n\nI'm looking at `./tests/validate/git-validation.sh`"
+        },
+        {
+            "user": "cevich",
+            "body": "One again for the third time...cleaned up `git-validation.sh` quite a bit, and made it more verbose when running under CI.  Also rebased vs latest master."
+        },
+        {
+            "user": "cevich",
+            "body": "I think I found + fixed the problem.  The default golangci-lint timeout is ***1 minute*** (no idea how/why that actually times out after about 10-minutes)."
+        },
+        {
+            "user": "cevich",
+            "body": "bors try"
+        },
+        {
+            "user": "bors[bot]",
+            "body": "## try\n\n# Build failed\n  * [continuous-integration/travis-ci/push](https://travis-ci.org/containers/buildah/builds/638076839?utm_source=github_status&utm_medium=notification)"
+        },
+        {
+            "user": "cevich",
+            "body": "dangit.  what the heck."
+        },
+        {
+            "user": "cevich",
+            "body": "oooohhhh! It's travis. ok.  @rhatdan can I make travis __not__ required for merge or is it too early for that?"
+        },
+        {
+            "user": "rhatdan",
+            "body": "As long as we are running the tests on ubuntu and fedora, I am fine with not requiring travis."
+        },
+        {
+            "user": "cevich",
+            "body": "> As long as we are running the tests on ubuntu and fedora, I am fine with not requiring travis.\n\nDang, with this PR we're only replacing Papr, so only run buildah-in-podman on Fedora.  The other VM-base testing runs, but fails (needswork).  So maybe not safe to disable travis yet?"
+        },
+        {
+            "user": "cevich",
+            "body": "Looking at the attempt, it appears it was a flake:\n\nhttps://travis-ci.org/containers/buildah/jobs/638076844#L890\n\nLet's try a 'bors merge' but then you/I will need to keep an eye on that travis run and re-run it if it flakes (before the 2-hour bors timeout).\n\nI think we can only fully get rid of travis after the Cirrus-CI VM-based testing is running and passing.  This PR is _only_ about replacing PAPR and Homu...unless you want me to extend it's purpose (again)?"
+        },
+        {
+            "user": "rhatdan",
+            "body": "bors merge"
+        },
+        {
+            "user": "cevich",
+            "body": "OMG travis is soooo slow even to just pick up the job, it hasn't even started running it yet after an HOUR!"
+        },
+        {
+            "user": "cevich",
+            "body": "finally travis started running a few min ago.  my gosh."
+        },
+        {
+            "user": "bors[bot]",
+            "body": "# Timed out"
+        },
+        {
+            "user": "cevich",
+            "body": ":confounded: TRAVIS!!!!!!!!!! :confounded: \n\nBors timed out before travis finished b/c it didn't even start running for over an hour after triggered.  wow!\n\n--sigh--"
+        },
+        {
+            "user": "cevich",
+            "body": "bors retry"
+        },
+        {
+            "user": "bors[bot]",
+            "body": "# Timed out"
+        },
+        {
+            "user": "cevich",
+            "body": "Writing an e-mail about this..."
+        },
+        {
+            "user": "cevich",
+            "body": "@jlebon - how do we disable Homu on this repository (after this PR merges)? \n\nFWIW- we're planning to implement bors-ng in another PR, where I also need to deal with a Travis problem."
+        },
+        {
+            "user": "jlebon",
+            "body": "> @jlebon - how do we disable Homu on this repository (after this PR merges)?\n\nI can take care of that."
+        },
+        {
+            "user": "cevich",
+            "body": "@vrothberg @rhatdan okay, this is good to go, assuming your comfortable w/ manual merges until #2115 is ready (already working on it)"
+        },
+        {
+            "user": "cevich",
+            "body": "rebased"
+        },
+        {
+            "user": "cevich",
+            "body": "> I can take care of that.\n\n@jlebon could you please disable Homu and Papr for buildah?  Thanks, and thanks for all your support all this time.  Hopefully the Bors-ng community will be as responsive :smile: "
+        },
+        {
+            "user": "jlebon",
+            "body": "> @jlebon could you please disable Homu and Papr for buildah?\n\nDone!\n\n> Thanks, and thanks for all your support all this time. Hopefully the Bors-ng community will be as responsive :smile: \n\nThanks! We might also use bors for some of our projects eventually. And other projects Prow. One less service to maintain is nice. :)"
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "buildah",
+            "number": 1840
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "buildah",
+            "number": 1915
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "buildah",
+            "number": 1971
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "buildah",
+            "number": 2115
+        }
+    ]
+}

@@ -1,0 +1,60 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "buildah",
+    "number": 1294,
+    "type": "pull_request",
+    "title": "cmd/commit: add flag omit-timestamp to allow for deterministic builds",
+    "state": "closed",
+    "labels": [
+        "locked - please file new issue/PR"
+    ],
+    "user": "birdayz",
+    "body": "By default, a field called \"created\" is written into the image manifest.\nHowever, even if my image build process is perfectly deterministic, the image\nsha256 hash will be different every time, even if my sources are exactly the\nsame. In many cases it is desirable that the same input results in the exactly\nsame output.\nThis commit introduces the flag --omit-timestamp to the commit command. If set to\ntrue, the timestamp is set to epoch 0, instead of the current timestamp (which\ncauses different results every time commit is invoked).\n\nExample:\nSet up sample content:\n`echo x > testfile`\n\nPerform build with buildah:\n```\nIMG=$(buildah from scratch)\nbuildah add $IMG testfile\nbuildah commit $IMG sample-image:sample-tag\n```\n\nOld behavior:\n```\n[root@thinkpad test-build]# buildah commit $IMG sample-image:sample-tag\nGetting image source signatures\nSkipping blob d01a9af531ac (already present): 2.00 KiB / 2.00 KiB [=========] 0s\nCopying config da849ca955ae: 263 B / 263 B [================================] 0s\nWriting manifest to image destination\nStoring signatures\nda849ca955ae7180f896b0e068839dd88aa1c0480d6b70fc84603368c20c5b67\n[root@thinkpad test-build]# buildah commit $IMG sample-image:sample-tag\nGetting image source signatures\nSkipping blob d01a9af531ac (already present): 2.00 KiB / 2.00 KiB [=========] 0s\nCopying config 28e7e2761805: 263 B / 263 B [================================] 0s\nWriting manifest to image destination\nStoring signatures\n28e7e2761805826eea37445716b6e185fc3d784a1c7bfeeb69dbee8ac79858db\n```\nImage is different for each commit, because the timestamp changed.\n\nWith this change:\n\n```\n[root@thinkpad test-build]# buildah commit --omit-timestamp $IMG sample-image:sample-tag\nGetting image source signatures\nSkipping blob d01a9af531ac (already present): 2.00 KiB / 2.00 KiB [=========] 0s\nCopying config a13f491de92a: 253 B / 253 B [================================] 0s\nWriting manifest to image destination\nStoring signatures\na13f491de92a8bb478c16e589082a9da093c04d7889d577ab19aa7fb33e902bf\n[root@thinkpad test-build]# buildah commit --omit-timestamp $IMG sample-image:sample-tag\nGetting image source signatures\nSkipping blob d01a9af531ac (already present): 2.00 KiB / 2.00 KiB [=========] 0s\nCopying config a13f491de92a: 253 B / 253 B [================================] 0s\nWriting manifest to image destination\nStoring signatures\na13f491de92a8bb478c16e589082a9da093c04d7889d577ab19aa7fb33e902bf\n```\n\nSo with this change, it's deterministic. Of course, if your build process itself, or the stuff you do with buildah, e.g. non-deterministic `buildah run`, this change can't help you :)\n\nThe background for this:\n- For one, it's desirable in general to have fully deterministic builds, down to the image itself. \n- As a more concrete situtation: we have a build process that builds multiple applications at once, and deploys them afterwards through HELM. We tag each image with the Git sha commit hash during the build. Then, we pass the image&tag into HELM and install. \nWhat happens: even if the image source, e.g. a static go binary, did not change in this run of our CD Pipeline, it will get re-deployed, because the image name & tag is different (different tag, which is the git commit).\n\nIt's possible to add a suffix with the concrete SHA hash of the complete image. It looks like this:\n`my-image-name:a30e2b0a2cfde329cc5b646c19a94b9e30b617d3@sha256:xxxxxxxxxxxxxxxx` where xxx is the sha256 hash of the image. Then, IIRC, k8s (or better, the deployment controller i guess) will not perform a (rolling) update, because the tag changed, but since the SHA hash is the same, nothing REALLY changed. **For this, i need subsequent builds with no actual change to produce the same docker image SHA.**\n\nWith almost all docker image build tools it's NOT possible to fully have deterministic builds due to the timestamp being written into the image manifest. This PR sets it always to 0 if --omit-timestamp is set, so it's an opt-in if this is required. If it's not needed, the \"old\" behavior is maintained. The drawback is, that tools will show - of course - an old timestamp for the image ;)\n\nI found two tools that also offer deterministic builds for docker images:\n- GCP's JIB https://github.com/GoogleContainerTools/jib\n- Bazel https://blog.bazel.build/2015/07/28/docker_build.html\n\nI'm happy to discuss other options to achieve this deterministic bevhavior. As far as i can see, docker struggles with this issue for a long time. Since JIB is java specific and Bazel is IMHO a rather heavy weight (this is not meant to be offensive against bazel, i just don't use it, yet), having buildah for deterministic builds would be really great in my opinion.\n\nIf this PR is acceptable, i'm happy to write tests for the changes as well. ",
+    "comments": [
+        {
+            "user": "rh-atomic-bot",
+            "body": "Can one of the admins verify this patch?\nI understand the following commands:\n- `bot, add author to whitelist`\n- `bot, test pull request`\n- `bot, test pull request once`"
+        },
+        {
+            "user": "rhatdan",
+            "body": "Missing:\nMan pages \nCommand Completions"
+        },
+        {
+            "user": "birdayz",
+            "body": "done, i've added the man page update to the .md file and the completion, and squashed again.\nWhat about the \".1\" file in the docs folder, do i have to adjust it as well or is it generated? Couldn't find something on that topic in the contribution guidelines.\n\nedit: forgot the sign-off, added it now."
+        },
+        {
+            "user": "rhatdan",
+            "body": "No the .1 is autogenerated."
+        },
+        {
+            "user": "rhatdan",
+            "body": "I'm fine with this LGTM, but I want @nalind to chime in.\nAlso @TomSweeneyRedHat PTAL"
+        },
+        {
+            "user": "birdayz",
+            "body": "As additional info: that's how JIB produces the OCI manifest:\n\nExample: (excerpts)\n\n```\n    \"OCIv1\": {\n        \"created\": \"1970-01-01T00:00:00Z\",\n...\nHistory\n            {\n                \"created\": \"1970-01-01T00:00:00Z\",\n                \"created_by\": \"jib-gradle-plugin:1.0.0-rc2\",\n                \"author\": \"Jib\",\n                \"comment\": \"classes\"\n            }\n...\nDocker:\n\n    \"Docker\": {\n        \"created\": \"1970-01-01T00:00:00Z\",\n...\n            {\n                \"created\": \"1970-01-01T00:00:00Z\",\n                \"author\": \"Jib\",\n                \"created_by\": \"jib-gradle-plugin:1.0.0-rc2\",\n                \"comment\": \"classes\"\n            }\n```\n\nHow buildah produces now:\n```\n{\n    \"OCIv1\": {\n        \"created\": \"1970-01-01T01:00:00+01:00\",\n     ....\n        \"history\": [\n            {\n                \"created\": \"1970-01-01T01:00:00+01:00\"\n            }\n        ]\n    },\n    \"Docker\": {\n        \"created\": \"1970-01-01T01:00:00+01:00\",\n  ...\n        \"history\": [\n            {\n                \"created\": \"1970-01-01T01:00:00+01:00\"\n            }\n        ]\n    },\n  \n```\n\nSo this is in line with what JIB does. Just to give some more confidence about being \"compliant\" in the way we set the reproducible timestamp."
+        },
+        {
+            "user": "vrothberg",
+            "body": "LGTM, thanks for the nice contribution!"
+        },
+        {
+            "user": "nalind",
+            "body": "Looks reasonable to me.\n@rh-atomic-bot r+"
+        },
+        {
+            "user": "rh-atomic-bot",
+            "body": ":pushpin: Commit 012e457 has been approved by `nalind`\n\n<!-- @rh-atomic-bot r=nalind 012e4575311360af0f7d0adb0c7037ba6d72625e -->"
+        },
+        {
+            "user": "rh-atomic-bot",
+            "body": ":hourglass: Testing commit 012e457 with merge 4bcddb7..."
+        },
+        {
+            "user": "rh-atomic-bot",
+            "body": ":sunny: Test successful - [status-papr](https://s3.amazonaws.com/aos-ci/ghprb/projectatomic/buildah/4bcddb7cbec960f93f4fea229cc45d9192349b17.1548100666271509760/index.html), [status-travis](https://travis-ci.org/containers/buildah/builds/482579464?utm_source=github_status&utm_medium=notification)\nApproved by: nalind\nPushing 4bcddb7cbec960f93f4fea229cc45d9192349b17 to master..."
+        }
+    ],
+    "cross_references": []
+}

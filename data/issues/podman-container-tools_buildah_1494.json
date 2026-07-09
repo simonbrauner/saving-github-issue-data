@@ -1,0 +1,120 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "buildah",
+    "number": 1494,
+    "type": "pull_request",
+    "title": "Travis CI: fail upon failure in any step",
+    "state": "closed",
+    "labels": [
+        "locked - please file new issue/PR"
+    ],
+    "user": "edsantiago",
+    "body": "Use 'set -e' to exit immediately upon any failure: there is,\ne.g., no reason to run BATS tests if the compile fails.\n\nBackground: in my brief experience here, the Go:tip jobs\ninevitably fail. Although these are marked as allowed to\nfail, I tried looking at the results anyway to see if the\nfailure was my fault; it took me a while to figure out\nthat the go build was failing, yet the CI job was plodding\non regardless. This seems wrong on infinite levels, and\na number of other people agree:\n\n    https://github.com/travis-ci/travis-ci/issues/1066\n\nI resent this waste of my time, and would like to prevent\nothers from similarly wasting theirs.\n\nSigned-off-by: Ed Santiago <santiago@redhat.com>",
+    "comments": [
+        {
+            "user": "edsantiago",
+            "body": "Good news: this worked as expected. All the `Go:tip` jobs failed within 8 minutes, at the expected `go build` error, thus saving compute cycles and human effort.\n\nBad news: all the other CI jobs failed too, in the `after_script` section at the very very end:\n```\n./hack/spc_build.sh: line 20: dnf: command not found\n```\n`spc_build.sh` is invoked from `hack/run_build.sh`. \n\nMy gut reaction is to add `set +e` before running this, and thus sweep this problem back under the rug, but I have no idea what either of these scripts are intended to accomplish so I will leave it up to the CI experts to look into this further."
+        },
+        {
+            "user": "edsantiago",
+            "body": "@lsm5 those scripts seem to be yours; could you comment on how important it is for them to run and pass in CI environment? TIA."
+        },
+        {
+            "user": "lsm5",
+            "body": "the scripts in hack are for running ubuntu builds on Travis."
+        },
+        {
+            "user": "lsm5",
+            "body": "But I thought those scripts were *not* merged upstream."
+        },
+        {
+            "user": "lsm5",
+            "body": "errrr ... my bad, the ones in hack/ that you mention above are for running container-diff tests. The ubuntu autobuilds are on my own fork."
+        },
+        {
+            "user": "edsantiago",
+            "body": "Thanks, but to rephrase my question: these scripts are failing due to missing `dnf`. It seems likely that they have been failing for a while. Are you monitoring their output? Are they serving any useful purpose by running in CI?"
+        },
+        {
+            "user": "lsm5",
+            "body": "ah ok, nope, I haven't been :( ..and nobody pointed me to these earlier. Also, your PR LGTM."
+        },
+        {
+            "user": "edsantiago",
+            "body": "What would you suggest, then? Remove the `hack/run_build.sh` line? Remove the entire `after_script`? Fix it so it runs? I don't have enough background info to know what's best here."
+        },
+        {
+            "user": "lsm5",
+            "body": "hmm, so IIRC, these were set to not block on anything. If we remove those lines, container-diff tests won't run at all. Let me get back to you after I recollect info on this. This was quite a while back."
+        },
+        {
+            "user": "edsantiago",
+            "body": "From a quick glance, I think part of the problem is\n```\nhack/run_build.sh:10:  DISTRO=\"${DISTRO:-fedora}\"\n```\nHowever, in this CI environment:\n```\nSetting environment variables from .travis.yml\n...\nexport DISTRO=\"ubuntu\"\n...\nPreparing to run $SPCMD=./hack/spc_build.sh in a ubuntu SPC.    <--- probably not what's desired\n```\n"
+        },
+        {
+            "user": "edsantiago",
+            "body": "@lsm5 could you take a quick new look, at my 2nd commit and at the new results?\n\nI made a small change to `hack/run_build.sh`, making an assumption that the use of `$DISTRO` was generic, and the collision with same envariable in CI was accidental. That gets the job much further, but all jobs now fail with:\n```\nError unpacking rpm package tzdata-2019a-1.fc29.noarch\nerror: unpacking of archive failed on file /usr/share/zoneinfo/Etc/UTC: cpio: rename failed - Device or resource busy\n```\nWithout knowing the purpose behind these scripts, I'm not sure how to proceed. I'm pretty sure they have never run properly, and am tempted to remove them completely from Travis, but I'd like your feedback."
+        },
+        {
+            "user": "edsantiago",
+            "body": "Okay, and the reason tzdata fails to install is because the fedora container is run with `-v /etc/localtime:/etc/localtime`. The obvious solution is to remove that from `run_build.sh` but once again, I don't want to fiddle too much without understanding what any of this is intended to accomplish."
+        },
+        {
+            "user": "edsantiago",
+            "body": "Help, please.\n\nI am happy with the `set -e` portion of this PR (my original goal): the broken builds fail in 8 minutes (vs 30), and the tail end of the log clearly shows the failure, without a misleading BATS run.\n\nThe `hack/run_build.sh` is proving a challenge. I've tried two ways of getting it to run, and it still fails; only now it's adding 5 minutes to each CI run instead of failing early. \n\nI don't believe that anyone here wants CI to take five more minutes; I don't believe this step has to be run on each individual job; and I actually don't believe this step should even run at all, given that it has probably been failing since Day One and nobody has noticed. I would like to remove it from `.travis.yml`.\n\n@lsm5 @nalind @TomSweeneyRedHat @rhatdan advice please?"
+        },
+        {
+            "user": "rhatdan",
+            "body": "Makes sense to me.\nLGTM"
+        },
+        {
+            "user": "edsantiago",
+            "body": "[CI failure](https://travis-ci.org/containers/buildah/jobs/518902223). Looks like a flake; I see these occasionally but can't reproduce them. Is this related to the cri-o failures discussed in Planning yesterday?\n```\n$ /home/travis/gopath/src/github.com/containers/buildah/tests/./../buildah --debug=false from --signature-policy /home/travis/gopath/src/github.com/containers/buildah/tests/./policy.json --quiet --pid= alpine\n# The following failures happened while trying to pull image specified by \"alpine\" based on search registries in /home/travis/gopath/src/github.com/containers/buildah/tests/./registries.conf:\n# * \"localhost/alpine\": Error determining manifest MIME type for docker://localhost/alpine:latest: pinging docker registry returned: Get https://localhost/v2/: dial tcp 127.0.0.1:443: connect: connection refused\n# * \"docker.io/library/alpine\": Error reading blob sha256:bdf0201b3a056acc4d6062cc88cd8a4ad5979983bfb640f15a145e09ed985f92: Invalid status code returned when fetching blob 503 (Service Unavailable)\n# * \"registry.fedoraproject.org/alpine\": Error determining manifest MIME type for docker://registry.fedoraproject.org/alpine:latest: Error reading manifest latest in registry.fedoraproject.org/alpine: manifest unknown: manifest unknown\n...\n```"
+        },
+        {
+            "user": "edsantiago",
+            "body": "ping, I'm happy with this now."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@mheon @lsm5 @baude @giuseppe @vrothberg @TomSweeneyRedHat PTAL"
+        },
+        {
+            "user": "mheon",
+            "body": "LGTM"
+        },
+        {
+            "user": "TomSweeneyRedHat",
+            "body": "@edsantiago I'd thought the hack/run_build.sh was running the conformance tests OK, I was unaware of them not running or having problems, but that doesn't mean they haven't been.  With this change I don't think they'll run now via the CI in any circumstance correct?\n\n@ypu I believe you put these tests together, do you want to weigh in?  Are you good with the conformance tests not running with each build?"
+        },
+        {
+            "user": "edsantiago",
+            "body": "The tests have not been running for a long time, quite probably have never run. I tried to read the code and understand it, but was unable to, and I'm not motivated to spend any further effort on them. I would like to have this PR approved, because its benefits are immediate: quick failure on CI error. This benefits everyone. If there is someone interested in looking at the code I removed, they can do so as a future PR. I would really not like to make this PR become about fixing something unrelated that has been broken for a long time."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@rh-atomic-bot r+"
+        },
+        {
+            "user": "rh-atomic-bot",
+            "body": ":pushpin: Commit d686457 has been approved by `rhatdan`\n\n<!-- @rh-atomic-bot r=rhatdan d68645775d1b840de015aaa857667d7f16c5b344 -->"
+        },
+        {
+            "user": "TomSweeneyRedHat",
+            "body": "@edsantiago I'm fine with going forward with this now, but would like @ypu to weigh in about possibly getting it back on-line at some point."
+        },
+        {
+            "user": "edsantiago",
+            "body": "Odd. The history I see relates to #1003 by @lsm5. But I agree entirely, Tom: I would like someone, anyone, to take ownership of those scripts; and, if they're important, make them work."
+        },
+        {
+            "user": "rh-atomic-bot",
+            "body": ":hourglass: Testing commit d686457 with merge e879079..."
+        },
+        {
+            "user": "rh-atomic-bot",
+            "body": ":sunny: Test successful - [status-papr](https://s3.amazonaws.com/aos-ci/ghprb/projectatomic/buildah/e87907966fc9962d14b2f0b207b0b4aa0b66c55e.1555541762516402944/index.html), [status-travis](https://travis-ci.org/containers/buildah/builds/521482594?utm_source=github_status&utm_medium=notification)\nApproved by: rhatdan\nPushing e87907966fc9962d14b2f0b207b0b4aa0b66c55e to master..."
+        }
+    ],
+    "cross_references": []
+}

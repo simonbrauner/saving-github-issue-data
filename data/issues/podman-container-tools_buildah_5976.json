@@ -1,0 +1,24 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "buildah",
+    "number": 5976,
+    "type": "issue",
+    "title": "`buildah mount` fails in buildah container (fuse-overlayfs?)",
+    "state": "open",
+    "labels": [],
+    "user": "cgwalters",
+    "body": "```\n$ podman run -q -v /dev/fuse --cap-add=all --rm -ti quay.io/buildah/stable:v1.38.1 bash -c 'id=$(buildah from busybox); buildah mount $id'\nResolved \"busybox\" as an alias (/etc/containers/registries.conf.d/000-shortnames.conf)\nTrying to pull docker.io/library/busybox:latest...\nGetting image source signatures\nCopying blob 9c0abc9c5bd3 done   | \nCopying config af47096251 done   | \nWriting manifest to image destination\nError: mount /var/lib/containers/storage/overlay:/var/lib/containers/storage/overlay, flags: 0x1000: operation not permitted\nWARN[0000] failed to shutdown storage: \"mount /var/lib/containers/storage/overlay:/var/lib/containers/storage/overlay, flags: 0x1000: operation not permitted\" \n```\n\nI'm trying to build on https://github.com/coreos/rpm-ostree/pull/5268 to have it support being run in the same setup as the buildah container, which is widely used for nested builds (container-in-container).\n\nIn the end I don't actually need `mount` here necessarily; we could also copy the image to an OCI and operate, but I'd like to avoid another copy.\n\nI haven't looked at the code here but I think this is also related to https://github.com/containers/podman/issues/25241 in that the \"mount\" logic is different from the \"run\" flow.\n",
+    "comments": [
+        {
+            "user": "cgwalters",
+            "body": "OK, I think I narrowed in on this. It works if I create a new user+mounts via e.g. `unshare -U -m --keep-caps -r`. And I think what's going on here is that when we go to do a build, buildah always unshares and makes a new mount namespace, so we can remount `/var/lib/containers/storage` in that mountns.\n\nBut in this scenario by default `/var/lib/containers` is actually set up by the outer runtime and we don't have permissions to modify it. The `unshare` works around that, and we can just run everything under that.\n\nBut that said, ISTM we could just skip doing this mount (there's even an option for it via `skip_mount_home`). Ah but yeah if I set that then we just get further errors because we can't mutate the `/var/lib/containers` mounts.\n\nOK, dunno hmm, I guess we can just add something to the man page about this? There's already things related to rootless that are similar. \n\nTangentially related, wow `buildah unshare` totally blows up in a buildah container, lots of failures to construct the \n\n```\nWARN[0000] Reading allowed ID mappings: reading subuid mappings for user \"root\" and subgid mappings for group \"root\": no subuid ranges found for user \"root\" in /etc/subuid \n...\nmemfd_create(): Invalid argument\n```\n\nWait we failed to create a memfd?? 🤔 Must be related to seccomp? A quick strace shows:\n\n```\n214  mount(\"/memfd:buildah-in-a-user-namespace-in-a-user-namespace-in-a-user-namespace-in-a-user-namespace-in-a-user-namespace-in-a-user-namespace-in-a-user-namespace-in-a-user-namespace-in-a-user-namespace-in-a-user-namespace-in-a-user-namespace-in-a-user-namespace (deleted)\", \"/tmp/containers.EyK1zL\", NULL, MS_B\nIND, NULL <unfinished ...>\n1203  <... nanosleep resumed>NULL)      = 0\n1214  <... mount resumed>)              = -1 ENAMETOOLONG (File name too long)\n1203  nanosleep({tv_sec=0, tv_nsec=20000},  <unfinished ...>\n1214  unlink(\"/tmp/containers.EyK1zL\")  = 0\n1214  openat(AT_FDCWD, \"/proc/self/exe\", O_RDONLY|O_CLOEXEC) = 3\n1214  fstat(3,  <unfinished ...>\n1203  <... nanosleep resumed>NULL)      = 0\n1214  <... fstat resumed>{st_mode=S_IFREG|0777, st_size=32937928, ...}) = 0\n1203  nanosleep({tv_sec=0, tv_nsec=20000},  <unfinished ...>\n1214  memfd_create(\"buildah-in-a-user-namespace-in-a\"..., MFD_CLOEXEC|MFD_ALLOW_SEALING) = -1 EINVAL (Invalid argument)\n```\n\nHeh no the real problem is it looks like we enter some sort of endless loop if we fail to create a userns, and then try to create a memfd that exceeds NAME_MAX of 255 bytes."
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "containers",
+            "repository": "storage",
+            "number": 2250
+        }
+    ]
+}

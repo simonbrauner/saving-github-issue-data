@@ -1,0 +1,75 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "buildah",
+    "number": 4068,
+    "type": "issue",
+    "title": "[FEATURE REQUEST]: oci hook for RUN instruction",
+    "state": "closed",
+    "labels": [
+        "locked - please file new issue/PR"
+    ],
+    "user": "lukasmrtvy",
+    "body": "I am not familiar with the exact relation between the build phase and runc/crun, but I believe We are missing some custom oci hook stage for RUN instruction which will help us trigger for example custom iptable rules. \n\nThis one is useful with a combination of already implemented --userns=auto parameter https://github.com/containers/buildah/issues/4060. \n\nUse case:\n- limit outbound traffic via iptables to internal networks\n- for building arbitrary code in \"sensitive\" environment\n\nSnippet:\n```\ncat << EOF > /etc/containers/restrict-outbound-access\n#!/bin/sh\n/usr/sbin/iptables-nft -A OUTPUT -d 192.168.0.0/16,172.16.0.0/12,10.0.0.0/8 -j DROP\nEOF\n\ncat << EOF > /etc/containers/oci/hooks.d/restrict-outbound-access.json\n{\n  \"version\": \"1.0.0\",\n  \"hook\": {\n    \"path\": \"/etc/containers/restrict-outbound-access\"\n  },\n  \"when\": {\n    \"annotations\": {\n      \"restrict-outbound-access\": \"true\"\n    }\n  },\n  \"stages\": [\"buildContainer\"]  <---- buildContainer stage does not exist\n}\nEOF\n\npodman build --annotation \"restrict-outbound-access=true\" ...\n```\n\nPossible workaround:\n```\nid=<random>\n\ncat << EOF > Dockerfile\nFROM busybox\nRUN echo \"foo\"\nEOF\n\ntar -czvf \"context_$id.tar.gz\" Dockerfile\n\nmkdir -p \"./builds/dir_$id/\"\n\nmv \"context_$id.tar.gz\" \"./builds/dir_$id/\"\n\npodman run --userns=auto --annotation \"restrict-outbound-access=true\" --rm -it -v \"./builds/dir_$id/:/build/\" buildah:latest ... --output \"/build/image_$id.tar\"\n\npodman load \"./builds/dir_$id/image_$id.tar\" \"$prefix/image_$id\"\n\nrm \"./builds/dir_$id/image_$id.tar\"\n\npodman push \"$prefix/image_$id\"\n```\n, but it comes with an additional performance and time penalty ( load image to local registry )\n\nThanks",
+    "comments": [
+        {
+            "user": "flouthoc",
+            "body": "Hi @lukasmrtvy , Thanks for creating the issue i'll take a look at this."
+        },
+        {
+            "user": "flouthoc",
+            "body": "Upon checking this again the stage which you requested `buildContainer` would be a new stage and runtime-spec has no description or guidelines for it. ~~Would it make sense to get specs for this new stage to get accepted by `runtime-spec` first ?~~\n\nWhat would be the use-case of this new stage if its meant to be executed in `runtime namespace` is anything stopping from executing `restrict-outbound-access` manually before starting the `buildah build` ?\n\nSo \n\nEdit: or do you want equivalent to `prestart` hook which gets triggerd only for build containers created by buildah so this would be buildah only feature."
+        },
+        {
+            "user": "lukasmrtvy",
+            "body": "@flouthoc hey, thanks\n\nLets say that I want to restrict outbound connections from build to private ranges defined by RFC ( except local DNS server ofc ). Should be doable to create a bridge ( and set iptables rules for this interface ) and use this bridge for container builds, but still, all builds are not isolated between themselves. It's the same case as --userns=auto, this one applies to networking.\n\nAnd yes, for running container, I am using containerCreate stage which exists, but it would make a sense to have a specific stage for containerBuild \n\nDoes it make sense ? Thanks"
+        },
+        {
+            "user": "flouthoc",
+            "body": "> @flouthoc hey, thanks\n> \n> Lets say that I want to restrict outbound connections from build to private ranges defined by RFC ( except local DNS server ofc ). Should be doable to create a bridge ( and set iptables rules for this interface ) and use this bridge for container builds, but still, all builds are not isolated between themselves. It's the same case as --userns=auto, this one applies to networking.\n> \n> And yes, for running container, I am using containerCreate stage which exists, but it would make a sense to have a specific stage for containerBuild\n> \n> Does it make sense ? Thanks\n\n@lukasmrtvy Added above feature in https://github.com/containers/buildah/pull/4071 but instead of adding a new stage I think we can keep using existing stages for buildah and you can further restrict usage using annotation. The reason i am not in favor of adding a new stage is because it does not states the behavior of the hook i.e when will it get executed and why was this stage crated if stages for all possible points already exists like `createContainer` `prestart`, `poststart` etc see https://github.com/opencontainers/runtime-spec/blob/main/config.md#posix-platform-hooks since we support `--hooks-dir` so while building you can do `buildah build --hooks-dir=/my/build/hooks -t <test> -f Containerfile` and apply all the hooks instead of using stage like `containerBuild` also default `hooks` dir is getting deprecated as per in-code warnings so i'd recommend using `--hooks-dir` with stages which are already there. \n\nAn example test in https://github.com/containers/buildah/pull/4071 should help.\n\nBut i'm also fine to introduce a new stage if maintainers agree with it :)\n\nThanks"
+        },
+        {
+            "user": "rhatdan",
+            "body": "This should work through the OCI specification, not a buildah only requirement."
+        },
+        {
+            "user": "flouthoc",
+            "body": "@rhatdan as of now buildah does not support hooks with regular OCI specs as well, there is a PR for that here https://github.com/containers/buildah/pull/4071 should we re-open issue till this is merged upstream."
+        },
+        {
+            "user": "rhatdan",
+            "body": "I read this request as asking for a new option.  We should support standard OCI Hooks though."
+        },
+        {
+            "user": "lukasmrtvy",
+            "body": "I am trying this implementation in Podman 4.2.0. Seems its working via CLI, but API call does not work.\n\n**Dockerfile**\n```\ncat << EOF > Dockerfile\nFROM alpine\nRUN ping 8.8.8.8\nEOF\n```\n**OCI hook ( script )**\n```\ncat << EOF > /etc/containers/restrict-outbound-access\n#!/bin/sh\n/usr/sbin/iptables-nft -A OUTPUT -d 8.8.8.8/32 -j DROP\nEOF\n```\n**OCI hook**\n```\ncat << EOF > /etc/containers/oci/hooks.d/restrict-outbound-access.json\n{\n  \"version\": \"1.0.0\",\n  \"hook\": {\n    \"path\": \"/etc/containers/restrict-outbound-access\"\n  },\n  \"when\": {\n    \"annotations\": {\n      \"restrict-outbound-access\": \"true\"\n    }\n  },\n  \"stages\": [\"createContainer\"] \n}\nEOF\n```\nWorks correctly via CLI\n```\npodman build --annotation \"restrict-outbound-access=true\" -t test .\n```\nDoes not work via CLI\n```\ntar -czf context.tar.gz Dockerfile\ncurl -s --unix-socket /run/podman/podman.sock -X POST  -H \"Content-Type:application/tar\"  --data-binary \"@context.tar.gz\"  'http://d/v4.2.0/libpod/build?annotations=%5B%22restrict-outbound-access%3Dtrue%22%5D'\n```\n"
+        },
+        {
+            "user": "flouthoc",
+            "body": "@lukasmrtvy ackd i'll check this."
+        },
+        {
+            "user": "flouthoc",
+            "body": "@lukasmrtvy This is not implemented for remote, since files hook access is present on the host, so client invoking this cannot expect `podman` (server) to invoke file from client machine. I can see test is also skipped for podman-remote use-case https://github.com/containers/podman/blob/main/test/buildah-bud/apply-podman-deltas#L235\n\nOne thing which can be done is that client expects that hook script is present on host then we can wire on API end and make ii work ( if that is what you want ) ?"
+        },
+        {
+            "user": "lukasmrtvy",
+            "body": "@flouthoc Thanks, Yes, I would expect the same behavior as for create container endpoint ( which is working with hook file present on host ). \n\nEven userns support ( for create container endpoint ) requires by default subuid and subgid files present on host, same should apply for https://github.com/containers/buildah/issues/4060 I guess.."
+        },
+        {
+            "user": "flouthoc",
+            "body": "@lukasmrtvy SGTM, this looks like a feature instead of a bug and following PR should close it https://github.com/containers/podman/pull/15522"
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "buildah",
+            "number": 4071
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 15522
+        }
+    ]
+}

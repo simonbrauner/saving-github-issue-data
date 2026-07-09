@@ -1,0 +1,44 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "buildah",
+    "number": 1348,
+    "type": "issue",
+    "title": "After setting devicemapper, use buildah command to report an error.",
+    "state": "closed",
+    "labels": [
+        "locked - please file new issue/PR"
+    ],
+    "user": "liujing66",
+    "body": "Description of problem:\nWhen I set the devicemapper, execute the buildah command and report the following error.\nAfter this, the buildah command is executed normally.\n(Edited to add backticks)\n```\n# cat /etc/containers/storage.conf\n[storage]\ndriver = \"devicemapper\"\nrunroot = \"/var/run/containers/storage\"\ngraphroot = \"/var/lib/containers/storage\"\n[storage.options.thinpool]\ndirectlvm_device = \"/dev/sdb\"\ndirectlvm_device_force = \"True\"\n\n# buildah images\nERRO[0000] File descriptor 8 (/dev/mapper/control) leaked on pvdisplay invocation. Parent PID 1343: buildah\n  Failed to find physical volume \"/dev/sdb\".\n  error=\"exit status 5\"\n\n# buildah from docker.io/busybox\nGetting image source signatures\nCopying blob 697743189b6d: 738.18 KiB / 738.18 KiB [========================] 4s\nCopying config d8233ab899d4: 1.46 KiB / 1.46 KiB [==========================] 0s\nWriting manifest to image destination\nStoring signatures\nbusybox-working-container\n\n# buildah images\nIMAGE NAME                                               IMAGE TAG            IMAGE ID             CREATED AT             SIZE\ndocker.io/library/busybox                                latest               d8233ab899d4         Feb 15, 2019 09:19     1.42 MB\n\n# buildah --version\nbuildah version 1.6 (image-spec 1.0.0, runtime-spec 1.0.0)\n```",
+    "comments": [
+        {
+            "user": "rhatdan",
+            "body": "We currently do not support devicemapper storage other then in CRI-O.\n\n@nalind @rhvgoyal PTAL"
+        },
+        {
+            "user": "rhatdan",
+            "body": "@haircommander could you see if buildah works on top of your new lvm plugin?"
+        },
+        {
+            "user": "haircommander",
+            "body": "@rhatdan yes, buildah works with LVM.  I can add a PR that spoofs the vendoring. \n\nWe definitely are going to have to address the perf issues with it, however. \n```\n $ time sudo buildah info > out.out\n\nreal    0m1.016s\nuser    0m0.238s\nsys     0m0.175s\n``` :\\"
+        },
+        {
+            "user": "rhatdan",
+            "body": "@nalind What was your suggested fix to allow multiple processes to share devicemapper?"
+        },
+        {
+            "user": "rhatdan",
+            "body": "@nalind Please document your ideas and I might be able to get someone else to work on it?"
+        },
+        {
+            "user": "nalind",
+            "body": "There are at least three areas where one process using devicemapper can interfere with another.\n\nThe kernel driver supplies a feature called a transaction identifier, which is a compare-and-swap value that user space uses to help recover from unexpected failures.  When the driver goes to create or delete a logical volume (LV), it first uses its copy of the most-recently-completed transaction's ID to compute the next ID in `allocateTransactionID()`.  The driver then records what it intends to do next in its metadata, performs the action, updates the kernel's idea of the most-recently-completed transaction's ID to match the new value, and then updates the driver's metadata to note that the task was completed.  When two processes are modifying storage, they'll both start with the same (or close) values for most-recently-completed transaction ID, and then they'll use overlapping ID values, which causes the kernel to return an error when one or the other attempts to update the kernel's idea of the most-recently-completed transactions's ID.  Having `openTransaction()` call `processPendingTransaction()`, which both cleans up after failed operations and reloads the most-recently-completed transaction ID from the kernel, might be all we need to do there.\n\nThe logical volumes that the driver creates are identified by number, and it uses a bitfield stored in an in-memory slice to keep track of which volume IDs are currently in use.  This bitfield is allocated using `make()` and populated at startup when the driver scans its metadata, and updated by clearing or setting bits in it when the driver removes or creates an LV.  When two processes are modifying storage, their copies of the device ID map bitfield won't be updated to reflect changes that they themselves didn't make.  I'd been considering using a memory-mapped file for this purpose, calling `unix.Msync()` when setting and clearing bits to keep everyone on the same page.\n\nWhen creating or removing logical volumes, the driver uses internal mutex locks to ensure that it's not trying to do more than one thing (mounting, unmounting, creating, removing) to a layer at a time.  This would need to be coordinated across processes instead of using `pkg/locker`, or by reworking `pkg/locker` to work across processes, which may be preferable for its other users.\n\nThat last item will keep the transaction metadata file that's used in the first item from being used by more than one transaction at a time, which could otherwise get very confusing.\n\nNone of this accounts for interactions with the driver's deferred removal and deletion features, so those still need to be verified."
+        },
+        {
+            "user": "rhatdan",
+            "body": "Since there has been no movement on this, I think we should close.  Unless someone from the community wants to pick this up, I don't see us implementing it."
+        }
+    ],
+    "cross_references": []
+}

@@ -1,0 +1,99 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "buildah",
+    "number": 3620,
+    "type": "issue",
+    "title": "bud: create non-existent WORKDIR with USER permissions",
+    "state": "closed",
+    "labels": [
+        "stale-issue",
+        "locked - please file new issue/PR"
+    ],
+    "user": "r10r",
+    "body": "Hi there,\n\nI just want to cross reference a docker issue which seems to  affect `buildah bud` to\nSee also https://github.com/docker/cli/issues/3346\n\n```\nbuildah --version\nbuildah version 1.23.1 (image-spec 1.0.1-dev, runtime-spec 1.0.2-dev)\n```\n\nBuilding the following Dockerfile with `buildah bud`\n\n````Dockerfile\nFROM docker.io/library/alpine:latest\nRUN adduser -D http -h /home/http\nUSER http\nRUN id\nWORKDIR /home/http/public\nRUN ls -ld $PWD\nRUN touch foobar\n````\n\nfails with the following output\n\n```bash\n[ruben@k8s-cluster9-controller test]$ buildah bud\nSTEP 1/7: FROM docker.io/library/alpine:latest\nSTEP 2/7: RUN adduser -D http -h /home/http\nSTEP 3/7: USER http\nSTEP 4/7: RUN id\nuid=1000(http) gid=1000(http)\nSTEP 5/7: WORKDIR /home/http/public\nSTEP 6/7: RUN ls -ld $PWD\ndrwxr-xr-x    2 root     root          4096 Nov  9 06:44 /home/http/public\nSTEP 7/7: RUN touch foobar\ntouch: foobar: Permission denied\nerror building at STEP \"RUN touch foobar\": error while running runtime: exit status 1\nERRO[0005] exit status 1 \n```",
+    "comments": [
+        {
+            "user": "rhatdan",
+            "body": "@flouthoc PTAL"
+        },
+        {
+            "user": "rhatdan",
+            "body": "@r10r Interested in opening a PR to fix?"
+        },
+        {
+            "user": "flouthoc",
+            "body": "I'll check this thanks."
+        },
+        {
+            "user": "r10r",
+            "body": "@rhatdan Yes, I can take a look at it and send a PR. \nI'll wait for @flouthoc to confirm the issue."
+        },
+        {
+            "user": "flouthoc",
+            "body": "@r10r Sure its yours :) "
+        },
+        {
+            "user": "rhatdan",
+            "body": "@r10r you got it."
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "flouthoc",
+            "body": "@r10r Just a friendly ping"
+        },
+        {
+            "user": "r10r",
+            "body": "Sorry for the high round-trip time ;) I'll look at it between the next two weeks."
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@r10r Did you ever look into it?"
+        },
+        {
+            "user": "r10r",
+            "body": "@rhatdan Sorry no. I'll try to send a pull request by the end of the week.\nCan you please give me a hint where I can find the test suite for the bud command."
+        },
+        {
+            "user": "flouthoc",
+            "body": "@r10r this should help https://github.com/containers/buildah/blob/main/tests/bud.bats"
+        },
+        {
+            "user": "r10r",
+            "body": "Thanks."
+        },
+        {
+            "user": "rhatdan",
+            "body": "I have been playing with this and have been debating with @nalind about whether or not we should do it. The issue is whether or not Docker compatibility versus docker buildkit compatibility.\nSecond thing to understand it this is more complicated then I first thought and  I have been working on a potential fix."
+        },
+        {
+            "user": "r10r",
+            "body": "Ok, this is good to know. I'll wait then. Let me know if I can help.\n\n> I have been playing with this and have been debating with @nalind about whether or not we should do it\n\nI  looked at the cross linked issue again to just realise that this is really a bug in *old* Docker engine, which\nwon't get fixed because they are pushing buildkit forward. Keeping full *old* Docker compatibility will always mean keeping these bugs. Well, I'm interested in outcome of your debate.\n"
+        },
+        {
+            "user": "Kai-Chen",
+            "body": "Ran into the same issue and was about to file a new ticket if I hadn't checked here.\nCurrently limping along with a `RUN mkdir -p` layer before WORKDIR.\n\n@rhatdan @nalind I'm curious: what are the pros for keeping backward compatibility with a bug?  -- in this particular case, I find it hard to imagine that anyone is relying on the bug's behavior such that a fix would break currently running systems.\n"
+        },
+        {
+            "user": "giuseppe",
+            "body": "something like the following patch seems to solve the issue for me:\n\n```diff\ndiff --git a/run_linux.go b/run_linux.go\nindex d2420b91..66ac5da1 100644\n--- a/run_linux.go\n+++ b/run_linux.go\n@@ -198,9 +198,19 @@ func (b *Builder) Run(command []string, options RunOptions) error {\n \t}\n \trootIDPair := &idtools.IDPair{UID: int(rootUID), GID: int(rootGID)}\n \n+\tuid, gid := spec.Process.User.UID, spec.Process.User.GID\n+\tif spec.Linux != nil {\n+\t\tuid, gid, err = util.GetHostIDs(spec.Linux.UIDMappings, spec.Linux.GIDMappings, uid, gid)\n+\t\tif err != nil {\n+\t\t\treturn err\n+\t\t}\n+\t}\n+\n+\tidPair := &idtools.IDPair{UID: int(uid), GID: int(gid)}\n+\n \tmode := os.FileMode(0755)\n \tcoptions := copier.MkdirOptions{\n-\t\tChownNew: rootIDPair,\n+\t\tChownNew: idPair,\n \t\tChmodNew: &mode,\n \t}\n \tif err := copier.Mkdir(mountPoint, filepath.Join(mountPoint, spec.Process.Cwd), coptions); err != nil {\ndiff --git a/vendor/github.com/openshift/imagebuilder/builder.go b/vendor/github.com/openshift/imagebuilder/builder.go\nindex b0e9d4f5..f9a586b4 100644\n--- a/vendor/github.com/openshift/imagebuilder/builder.go\n+++ b/vendor/github.com/openshift/imagebuilder/builder.go\n@@ -377,12 +377,6 @@ func (b *Builder) Run(step *Step, exec Executor, noRunsRemaining bool) error {\n \t\treturn err\n \t}\n \n-\tif len(b.RunConfig.WorkingDir) > 0 {\n-\t\tif err := exec.EnsureContainerPath(b.RunConfig.WorkingDir); err != nil {\n-\t\t\treturn err\n-\t\t}\n-\t}\n-\n \tfor _, run := range runs {\n \t\tconfig := b.Config()\n \t\tconfig.Env = step.Env\n```\n\n@rhatdan @nalind if you are fine with this approach, I will clean it up and add some tests"
+        },
+        {
+            "user": "giuseppe",
+            "body": "opened a PR: https://github.com/containers/buildah/pull/3840"
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "buildah",
+            "number": 3840
+        }
+    ]
+}

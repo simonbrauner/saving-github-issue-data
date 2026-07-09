@@ -1,0 +1,70 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "buildah",
+    "number": 2993,
+    "type": "pull_request",
+    "title": "Fix caching layers with build args",
+    "state": "closed",
+    "labels": [
+        "approved",
+        "lgtm",
+        "todo-backport-to-1.19",
+        "locked - please file new issue/PR"
+    ],
+    "user": "terceiro",
+    "body": "This fixes a regression introduced in 9b299588c0936376ef9ccd7938f1cef27c831418.\n    \nib.Run() is only really needed in the ARG step. On all the other steps, it can cause potentially expensive commands to be executed unecessarily.\n    \nCloses https://github.com/containers/buildah/issues/2992\n    \nSigned-off-by: Antonio Terceiro <antonio.terceiro@linaro.org>\nSigned-off-by: Urvashi Mohnani <umohnani@redhat.com>\n",
+    "comments": [
+        {
+            "user": "rhatdan",
+            "body": "Thanks @terceiro \nLGTM\n@nalind @TomSweeneyRedHat @ashley-cui @umohnani8 PTAL"
+        },
+        {
+            "user": "umohnani8",
+            "body": "This does not work for the following case\n```\nFROM ubi8\nARG foo\nCMD echo $foo\n\n➜  buildah git:(arg-test) ./bin/buildah bud --layers -t test                    \nWARN missing \"foo\" build argument. Try adding \"--build-arg foo=<VALUE>\" to the command line \nSTEP 1: FROM ubi8\nSTEP 2: ARG foo\n--> 4d29eae14f9\nSTEP 3: CMD echo $foo\nSTEP 4: COMMIT test\n--> 5ceadb5fe64\n5ceadb5fe647658bb7858b1003f45ff5909daa98ae2aeff5dd84f909cdef2c19\n\n➜  buildah git:(arg-test) ./bin/buildah bud --layers -t test1 --build-arg foo=bar\nSTEP 1: FROM ubi8\nSTEP 2: ARG foo\n--> Using cache 4d29eae14f93b2831fee8b47e0fa8e71518669493cf3bb2797469a0f70a71882\n--> 4d29eae14f9\nSTEP 3: CMD echo $foo\n--> Using cache 5ceadb5fe647658bb7858b1003f45ff5909daa98ae2aeff5dd84f909cdef2c19\nSTEP 4: COMMIT test1\n--> 5ceadb5fe64\n5ceadb5fe647658bb7858b1003f45ff5909daa98ae2aeff5dd84f909cdef2c19\n\n➜  buildah git:(arg-test) podman run test\n\n➜  buildah git:(arg-test) podman run test1\n\n➜  buildah git:(arg-test)\n```\n\nAs you can see, even though I passed in `--build-arg` to the command it did not pick up the new ARG value. We need to run `ib.Run()` so that it can execute buildah's in-memory configuration and retrieve the args we want and add it to the Allowed list of arguments that the `Arguments()` function uses to filter against.\n\n"
+        },
+        {
+            "user": "rhatdan",
+            "body": "We should have a test to catch this case."
+        },
+        {
+            "user": "umohnani8",
+            "body": "We do, the build-arg test is failing. I think I have a fix, just testing it out."
+        },
+        {
+            "user": "umohnani8",
+            "body": "@terceiro https://github.com/containers/buildah/compare/master...umohnani8:arg-cache?expand=1 should fix both issues, can you please incorporate it in your PR and try it out as well"
+        },
+        {
+            "user": "terceiro",
+            "body": "@umohnani8 yes that does the job, thanks!. I have updated this PR accordingly.\n"
+        },
+        {
+            "user": "umohnani8",
+            "body": "Perfect! Thank you for finding the issue :)\n\nLGTM"
+        },
+        {
+            "user": "rhatdan",
+            "body": "/approve\n/lgtm"
+        },
+        {
+            "user": "openshift-ci-robot",
+            "body": "[APPROVALNOTIFIER] This PR is **APPROVED**\n\nApproval requirements bypassed by manually added approval.\n\nThis pull-request has been approved by: *<a href=\"https://github.com/containers/buildah/pull/2993#issuecomment-777107428\" title=\"LGTM\">rhatdan</a>*, *<a href=\"https://github.com/containers/buildah/pull/2993#\" title=\"Author self-approved\">terceiro</a>*\n\nThe full list of commands accepted by this bot can be found [here](https://go.k8s.io/bot-commands?repo=containers%2Fbuildah).\n\nThe pull request process is described [here](https://git.k8s.io/community/contributors/guide/owners.md#the-code-review-process)\n\n<details >\nNeeds approval from an approver in each of these files:\n\n- **[OWNERS](https://github.com/containers/buildah/blob/master/OWNERS)**\n\nApprovers can indicate their approval by writing `/approve` in a comment\nApprovers can cancel approval by writing `/approve cancel` in a comment\n</details>\n<!-- META={\"approvers\":[]} -->"
+        },
+        {
+            "user": "travisghansen",
+            "body": "I think I'm experiencing this issue. I'm running `buildah` inside a container on k8s connected with the gitlab k8s executor. My `buildah` image has the following `buildah` version info:\n\n```\nVersion:         1.28.0\nGo Version:      go1.19.1\nImage Spec:      1.0.2-dev\nRuntime Spec:    1.0.2-dev\nCNI Spec:        1.0.0\nlibcni Version:  v1.1.2\nimage Version:   5.23.0\nGit Commit:      79f41e3235ecc17d711a9aa06ec769234ec95399\nBuilt:           Tue Oct  4 06:34:51 2022\nOS/Arch:         linux/amd64\nBuildPlatform:   linux/amd64\n```\n\n`Dockerfile` is:\n\n```\nFROM internal-registry/docker-ember-base:v3.5\n\n# only install npm deps if package.json changes\nCOPY /.npmrc ./\nCOPY /.bowerrc ./\nCOPY /bower.json ./\nCOPY /package.json ./\nCOPY /yarn.lock ./\n\n# install stuff\nRUN \\\n    npm config set spin false \\\n    && yarn install --silent --no-progress --non-interactive --pure-lockfile \\\n    && npm rebuild node-sass \\\n    && yarn cache clean \\\n    && bower install --allow-root --config.storage.packages=.bowercache/packages --config.storage.registry=.bowercache/registry \\\n    && rm -rf .npmcache .bowercache .yarncache tmp;\n\n\n# pack code into image\nCOPY / ./\n\n#  --build-arg \"CI_COMMIT_REF_NAME=${CI_COMMIT_REF_NAME}\"\nARG CI_COMMIT_REF_NAME\nARG CI_JOB_NAME\nARG CI_EMBER_BUILD\n\n# build\nRUN \\\n    for env in $(echo \"${CI_EMBER_BUILD}\" | sed \"s/,/ /g\"); do \\\n        time ember build --environment=${env} -o build/${env}; \\\n    done\n\n# test\n# running this as a separate step *after* the build above\n# for caching purposes...in the case of sporadic failed tests\n# at least the build will not need to be redone\n#RUN \\\n#    if [[ \"${CI_JOB_NAME}\" == \"test\" ]];then \\\n#        time ember exam --silent true --environment test --path build/test --test-port 0 --parallel=6 --load-balance --config-file testem-ci.js; \\\n#    fi;\n\n# removes need for git directory inside container\n# to help keep image size down\n# SEE: docker-entrypoint.sh in -base image\nARG CI_COMMIT_SHORT_SHA\nENV EMBER_VERSION_CHECK_VERSION=${CI_COMMIT_SHORT_SHA}\n```\n\nSnippet from `.gitlab-ci.yml`:\n\n```\n    # build image\n    buildah build \\\n    -f Dockerfile \\\n    --no-hosts \\\n    --pull=always \\\n    --layers \\\n    --cache-to   \"${CI_REGISTRY_IMAGE}/buildah-cache\" \\\n    --cache-from \"${CI_REGISTRY_IMAGE}/buildah-cache\" \\\n    --build-arg \"CI_COMMIT_SHORT_SHA=${CI_COMMIT_SHORT_SHA}\" \\\n    --build-arg \"CI_JOB_NAME=${CI_JOB_NAME}\" \\\n    --build-arg \"CI_COMMIT_REF_NAME=${CI_COMMIT_REF_NAME}\" \\\n    --build-arg \"CI_EMBER_BUILD=${CI_EMBER_BUILD}\" \\\n    $BUILDTAGARGS \\\n    .\n```\n\nSample output:\n\n```\n# run 1\nSTEP 8/14: COPY / ./\n--> Pushing cache internal-registry/buildah-cache:abdb0c45ad58c40e84e87b2bd430004d5ee9b623bea3c1855fa6f7f9a826e476\n--> 07b89c96595\nSTEP 9/14: ARG CI_COMMIT_REF_NAME\n--> Pushing cache internal-registry/buildah-cache:7d0379dc3891679a2f296ad4c3c8eb4d3d6d96aee7ed2296ced1ac274304ce7b\n--> ef3fb7db575\nSTEP 10/14: ARG CI_JOB_NAME\n--> Pushing cache internal-registry/buildah-cache:a19633b701a0ad5348fd192740478a3e3fffa4f580de22945f3a87154b93f431\n--> d499d76f476\nSTEP 11/14: ARG CI_EMBER_BUILD\n--> Pushing cache internal-registry/buildah-cache:38c27cb52abf33e5a9499a71d5513702a57356d0e5f7d2c0abd1529d26225ea1\n--> 049ec8d8b58\n\n# run 2\nSTEP 8/14: COPY / ./\n--> Cache pulled from remote internal-registry/buildah-cache:abdb0c45ad58c40e84e87b2bd430004d5ee9b623bea3c1855fa6f7f9a826e476\n--> Using cache 07b89c96595fcfc839ea78267549406ec3a469dd185781f258378e91152379c3\n--> 07b89c96595\nSTEP 9/14: ARG CI_COMMIT_REF_NAME\n--> Pushing cache internal-registry/buildah-cache:7d0379dc3891679a2f296ad4c3c8eb4d3d6d96aee7ed2296ced1ac274304ce7b\n--> 4cb04cfabe8\nSTEP 10/14: ARG CI_JOB_NAME\n--> Pushing cache internal-registry/buildah-cache:a6a962b66f0fd598d6adfa2067925b0c9e8256e173254d4256e5072d25763422\n--> 02c821b8a8e\nSTEP 11/14: ARG CI_EMBER_BUILD\n--> Pushing cache internal-registry/buildah-cache:a6626fcac52ab17279a07635480abc5dab338ca176cffb3f842294a8ae43de31\n--> 1eebf4d74ca\n\n# run 3\nSTEP 8/14: COPY / ./\n--> Cache pulled from remote internal-registry/buildah-cache:abdb0c45ad58c40e84e87b2bd430004d5ee9b623bea3c1855fa6f7f9a826e476\n--> Using cache 07b89c96595fcfc839ea78267549406ec3a469dd185781f258378e91152379c3\n--> 07b89c96595\nSTEP 9/14: ARG CI_COMMIT_REF_NAME\n--> Pushing cache internal-registry/buildah-cache:7d0379dc3891679a2f296ad4c3c8eb4d3d6d96aee7ed2296ced1ac274304ce7b\n--> eab11aa757c\nSTEP 10/14: ARG CI_JOB_NAME\n--> Pushing cache internal-registry/buildah-cache:d53ef4ac50b7cf11ea0f3b9f85778c69788183329c22df27bfb2808dc9fc571b\n--> c3a44faaa1c\nSTEP 11/14: ARG CI_EMBER_BUILD\n--> Pushing cache internal-registry/buildah-cache:ac1a668f79b6ccf1b014f027ef005899d848fd805d347fa3c8ae82a43bc71700\n--> ec35f1bd0ec\n```\n\nFor the same pipeline the values of the args should be the same, yet if I rerun the `job` multiple times each step up to `ARG CI_COMMIT_REF_NAME` is cached but then I diverge. Interesting that all of them 'push' this `7d0379dc3891679a2f296ad4c3c8eb4d3d6d96aee7ed2296ced1ac274304ce7b` but it never gets pulled.\n\nFor comparison here is `kaniko` output:\n\n```\n# run 1\nINFO[0545] Found cached layer, extracting to filesystem \nINFO[0721] COPY / ./                                    \nINFO[0726] Taking snapshot of files...                  \nINFO[0727] ARG CI_COMMIT_REF_NAME                       \nINFO[0727] No files changed in this command, skipping snapshotting. \nINFO[0727] ARG CI_JOB_NAME                              \nINFO[0727] No files changed in this command, skipping snapshotting. \nINFO[0727] ARG CI_EMBER_BUILD                           \nINFO[0727] No files changed in this command, skipping snapshotting. \nINFO[0727] RUN     for env in $(echo \"${CI_EMBER_BUILD}\" | sed \"s/,/ /g\"); do         time ember build --environment=${env} -o build/${env};     done \nINFO[0727] Taking snapshot of full filesystem...        \nINFO[0746] cmd: /bin/sh                                 \nINFO[0746] args: [-c for env in $(echo \"${CI_EMBER_BUILD}\" | sed \"s/,/ /g\"); do         time ember build --environment=${env} -o build/${env};     done] \nINFO[0746] Running: [/bin/sh -c for env in $(echo \"${CI_EMBER_BUILD}\" | sed \"s/,/ /g\"); do         time ember build --environment=${env} -o build/${env};     done] \n...[OUTPUT OF BUILD]\nINFO[0907] Taking snapshot of full filesystem...        \nINFO[0914] Pushing layer internal-registry/kaniko-cache:2258cf07ea55447bcc23e62ac0c26d13d67b56d754977c0d27bba60e1b42bc6f to cache now \nINFO[0914] Pushing image to internal-registry/kaniko-cache:2258cf07ea55447bcc23e62ac0c26d13d67b56d754977c0d27bba60e1b42bc6f \nINFO[0914] ARG CI_COMMIT_SHORT_SHA                      \nINFO[0914] No files changed in this command, skipping snapshotting. \nINFO[0914] ENV EMBER_VERSION_CHECK_VERSION=${CI_COMMIT_SHORT_SHA} \nINFO[0914] No files changed in this command, skipping snapshotting. \n\n# run 2\nINFO[0213] Found cached layer, extracting to filesystem \nINFO[0267] COPY / ./                                    \nINFO[0272] Taking snapshot of files...                  \nINFO[0273] ARG CI_COMMIT_REF_NAME                       \nINFO[0273] No files changed in this command, skipping snapshotting. \nINFO[0273] ARG CI_JOB_NAME                              \nINFO[0273] No files changed in this command, skipping snapshotting. \nINFO[0273] ARG CI_EMBER_BUILD                           \nINFO[0273] No files changed in this command, skipping snapshotting. \nINFO[0273] RUN     for env in $(echo \"${CI_EMBER_BUILD}\" | sed \"s/,/ /g\"); do         time ember build --environment=${env} -o build/${env};     done \nINFO[0273] Found cached layer, extracting to filesystem \nINFO[0285] ARG CI_COMMIT_SHORT_SHA                      \nINFO[0285] No files changed in this command, skipping snapshotting. \nINFO[0285] ENV EMBER_VERSION_CHECK_VERSION=${CI_COMMIT_SHORT_SHA} \nINFO[0285] No files changed in this command, skipping snapshotting. \n```\n\nDo I have something off or is there some other issue at play?"
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "buildah",
+            "number": 2991
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "buildah",
+            "number": 2998
+        }
+    ]
+}

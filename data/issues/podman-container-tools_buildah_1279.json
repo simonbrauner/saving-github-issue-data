@@ -1,0 +1,137 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "buildah",
+    "number": 1279,
+    "type": "issue",
+    "title": "buildah mount ctr in rootless mode should work.",
+    "state": "closed",
+    "labels": [
+        "locked - please file new issue/PR"
+    ],
+    "user": "rhatdan",
+    "body": "We should enter the usernamespace before mounting and it would work fine.  If we do similar with other commands we should be able to get most of buildah commands to work.",
+    "comments": [
+        {
+            "user": "rhatdan",
+            "body": "```\n$ buildah mount alpine-working-container\ncannot mount using driver overlay in rootless mode\nERRO[0000] exit status 1                            \n```\n```\n$ buildah unshare\n# buildah mount alpine-working-container\n/home/dwalsh/.local/share/containers/storage/overlay/bcef5f32e15f3dc982bd1239c03030a23a29fbb941a86ba211252acc8a660d92/merged\nexit\n```\n```\n$ touch /home/dwalsh/.local/share/containers/storage/overlay/bcef5f32e15f3dc982bd1239c03030a23a29fbb941a86ba211252acc8a660d92/merged/dan\n```\n```\n buildah umount alpine-working-container\n472be9b00a55524077005980063b8dcd786494f5a0fab84ceefeb9a76fb2b675\n```\n\n"
+        },
+        {
+            "user": "giuseppe",
+            "body": "the issue is that the same user/mount namespace must be maintained through all the session, not only during `buildah mount`, so doing the `buildah unshare` before is necessary for properly setting it up.\n\nDifferently than Podman where we manage to join the namespace from podman itself, it won't work with Buildah as we allow external tools to access and manage the storage, so I don't see any other way than wrapping the entire session with `buildah unshare` and work from there.\n\nDifferently `build-using-dockerfile` is fine as it wraps internally the rootless session."
+        },
+        {
+            "user": "rhatdan",
+            "body": "So can we either change buildah mount to reexec itself as\n```\nbuildah mount fedora-working-container\nbuildah unshare buildah mount fedora-working-container\n```"
+        },
+        {
+            "user": "giuseppe",
+            "body": "that will break the non interactive use case: `ctr=$(buildah mount fedora-working-container)` as buildah mount will re-exec and create the `unshare` session"
+        },
+        {
+            "user": "SergeyBear",
+            "body": "Hello!\n\n+1 for invoking unshare silently in mount in rootless mode, because non-interactive case already broken:\n    \n    id=$(buildah from centos)\n    mount=$(buildah unshare buildah mount ${id})\n\nreturns:\n\n    Main config did not have a override_install_langs attr. before setopt\n    Main config did not have a override_install_langs attr. before setopt\n    Error: This command has to be run under the root user.\n\nFedora 29 and buildah-1.6-2.git5f95bd9.fc29.x86_64"
+        },
+        {
+            "user": "giuseppe",
+            "body": "@SergeyBear that won't work.\n\nYou need to use unshare before using any other buildah command.\n\n@TomasTomecek already solved the issue he was having that way.  I think we can close this issue\n"
+        },
+        {
+            "user": "SergeyBear",
+            "body": "@giuseppe oh, I see, like that it worked:\n\n    buildah unshare ./build.sh\n\nThant you!\n\n**P.S.** But imho, it would be nice not to bother about different tricks and rootless mode worked out of the box."
+        },
+        {
+            "user": "giuseppe",
+            "body": "@SergeyBear the problem is that what we want to achieve is not permitted.  Once the process exits, there is no mount point that will survive it, and this is done for good reasons as an unprivileged user cannot mount stuff on the host.\n\nWe need to stay in the same namespace, where the mount exists and is accessible.\n\nI am not trying to avoid fixing it, it is just not possible :-)"
+        },
+        {
+            "user": "SergeyBear",
+            "body": "@giuseppe please, don't get me wrong, I'm just saying from perspective of user which I'm now :-)"
+        },
+        {
+            "user": "rhatdan",
+            "body": "I think we need to fix this via documentation.  In rootless mode buildah mount should throw and error explainign how you need to do this in rootless mode.\n```\n$ buildah mount $ctr\nError: Buildah mount in rootless mode needs to be run within a buildah unshare\nsession.\n\nFirst execute\n# buildah unshare\n# buildah mount $ctr\n...\n# buildah commit $ctr image\n# exit\n\nAlternatively you can create a bash script and execute it from `buildah unshare ./buildscript.sh`\n```"
+        },
+        {
+            "user": "rhatdan",
+            "body": "@SergeyBear I agree with you people are stumbling over this, and we at least need to make it clear what is going on."
+        },
+        {
+            "user": "giuseppe",
+            "body": "we already have an error when trying to mount overlay directly without an `unshare` environment, and we have also the documentation for it: https://github.com/containers/buildah/commit/b4f712fa756aeb10169d4b43eee83edc894d1604\n\nI've opened another PR to improve the error message: https://github.com/containers/buildah/pull/1339"
+        },
+        {
+            "user": "AndydeCleyre",
+            "body": "So is it possible, rootlessly, to use mount in non-interactive scripts (in arbitrary languages), somehow saving the environment created by `unshare`, so that it can explicitly be provided to other (potentially non-buildah) operations? It seems the `env` vars are not sufficient, so what else can be \"exported\" of the created environment so that a separate \"session\" may also access the mounted filesystem? "
+        },
+        {
+            "user": "rhatdan",
+            "body": "You can just mount the same mount point in a different session\nbuildah unshare\nbuildah mount ctr\nGo to town."
+        },
+        {
+            "user": "AndydeCleyre",
+            "body": "@rhatdan Thanks, but I'm thinking of a case that doesn't totally support sessions in the sense of multiple commands directly affecting each other's \"environments\". What defines the environment (or is that the wrong question)?"
+        },
+        {
+            "user": "rhatdan",
+            "body": "I think you really need to describe what you want to do.  "
+        },
+        {
+            "user": "AndydeCleyre",
+            "body": "For example, certain cases of using a configuration management tool like Ansible making multiple SSH connections to run various steps, some of which need access to the mounted container filesystem."
+        },
+        {
+            "user": "AndydeCleyre",
+            "body": "@rhatdan\n\nIn addition to the case mentioned above, similarly: what would it take to mount the container to a path on the host, then use Python to perform file operations to alter the container, using something like [Plumbum](https://plumbum.readthedocs.io/)?\n\nIs there another way to mount the container filesystem that allows more access from external programs?"
+        },
+        {
+            "user": "rhatdan",
+            "body": "Access will be controlled via standard Linux protections. The mount point is defined within the tool, you can not mount to arbitrary locations, although you could bind mount the mount point to other locations.  once the image is mounted any process on the system can use it as long as it is in the same mount namespace and can see the mountpoint,  governed by DAC/User permissions."
+        },
+        {
+            "user": "AndydeCleyre",
+            "body": "Thank you for the quick explanation!\n\nThe mount location as-is is no problem. Somehow I missed the ways unshare can be used to run any arbitrary process. Is there a good and non-evil way to pack the unshare command into the shebang? Something like\n\n```bash\n#!/bin/env/buildah unshare -- /bin/env python3\n```"
+        },
+        {
+            "user": "rhatdan",
+            "body": "Why not create a command called bunshare\n\n```\n#!/bin/sh\nexec $@\n```\nbunshare /bin/env python3\n"
+        },
+        {
+            "user": "AndydeCleyre",
+            "body": "Well I'm looking to make scripts directly executable, and also able to mount containers. I'd rather not add extra files or path manipulations or special instructions on executing if not strictly necessary. \n\nAnd either I'm really misunderstanding the suggestion, or you left out `buildah unshare` altogether. "
+        },
+        {
+            "user": "rhatdan",
+            "body": "Yes I guess my example should have been\nexec buildah unshare -- $@\n\n\nUpstream buildah unshare now has support for --mount CTRID.\n\n"
+        },
+        {
+            "user": "AndydeCleyre",
+            "body": "FWIW, this works with `env` from modern GNU coreutils:\n\n```bash\n#!/usr/bin/env -S buildah unshare -- python3\n```"
+        },
+        {
+            "user": "rhatdan",
+            "body": "@AndydeCleyre Would you be interesting in writing up a short blog?  It might be of more interest if you wrote it using  podman rather then buildah.  I think podman has more users, but it would be exactly the same.\n```\n#!/usr/bin/env -S podman unshare -- python3\n```"
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "ansible",
+            "repository": "ansible",
+            "number": 50583
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "buildah",
+            "number": 1339
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "buildah",
+            "number": 1469
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "buildah",
+            "number": 3912
+        }
+    ]
+}

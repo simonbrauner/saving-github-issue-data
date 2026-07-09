@@ -1,0 +1,49 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "buildah",
+    "number": 5750,
+    "type": "issue",
+    "title": "buildah commands that don't involve building containers at all run through unshare",
+    "state": "open",
+    "labels": [],
+    "user": "AdamWill",
+    "body": "**Description**\n\nThis is yet another in the series of 'issues to do with running buildah in a locked-down container' - see https://github.com/containers/buildah/issues/4563 , https://github.com/containers/buildah/issues/1901 - but with a twist: we want to use buildah to do things that don't involve building containers *at all*, but those commands still run through unshare. @terinjokes also noted this in https://github.com/containers/buildah/issues/1901#issuecomment-1674648806 .\n\n@jeremycline and I are working on improving Fedora's container registry publication. All this needs to do is take some already-built container images from a Fedora compose, create a multiarch manifest, and push the images and the manifest to some registries. The only tools we've found for doing this are buildah and podman. We have [the code for this](https://pagure.io/cloud-image-uploader) all written. But when we try to deploy it in an openshift container (which is where we want to deploy it), it blows up because unshare doesn't work. Well, sure, it doesn't, and we don't really want to mess around with the container security stuff to allow it, because *we shouldn't need it* to do this. Commands which just create manifests and push images to registries should not need to run through isolation; they're just writing trivial JSON and making web API calls. (podman appears to have basically the same problem as buildah).\n\nWe would happily use a different tool for this if we could find one that just does this and avoids the mess, but we can't (suggestions welcome). We really don't want to have to write one.\n\n**Steps to reproduce the issue:**\n1. Create a bog-standard Fedora container in Fedora openshift, with buildah in it\n2. Try and run `buildah login` or `buildah manifest create` or `buildah manifest push`\n\n\n**Describe the results you received:**\n```\nsh-5.2$ HOME=/tmp/whatever buildah login\nWARN[0000] Reading allowed ID mappings: reading subuid mappings for user \"1001340000\" and subgid mappings for group \"1001340000\": no subuid ranges found for user \"1001340000\" in /etc/subuid \nWARN[0000] Found no UID ranges set aside for user \"1001340000\" in /etc/subuid. \nWARN[0000] Found no GID ranges set aside for user \"1001340000\" in /etc/subgid. \nError during unshare(CLONE_NEWUSER): Function not implemented\nERRO[0000] parsing PID \"\": strconv.Atoi: parsing \"\": invalid syntax \nERRO[0000] (Unable to determine exit status)            \nsh-5.2$ \n```\n\n**Describe the results you expected:**\nsuccessful login",
+    "comments": [
+        {
+            "user": "AdamWill",
+            "body": "The `HOME=/tmp/whatever` is needed because without that buildah has a fit about `~/.config` not being owned by the current user, btw."
+        },
+        {
+            "user": "AdamWill",
+            "body": "Ugh. I guess https://github.com/containers/buildah/issues/3259 is a complicating factor here?"
+        },
+        {
+            "user": "AdamWill",
+            "body": "Here's a kinda silly 'fix' for this, I guess...\n```\ndiff --git a/cmd/buildah/main.go b/cmd/buildah/main.go\nindex 524d87b32..df42a82f5 100644\n--- a/cmd/buildah/main.go\n+++ b/cmd/buildah/main.go\n@@ -40,6 +40,7 @@ type globalFlags struct {\n        MemoryProfile              string\n        UserShortNameAliasConfPath string\n        CgroupManager              string\n+       NoUnshare                  bool\n }\n \n var rootCmd = &cobra.Command{\n@@ -105,6 +106,7 @@ func init() {\n        rootCmd.PersistentFlags().StringVar(&globalFlagResults.LogLevel, logLevel, \"warn\", `the log level to be used, one of \"trace\", \"debug\", \"info\", \"warn\", \"error\", \"fatal\", or \"panic\"`)\n        rootCmd.PersistentFlags().StringVar(&globalFlagResults.CPUProfile, \"cpu-profile\", \"\", \"`file` to write CPU profile\")\n        rootCmd.PersistentFlags().StringVar(&globalFlagResults.MemoryProfile, \"memory-profile\", \"\", \"`file` to write memory profile\")\n+       rootCmd.PersistentFlags().BoolVar(&globalFlagResults.NoUnshare, \"no-unshare\", false, \"disable user namespace re-exec when unprivileged (for running non-build commands like pull, push and manifest in locked-down containers)\")\n \n        if err := rootCmd.PersistentFlags().MarkHidden(\"cpu-profile\"); err != nil {\n                logrus.Fatalf(\"unable to mark cpu-profile flag as hidden: %v\", err)\n@@ -145,6 +147,13 @@ func before(cmd *cobra.Command) error {\n        case \"\", \"help\", \"version\", \"mount\":\n                return nil\n        }\n+       if globalFlagResults.NoUnshare {\n+               switch cmd.Use {\n+               case \"add\", \"build\", \"commit\", \"copy\", \"from\", \"mkcw\", \"run\", \"umount\", \"unshare\":\n+                       return fmt.Errorf(\"command %s cannot be used with --no-unshare\", cmd.Use)\n+               }\n+               return nil\n+       }\n        debugCapabilities()\n        unshare.MaybeReexecUsingUserNamespace(false)\n        if globalFlagResults.CPUProfile != \"\" {\n```"
+        },
+        {
+            "user": "rhatdan",
+            "body": "Let's just add the ones that make no sense to unshare to the line above:\n\n\tswitch cmd.Use {\n\tcase \"\", \"help\", \"version\", \"mount\":\n\t\treturn nil\n\t}"
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "Detzi88",
+            "body": "I suppose this is the same thing that stops me from using:\n```bash\n$ buildah login $CI_REGISTRY -u $CI_REGISTRY_USER -p $CI_REGISTRY_PASSWORD\nError during unshare(CLONE_NEWUSER): Operation not permitted\ntime=\"2025-04-22T09:19:06Z\" level=error msg=\"parsing PID \\\"\\\": strconv.Atoi: parsing \\\"\\\": invalid syntax\"\ntime=\"2025-04-22T09:19:06Z\" level=error msg=\"(Unable to determine exit status)\"\n``` \nwhen running in an unprivileged container? \nEDIT: The issue was me, customizing (installing packages with microdnf) the container and not using a \"mint\" quay.io/buildah/stable:v1.39 image.\nEDIT2: Scratch that, i was given a privileged runner, thats why it worked with the \"mint\" quay.io/buildah/stable:v1.39 image. I removed the priv. and now its showing the same error."
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "skopeo",
+            "number": 1136
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "buildah",
+            "number": 5752
+        }
+    ]
+}

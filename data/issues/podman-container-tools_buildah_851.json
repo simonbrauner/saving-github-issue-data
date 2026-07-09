@@ -1,0 +1,209 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "buildah",
+    "number": 851,
+    "type": "issue",
+    "title": "Add INCLUDE to Dockerfile parsing in bud",
+    "state": "closed",
+    "labels": [
+        "kind/feature",
+        "question",
+        "buildkit",
+        "locked - please file new issue/PR"
+    ],
+    "user": "TomSweeneyRedHat",
+    "body": "**Description**\nCut from #850 by @pixdrift - I think this should be a stand alone discussion/enhancement request.\n\nI also wanted to raise in this thread the possibility of inclusion of an INCLUDE feature in the Dockerfile parser (bud), to essentially achieve the same as above. This has been raised / rejected several times in Docker/moby issues, but interested to know if there is any precedent in Buildah for support of additional features in the Dockerfile, or if bud is purely for compatibility with existing features.\n\nProposal discussions for INCLUDE in Docker/Moby:\nmoby/moby#735\nmoby/moby#12749\n\nI don't really see this as including a entire existing Dockerfiles (ie. with their own FROM), more to include common code blocks/snippets. I have achieved the same using native `buildah run` and `source` to pull in common code blocks, but would still be interested in comments on the above idea.\n",
+    "comments": [
+        {
+            "user": "vrothberg",
+            "body": "I've been thinking about such a feature for a while and as you like building stuff on old unix tools, you might be interested in using the C pre-processor.  It does everything you need which is mainly textual replacement via the `#include` directive but it could also allow you to do macro expansion and even conditional rules and way more things.\n\nConsider the following (minimal) example for demonstration:\n``` Dockerfile\nDockerfile-base\nFROM alpine                                                          \nRUN  echo \"very important and complex common patterns\" > /pattern.txt\n```\n``` Dockerfile\nDockerfile-derived\n#include \"Dockerfile-base\"\nRUN echo \"my own stuff\" > /own-stuff.txt\n```\n\nNow run `$ cpp -E Dockerfile-derived > Dockerfile-final`. We could do all kinds of things with that and pre-process each Dockerfile by default."
+        },
+        {
+            "user": "pixdrift",
+            "body": "@vrothberg, thanks for the comment / suggestion, it's nice as it does have the relationship described inside the file.\n\nWith this suggestion, I am trying to move away from processing/parsing outside of the Dockerfilers as I want everything described in the Dockerfile and for users to be able to run a single `buildah bud` step with no dependant steps/scripts so I can maintain their simplicity of use.\n\nIt's interesting because you are including in the opposite direction to what I am suggesting, as the bud processor will want the FROM in the initial image. With your example i'd use a FROM to Dockerfile-base... but then you end up storing the dependant image relationships for rebuilding etc. I appreciate this was just an example though and may not be the only use case 😃 \n\nI have also seen a make file used to construct the final image but my issue there is that the Dockerfile you have executed isn't what's in your version control (because it's constructed/built in the pipeline), so the final product of the make ends up being another artefact to store.\n\nThis is what I am hoping for.\n```\nDockerfile-myapp:\nFROM centos                                                     \nINCLUDE Dockerfile-snippet-patching-update\nRUN <install myapp steps etc>\nINCLUDE Dockerfile-snippet-common-entry\n```\n```\nDockerfile-snippet-patching-update:\nCOPY repo.conf /etc/yum/repos.d/\nRUN yum clean all && yum update -y && rm -rf /var/cache/yum\nRUN <more patch specific stuff eg. packages outside of yum/rpm>\n```\n```\nDockerfile-snippet-common-entry:\nCOPY entrypoint.sh /\nENV <common env stuff>\nENTRYPOINT /entrypoint.sh\n```\n\nThe following is what I am using currently (as you may have seen), which does similar to the include I describe (using just bud), but requires description of the relationship in a script outside of the Dockerfiles:\nhttps://github.com/projectatomic/buildah/issues/850\n\nI'm not quite in utopia yet! 😁 \n\n-edit-\n\nSomething that's worth noting is that ideally you would reference a Dockerfile directory for the INCLUDE, so each INCLUDE could have self contained external elements (eg. files) that it uses in its ADD/COPY commands.\n"
+        },
+        {
+            "user": "vrothberg",
+            "body": "@pixdrift Thanks for the nice explanation!\n\nPlease don't get me wrong, I am not against extending Dockerfile to support an `INCLUDE` directive. I think it's something urgently needed and many users do such things already but have to work around that.\n\nThe major concern I have is that adding such a directive to Buildah would make those Dockerfiles incompatible to Moby/Docker and all other Dockerfile-based tools. When using `cpp` instead, those files could still be used for other tools after being pre-processed. In case of `buildah-bud` this could happen transparently within Buildah by unconditionally pre-processing each input Dockerfile before parsing.\n\nBut I think it depends on what you want to achieve. If the plan is to provide some proof of concept to Docker/Moby, then the supporting `INCLUDE` is the way to go (at the cost of breaking compatibility with other tools). If the plan is to generally support composing images on a finer granularity than images (i.e., `FROM`), then I would recommend to not diverge from other tools. But maybe, we don't care about the other tools at that point and want to empower users to finally use this feature?"
+        },
+        {
+            "user": "pixdrift",
+            "body": "@vrothberg, this is almost exactly the question I put forward to the others working on buildah. Is the role of `bud` to implement Dockerfile compatibility, and everything else should happen in the 'native' buildah commands, so perhaps `buildah include`? Or is there an opportunity to extend the functionality for buildah specific Dockerfiles (Buildahfiles?) that maybe would have some adoption from others? (but obviously causes a fracture in 'standards'). It's really a bigger question than just the `INCLUDE` directive detailed here, but definitely want to include this in the discussion!\n\nI'm basically chasing a solution that meets the following requirements/constraints.\n**1.** The file/files that is stored in version control can be executed directly by the build tool (ie. no intermediate interpretation step to 'create' the Dockerfile) as this is an additional artefact to store.\n**2.** No logic/configuration needs to exist outside the files to describe their relationship\n**3.** Access to all existing capabilities that can be used in existing Dockerfiles from the segments/snippets (ie. not just RUN commands)\n**4.** Segments/snippets can be inserted at arbitrary locations in the file, not just concatenated to the end / in a certain order (see my above example, an item is included, then some tasks, then another include)\n**5.** Segments/snippets can be referenced outside the Dockerfile directory context so they can be shared by multiple Dockerfiles\n\nThe options I have seen/worked with so far:\n\n## buildah bud -f\n> `bud -f` in its old behaviour was very close, but it fails item (**2.**) and (**4.**) above. The order in which the files are 'spliced' is codified in the command, and they are concatenated in order, essentially achieving the same as `cat` on the command line, so arbitrary insertion into a 'parent' file isn't really possible so the test case doesn't work for the above example.\n  \nExample of this form:\n```\nbuildah bud -f Dockerfile -f ../Dockerfile-snippet-patching-update -f ../Dockerfile-snippet-common-entry Dockerfile-myapp\n```\n\n## Repository of scripts (eg .sh files) \n\n> Adding for example a tarball of scripts and then executing them selectively. This is OK, but when using Dockerfile syntax, with RUN, your snippets then can't include other Dockerfile commands such as ENTRYPOINT, ENV etc (so they are missing in the below example). This method fails (**3.**) \n\nExample of this form: (**WARNING:** below example is untested/theoretical)\n\n[Dockerfile-myapp]\n```\nFROM centos\nADD allmyscripts.tar.gz /scripts                                                \nRUN /scripts/Dockerfile-snippet-patching-update\nRUN <install myapp steps etc>\nRUN /scripts/Dockerfile-snippet-common-entry\n```\n  \n## make or cpp (ie. external build tools)\n> @vrothberg suggestion above. Very close to complete solution, I have seen `make` used in the past, my only concern is that it does need the interpretation/parsing by another tool (**1.**). I realise it's low overhead, but i'm considering the (minor) impact to end user experience using multiple tools.\n\nExample of this form:  (**WARNING:** below example is untested/theoretical)\n\n[Dockerfile-myapp]\n```\nFROM centos                                                     \n#include \"Dockerfile-snippet-patching-update\"\nRUN <install myapp steps etc>\n#include \"Dockerfile-snippet-common-entry\"\n```\n\n[Dockerfile-snippet-patching-update]\n```\nCOPY repo.conf /etc/yum/repos.d/\nRUN yum clean all && yum update -y && rm -rf /var/cache/yum\nRUN <more patch specific stuff eg. packages outside of yum/rpm>\n```\n\n[Dockerfile-snippet-common-entry]\n```\nCOPY entrypoint.sh /\nENV <common env stuff>\nENTRYPOINT /entrypoint.sh\n```\nCompile step of:\n```\n$ cpp -E Dockerfile-myapp > Dockerfile-final\n```\n\n## buildah native using 'source'\nBasically using buildah in the form of a bash file, and using `source` to pull in other bash script segments/snippets. I had a PoC of this up and running, but because you're at the shell, I find the resulting execution isn't as 'contained' as it is in the `bud` interpreter which can lead to bad things (ie. bad escapes in RUN commands being executed on host if not done correctly). You also need to maintain consistency in variable names etc. to maintain context.\n\nExample of this form: (**WARNING:** below example is untested/theoretical)\n\n[Dockerfile-myapp.sh]\n```\n#!/bin/bash\nnewcontainer=$(buildah from centos)\nscratchmnt=$(buildah mount ${newcontainer})\nsource Dockerfile-snippet-patching-update\nbuildah run  ${newcontainer} <install myapp steps etc>\nsource Dockerfile-snippet-common-entry\n```\n\n[Dockerfile-snippet-patching-update.sh]\n```\ncp repo.conf ${scratchmnt}/etc/yum/repos.d/\nbuildah run ${newcontainer} yum clean all\nbuildah run ${newcontainer} yum update -y\nrm -rf ${scratchmnt}/var/cache/yum\nbuildah run ${newcontainer} <more patch specific stuff eg. packages outside of yum/rpm>\n```\n[Dockerfile-snippet-common-entry.sh]\n```\ncp entrypoint.sh ${scratchmnt}/\nbuildah config --env ${newcontainer} <common env stuff>\nbuildah config --entrypoint ${newcontainer} /entrypoint.sh\n```"
+        },
+        {
+            "user": "vrothberg",
+            "body": "> I'm basically chasing a solution that meets the following requirements/constraints.\n> 1. The file/files that is stored in version control can be executed directly by the build tool (ie. no intermediate interpretation step to 'create' the Dockerfile) as this is an additional artefact to store.\n> 2. No logic/configuration needs to exist outside the files to describe their relationship> \n> 3. Access to all existing capabilities that can be used in existing Dockerfiles from the segments/snippets (ie. not just RUN commands)\n> 4. Segments/snippets can be inserted at arbitrary locations in the file, not just concatenated to the end / in a certain order (see my above example, an item is included, then some tasks, then another include)\n> 5. Segments/snippets can be referenced outside the Dockerfile directory context so they can be shared by multiple Dockerfiles\n\nAll of this can be done with `cpp`. Note that `$ cpp -E Dockerfile-myapp > Dockerfile-final`  is not required and can be done transparently in `buildah-bud`. But I don't want to hijack the discussion regarding `cpp`. As you stated, it's important to first have an agreement on the general issue whether buidah can/should diverge from other Dockerfile-based tools or not."
+        },
+        {
+            "user": "pixdrift",
+            "body": "The function/behaviour is correct with the cpp solution. I believe the implementation should fail on existing Docker interpreters so it doesn't get skipped with the leading `#`. Not sure how specific you were about interpreting the cpp as is in the example.\n\nThere is a kind of precedent in `grep` using the `-E` to enable extended capability, perhaps the implementation could be similar with `bud`?\n\nConsider the following Dockerfiles\n\n[container_app/Dockerfile]\n```\nFROM docker.io/library/centos:7\nRUN echo pixdrift\nE_INCLUDE container_inc\n```\n\n[container_inc/Dockerfile]\n```\nRUN echo inside.include\n```\n\nIn this example I have prefixed the `INCLUDE` with `E_` to protect it from a keyword collision if Docker do ever implement an `INCLUDE` capability, which would result in ambiguity. This I guess could be anything, eg. `BUILDAH_INCLUDE`.\n\nI think the implementation should require the user to explicitly switch the bud parser into `extended` mode to enable the additional features, so there is no confusion with regards to compatibility (perhaps even warn users when this is enabled). For example with `-e` and `--extended` options to bud.\n\nSome examples\n\n## buildah bud as it exists today (failure expected)\nFailure expected because an extended feature has been enabled without enabling the extended capability.\n```\n# buildah bud container_app\nSTEP 1: FROM docker.io/library/centos:7\nSTEP 2: RUN echo pixdrift\npixdrift\nSTEP 3: E_INCLUDE container_inc\nERRO[0000] Build error: Unknown instruction: \"e_include\" \n```\nThis error could be enhanced to something like this:\n```\nERRO[0000] Build error: Attempt to use extended instruction: \"e_include\" . Enable the extended capabilities with \"buildah bud --extended\"\n```\n\n## buildah bud with 'extended' capability enabled (success expected)\n```\n# buildah bud -e container_app\nSTEP 1: FROM docker.io/library/centos:7\nSTEP 2: RUN echo pixdrift\npixdrift\nSTEP 3: E_INCLUDE container_inc\nSTEP 4: RUN echo inside.include\ninside.include\n```\n\nIf a `FROM` appears in `container_inc/Dockerfile`, a warning could be shown to the user so they are aware it's ignored, eg.\n```\nSTEP 3: E_INCLUDE container_inc\nWARN[0000] Build warning: Ignoring FROM statement in included Dockerfile\n```\n\n## build attempt with moby/Docker existing implementation (failure expected)\nFailure expected because the command is listed in the Dockerfile and is picked up by Docker.\n\n```\n# docker build container_app\nSending build context to Docker daemon 2.048 kB\nError response from daemon: Unknown instruction: E_INCLUDE\n```\n\n\nNot sure if it's also worth discussing implementation details of levels of `E_INCLUDE` to support? to avoid complex dependency structures. eg. `E_INCLUDE` can only occur in the Dockerfile directly referenced by buildah bud? (this may be an unnecessary constraint/limit).\n\n-edit-\n\nWas also going to mention the potential to detect the file name and change behaviour. eg. if it's `Buildahfile`, the extended capability could be automatically turned on for the `bud` operation."
+        },
+        {
+            "user": "rhatdan",
+            "body": "5 years of discussion on adding this feature...\nI kind of like the idea of adding cpp support and only add INCLUDE once it is fully available, but that still leads us to the point where Dockerfiles used with buildah can not be used with Docker.\n\nPerhaps we should have a meeting to discuss this."
+        },
+        {
+            "user": "vrothberg",
+            "body": "> I kind of like the idea of adding cpp support and only add INCLUDE once it is fully available, but that still leads us to the point where Dockerfiles used with buildah can not be used with Docker.\n\nThat's true, but I think it's the lesser evil as those Dockerfiles can easily be transformed into something other parsers can eat.\n\n> Perhaps we should have a meeting to discuss this.\n\nIn case, I'd be interested in joining."
+        },
+        {
+            "user": "pixdrift",
+            "body": "@rhatdan The issue I see with the cpp method is that it will fail silently in Docker, and result in a successful Docker build with missing segment/snippet.\n\nI have proposed the E_INCLUDE method above so it's clear that it extends standard Dockerfile and breaks legacy compatibility if someone attempts to build the file that contains extensions with Docker. "
+        },
+        {
+            "user": "rhatdan",
+            "body": "@vbatts @nalind @mheon @smarterclayton @wking WDYT"
+        },
+        {
+            "user": "smarterclayton",
+            "body": "At that point it's not a Dockerfile.  If there's a desire for other formats, it would be best to make it be clear that it's something else (via a separate command, or flags that explicitly identify it, or a different filename).  Dockerfiles are valuable because they're reasonably portable and identical everywhere.  Creating something new needs to be different (it's a new API in a new direction)."
+        },
+        {
+            "user": "pixdrift",
+            "body": "@smarterclayton, that is why I have proposed the '-e' flag above, which makes it clear that it isn't compatible with the Dockerfile standard. This makes sure that when users are enabling the extended features they know they are breaking compatibility.\n\nI'm not sure it warrants a whole new file format / parser, even if it does break compatibility, but if it's a genuine concern the `Buildahfile` I proposed or even `Podmanfile`, for example, could be used with the same parser (and extended options automatically enabled for these filenames).\n"
+        },
+        {
+            "user": "mheon",
+            "body": "I would support a rename if we're going to go ahead and add potentially-incompatible options... Distributing Dockerfiles that don't actually build under Docker because of their extended options seems rather confusing. A new name, making distinct that this is something new and not fully compatible, would be a good idea.\n\nIf we can slip in a versioning system for the build files so we can more gracefully handle additions and changes like this in the future, that would also be a nice bonus."
+        },
+        {
+            "user": "smarterclayton",
+            "body": "If it has no chance of going into the canonical upstream, I really don't\nthink we should be adding it ourselves.  That seems scary.\n\nOn Mon, Jul 9, 2018 at 4:49 PM, pixdrift <notifications@github.com> wrote:\n\n> @smarterclayton <https://github.com/smarterclayton>, that is why I have\n> proposed the '-E' flag above, which makes it clear that it isn't compatible\n> with the Dockerfile standard. This makes sure that when users are enabling\n> the extended features they know they are breaking compatibility.\n>\n> I'm not sure it warrants a whole new file format / parser, even if it does\n> break compatibility.\n>\n> —\n> You are receiving this because you were mentioned.\n> Reply to this email directly, view it on GitHub\n> <https://github.com/projectatomic/buildah/issues/851#issuecomment-403615730>,\n> or mute the thread\n> <https://github.com/notifications/unsubscribe-auth/ABG_p3AFWbXTrY9rAL40RsIL-dlg6NUXks5uE8H1gaJpZM4VD2ng>\n> .\n>\n"
+        },
+        {
+            "user": "pixdrift",
+            "body": "@smarterclayton, Red Hat maintain experimental features downstream for Docker itself.\nhttps://access.redhat.com/articles/1354823\n\nGranted, this doesn't break compatibility with file formats, but a precedent for extending capability exists."
+        },
+        {
+            "user": "rhatdan",
+            "body": "Tough to judge if INCLUDE will go in upstream.  Since it has been talked about for 5 years, but there is a decent amount of recent info.\n\nI kind of like the idea of Dockerfile.in and then having buildah be smart enough to run the preprocessor on it to create a Dockerfile to use.  Then users would know not to use Dockerfile.in in upstream docker and could easily convert it if they did want to .."
+        },
+        {
+            "user": "pixdrift",
+            "body": "@rhatdan, am I right in thinking that the `Docker.in` in essence would only support concatenation of multiple files, and not arbitrary insertion as discussed above?\n\nAre you able to provide a quick example for discussion?"
+        },
+        {
+            "user": "rhatdan",
+            "body": "Dockerfile.in would be running the cpp on a Dockerfile. as suggested above.  Which would allow you to imbed includes into a Dockerfile.  If we seemlessly put this into Buildah, so it would notice a .in on a -f object, and run the cpp on it."
+        },
+        {
+            "user": "smarterclayton",
+            "body": "A preprocessing step that is a buildah specific option seems much safer.\nThere are lots of templating mechanisms, but a simple include implemented\nas a separate command or under a flag is reasonable, or with a specific\nextension.\n\nOn Mon, Jul 9, 2018 at 5:30 PM, Daniel J Walsh <notifications@github.com>\nwrote:\n\n> Dockerfile.in would be running the cpp on a Dockerfile. as suggested\n> above. Which would allow you to imbed includes into a Dockerfile. If we\n> seemlessly put this into Buildah, so it would notice a .in on a -f object,\n> and run the cpp on it.\n>\n> —\n> You are receiving this because you were mentioned.\n> Reply to this email directly, view it on GitHub\n> <https://github.com/projectatomic/buildah/issues/851#issuecomment-403626710>,\n> or mute the thread\n> <https://github.com/notifications/unsubscribe-auth/ABG_p_gUWHBXmk-a0XQZF_cZPGLgeVoPks5uE8tggaJpZM4VD2ng>\n> .\n>\n"
+        },
+        {
+            "user": "pixdrift",
+            "body": "@rhatdan, the concern I have with this approach is how Docker handles the Dockerfile with the cpp includes in it? Ideally Docker should error consistently, but I expect it will just ignore them and continue without error (can test this with a proposed example).\n\nAn alternate is that these segments/snippets aren't named Dockerfile, but container Dockerfile syntax. Can we call them `bricks` to maintain the buildah theme? 😏 \n\n-edit-\nCan I get a full example of the proposal so I am on the same page?"
+        },
+        {
+            "user": "AkihiroSuda",
+            "body": "Rather than extending Dockerfile in the own way, how about implementing \"syntax directive\", which will be introduced in Docker 18.06? https://github.com/moby/buildkit/pull/384/commits/460fb33da7e32d899f56cdfe2f48d58efe4c335f\n\ne.g.\n\n```dockerfile\n# syntax = projectatomic/dockerfile:with-include\nINCLUDE foo.Dockerfile.inc\nRUN foo bar\n```\n\nThe \"syntax directive\" is also used for supporting `RUN --mount type=cache` in Docker 18.06.\n\nNote that supporting \"syntax directive\" won't require vendoring buildkit nor any Moby component, except LLB protobuf definitions.\n\ncc @tonistiigi \n"
+        },
+        {
+            "user": "e-minguez",
+            "body": "what about having 'buildahfiles' instead dockerfiles?"
+        },
+        {
+            "user": "vbatts",
+            "body": "> what about having 'buildahfiles' instead dockerfiles?\n\nNo. Having Dockerfile as a standard syntax is one thing, but splintering that syntax is too much. One if the syntax is already self extending. Which sounds like what @AkihiroSuda is saying"
+        },
+        {
+            "user": "pixdrift",
+            "body": "@AkihiroSuda, do you have any more documentation/details of how the `syntax` parser directive is going to be implemented? I had a look and couldn't find any related issues / PRs or proposals... although I may be looking in the wrong places.\n\nThere is general documentation on directives here, but obviously doesn't include this new feature:\nhttps://docs.docker.com/engine/reference/builder/#parser-directives\n\nI am interested in seeing what the capabilities/limits of this option are."
+        },
+        {
+            "user": "AkihiroSuda",
+            "body": "> do you have any more documentation/details of how the syntax parser directive is going to be implemented? I had a look and couldn't find any related issues / PRs or proposals... although I may be looking in the wrong places.\n\nhttps://www.slideshare.net/Docker/containerd-buildkit-breakout/43\nhttps://github.com/moby/buildkit/pull/442\n\nWhen `# syntax = foo/bar:baz` is specified, a container image `foo/bar:baz` is launched for translating Dockerfile into BuildKit LLB (low-level build instructions).\n`foo/bar:baz` speaks BuildKit Frontend Gateway gRPC API via stdio.\n\nExample: `tonistiigi/dockerfile:runmount...`\n* Dockerfile: https://github.com/moby/buildkit/blob/master/frontend/dockerfile/cmd/dockerfile-frontend/Dockerfile (`--build-arg BUILDTAGS=dfrunmount`)\n* Frontend Gateway gRPC API: https://github.com/moby/buildkit/blob/master/frontend/gateway/pb/gateway.proto\n* LLB: https://github.com/moby/buildkit/blob/master/solver/pb/ops.proto\n\n> I am interested in seeing what the capabilities/limits of this option are.\n\nThe capabilities and limits depend on BuildKit API. (you don't need to vendor BuildKit library but you need to reimplement BuildKit API at least)\n\nIf you don't want to depend on BuildKit API,  you can also implement `# syntax = foo/bar:baz` without actually launching `foo/bar:baz`.\nHowever, even in that case, I suggest providing `foo/bar:baz` image for BuildKit/Docker/img compatibility.\n\n\n\n"
+        },
+        {
+            "user": "AkihiroSuda",
+            "body": "Also, it would make sense to consider designing a new language that is completely different from Dockerfile. \ne.g. Lua-based one: https://twitter.com/ehotinger/status/1016526888410365952\n"
+        },
+        {
+            "user": "rhatdan",
+            "body": "I was thinking more of keeping this simple and just handling Dockerfile.in, which most programmers would not expect to work with `docker build`, they should realize it needs to be preprocessed.  Buildah would just build in the preprocessing, whereas if someone wanted to use the file with `docker build` you would first need to run the cpp command on it."
+        },
+        {
+            "user": "vbatts",
+            "body": "But then I would assume that to be an m4 file\n\nOn Thu, Jul 12, 2018, 08:06 Daniel J Walsh <notifications@github.com> wrote:\n\n> I was thinking more of keeping this simple and just handling\n> Dockerfile.in, which most programmers would not expect to work with docker\n> build, they should realize it needs to be preprocessed. Buildah would\n> just build in the preprocessing, whereas if someone wanted to use the file\n> with docker build you would first need to run the cpp command on it.\n>\n> —\n> You are receiving this because you were mentioned.\n> Reply to this email directly, view it on GitHub\n> <https://github.com/projectatomic/buildah/issues/851#issuecomment-404489788>,\n> or mute the thread\n> <https://github.com/notifications/unsubscribe-auth/AAEF6RogeTA4QUkOWYaojoz7n7utwglbks5uFzu6gaJpZM4VD2ng>\n> .\n>\n"
+        },
+        {
+            "user": "pixdrift",
+            "body": "@rhatdan, can you provide a full example of this proposal including the input files, `buildah` command that would be executed, and the expected result? I think this would provide benefit to the discussion."
+        },
+        {
+            "user": "rhatdan",
+            "body": "I like @jfinkhaeuser suggestion back in 2014 in\n\nhttps://github.com/moby/moby/issues/735\n\n```\nNot to sound negative here (pun intended), but -1.\n\nI completely get the use cases for an include statement. But then I also get the need for parametrized Dockerfiles, and then for conditionals, etc. Continue down that path, and you'll end up implementing a programming language in Dockerfiles, which may even become turing complete. The cynicism in that statement is free of charge, by the way ;)\n\nWhy not use a preprocessing step instead? You don't even have to program your own, you could use m4 (used in autotools for this purpose) or the C preprocessor (used in IMake, which does a similar job as autotools but is pretty much defunct these days).\n\nMakefile:\n\nDockerfile: Dockerfile.in *.docker\n  cpp -o Dockerfile Dockerfile.in\n\nbuild: Dockerfile\n  docker build -rm -t my/image .\n\nDockerfile:\n\nFROM ubuntu:latest\nMAINTAINER me\n\n#include \"imagemagick.docker\"\n#include \"redis.docker\"\n\nRun make and it'll re-build the Dockerfile if any input file changed. Run make build and it'll re-build the Dockerfile if any input file changed, and continue to build the image.\n\nLook ma, no code!\n```"
+        },
+        {
+            "user": "rhatdan",
+            "body": "The idea would be for buildah to realize that a file ending in the .in prefix, requires cpp to be run on it first and then generate the Dockerfile.  It would be a soft requirement and would ask the user to install cpp if he wants to use Preprocessed files.\n\n"
+        },
+        {
+            "user": "pixdrift",
+            "body": "So you're proposing you just `buildah bud Dockerfile.in`, or you would `buildah bud Dockerfile` and it would look for an associated .in based on convention? or determine that `#include` occurs in the file?\n\nCan you provide a full example."
+        },
+        {
+            "user": "rhatdan",
+            "body": "I am proposing if you did \n\n`buildah bud /foobar`\n\nAnd Dockerfile did not exist the /foobar directory, but Dockerfile.in did then we would execute cpp on the Dockerfile.in and create a temporary Dockerfile, then use this Dockerfile with the context directory. If the Dockerfile did exist with the Dockerfile.in then we would just use the Dockerfile.\n\n`buildah bud -f /foobar/mybuilder.in ~  `\n\nWould attempt to preprocess mybuilder.in and generate a temporary file that it would treat as a Dockerfile and use the context directory of ~.\n\nif /usr/bin/cpp did not exist on the system, then it would print a message saying to install /usr/bin/cpp.\n"
+        },
+        {
+            "user": "ghost",
+            "body": "Isn't it a bit hacky to have a dependency on something like the c++ toolchain or m4 in order to implement an include statement ? "
+        },
+        {
+            "user": "vrothberg",
+            "body": "> Isn't it a bit hacky to have a dependency on something like the c++ toolchain or m4 in order to implement an include statement ?\n\nThat's a standard tool and independent from compilers, so I wouldn't expect any dependency chain."
+        },
+        {
+            "user": "pixdrift",
+            "body": "From a packaging perspective, I would expect as a user/consumer that this would be included as a dependency, rather than informing the user that it's missing.."
+        },
+        {
+            "user": "vrothberg",
+            "body": "I agree, I just checked for `opensuse:latest`:\n```\nThe following 6 NEW packages are going to be installed:\n  cpp cpp48 libcloog-isl4 libisl10 libmpc3 libmpfr4\n\n6 new packages to install.\nOverall download size: 5.6 MiB. Already cached: 0 B. After the operation,\nadditional 15.1 MiB will be used.\n```"
+        },
+        {
+            "user": "pixdrift",
+            "body": "@vrothberg beat me to it. In CentOS this suggests it would cost ~15M on install\n\nhttps://centos.pkgs.org/7/centos-x86_64/cpp-4.8.5-28.el7.x86_64.rpm.html"
+        },
+        {
+            "user": "vrothberg",
+            "body": "> @vrothberg beat me to it. In CentOS this suggests it would cost ~15M on install\n\n:laughing:"
+        },
+        {
+            "user": "rhatdan",
+            "body": "@pixdrift Sure people can package it together, but buildah should not assume that it is there.  It can be packaged as a soft or hard requirement.\n\nBut \nmake install\n\nfrom git, would not guarantee that it is there."
+        },
+        {
+            "user": "rhatdan",
+            "body": "Buildah now has #include support. \nWill be released soon as buildah 1.3"
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "buildah",
+            "number": 850
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "buildah",
+            "number": 893
+        },
+        {
+            "organization": "openshift",
+            "repository": "installer",
+            "number": 207
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "buildah",
+            "number": 3479
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "buildah",
+            "number": 3816
+        }
+    ]
+}

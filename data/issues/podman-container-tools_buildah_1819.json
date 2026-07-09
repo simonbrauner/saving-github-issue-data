@@ -1,0 +1,70 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "buildah",
+    "number": 1819,
+    "type": "issue",
+    "title": "Buildah APIs for embedding in other tool",
+    "state": "closed",
+    "labels": [
+        "locked - please file new issue/PR"
+    ],
+    "user": "slinkydeveloper",
+    "body": "Hi,\nI'm working on a POC where I would like to use buildah directly inside this tool. There is any plan to provide a documented API and some examples?",
+    "comments": [
+        {
+            "user": "rhatdan",
+            "body": "It would probably be best if you worked with us on the API.  Buildah has been vendored into podman and into OpenShift at this point, but we have been basically doing it manually and not as nicely as we should."
+        },
+        {
+            "user": "rhatdan",
+            "body": "If all that you want to do is process Dockerfiles, it would probably be best to just lock at the buildah/cmd/buildah/bud.go and you can probably get pretty far with that."
+        },
+        {
+            "user": "slinkydeveloper",
+            "body": "I've tried to emulate what is done in bud.go, but I'm not able to make it working. I've tried the same dockerfile with buildah bud and it works like a charm, and then with my app it stucks.\nFirst of all, I use `MaybeReexecUsingUserNamespace(false)` to make it working without root use, but at first COPY/ADD i get stuck on this problem:\n```\npanic: error copying \"/home/francesco/go/src/github.com/slinkydeveloper/my-app/target/src\" to \"/home/francesco/.local/share/containers/storage/overlay/387b542a07366c5621af3b662013fd01b88cfcbd03152b4eb325a0444d78700b/merged/home/node/src\": Error processing tar file(exit status 1): Error: unknown command \"/\" for \"my-app\"\nRun 'my-app --help' for usage.\nunknown command \"/\" for \"my-app\"\n```\n\nAny ideas? I've tried to build the container using buildah commands, but I still get stuck right on this copy command with same error\n\nAnyway, if i get this experiment working, i'll be glad to help you documenting the actual APIs"
+        },
+        {
+            "user": "slinkydeveloper",
+            "body": "I'm getting the same exact error using [podman wrapped Build method](https://godoc.org/github.com/containers/libpod/libpod#Runtime.Build). What this could be related to?"
+        },
+        {
+            "user": "rhatdan",
+            "body": "Does your app work when run as Root?\nI think you should get that to work first. Then we can look at rootless."
+        },
+        {
+            "user": "slinkydeveloper",
+            "body": "It doesn't work: \n\n```\nWARN[0000] error reading allowed ID mappings: error reading subuid mappings for user \"root\" and subgid mappings for group \"root\": No subuid ranges found for user \"root\" in /etc/subuid \nWARN[0000] Found no UID ranges set aside for user \"root\" in /etc/subuid. \nWARN[0000] Found no GID ranges set aside for user \"root\" in /etc/subgid. \npanic: kernel does not support overlay fs: 'overlay' is not supported over extfs at \"/var/lib/containers/storage/overlay\": backing file system is unsupported for this graph driver\n```\n\nI have correctly installed and configured fuse-overlayfs, maybe a permission issue? `buildah info --debug` with normal user output shows it's correctly configured:\n\n```\n    \"store\": {\n        \"ContainerStore\": {\n            \"number\": 2\n        },\n        \"GraphDriverName\": \"overlay\",\n        \"GraphOptions\": [\n            \"overlay.mount_program=/usr/bin/fuse-overlayfs\"\n        ],\n        \"GraphRoot\": \"/home/francesco/.local/share/containers/storage\",\n        \"GraphStatus\": {\n            \"Backing Filesystem\": \"extfs\",\n            \"Native Overlay Diff\": \"false\",\n            \"Supports d_type\": \"true\",\n            \"Using metacopy\": \"false\"\n        },\n        \"ImageStore\": {\n            \"number\": 7\n        },\n        \"RunRoot\": \"/run/user/1000\"\n    }\n```"
+        },
+        {
+            "user": "rhatdan",
+            "body": "You should not need fuse-overlay for root buildah, it is only needed for rootless.  I think the issue is you are using user namespace, perhaps when you do not need to for root running builds.  You should not need to look for root in /etc/subuid."
+        },
+        {
+            "user": "slinkydeveloper",
+            "body": "Uops sorry forget the warning, it was my mistake. Anyway I'm still getting the overlay fs error. To get the store i used the `storage.DefaultStoreOptions`. The complete code snippet is:\n\n```\n\tbuildStoreOptions, err := storage.DefaultStoreOptions(unshare.IsRootless(), unshare.GetRootlessUID())\n\n\tif err != nil {\n\t\treturn err\n\t}\n\n\tbuildStore, err := storage.GetStore(buildStoreOptions)\n\n\tif err != nil {\n\t\treturn err\n\t}\n\n\tbuildOpts := &buildah.CommonBuildOptions{\n\t\tLabelOpts: nil,\n\t}\n\n\topts := buildah.BuilderOptions{\n\t\tFromImage: \"node:12-alpine\",\n\t\tRegistry: image.ImageRegistry,\n\t\tIsolation: buildah.IsolationDefault,\n\t\tCommonBuildOpts: buildOpts,\n\t\tConfigureNetwork: buildah.NetworkDefault,\n\t}\n\n\tbuilder, err := buildah.NewBuilder(context.TODO(), buildStore, opts)\n\n\tif err != nil {\n\t\treturn err\n\t}\n\n\tbuilder.SetPort(\"8080\")\n\n\tdigester := digest.Canonical.Digester()\n\n\terr = builder.Add(\"/home/node/src\", false, buildah.AddAndCopyOptions{Hasher: digester.Hash()}, path.Join(targetDir, \"src\"))\n\tif err != nil {\n\t\tpanic(err)\n\t}\n\n\terr = builder.Add(\"/home/node/usr\", false, buildah.AddAndCopyOptions{Hasher: digester.Hash()}, path.Join(targetDir, \"usr\"))\n\tif err != nil {\n\t\tpanic(err)\n\t}\n\n\terr = builder.Run([]string{\n\t\t\"mkdir -p /home/node/usr/.npm\",\n\t\t\"chmod -R a+g+x /home/node/usr\", \"chmod -R a+g+x /home/node/src\",\n\t\t\"cd /home/node/src\",\n\t\t\"npm install\",\n\t\t\"cd /home/node/usr\",\n\t\t\"npm install\",\n\t\t\"cd /home/node/src\"}, buildah.RunOptions{})\n\tif err != nil {\n\t\treturn err\n\t}\n\n\tbuilder.SetEnv(\"HOME\", \"/home/node/usr\")\n\tbuilder.SetUser(\"1000\")\n\n\tbuilder.SetCmd([]string{\"node\", \"/home/node/src/index.js\"})\n\n\timageRef, err := alltransports.ParseImageName(fmt.Sprintf(\"%s/%s:%s\", image.ImageRegistry, image.ImageName, image.Tag))\n\n\timageId, _, _, err := builder.Commit(context.TODO(), imageRef, buildah.CommitOptions{})\n\n\tfmt.Printf(\"ImageId: %v\", imageId)\n\n\treturn err\n```\n\nAs I said, using a Dockerfile or using builder commands produce the same respective errors, both in root and rootless"
+        },
+        {
+            "user": "rhatdan",
+            "body": "And it is telling you the error about user namespace still and lack of overlayfs support?"
+        },
+        {
+            "user": "slinkydeveloper",
+            "body": "Yep. I get the overlay fs error using the code above (or using BuildDockerfile) and without using `MaybeReexecUsingUserNamespace(false) `. "
+        },
+        {
+            "user": "nalind",
+            "body": "> I've tried to emulate what is done in bud.go, but I'm not able to make it working. I've tried the same dockerfile with buildah bud and it works like a charm, and then with my app it stucks.\n> First of all, I use `MaybeReexecUsingUserNamespace(false)` to make it working without root use, but at first COPY/ADD i get stuck on this problem:\n> \n> ```\n> panic: error copying \"/home/francesco/go/src/github.com/slinkydeveloper/my-app/target/src\" to \"/home/francesco/.local/share/containers/storage/overlay/387b542a07366c5621af3b662013fd01b88cfcbd03152b4eb325a0444d78700b/merged/home/node/src\": Error processing tar file(exit status 1): Error: unknown command \"/\" for \"my-app\"\n\nYou'll need a call to either `github.com/containers/storage/pkg/reexec.Init()` or `github.com/containers/buildah.InitReexec()`, which just wraps that, at the top of `main()`, and have `main()` return if the function returns `true`, as we do at https://github.com/containers/buildah/blob/master/cmd/buildah/main.go#L123.  This is how the subprocesses that we launch using the same binary \"know\" that they're being invoked as the child in a do-something-in-a-subprocess scheme, and not the proper binary."
+        },
+        {
+            "user": "slinkydeveloper",
+            "body": "Thank you it works! I think this should be properly documented to allow people use buildah apis. I'll open a pr for it :)"
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "buildah",
+            "number": 1852
+        }
+    ]
+}

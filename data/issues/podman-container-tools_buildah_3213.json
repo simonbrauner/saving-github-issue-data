@@ -1,0 +1,66 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "buildah",
+    "number": 3213,
+    "type": "pull_request",
+    "title": "Fix copy race while walking paths",
+    "state": "closed",
+    "labels": [
+        "approved",
+        "lgtm",
+        "locked - please file new issue/PR"
+    ],
+    "user": "cevich",
+    "body": "#### What type of PR is this?\n\n> /kind bug\n\n#### What this PR does / why we need it:\n\nDuring a copy operation which descends through a directory tree,\nIt's possible for a referenced file to become inaccessible (by unlink\nor permission change or whatever).  During the walk of paths to copy,\nan `Lstat()` is run on each item, and any error passed into the handler\nfunction to deal with.  Subsequently, if there is no error, the file\nis examined for inclusion/exclusion by the handler.\n\nUnfortunately, this introduces a TOCTOU race condition for files which\nbecome inaccessible even if they would otherwise be excluded.  For\nexample a file or directory under /proc or /sys (which frequently and\nunpredictably change).  This was the original cause encountered during\npodman integration testing.\n\nIt's impractical to actually fix this race at the file-level, without\nintroducing negative effects to any source-container operations.  It's\nalso questionably useful to offer a command-line option to offload the\nchoice to the user.  Instead, follow the behavior of the `tar` command\nfor this situation: Issue a warning to the user, and ignore the\nproblematic item (don't copy it).\n\nAlso add a test resembling the podman test which originally caught this\nrace.  While not reliable, it does introduce a non-zero chance of\nhitting the race condition - and handling the new warning properly.\n\n#### How to verify it\n\nSince the desired/expected race condition behavior is negative (warning + ignore the file), verifying through testing is likely\nextremely difficult.  The newly added test should eventually catch and confirm the warning message, given sufficient runtime (possibly after 1,000,000 years of continuous testing).\n\n#### Which issue(s) this PR fixes:\n\nFixes #9997\n\n#### Special notes for your reviewer:\n\n#### Does this PR introduce a user-facing change?\n\n```release-note\nThe copy operation will now issue a warning message if source file/dir becomes inaccessible. In this case, the item will *not* be copied.\n```",
+    "comments": [
+        {
+            "user": "openshift-ci-robot",
+            "body": "[APPROVALNOTIFIER] This PR is **APPROVED**\n\nThis pull-request has been approved by: *<a href=\"https://github.com/containers/buildah/pull/3213#\" title=\"Author self-approved\">cevich</a>*\n\nThe full list of commands accepted by this bot can be found [here](https://go.k8s.io/bot-commands?repo=containers%2Fbuildah).\n\nThe pull request process is described [here](https://git.k8s.io/community/contributors/guide/owners.md#the-code-review-process)\n\n<details >\nNeeds approval from an approver in each of these files:\n\n- ~~[OWNERS](https://github.com/containers/buildah/blob/master/OWNERS)~~ [cevich]\n\nApprovers can indicate their approval by writing `/approve` in a comment\nApprovers can cancel approval by writing `/approve cancel` in a comment\n</details>\n<!-- META={\"approvers\":[]} -->"
+        },
+        {
+            "user": "nalind",
+            "body": "The bug description says that this is about symlinks, but the code being modified isn't related to symlinks?"
+        },
+        {
+            "user": "cevich",
+            "body": "> The bug description says that this is about symlinks, but the code being modified isn't related to symlinks?\n\nOh okay, that was my understanding of what was happening.  The target of a dereferenced symlink was becoming inaccessible after following but before copying.  It's easily possible I'm mistaken, I'll review the code more."
+        },
+        {
+            "user": "cevich",
+            "body": "Oof...so many pitfalls/races in copying files...okay I think I understand more now.  The race hit in the podman test doesn't _require_ symlink chasing, but it is possible to have a TOCTOU race there.  There's another one possible between the initial `filepath.Walk()` and _after_ the `err != nil` condition (i.e. source file becoming inaccessable).  But...for the original failing podman test, what appears to have happened is `filepath.Walk()` ran it's `lstat()` - encountered an error, then passed that along to walkfn() to handle (which it did).  This occurred on a file that would have been excluded, but the exclusion check doesn't occur until *after* the error handling (in `walkfn()`).  K.  I think I got it now.  I'll update the commit message and such accordingly."
+        },
+        {
+            "user": "TomSweeneyRedHat",
+            "body": "Changes LGTM, but I'll go with @nalind's thinking on the option need (or not)."
+        },
+        {
+            "user": "nalind",
+            "body": "Question about the commit log: what are the \"negative effects to any source-container operations\" it alludes to?"
+        },
+        {
+            "user": "rhatdan",
+            "body": "I would prefer to not offer any option to a user.  If it is internal and openshift/builder wanted it, I am fine."
+        },
+        {
+            "user": "nalind",
+            "body": "To be clear, I've only ever been talking about making it an API option."
+        },
+        {
+            "user": "cevich",
+            "body": "> what are the \"negative effects to any source-container operations\" it alludes to?\n\nIt's quite a stretch, but I was imagining a situation where a device is made available to a container.  Even if it would eventually be skipped, the code will still attempt to `lstat()` a file on/for the device.  Therefor that access will require synchronization with the kernel which could in turn impact another operation holding/waiting for a lock (for example)."
+        },
+        {
+            "user": "cevich",
+            "body": "> To be clear, I've only ever been talking about making it an API option.\n\nI think it's fine to have one, but maybe let somebody ask for it first?  More simply, I also don't want to add it in this PR...since I think it and writing a proper unit-test is well beyond my abilities. :grin: "
+        },
+        {
+            "user": "TomSweeneyRedHat",
+            "body": "One LGTM, and a bit of a discussion.  @rhatdan or @nalind can you LGTM and merge or say we need the API change for sure?"
+        },
+        {
+            "user": "rhatdan",
+            "body": "/lgtm\n\nWe can add an option in a later PR if desirable."
+        }
+    ],
+    "cross_references": []
+}

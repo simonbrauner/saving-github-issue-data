@@ -1,0 +1,140 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "buildah",
+    "number": 5091,
+    "type": "issue",
+    "title": "support for oras-like sugar",
+    "state": "open",
+    "labels": [
+        "kind/feature"
+    ],
+    "user": "cgwalters",
+    "body": "As far as I can tell, generally the core `skopeo copy` workflow is functional when using [OCI artifacts](https://github.com/opencontainers/artifacts).  However, operating on artifacts is clunky; the most ergonomic way is to fetch into an `oci` directory and then parse the content (and if you just wanted the data, delete the temporary oci dir).  For uploads it requires e.g. creating content in a local `oci` directory e.g. and then pushing to a registry.\n\nThe [ORAS project](https://oras.land/docs/category/oras-commands/) has much nicer higher level sugar; especially things like [oras push](https://oras.land/docs/commands/oras_push):\n\n`oras push --artifact-type application/vnd.me.config localhost:5000/hello:v1 hi.txt`\n\nis quite nice.\n\nWDYT about adding some commands like this to skopeo?",
+    "comments": [
+        {
+            "user": "vrothberg",
+            "body": "Just came out of a call with @baude working in this area.  In general, I think it would be great to provide means to create OCI artifacts more easily.\n\nI am under the impression that you're looking more into _creating_ artifacts (since copying them is already supported by Skopeo).  In that case, I think that Buildah is probably a better home for that functionality.  Or even extending umoci?"
+        },
+        {
+            "user": "vrothberg",
+            "body": "@nalind is also looking into SBOMs and artifacts at the moment AFAIR."
+        },
+        {
+            "user": "cgwalters",
+            "body": ">  In that case, I think that Buildah is probably a better home for that functionality. Or even extending umoci?\n\nNot opposed to buildah for this functionality; feels like it can go either way?  In theory skopeo is more about inspection/copying, but OTOH this desired functionality is very close to \"copying\" too.  There's no \"containerization\" involved here (namespaces, cgroups, overlayfs, etc etc.), it's just wrapping files in JSON.\n\nRestating the above, one dividing line here is that IMO at a technical level this does not involve containers/storage and eventually I think it could make sense to drop the vendored copy of containers/storage out of skopeo and have it defer to the installed buildah/podman binary for that.\n\nAs far as umoci, today it's not shipped in RHEL and I'd definitely like something that is for this.\n"
+        },
+        {
+            "user": "mtrmac",
+            "body": "For me, the primary boundary is: Skopeo should not be in the business of editing blob _contents_. That’s clearly what Buildah is, for container layers.\nSecondarily, I’d be wary of any kind of concept of “staging/WIP” and edit commands, even with whole blobs; that suggests that some kind of artifact-type-specific tool would be a better fit, possibly calling c/image to do the registry operations.\n\nIn that sense, a “push an artifact with these raw blobs” (creating just a manifest) is close but probably on the “reasonable to include” side. (It’s not _that_ easy as the example shows… At least every blob needs a MIME type specified.)\n\nApart from `skopeo sync`, Skopeo is a _very_ simple/dumb wrapper around c/image, with little UI design and quite little required maintenance. And, past experience is `skopeo sync` is, sadly, not getting the attention it probably deserves. There’s the chicken-and-egg problem of a very small project with little attention required vs. a very small project with little spare capacity available. Solvable, of course, but needs to be considered as something to solve if the feature set were to grow significantly, beyond that one example (which would be an one-off thing, and certainly manageable).\n\nNow, Buildah is designed around c/storage and storing data in layers there; storing other arbitrary large blobs in c/storage is _possible_ but I’m not sure it’s wanted; there’s not that much obvious benefit and the locking required by c/storage might mean that dealing with _large_ artifacts could slow down otherwise unrelated pulls/pushes/container starts in the same store. So I can vaguely imagine that Buildah, as it exists right now, might not actually be the best answer either, and maybe Skopeo could be the place.\n\n---\n\n> eventually I think it could make sense to drop the vendored copy of containers/storage out of skopeo\n\nc/storage in Skopeo is one of those things that is useless and inconvenient 99% of the time (notably its dependencies are one of the stronger reasons we can’t provide a single static Skopeo binary that runs on all distributions, something a class of users wants) — and then very useful in rare support cases.\n\nMy _wish_ is that every single caller of `alltransports.ParseImageName` accepts the same transports with the same syntax, with `docker://` and `dir:` and …. and, yes, `containers-storage:`. (In many cases, the right call is not to call `alltransports.ParseImageName` in the first place!). In that sense, it Would Look Bad™️ if Skopeo, the poster child of c/image, did not do that. Now, of course, that “wish” is an architecture astronaut thing with not that much relevance to end users."
+        },
+        {
+            "user": "cgwalters",
+            "body": "> In that sense, a “push an artifact with these raw blobs” (creating just a manifest) is close but probably on the “reasonable to include” side. (It’s not that easy as the example shows… At least every blob needs a MIME type specified.)\n\nRight, that was my sense too.  \n\n## Syntax\n\nI guess regardless of whether it goes in skopeo or buildah (mostly) - any opinions on syntax?  \nI think my bikeshed here would be:\n\n### Pushing\n\n`skopeo ociartifact push (--export-manifest manifest.json) [IMAGE] [FILENAME]:[MIMETYPE]...`\ne.g.:\n\n`skopeo ociartifact push quay.io/example/configmap:latest foo.json:application/vnd.containers.configmap+json bar.json:application/vnd.containers.configmap+json`\n\nand\n`skopeo ociartifact push quay.io/example/diskimage:latest fedora-coreos.qcow2:application/vnd.coreos.disk+qcow2`\n\nUnlike oras we make the mime type required, because skopeo already has commands for pushing OCI images.\n\n### Pulling\n\n`skopeo copy quay.io/example/configmap:latest oci:myartifact`\n\nNo new command!  This already exists and works.\n\n`skopeo ociartifact extract quay.io/example/configmap:latest foo.json` \n\nThis will write the contents of `foo.json` to stdout.  Handy for streaming to other tools, etc.\n\n`skopeo ociartifact extract --single quay.io/example/configmap:latest` \n\nAssuming that there is only one referenced blob, extract it to stdout.\n\nBoth of these commands would take `--export-manifest` to also save the manifest (e.g. one may want version metadata e.g.)\n\n> Now, Buildah is designed around c/storage and storing data in layers there; storing other arbitrary large blobs in c/storage is possible but I’m not sure it’s wanted;\n\nIt's definitely unwanted; use cases here include e.g. storing `.qcow2` images directly as an artifact in a registry, and we want to go directly from `.qcow`-in-filesystem to registry, not indirect through c/storage.   That said, just because something is in buildah doesn't mean that it has to indirect through c/storage of course.\n\n"
+        },
+        {
+            "user": "mtrmac",
+            "body": "> I guess regardless of whether it goes in skopeo or buildah (mostly) - any opinions on syntax?\n\n- Separate CLI arguments for MIME type and file paths, please. We already painted ourselves into that corner with `oci-archive:`_path_`:`_tag_ making it impossible to `podman load archive-path:with-colon.tar`.\n- I think the destination should be a _transport_`:`_name_, not registry-specific. (I don’t quite feel strongly enough to call it a blocker, but it’s close.)\n- The OCI image format actually strongly differentiates between config (almost, but not quite, mandatory) and layers. It would probably be convenient to make “the first” argument the config, and the rest layers, I just want to be an intentional decision.\n\nMaybe something like\n\n`skopeo oci-artifact push docker://quay.io/… `{`-c`|`--config-mime-type`}` application/foo.metadata foo.json `{`-m`|`--mime-type`}` application/foo.data blob1.bin `[{`-m`|`--mime-type`}` application/foo.extra`]` blob2.bin`\n\nwith `-m` mandatory before the first blob but optional for the following ones (continuing to use the previous value)?\n\n- The `extract` part might not be necessary (`inspect --config --raw`), or alternatively needs some more mechanisms for dealing with config vs. one of the potentially many layers.\n- Unsure: I’m not sure that `--export-manifest` is necessary as such; what is the consumer going to _do_ with the raw bytes? `skopeo copy` has `--digestfile`, is that roughly the idea?"
+        },
+        {
+            "user": "mtrmac",
+            "body": "Also Cc: @flouthoc @nalind — I’m not sure whether these or similar, conversations, have been happening elsewhere as well."
+        },
+        {
+            "user": "cgwalters",
+            "body": "> We already painted ourselves into that corner with oci-archive:path:tag making it impossible to podman load archive-path:with-colon.tar.\n\nYeah, true.  Agree it's unclean.  Has it been a problem in practice though?\n\n> Maybe something like\n\nMy main concern with this is that usually arguments aren't positionally sensitive, it should be equivalent to specify them as `FLAGS ARGS` where `FLAGS` are things that start with `-` and `ARGS` don't (except for a flag that binds to an argument of course).\n\nDunno.  Probably not a big deal.\n\nHmm, I think a `,` can't appear in a media type (since it's in `tspecials` [here](https://datatracker.ietf.org/doc/html/rfc2045#section-5.1) right?), so another alternative is to reverse things and do `skopeo oci-artifact push [IMAGE] [MEDIATYPE],[FILE]`\n\n`skopeo oci-artifact push quay.io/example/diskimage:latest application/vnd.coreos.disk+qcow2,fedora-coreos.qcow2`\n\nhmm, in the general case we may want support for accepting separate local filenames and remote `org.opencontainers.image.title` names...messy.  I don't think `oras` supports this.\n\nI'm OK with having separate arguments; visually noisier but in the end I expect most usage of this is from scripts or at worst humans copy/pasting instructions.\n\n(Also the use cases I primarily care about have exactly one layer, in which case the argument ordering doesn't matter)\n\n> Unsure: I’m not sure that --export-manifest is necessary as such; what is the consumer going to do with the raw bytes? skopeo copy has --digestfile, is that roughly the idea?\n\nKey metadata in the manifest: version aka `org.opencontainers.image.version`, timestamp aka `org.opencontainers.image.created` - plus digest of the whole manifest.\n\n \n\n"
+        },
+        {
+            "user": "mtrmac",
+            "body": "> > We already painted ourselves into that corner with oci-archive:path:tag making it impossible to podman load archive-path:with-colon.tar.\n> \n> Yeah, true. Agree it's unclean. Has it been a problem in practice though?\n\nhttps://github.com/containers/podman/issues/489 (internal) https://github.com/containers/podman/issues/18673 (external reporter), at least.\n\n> My main concern with this is that usually arguments aren't positionally sensitive, it should be equivalent to specify them as `FLAGS ARGS`\n\nYes. I don’t know that there is another trivial ergonomic solution… eventually we might end up accepting a JSON input, which clearly works but also takes a lot of pleasure out of using the tool. …\n\n> Hmm, I think a `,` can't appear in a media type (since it's in `tspecials` [here](https://datatracker.ietf.org/doc/html/rfc2045#section-5.1) right?), so another alternative is to reverse things and do `skopeo oci-artifact push [IMAGE] [MEDIATYPE],[FILE]`\n\n… oh, look a non-trivial solution :) That looks promising. The trivial version would require specifying the MIME type on every argument, but special-casing `,`_file_ or something like that would work, even if inelegantly.\n\n---\n\n> hmm, in the general case we may want support for accepting separate local filenames and remote `org.opencontainers.image.title` names...messy. I don't think `oras` supports this.\n\nI’m not sure what you mean. Should this create a side image using the OCI referrers mechanism? (That, to me feels like a separate subcommand, and anyway c/image can’t currently do that.) Or is it just an annotation string?\n\n---\n\n> > Unsure: I’m not sure that --export-manifest is necessary as such; what is the consumer going to do with the raw bytes? skopeo copy has --digestfile, is that roughly the idea?\n> \n> Key metadata in the manifest: version aka `org.opencontainers.image.version`, timestamp aka `org.opencontainers.image.created` - plus digest of the whole manifest.\n\nAt least for …`image.version`, that seems backwards to me: When _creating_ the artifact, Skopeo itself has no idea what the value should be, it would have to come from the caller as an option.\n\nI feel very weakly about `.created` — it could, plausibly, be automatically set, but for symmetry that might be an incoming option as well. Or just let the caller set arbitrary annotations [… on which of the many fields? All of them?] and be done with it."
+        },
+        {
+            "user": "vrothberg",
+            "body": "Buildah has already a hidden set of commands (see `buildah source`) to create a \"source image\" OCI artifact.  I don't think we'll need that anymore but there is a precedent in Buildah that shows how artifacts can be build.  It doesn't use c/storage at all for that but operates exclusively with the `docker:` and `oci:` transport.  I am sure we can generalize that code fairly easily into a generic artifact building tool.  I am sure @baude and @rhatdan will be supportive of such efforts - the timing seems right.\n\nBut I'd prefer to move the details of the design into a separate design doc/proposal/pr.  May that be an `.md` or a Google Doc or something else - but something that allows for an easy iterative review."
+        },
+        {
+            "user": "rhatdan",
+            "body": "That makes sense to me, I don't see us having to lock everything into containers/storage for buildah.  Creating and assembling manifests and pushing them to a container/registry seems like a legitimate use case."
+        },
+        {
+            "user": "cgwalters",
+            "body": "> That makes sense to me, \n\nThat = carrying this in buildah or carrying it in skopeo?\n\n>  When creating the artifact, Skopeo itself has no idea what the value should be, it would have to come from the caller as an option. ... . Or just let the caller set arbitrary annotations \n\nYes, oras has `-a, --annotation stringArray`, so a full invocation might look like e.g.:\n`skopeo oci-artifact push -a 'org.opencontainers.image.version=38.20231011.7' quay.io/example/diskimage:latest application/vnd.coreos.disk+qcow2,fedora-coreos.qcow2`\n\n> I feel very weakly about .created — it could, plausibly, be automatically set, \n\noras does this by default; I think it makes sense, but clearly needs to be overridable too."
+        },
+        {
+            "user": "rhatdan",
+            "body": "buildah support.\n\nI think skopeo might changing what the tool does."
+        },
+        {
+            "user": "cgwalters",
+            "body": "(transferred this issue to buildah)"
+        },
+        {
+            "user": "flouthoc",
+            "body": "FWIW ( not directly related ) better support to push OCI artifacts is also needed so its easier to ship WASM modules ( for which podman is currently using scratch based OCI images ) if it becomes easier to work with artifacts, I think podman should switch to artifacts to ship `wasm` modules as well like other tools in the ecosystem. "
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "cgwalters",
+            "body": "xref https://github.com/CentOS/centos-bootc-layered/pull/21#issuecomment-1865199943\n\nOne thing that got slightly lost here is that even if we choose `buildah` to build, we still probably want `skopeo` and `podman` to support fetching."
+        },
+        {
+            "user": "rhatdan",
+            "body": "Not sure podman has any better support for fetching the buildah pull, but definitely better for running containers."
+        },
+        {
+            "user": "arewm",
+            "body": "I ran across `buildah source` recently but functionality isn't there for me to be able to depend on it for my use cases (i.e. https://github.com/containers/buildah/issues/5399). I wanted to change from our current default of oras, but regctl also looked like it had a nice interface."
+        },
+        {
+            "user": "flouthoc",
+            "body": "> I ran across `buildah source` recently but functionality isn't there for me to be able to depend on it for my use cases (i.e. #5399). I wanted to change from our current default of oras, but regctl also looked like it had a nice interface.\n\n@arewm Created a PR for this: https://github.com/containers/buildah/pull/5454 "
+        },
+        {
+            "user": "cgwalters",
+            "body": "I recently came across https://github.com/carvel-dev/imgpkg - definitely related and interesting."
+        },
+        {
+            "user": "ktdreyer",
+            "body": "Is this related to https://github.com/containers/podman/pull/25005 ?"
+        },
+        {
+            "user": "ericcurtin",
+            "body": "I think we should lean `podman artifact` when appropriate.\n\nBut there is room for a tool that can do this without a local container store, without native OS support (macOS without podman machine as an example).\n\nI wrote a tool for this (https://github.com/ericcurtin/ocicp).\n\nIt's just a skopeo wrapper, I see that as a good thing, skopeo is packaged all over the place, rpm, brew, etc. It uses github.com/containers libraries (this is probably the what I like about it most vs oras).\n\nThe experience is a very simple `ocicp push`, `ocicp pull` experience.\n\n```\n$ ocicp push quay.io/some-namespace/some-image file1 file2\nGetting image source signatures\nCopying blob f489f6dc3a26 done   |\nCopying config 69d4ec4fdc done   |\nWriting manifest to image destination\n```\n\n```\n$ ocicp pull quay.io/podman-llm/podman-llm\nGetting image source signatures\nCopying blob f489f6dc3a26 done   |\nCopying config 69d4ec4fdc done   |\nWriting manifest to image destination\n```"
+        },
+        {
+            "user": "tarilabs",
+            "body": "> But there is room for a tool that can do this without a local container store, without native OS support (macOS without podman machine as an example).\n\nwould this tool support annotations, please?\nI'd love to contribute/have a binary-based equivalent of what is done with https://github.com/containers/olot for pure python based environments"
+        },
+        {
+            "user": "ericcurtin",
+            "body": "> > But there is room for a tool that can do this without a local container store, without native OS support (macOS without podman machine as an example).\n> \n> would this tool support annotations, please? I'd love to contribute/have a binary-based equivalent of what is done with https://github.com/containers/olot for pure python based environments\n\nSure... Why not? I'd want the default experience to remain as simple as:\n\n```\n$ ocicp push quay.io/yourorg/yourimage:latest file1.txt file2.conf\nGetting image source signatures\nCopying blob 6c43a1ee1e9b done   |\nCopying config eeab4a7bd2 done   |\nWriting manifest to image destination\n```\n\nand\n\n```\n$ ocicp pull quay.io/yourorg/yourimage:latest\nGetting image source signatures\nCopying blob 6c43a1ee1e9b done   |\nCopying config eeab4a7bd2 done   |\nWriting manifest to image destination\n```\n\nthough...\n"
+        },
+        {
+            "user": "mtrmac",
+            "body": "@ericcurtin Please stop for a few minutes and think what you want to _achieve_ longer-term.\n\nRight now, `ocicp` packages things as tarballs. That’s fine as it goes, and consistent with `ramalama oci://` right now.\n\nBut what is the _desired end state_?\n\nPodman is, among other reasons I understand also at Ramalama’s urging, adding support for `podman artifact`, to avoid the tar wrapping, to optimize using reflinks, and all that.\n\nSo does Ramalama want to use tar wrappers, or raw files without that? It surely isn’t productive to try to make _both_ popular concurrently.\n\n---\n\nAlso, I think it will ~never be as simple as that for any production usecase. Metadata matters (for a start, some registries are fairly strict about MIME types matching blob contents, but just about any data store needs _some_ metadata specific to its application), and the amount of metadata required _very quickly_ outgrows the scalability of a shell command line.\n\nLook how tedious https://github.com/containers/buildah/issues/5091#issuecomment-1768420598 looks, and that’s _just_ to do the minimum _mandatory_ for a registry object; not all the various annotations and creation time / version / compatibility / … data one might need. \n\nConsider designing for that from the start."
+        },
+        {
+            "user": "ericcurtin",
+            "body": "> [@ericcurtin](https://github.com/ericcurtin) Please stop for a few minutes and think what you want to _achieve_ longer-term.\n> \n> Right now, `ocicp` packages things as tarballs. That’s fine as it goes, and consistent with `ramalama oci://` right now.\n> \n> But what is the _desired end state_?\n> \n> Podman is, among other reasons I understand also at Ramalama’s urging, adding support for `podman artifact`, to avoid the tar wrapping, to optimize using reflinks, and all that.\n> \n> So does Ramalama want to use tar wrappers, or raw files without that? It surely isn’t productive to try to make _both_ popular concurrently.\n> \n> Also, I think it will ~never be as simple as that for any production usecase. Metadata matters (for a start, some registries are fairly strict about MIME types matching blob contents, but just about any data store needs _some_ metadata specific to its application), and the amount of metadata required _very quickly_ outgrows the scalability of a shell command line.\n> \n> Look how tedious [#5091 (comment)](https://github.com/containers/buildah/issues/5091#issuecomment-1768420598) looks, and that’s _just_ to do the minimum _mandatory_ for a registry object; not all the various annotations and creation time / version / compatibility / … data one might need.\n> \n> Consider designing for that from the start.\n\nThis is not necessarily for RamaLama. I think we are more likely to use podman artifact there.\n\nThis is more, I want to push/pull a file or many files to/from an OCI registry, kinda like oras does, I don't care about the details, I want it to be as simple as an scp/tar . I don't expect that to fit everyones use-case, but I expect it to fit a lot of usecases. I think for this use case, it's designed fine from the start.\n"
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "bootc-dev",
+            "repository": "bootc",
+            "number": 22
+        },
+        {
+            "organization": "cri-o",
+            "repository": "cri-o",
+            "number": 7492
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "skopeo",
+            "number": 1136
+        }
+    ]
+}

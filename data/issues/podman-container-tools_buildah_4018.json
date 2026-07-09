@@ -1,0 +1,94 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "buildah",
+    "number": 4018,
+    "type": "issue",
+    "title": "implement retry on buildah bud for FROM downloads",
+    "state": "closed",
+    "labels": [
+        "locked - please file new issue/PR"
+    ],
+    "user": "flucas1",
+    "body": "Network can be unreliable at some moments, even internal ones when STP layer-2 is acting...., and this make CI processes fail,\n\nFor this scenario I suggest that \"buildah bud\" has a retry capabilities when retrieving images via FROM,\n\nCurl implement this group of options\ncurl --connect-timeout 5  --max-time 10  --retry 5  --retry-delay 0   --retry-max-time 40 ....\n\nApt also implement APT::Acquire::Retries\n\nI would favor to have the retry delay and the number of retries as an overall parameter to buildah bud, that applies to all FROM instructions. FROM can be an argument to buildah, or having several FROM, so parsing the dockerfile to pre-download images is not an generic solution.",
+    "comments": [
+        {
+            "user": "vrothberg",
+            "body": "Thanks for reaching out.  Buildah has a built-in retry logic and will do it at most 3 times.  Can you share the errors you are seeing and the version of Buildah you are using?"
+        },
+        {
+            "user": "flucas1",
+            "body": "I am facing two issues:\n   * network unreliable, for 2 or 3 min\n   * docker registry maintenance operations (at least for the reference docker registry project that requires stop for garbage collection)\n \nI could easily overcome those issues with a retry delay of 60 seconds, and 5 retries or more...\n\nWith podman I can do podman pull, iterate over the exit codes, and then podman run --pull=none\n\nBut with buildah bud and FROM there is no easy workaround (only preparsing the dockerfile, and expanding ARGS)"
+        },
+        {
+            "user": "flouthoc",
+            "body": "Hi @flucas1 , Would it work for you if we make `MaxRetries` and `RetryDelay` configurable from CLI ? https://github.com/containers/buildah/blob/main/pull.go#L45"
+        },
+        {
+            "user": "vrothberg",
+            "body": "That is a very unreliable network.  There is only so much (or little) tools can do in such environments.  What if the `RUN` instructions require network?\n\nI am OK to expose the retry fields on the CLI but it feels much more like a symptomatic fix."
+        },
+        {
+            "user": "resmo",
+            "body": "This just came through my mind: What if `FROM` could be a list (delemiter separated, e.g. `|` ?) to try download from various endpoints sequencially? \n\nMany images are availalbe in more then one container registry so why not faillback to any other? Or \"try first local registry and fallback to public registry if fails\" scenario."
+        },
+        {
+            "user": "vrothberg",
+            "body": "Mirrors can already be configured in [man containers-registries.conf](https://github.com/containers/image/blob/main/docs/containers-registries.conf.5.md#example).  It is something I believe should be configured globally by the sysadmin and not by individual developers in Dockerfiles."
+        },
+        {
+            "user": "flucas1",
+            "body": "What I would suggest/desire is that `buildah bud` has arguments such as `--from-retry-max` `--from-retry-interval`\n\nIf the RUN instruction requires network, it should be up to the shell line executed to handle the situation of network issues, not a buildah issue. if it is curl, it should be called with he right retry values, or apt with the right retry.\n\n`\nRUN timeout 10m sh -c \"while ! apt-get update --error-on=any ; do sleep 1s ; done\"`"
+        },
+        {
+            "user": "vrothberg",
+            "body": "@rhatdan @nalind WDYT?\n\nAlternatively, it could be an environment variable.  That would prevent us from having to add new flags to all commands that may pull images."
+        },
+        {
+            "user": "rhatdan",
+            "body": "Definitely not a new flag.  registries.conf would make sense to me or I could live with a CONTAINER_PULL_RETRIES environment variable.  It should affect all pulling of images though, not just FROM command."
+        },
+        {
+            "user": "vrothberg",
+            "body": "> Definitely not a new flag. registries.conf would make sense to me or I could live with a CONTAINER_PULL_RETRIES environment variable. It should affect all pulling of images though, not just FROM command.\n\n`registries.conf` could make sense conceptually but I think it would require some restructuring of the code. Currently, the `retry` package lives in containers/common and if registries.conf received a new option, the package should probably live in containers/image, so that all consumers of containers/image (and hence registries.conf) can use it transparently.  Alternative, we could add it to `containers.conf` which already has a `image_parallel_copies` option.\n\n@mtrmac WDYT?"
+        },
+        {
+            "user": "mtrmac",
+            "body": "- Global retry defaults are _hard_. Compare https://github.com/containers/container-libs/issues/93  (no possible good timeout when considering large images; the whole conversation there is quite interesting). I just don’t see that it is possible to chose a _well-fitting_ timeout value that is appropriate for all images on a single registry (as it would probably be configured in `registries.conf`), and it’s even _less_ possible to choose a timeout value that applies to all registries (like the environment variable). So at least for timeouts, I do think that this should primarily be a per-operation option (i.e. something on the CLI of the individual command).\n- If talking not about timeouts, but just about a number of retries, this is less of a concern, and a global default might make more sense. But then consider the long-standing request to retry not at the image level, but at the individual layer level (which has, this year, finally become easier to do after adding the private API), and that again makes adding any new mechanism for globally setting the per-image retry count not _that_ attractive. And, see below.\n- WRT implementation layering, `registries.conf` (technically an internal implementation detail of the `docker://` transport) driving retries that currently happen by repeatedly calling the top-level `copy.Image` is a bad match (e.g. how would `registries.conf` apply for a `skopeo copy sif:… atomic:…` or other things that don’t involve a registry at all?). `containers.conf`, driving the libimage callers (only?), is closer to the current layering stack, OTOH that would currently leave out Skopeo.\n\n---\n\n`buildah bud` AFAICS already hard-codes https://github.com/containers/buildah/blob/44f96a5178e41fc649dd3b9e525d163da527b464/cmd/buildah/common.go#L30-L31 . Sure, that’s not an _option_, but Buildah should already be behaving that way by default. So what is this issue actually about? Was this a _purely theoretical_ request to support retries, without noticing that we already retry, or is that mechanism for some reason not working? If it is the latter, we need to drill down to what _exactly_ is not working, and fix that, and no amount of adding options to do the same three retries would make a difference if the retry logic is not helping."
+        },
+        {
+            "user": "mtrmac",
+            "body": "… my mistake, the three retries were already discussed.\n\nGiven that, as a starting point we could just hook up `pkg/retry` options to the CLI, first. Possibly creating a shared utility for the CLI options. _Then_ it would make more sense to think about designing more CLI tunables (collecting RFEs across the projects to see what makes sense). And moving those tunables from the CLI to config files would, I think, be a much later step, after we gain experience/feedback. Somewhere along the way, doing per-layer retries should also happen…"
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@mtrmac @vrothberg any movement on this?"
+        },
+        {
+            "user": "rhatdan",
+            "body": "@flouthoc Lets just add --retry and --timeout to budah from and buildah-bud Probably need this in buildah pull as well.  Eventually these should be added to podman pull as well. Podman build would happen natually."
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@flouthoc friendly ping."
+        },
+        {
+            "user": "flouthoc",
+            "body": "PR https://github.com/containers/buildah/pull/4195 allows users to configure these at buildah end."
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "buildah",
+            "number": 4195
+        }
+    ]
+}

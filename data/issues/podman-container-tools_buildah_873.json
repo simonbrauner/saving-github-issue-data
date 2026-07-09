@@ -1,0 +1,126 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "buildah",
+    "number": 873,
+    "type": "pull_request",
+    "title": "Add --isolation rootless",
+    "state": "closed",
+    "labels": [
+        "locked - please file new issue/PR"
+    ],
+    "user": "nalind",
+    "body": "Add an isolation mode which also calls an OCI runtime, but with modified arguments, passing it a modified runtime configuration.  This mode does things which are currently not permitted for containers in SELinux policy.\nWe now reexec ourselves in a new user namespace — even when we're running with UID 0 — if we don't have `CAP_SYS_ADMIN`, so that we can use `unshare(2)` when setting up to run a runtime.",
+    "comments": [
+        {
+            "user": "rhatdan",
+            "body": "@nalind What AVCs are you seeing?"
+        },
+        {
+            "user": "rhatdan",
+            "body": "DOes this replace https://github.com/projectatomic/buildah/pull/836 or in addition?\n@giuseppe PTAL"
+        },
+        {
+            "user": "nalind",
+            "body": "My preference would be to leave the SELinux policy alone, as that means we don't grant more privileges to containers, but these are logged in permissive mode:\n```\n----\ntime->Thu Jul 19 15:56:17 2018\ntype=AVC msg=audit(1532030177.684:21985): avc:  denied  { mount } for  pid=13547 comm=\"runc:[2:INIT]\" name=\"/\" dev=\"devpts\" ino=1 scontext=system_u:system_r:container_t:s0:c508,c877 tcontext=system_u:object_r:devpts_t:s0 tclass=filesystem permissive=1\n----\ntime->Thu Jul 19 15:56:17 2018\ntype=AVC msg=audit(1532030177.684:21984): avc:  denied  { mount } for  pid=13547 comm=\"runc:[2:INIT]\" name=\"/\" dev=\"tmpfs\" ino=20748791 scontext=system_u:system_r:container_t:s0:c508,c877 tcontext=system_u:object_r:tmpfs_t:s0 tclass=filesystem permissive=1\n----\ntime->Thu Jul 19 15:56:17 2018\ntype=AVC msg=audit(1532030177.684:21986): avc:  denied  { mounton } for  pid=13547 comm=\"runc:[2:INIT]\" path=\"/tmp/buildah730234659/mnt/rootfs/dev/pts\" dev=\"devpts\" ino=1 scontext=system_u:system_r:container_t:s0:c508,c877 tcontext=system_u:object_r:devpts_t:s0 tclass=dir permissive=1\n----\ntime->Thu Jul 19 15:56:17 2018\ntype=AVC msg=audit(1532030177.684:21987): avc:  denied  { mounton } for  pid=13547 comm=\"runc:[2:INIT]\" path=\"/tmp/buildah730234659/mnt/rootfs/proc\" dev=\"proc\" ino=1 scontext=system_u:system_r:container_t:s0:c508,c877 tcontext=system_u:object_r:proc_t:s0 tclass=dir permissive=1\n----\ntime->Thu Jul 19 15:56:17 2018\ntype=AVC msg=audit(1532030177.684:21988): avc:  denied  { remount } for  pid=13547 comm=\"runc:[2:INIT]\" scontext=system_u:system_r:container_t:s0:c508,c877 tcontext=system_u:object_r:sysfs_t:s0 tclass=filesystem permissive=1\n----\ntime->Thu Jul 19 15:56:17 2018\ntype=AVC msg=audit(1532030177.685:21989): avc:  denied  { open } for  pid=13547 comm=\"runc:[2:INIT]\" path=\"/dev/pts/ptmx\" dev=\"devpts\" ino=2 scontext=system_u:system_r:container_t:s0:c508,c877 tcontext=system_u:object_r:devpts_t:s0 tclass=chr_file permissive=1\n----\ntime->Thu Jul 19 15:56:17 2018\ntype=AVC msg=audit(1532030177.700:21990): avc:  denied  { setattr } for  pid=13547 comm=\"runc:[2:INIT]\" name=\"0\" dev=\"devpts\" ino=3 scontext=system_u:system_r:container_t:s0:c508,c877 tcontext=system_u:object_r:devpts_t:s0 tclass=chr_file permissive=1\n----\n```"
+        },
+        {
+            "user": "rhatdan",
+            "body": "If these are considered low enough risk to allow non priv users to mount, I don't see why SELinux should block.\n\nallow container_t devpts_t:chr_file { open setattr };\nallow container_t devpts_t:dir mounton;\nallow container_t devpts_t:filesystem mount;\nallow container_t proc_t:dir mounton;\nallow container_t sysfs_t:filesystem remount;\nallow container_t tmpfs_t:filesystem mount;\nI guess the real question is why are these not labeled.\n\nWe have a devpts_t that is being mounted on?  Is this the systems /dev/pts?  \nMounting on /proc directories is probably not a concern?\n\n[dwalsh@localhost psgo]$ sesearch -A -s container_t -p mount\nallow container_domain container_file_t:filesystem { mount remount unmount };\nallow container_t fusefs_t:filesystem mount; [ virt_sandbox_use_fusefs ]:True\nallow svirt_sandbox_domain fusefs_t:filesystem mount; [ virt_sandbox_use_fusefs ]:True\nallow svirt_sandbox_domain nfs_t:filesystem mount; [ virt_use_nfs ]:True\n\n"
+        },
+        {
+            "user": "nalind",
+            "body": "These denials are seen when running `buildah run` inside of a container.  The /dev, /proc, and /sys mountpoints start off as ordinary directories in the rootfs that buildah has been building.  The devpts filesystem is being mounted with the \"newinstance\" flag."
+        },
+        {
+            "user": "rhatdan",
+            "body": "Is buildah passing in the mount label of the container it is running in?  I think the issue might be that we are not passing down the label so buildah a devpts which is not labeled correctly?"
+        },
+        {
+            "user": "nalind",
+            "body": "As near as the `buildah` process can tell, SELinux is disabled, and `github.com/opencontainers/selinux/go-selinux/label.InitLabels()` returns empty values for it to use."
+        },
+        {
+            "user": "rhatdan",
+            "body": "Just for grins could you hard code a label into mountlabel, to see if the AVC's get better?"
+        },
+        {
+            "user": "nalind",
+            "body": "When setting processLabel to `system_u:system_r:container_t:s0:c26,c85` and mountLabel to `system_u:object_r:container_file_t:s0:c26,c85`, runc's validator logic returns an `selinux label is specified in config, but selinux is disabled or not supported` error."
+        },
+        {
+            "user": "rhatdan",
+            "body": "Ok We will have to think of planb.  I had a patch for selinux to allow the applying of labels even if selinux is disabled, but maybe that will not work.\n"
+        },
+        {
+            "user": "rh-atomic-bot",
+            "body": ":umbrella: The latest upstream changes (presumably b956493) made this pull request unmergeable. Please resolve the merge conflicts."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@nalind Needs a rebase."
+        },
+        {
+            "user": "rh-atomic-bot",
+            "body": ":umbrella: The latest upstream changes (presumably 59d2a89) made this pull request unmergeable. Please resolve the merge conflicts."
+        },
+        {
+            "user": "nalind",
+            "body": "bot, retest this please"
+        },
+        {
+            "user": "rhatdan",
+            "body": "bot, retest this please"
+        },
+        {
+            "user": "rhatdan",
+            "body": "bot, retest this please"
+        },
+        {
+            "user": "nalind",
+            "body": "bot, retest this please"
+        },
+        {
+            "user": "TomSweeneyRedHat",
+            "body": "Happy green test buttons.  I'm fine with addressing my comments in a follow up if they're pertinent."
+        },
+        {
+            "user": "nalind",
+            "body": "The `MoreCreateArgs` value is passed to the child [here](https://github.com/projectatomic/buildah/pull/873/files#diff-12f3273da1625fbe0b8ae7f4eefe2c3cR1297), so that its values can be used as additional command line arguments for the runtime's `create` command.  Arguments that specify where to send the console socket are appended to the passed-in value instead of its previous empty default value."
+        },
+        {
+            "user": "TomSweeneyRedHat",
+            "body": "Yeah I saw the MoreCreateArgs getting passed, I just didn't find any code that actually used it once passed. I may have missed it or have older code."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@rh-atomic-bot r+"
+        },
+        {
+            "user": "rh-atomic-bot",
+            "body": ":pushpin: Commit 6562d41 has been approved by `rhatdan`\n\n<!-- @rh-atomic-bot r=rhatdan 6562d41d255102b704eb1d5b933361201cd4d16d -->"
+        },
+        {
+            "user": "rh-atomic-bot",
+            "body": ":hourglass: Testing commit 6562d41 with merge 5490c49..."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@rh-atomic-bot retry"
+        },
+        {
+            "user": "rh-atomic-bot",
+            "body": ":hourglass: Testing commit 6562d41 with merge ae451b7..."
+        },
+        {
+            "user": "rh-atomic-bot",
+            "body": ":sunny: Test successful - [status-papr](https://s3.amazonaws.com/aos-ci/ghprb/projectatomic/buildah/ae451b721afacf3d8edbf1d808b673b6b5ad38e4.1533328610814019328/index.html)\nApproved by: rhatdan\nPushing ae451b721afacf3d8edbf1d808b673b6b5ad38e4 to master..."
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "buildah",
+            "number": 905
+        }
+    ]
+}

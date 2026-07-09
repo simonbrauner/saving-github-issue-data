@@ -1,0 +1,167 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "buildah",
+    "number": 2954,
+    "type": "issue",
+    "title": "caching buildah images (base + created) using github actions/cache",
+    "state": "open",
+    "labels": [
+        "buildkit"
+    ],
+    "user": "himanshumps",
+    "body": "I want to cache the buildah images so that they are not pulled every time using github actions/cache. Can you please help me understand what layers should be cached. I started with ~/var/lib/containers and /var/lib/containers but that did not help\n\n\n```\njobs:\n  # This workflow contains a single job called \"greet\"\n  build:\n    # The type of runner that the job will run on\n    runs-on: ubuntu-latest\n    steps:\n    - uses: actions/checkout@master\n    - name: Set up JDK 1.8\n      uses: actions/setup-java@v1\n      with:\n        java-version: 1.8\n    - name: Install oc tool\n      run: mkdir /tmp/s2i/ && cd /tmp/s2i/ && curl -s https://api.github.com/repos/openshift/source-to-image/releases/latest | grep browser_download_url | grep linux-amd64 | cut -d '\"' -f 4 | wget -qi - && tar xvf source-to-image*.gz && sudo mv s2i /usr/local/bin && rm -rf /tmp/s2i/\n    - name: Login to quay.io using Buildah\n      run: buildah login -u ${{ secrets.QUAY_USERNAME }} -p ${{ secrets.QUAY_PASSWORD }} quay.io\n    - name: Cache local Maven repository & buildah containers\n      uses: actions/cache@v2\n      with:\n        path: |\n          ~/.m2/repository\n        key: ${{ runner.os }}-maven-buildah-${{ hashFiles('**/pom.xml') }}\n        restore-keys: |\n          ${{ runner.os }}-maven-buildah-\n    - name: Build with Maven\n      run: pwd && mvn -B clean install -DskipTests -f ./vertx-starter/pom.xml\n    - name: Create the Dockerfile\n      run: printf \"FROM openjdk:8-slim\\nARG JAR_FILE=target/*.jar\\nRUN mkdir -p /deployments\\nCOPY \\${JAR_FILE} /deployments/app.jar\\nRUN chown -R 1001:0 /deployments && chmod -R 0755 /deployments\\nEXPOSE 8080 8443\\n USER 1001\\nENTRYPOINT [\\\"java\\\",\\\"-jar\\\",\\\"/deployments/app.jar\\\"]\" > Dockerfile && cat Dockerfile\n    - name: Create image using buildah\n      run: buildah bud --layers --log-level debug --build-arg JAR_FILE=\"vertx-starter/target/app.jar\" -t quay.io/himanshumps/vertx_demo .\n\n```",
+    "comments": [
+        {
+            "user": "TomSweeneyRedHat",
+            "body": "@himanshumps I'm not exactly clear what you're trying to do, to what exactly github actions/cache is caching between runs.  So just a quick stab, can you add the option `--pull` to your `buildah bud` command?  That should pull the image from the repository only if it or some of its layers are newer on the registry than the local ones.\n\n@cevich, any thoughts?"
+        },
+        {
+            "user": "cevich",
+            "body": "> @cevich, any thoughts?\n\nactions/cache is new to me, I've only ever dabbled with the archive action.  Let me stare at your YAML for a few minutes and see if I can wrap my brain around it..."
+        },
+        {
+            "user": "cevich",
+            "body": "...okay I understand what you're trying to do here.  Yeah I don't think caching the underlying container storage is a good idea, that's not and never was intended to be transported out of the original context.  Regardless, I attempted to do something very similar in a CI setup about a year ago, and had lots of trouble getting it to work (even setting `--timestamp 0`) reliably.  The \"proper\" way to transport image layers, is to encode/decode them using a standardized format (like docker-archive).\n\nThe setup I tried using worked like this: Before the build, I would `buildah pull docker-archive:...` after restoring cache (conditional on the file existing).  After the build I would `buildah push $IMAGE docer-archive:...` into a file, then cache the file.  However, the complexity of this setup was ultimately its downfall (i.e. the scripts and caching mechanisms kept breaking for one reason or another).  Though you're welcome to try this approach, perhaps a year of buildah development and a different CI system will help it be successful.  \n\nFor my setup, what ended up being much simpler and more reliable, was using the `--volume` option with `buildah bud ...` to provide a reusable store of cached bits on the host side, into the container for use at build time.  This strategy worked out much more reliably (since it's simple) as it didn't depend on lots of extra steps and conditional checks.  In my case, I was dealing with a lengthy Fedora package install.  So it was simple to volume-mount in a cached `/var/cache/dnf` to speed up the overall build.\n\nHope that helps."
+        },
+        {
+            "user": "himanshumps",
+            "body": "That helps. I can give it a shot. The reason I am planning to do it is because the GitHub runner uses the VFS mount and buildah is a bit slow with VFS. The oci archive makes sense and can help reduce build time drastically with layers using GitHub runner."
+        },
+        {
+            "user": "cevich",
+            "body": "Great. I'm curious if you're able to get it working."
+        },
+        {
+            "user": "webknjaz",
+            "body": "FTR there's https://github.com/redhat-actions/buildah-build that I started using recently but it is unable to reuse the layers cache, supposedly because buildah doesn't support this..."
+        },
+        {
+            "user": "Raboo",
+            "body": "I'm not as interested in the yum/dnf/apt/apk cache. I'm more interested in seeing a solution the original question like Docker has done with the cache-from and cache-to, https://github.com/docker/build-push-action/blob/master/docs/advanced/cache.md#github-cache.\n\nI.e. caching the layers. Let's say you have more than 1 job with the `FROM ubuntu:20.04`. It makes perfect sense to cache the underlying layers in a CI pipeline. Just pretend you have 1000 different jobs in a daily basis with `FROM ubuntu:20.04` or whatever `FROM` variants you use.. Would much rather fetch the underlying layers from GitHub Actions cache than from Docker Hub via Internet. \n\nSure, it wouldn't hurt to combine the image layers with a package volume mount cache and putting everything in the actions/cache. But foremost it would be nice not to download the exact same OS images every time you execute buildah in a github actions workflow."
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "Raboo",
+            "body": "unstale.."
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "webknjaz",
+            "body": "unstale"
+        },
+        {
+            "user": "rhatdan",
+            "body": "What about using additional stores for this.  \n\nYou could pull the images to /var/lib/shared and then share them amongst all of your builders?"
+        },
+        {
+            "user": "rhatdan",
+            "body": "https://www.redhat.com/sysadmin/image-stores-podman"
+        },
+        {
+            "user": "cevich",
+            "body": "WRT @Raboo [comment on Mar 15](https://github.com/containers/buildah/issues/2954#issuecomment-799270257) Dan's suggestion sounds feasible.  Though IIRC the cache directory needs to live at or below `$GITHUB_WORKSPACE` for [actions/cache](https://github.com/actions/cache)."
+        },
+        {
+            "user": "Raboo",
+            "body": "Hmm, okay so in short buildah uses `/var/lib/shared` or perhaps even  `/var/lib/shared/overlay-images` to store it's images and layers?\nAnd with podman you can control the image store location with the `--root` argument.\nThat is good to know.\n\nI see no mention that you are limited to `$GITHUB_WORKSPACE` for [actions/cache](https://github.com/actions/cache), most examples are under the `$HOME`. And the Docker team uses `/tmp/.buildx-cache` in their example.\nI think you should be able to to set /var/lib/shared as a cache directory. Remains to be seen.\n\nSo I assume you can create a cache in Github Actions with this information. And also other pipelines.\n\nOne follow-up question, how would buildah handle parallel builds against a shared filesystem under `/var/lib/shared`?"
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "webknjaz",
+            "body": "unstale"
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "flouthoc",
+            "body": "@Raboo I think its `default: \"/var/lib/containers/storage\" for UID 0, \"$HOME/.local/share/containers/storage\" for other users` have you tried using buildah with `--root` I think it should allow you to change default path with custom one where github action is storing cache by default. "
+        },
+        {
+            "user": "Raboo",
+            "body": "@flouthoc okay, thanks.\nI don't have the time or possibility to test this right now as I'm not using buildah at the moment. But it clearly seems solvable in sense."
+        },
+        {
+            "user": "rhatdan",
+            "body": "I think we need to document up how to use additional stores, @giuseppe @flouthoc Could you write up a blog on using additional stores to satisfy this need."
+        },
+        {
+            "user": "giuseppe",
+            "body": "do we need to cover something that is not already in https://www.redhat.com/sysadmin/image-stores-podman or do we need some github specific recipe?"
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "webknjaz",
+            "body": "> do we need to cover something that is not already in https://www.redhat.com/sysadmin/image-stores-podman or do we need some github specific recipe?\n\nFWIW I don't think I saw the intermediate layer cache working when I tried out RH-maintained actions."
+        },
+        {
+            "user": "sanmai-NL",
+            "body": "@himanshumps Can't you use`podman build --cache-from` and `--cache-to` parameters?"
+        },
+        {
+            "user": "libinglong",
+            "body": "I use buildah in container with cached dir /var/lib/containers and it works for me."
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "webknjaz",
+            "body": "Unstale"
+        },
+        {
+            "user": "rhatdan",
+            "body": "@flouthoc PTAL"
+        },
+        {
+            "user": "penn5",
+            "body": "The `--root` parameter seems to solve this? Just needs more prominent documentation..."
+        },
+        {
+            "user": "rhatdan",
+            "body": "Cre to open a PR?"
+        },
+        {
+            "user": "penn5",
+            "body": "I'm afraid I'm busy debugging your selinux policies now :/ (probably an issue in my setup)"
+        },
+        {
+            "user": "penn5",
+            "body": "It looks like the `--root` approach can create some very large and sprawling directories (5GB for a very simple build) so this is not appropriate for this use case, but I'll find another way\n"
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 15887
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "buildah",
+            "number": 4874
+        }
+    ]
+}

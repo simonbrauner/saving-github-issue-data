@@ -1,0 +1,70 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "buildah",
+    "number": 6731,
+    "type": "issue",
+    "title": "Inconsistency in the handling of duplicate stage names",
+    "state": "open",
+    "labels": [
+        "kind/bug",
+        "jira"
+    ],
+    "user": "chmeliik",
+    "body": "### Issue Description\n\nWhen a Containerfile contains duplicate stage names (`FROM ... AS <name>`):\n\n- `--target <name>` matches the first one\n- Without `--target`, if the final stage depends on the duplicate stages, buildah builds all of them and uses the last one\n    - (same for `--target <different stage>` if this stage depends on the duplicate stages)\n\nComparing to docker, buildah should probably match the last one in both cases (and skip building the earlier ones unless --skip-unused-stages=false).\n\nContext: in [Konflux](https://konflux-ci.dev/), we do builds with no network access, which requires pre-pulling the images for `FROM`, `COPY --from=` etc. We had bugs in the pre-pull logic, so we're correcting it to match buildah behavior, and found this inconsistency.\n\n### Steps to reproduce the issue\n\nSteps to reproduce the issue\n\nContainerfile:\n```Dockerfile\nFROM scratch AS stage0\n\nLABEL x=\"really stage 0\"\n\n\nFROM scratch AS stage0\n\nLABEL x=\"actually stage 1\"\n\n\nFROM stage0\n```\n\nRun:\n\n```text\n$ buildah build -t test --target stage0 .              \nSTEP 1/2: FROM scratch AS stage0\nSTEP 2/2: LABEL x=\"really stage 0\"\nCOMMIT test\n\n$ buildah inspect test:latest | jq .OCIv1.config.Labels\n{\n  \"io.buildah.version\": \"1.42.2\",\n  \"x\": \"really stage 0\"\n}\n\n# without --target\n$ buildah build -t test . \n[1/3] STEP 1/2: FROM scratch AS stage0\n[1/3] STEP 2/2: LABEL x=\"really stage 0\"\nGetting image source signatures\nCopying blob 5f70bf18a086 skipped: already exists  \nCopying config 4723b20146 done   | \nWriting manifest to image destination\n--> 4723b2014644\n[2/3] STEP 1/2: FROM scratch AS stage0\n[2/3] STEP 2/2: LABEL x=\"actually stage 1\"\nGetting image source signatures\nCopying blob 5f70bf18a086 skipped: already exists  \nCopying config c6c98af0b5 done   | \nWriting manifest to image destination\n--> c6c98af0b568\n[3/3] STEP 1/1: FROM c6c98af0b5683156d753a2a41e315c13fb0c808e9eec87a165b111932acd2079\n[3/3] COMMIT test\n\n$ buildah inspect test:latest | jq .OCIv1.config.Labels\n{\n  \"io.buildah.version\": \"1.42.2\",\n  \"x\": \"actually stage 1\"\n}\n```\n\nRepeat experiment with docker:\n\n```text\n$ docker build -t test -f Containerfile --target stage0 .\n$ docker inspect test:latest | jq '.[].Config.Labels'    \n{\n  \"x\": \"actually stage 1\"\n}\n\n$ docker build -t test -f Containerfile .\n$ docker inspect test:latest | jq '.[].Config.Labels'\n{\n  \"x\": \"actually stage 1\"\n}\n```\n\nNote that docker logs for this Containerfile don't actually show which stages are being built, so to prove that it doesn't build the first stage0 at all, replace the first line in the Containerfile with: `FROM image-does-not-exist:foo AS stage0` (which would fail if docker tried to build it)\n\n### Describe the results you received\n\n- `--target <name>` matches the first one\n- Without `--target`, if the final stage depends on the duplicate stages, buildah builds all of them and uses the last one\n\n### Describe the results you expected\n\n- `--target <name>` matches the last one, same as docker\n- Without `--target`, if the final stage depends on the duplicate stages, buildah builds and uses the last one, same as docker\n\n### buildah version output\n\n```yaml\nVersion:         1.42.2\nGo Version:      go1.24.10\nImage Spec:      1.1.1\nRuntime Spec:    1.2.1\nCNI Spec:        1.1.0\nlibcni Version:  \nimage Version:   5.38.0\nGit Commit:      \nBuilt:           Wed Dec  3 15:03:30 2025\nOS/Arch:         linux/amd64\nBuildPlatform:   linux/amd64\n```\n\n### buildah info output\n\n```yaml\n{\n    \"host\": {\n        \"CgroupVersion\": \"v2\",\n        \"Distribution\": {\n            \"distribution\": \"fedora\",\n            \"version\": \"42\"\n        },\n        \"MemFree\": 14483775488,\n        \"MemTotal\": 33056059392,\n        \"OCIRuntime\": \"crun\",\n        \"SwapFree\": 8589930496,\n        \"SwapTotal\": 8589930496,\n        \"arch\": \"amd64\",\n        \"cpus\": 14,\n        \"hostname\": \"acmiel-thinkpadx1carbongen12.tpbc.csb\",\n        \"kernel\": \"6.18.13-100.fc42.x86_64\",\n        \"os\": \"linux\",\n        \"rootless\": true,\n        \"uptime\": \"1h 20m 26.46s (Approximately 0.04 days)\",\n        \"variant\": \"\"\n    },\n    \"store\": {\n        \"ContainerStore\": {\n            \"number\": 5\n        },\n        \"GraphDriverName\": \"overlay\",\n        \"GraphImageStore\": \"\",\n        \"GraphOptions\": null,\n        \"GraphRoot\": \"/home/acmiel/.local/share/containers/storage\",\n        \"GraphStatus\": {\n            \"Backing Filesystem\": \"btrfs\",\n            \"Native Overlay Diff\": \"true\",\n            \"Supports d_type\": \"true\",\n            \"Supports shifting\": \"false\",\n            \"Supports volatile\": \"true\",\n            \"Using metacopy\": \"false\"\n        },\n        \"GraphTransientStore\": false,\n        \"ImageStore\": {\n            \"number\": 122\n        },\n        \"RunRoot\": \"/run/user/105500/containers\"\n    }\n}\n```\n\n### Provide your storage.conf\n\n```toml\n[storage]\ndriver = \"overlay\"\nrunroot = \"/run/containers/storage\"\ngraphroot = \"/var/lib/containers/storage\"\n\n[storage.options]\nadditionalimagestores = [\n\"/usr/lib/containers/storage\",\n]\npull_options = {enable_partial_images = \"true\", use_hard_links = \"false\", ostree_repos=\"\"}\n\n[storage.options.overlay]\nmountopt = \"nodev,metacopy=on\"\n```\n\n### Upstream Latest Release\n\nYes\n\n### Additional environment details\n\n_No response_\n\n### Additional information\n\n_No response_",
+    "comments": [
+        {
+            "user": "nalind",
+            "body": "Ugh, this isn't supposed to just be an error?"
+        },
+        {
+            "user": "chmeliik",
+            "body": "> Ugh, this isn't supposed to just be an error?\n\nDocker does log a warning... but no, not an error 😞 "
+        },
+        {
+            "user": "Honny1",
+            "body": "@dosu "
+        },
+        {
+            "user": "dosubot[bot]",
+            "body": "<!-- Answer -->\nHi! This issue you've reported is related to an existing bug tracked in [Issue #5210](https://github.com/containers/buildah/issues/5210), which was filed in December 2023 and acknowledged by maintainer @flouthoc but hasn't been resolved yet.\n\nYour analysis is correct—the inconsistency stems from two different code paths:\n- `--target` uses `ThroughTarget()` which returns on **first match**\n- Without `--target`, stages are stored in maps where later entries overwrite earlier ones (**last wins**)\n\nTo match Docker's behavior (always use the last stage with a duplicate name), the fix would likely need to happen in the `openshift/imagebuilder` library that buildah vendors, specifically in the `ThroughTarget()` function. This issue provides a clearer reproduction case with better documentation of the expected vs actual behavior than #5210, which may help move it forward.\n\n\n<!-- Dosu Comment Footer -->\n*To reply, just mention [@dosu](https://go.dosu.dev/dosubot?utm_source=github&utm_medium=bot-comment&utm_campaign=github-comment-footer-20260415&utm_content=reply-with-mention&utm_term=containers%2Fbuildah).*\n\n---\n\nDocs are dead. Just use [Dosu](https://dosu.dev?utm_source=github&utm_medium=bot-comment&utm_campaign=github-comment-footer-20260415&utm_content=static-docs-tagline&utm_term=containers%2Fbuildah).\n\n[![Leave Feedback](https://img.shields.io/badge/Leave%20Feedback-555555?style=flat)](https://app.dosu.dev/response-feedback?utm_source=github&utm_medium=bot-comment&utm_campaign=github-comment-footer-20260415&utm_content=static-docs-feedback&utm_term=containers%2Fbuildah#message_id=bfceb576-8475-4e62-b717-15a8c999e7cd) [![Ask Dosu about buildah](https://img.shields.io/badge/Ask%20Dosu%20about%20buildah-2f7b3f?style=flat&logo=data%3Aimage%2Fsvg%2Bxml%3Bbase64%2CPHN2ZyB3aWR0aD0iODYiIGhlaWdodD0iODkiIHZpZXdCb3g9IjAgMCA4NiA4OSIgZmlsbD0ibm9uZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj48cGF0aCBkPSJNNS4yOTIzNiAxMi43OTI4TDE3Ljc1OTMgNi42ODE4OFY3Mi41NjY3TDUuMjkyMzYgODQuMDYxOFYxMi43OTI4WiIgZmlsbD0iI0I0QkI5MSIvPjxwYXRoIGQ9Ik0xOC4yNTc1IDczLjExOTZMNTkuMTMyOSA3Mi43NDhMNTEuNzAxMSA4Mi40MDk1TDI5LjAzMzggODYuMjkxTDYuMjM5NjIgODUuMTU1NEwxOC4yNTc1IDczLjExOTZaIiBmaWxsPSIjNzc4NTYxIi8%2BPHBhdGggZD0iTTE3LjQ5MTYgMy43MzYzM0wzLjU4NTU3IDEyLjcwOTlWODMuNTc5MkMzLjU4NTU3IDg0Ljc1NDIgNC45ODU2MyA4NS4zNjUyIDUuODQ3MDUgODQuNTY2TDE5LjYyOTYgNzEuNzgwMSIgc3Ryb2tlPSJibGFjayIgc3Ryb2tlLXdpZHRoPSI2LjQyODQ0IiBzdHJva2UtbGluZWNhcD0icm91bmQiLz48bWFzayBpZD0iZG9zdS1kLWN1dG91dCIgZmlsbD0id2hpdGUiPjxwYXRoIGZpbGwtcnVsZT0iZXZlbm9kZCIgY2xpcC1ydWxlPSJldmVub2RkIiBkPSJNNDAuNzA0IDAuNTE4MDY2SDE3LjA0MzlWNzYuMjIyMUg0MC43MDRINDIuNTgwNUg0Ny44MDEzQzY4LjcwNjQgNzYuMjIyMSA4NS42NTMzIDU5LjI3NTIgODUuNjUzMyAzOC4zNzAxQzg1LjY1MzMgMTcuNDY1IDY4LjcwNjMgMC41MTgwNjYgNDcuODAxMyAwLjUxODA2Nkg0Mi41ODA1SDQwLjcwNFoiLz48L21hc2s%2BPHBhdGggZmlsbC1ydWxlPSJldmVub2RkIiBjbGlwLXJ1bGU9ImV2ZW5vZGQiIGQ9Ik00MC43MDQgMC41MTgwNjZIMTcuMDQzOVY3Ni4yMjIxSDQwLjcwNEg0Mi41ODA1SDQ3LjgwMTNDNjguNzA2NCA3Ni4yMjIxIDg1LjY1MzMgNTkuMjc1MiA4NS42NTMzIDM4LjM3MDFDODUuNjUzMyAxNy40NjUgNjguNzA2MyAwLjUxODA2NiA0Ny44MDEzIDAuNTE4MDY2SDQyLjU4MDVINDAuNzA0WiIgZmlsbD0iI0YzRjZGMSIvPjxwYXRoIGQ9Ik0xNy4wNDM5IDAuNTE4MDY2Vi02LjU3OTE5SDkuOTQ2NjlWMC41MTgwNjZIMTcuMDQzOVpNMTcuMDQzOSA3Ni4yMjIxSDkuOTQ2NjlWODMuMzE5NEgxNy4wNDM5Vjc2LjIyMjFaTTE3LjA0MzkgNy42MTUzMkg0MC43MDRWLTYuNTc5MTlIMTcuMDQzOVY3LjYxNTMyWk0yNC4xNDEyIDc2LjIyMjFWMC41MTgwNjZIOS45NDY2OVY3Ni4yMjIxSDI0LjE0MTJaTTQwLjcwNCA2OS4xMjQ5SDE3LjA0MzlWODMuMzE5NEg0MC43MDRWNjkuMTI0OVpNNDIuNTgwNSA2OS4xMjQ5SDQwLjcwNFY4My4zMTk0SDQyLjU4MDVWNjkuMTI0OVpNNDcuODAxMyA2OS4xMjQ5SDQyLjU4MDVWODMuMzE5NEg0Ny44MDEzVjY5LjEyNDlaTTc4LjU1NiAzOC4zNzAxQzc4LjU1NiA1NS4zNTU1IDY0Ljc4NjcgNjkuMTI0OSA0Ny44MDEzIDY5LjEyNDlWODMuMzE5NEM3Mi42MjYxIDgzLjMxOTQgOTIuNzUwNSA2My4xOTQ5IDkyLjc1MDUgMzguMzcwMUg3OC41NTZaTTQ3LjgwMTMgNy42MTUzMkM2NC43ODY2IDcuNjE1MzIgNzguNTU2IDIxLjM4NDcgNzguNTU2IDM4LjM3MDFIOTIuNzUwNUM5Mi43NTA1IDEzLjU0NTMgNzIuNjI2IC02LjU3OTE5IDQ3LjgwMTMgLTYuNTc5MTlWNy42MTUzMlpNNDIuNTgwNSA3LjYxNTMySDQ3LjgwMTNWLTYuNTc5MTlINDIuNTgwNVY3LjYxNTMyWk00MC43MDQgNy42MTUzMkg0Mi41ODA1Vi02LjU3OTE5SDQwLjcwNFY3LjYxNTMyWiIgZmlsbD0iYmxhY2siIG1hc2s9InVybCgjZG9zdS1kLWN1dG91dCkiLz48cGF0aCBkPSJNNjguOTIxNSAzNi4wMTM1QzY4LjkyMTUgMzYuMDEzNSA2NS43MzY5IDQ5LjQ3MzggNTEuNDIzMSA0OS40NzM4QzM3LjEwOTMgNDkuNDczOCAzMi41Nzg3IDM3LjM1OTYgMzIuNTc4NyAzNi4wMTM1IiBzdHJva2U9ImJsYWNrIiBzdHJva2Utd2lkdGg9IjcuNjkxNjEiIHN0cm9rZS1saW5lY2FwPSJyb3VuZCIgc3Ryb2tlLWxpbmVqb2luPSJyb3VuZCIvPjxwYXRoIGQ9Ik0wLjM0ODYzMyA4NS40OTQ2QzAuMzQ4NjMzIDg1LjQ5NDYgMjkuNDg1NiA4NS44MzA5IDM0LjgwOSA4NS42OThDNDQuODMzNyA4NS40NDc3IDUxLjI4NzIgODQuNDAyIDU3LjUyNjkgNzguOTcyNEM2Mi44MTI5IDc0LjM3MjcgNzUuMTM0MiA1OS42ODM2IDc1LjEzNDIgNTkuNjgzNiIgc3Ryb2tlPSJibGFjayIgc3Ryb2tlLXdpZHRoPSI2LjE2NDgyIi8%2BPC9zdmc%2B)](https://github.dosu.com/containers/buildah?utm_source=github&utm_medium=bot-comment&utm_campaign=github-comment-footer-20260415&utm_content=static-docs-ask-repo&utm_term=containers%2Fbuildah) [![Share Dosu with your team](https://img.shields.io/badge/Share%20Dosu%20with%20your%20team-1f6feb?style=flat)](https://app.dosu.dev/signup?referrer=openSource&source=github-footer&utm_source=github&utm_medium=bot-comment&utm_campaign=github-comment-footer-20260415&utm_content=static-docs-share-team&utm_term=containers%2Fbuildah)"
+        },
+        {
+            "user": "nalind",
+            "body": "Starting on this one."
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "github-actions[bot]",
+            "body": "A friendly reminder that this issue had no activity for 30 days."
+        },
+        {
+            "user": "chmeliik",
+            "body": "Update for v1.44: `--target` now matches the last stage as expected\n\nThe second issue remains - buildah builds all the duplicate stages, not just the last one"
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "openshift",
+            "repository": "imagebuilder",
+            "number": 320
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "buildah",
+            "number": 6774
+        },
+        {
+            "organization": "konflux-ci",
+            "repository": "konflux-build-cli",
+            "number": 133
+        },
+        {
+            "organization": "konflux-ci",
+            "repository": "capo",
+            "number": 44
+        }
+    ]
+}

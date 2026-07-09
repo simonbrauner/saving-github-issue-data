@@ -1,0 +1,71 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "buildah",
+    "number": 1304,
+    "type": "issue",
+    "title": "overlay/overlay2 not supported by kernel 4.20.3 or extfs?",
+    "state": "closed",
+    "labels": [
+        "locked - please file new issue/PR"
+    ],
+    "user": "AndydeCleyre",
+    "body": "Arch Linux\nExt4\n\nI thought that the overlay(2) driver was pretty much always recommended, but since I upgraded buildah to 1.6, it seems to say it's not supported over extfs anymore, though I can't find info on that anywhere. Can anyone clear things up for me? I believe vfs performance is expected to be awful. What should I be using?\n\n```bash\nbuildah containers\n```\n```\nERRO[0000] 'overlay' is not supported over extfs at \"/home/andy/.local/share/containers/storage/overlay2\" \nERRO[0000] 'overlay' is not supported over extfs at \"/home/andy/.local/share/containers/storage/overlay2\" \nkernel does not support overlay fs: 'overlay' is not supported over extfs at \"/home/andy/.local/share/containers/storage/overlay2\": backing file system is unsupported for this graph driver\nkernel does not support overlay fs: 'overlay' is not supported over extfs at \"/home/andy/.local/share/containers/storage/overlay2\": backing file system is unsupported for this graph driver\nERRO[0000] exit status 1\n```\n\n```\nVersion:         1.6\nGo Version:      go1.11.5\nImage Spec:      1.0.0\nRuntime Spec:    1.0.0\nCNI Spec:        0.4.0\nlibcni Version:  v0.7.0-alpha1\nGit Commit:      5f95bd9a\nBuilt:           Sat Jan 26 13:04:12 2019\nOS/Arch:         linux/amd64\n```\n\n```\nLinux Ingram 4.20.3-zen2-1-zen #1 ZEN SMP PREEMPT Sun Jan 20 22:17:49 UTC 2019 x86_64 GNU/Linux\n```\n\n**`/etc/containers/storage.conf`:**\n\n```ini\n[storage]\ndriver = \"overlay\"\nrunroot = \"/var/run/containers/storage\"\ngraphroot = \"/var/lib/containers/storage\"\n[storage.options]\nadditionalimagestores = [\n]\nsize = \"\"\noverride_kernel_check = \"true\"\nmountopt = \"nodev\"\n[storage.options.thinpool]\nostree_repo = \"\"\nskip_mount_home = \"false\"\n```\n\n**`/~/.config/containers/storage.conf`:**\n\n```ini\n[storage]\n  driver = \"overlay2\"\n  runroot = \"/run/user/1000\"\n  graphroot = \"/home/andy/.local/share/containers/storage\"\n  [storage.options]\n    mount_program = \"\"\n```",
+    "comments": [
+        {
+            "user": "TomasTomecek",
+            "body": "There is a bug somewhere, I erased `~/.local/share/containers` and `~/.config/containers` to start from scratch and then it started to work as expected. I think there is an issue related to this.\n\nAlso, there is no `overlay2` in podman/world; just overlay."
+        },
+        {
+            "user": "AndydeCleyre",
+            "body": "@TomasTomecek work as expected with overlay, or did it change your config to vfs?"
+        },
+        {
+            "user": "TomasTomecek",
+            "body": "I think your issue is a dupe of https://github.com/containers/libpod/issues/2172\n\nOverlay. I don't use vfs, it is slow and inefficient."
+        },
+        {
+            "user": "rhatdan",
+            "body": "The overlay driver is doing some testing to see if the file system as full support on file system it is attempting to use.  Could you turn on full debugging to see if containers/storage gives you more information on why it says the storage is not working?\n\n@nalind @rhvgoyal.   Should overlay work on extfs?\n\n"
+        },
+        {
+            "user": "rhatdan",
+            "body": "This fails in this function.  What is the file system that this is happening on,  It is being reported as extfs.\n\n```\n\nfunc supportsOverlay(home string, homeMagic graphdriver.FsMagic, rootUID, rootGID int) (supportsDType bool, err error) {\n\t// We can try to modprobe overlay first\n\n\texec.Command(\"modprobe\", \"overlay\").Run()\n\n\tlayerDir, err := ioutil.TempDir(home, \"compat\")\n\tif err != nil {\n\t\tpatherr, ok := err.(*os.PathError)\n\t\tif ok && patherr.Err == syscall.ENOSPC {\n\t\t\treturn false, err\n\t\t}\n\t}\n\tif err == nil {\n\t\t// Check if reading the directory's contents populates the d_type field, which is required\n\t\t// for proper operation of the overlay filesystem.\n\t\tsupportsDType, err = fsutils.SupportsDType(layerDir)\n\t\tif err != nil {\n\t\t\treturn false, err\n\t\t}\n\t\tif !supportsDType {\n\t\t\treturn false, overlayutils.ErrDTypeNotSupported(\"overlay\", backingFs)\n\t\t}\n\n\t\t// Try a test mount in the specific location we're looking at using.\n\t\tmergedDir := filepath.Join(layerDir, \"merged\")\n\t\tlower1Dir := filepath.Join(layerDir, \"lower1\")\n\t\tlower2Dir := filepath.Join(layerDir, \"lower2\")\n\t\tdefer func() {\n\t\t\t// Permitted to fail, since the various subdirectories\n\t\t\t// can be empty or not even there, and the home might\n\t\t\t// legitimately be not empty\n\t\t\t_ = unix.Unmount(mergedDir, unix.MNT_DETACH)\n\t\t\t_ = os.RemoveAll(layerDir)\n\t\t\t_ = os.Remove(home)\n\t\t}()\n\t\t_ = idtools.MkdirAs(mergedDir, 0700, rootUID, rootGID)\n\t\t_ = idtools.MkdirAs(lower1Dir, 0700, rootUID, rootGID)\n\t\t_ = idtools.MkdirAs(lower2Dir, 0700, rootUID, rootGID)\n\t\tflags := fmt.Sprintf(\"lowerdir=%s:%s\", lower1Dir, lower2Dir)\n\t\tif len(flags) < unix.Getpagesize() {\n\t\t\terr := mountFrom(filepath.Dir(home), \"overlay\", mergedDir, \"overlay\", 0, flags)\n\t\t\tif err == nil {\n\t\t\t\tlogrus.Debugf(\"overlay test mount with multiple lowers succeeded\")\n\t\t\t\treturn supportsDType, nil\n\t\t\t} else {\n\t\t\t\tlogrus.Debugf(\"overlay test mount with multiple lowers failed %v\", err)\n\t\t\t}\n\t\t}\n\t\tflags = fmt.Sprintf(\"lowerdir=%s\", lower1Dir)\n\t\tif len(flags) < unix.Getpagesize() {\n\t\t\terr := mountFrom(filepath.Dir(home), \"overlay\", mergedDir, \"overlay\", 0, flags)\n\t\t\tif err == nil {\n\t\t\t\tlogrus.Errorf(\"overlay test mount with multiple lowers failed, but succeeded with a single lower\")\n\t\t\t\treturn supportsDType, errors.Wrap(graphdriver.ErrNotSupported, \"kernel too old to provide multiple lowers feature for overlay\")\n\t\t\t} else {\n\t\t\t\tlogrus.Debugf(\"overlay test mount with a single lower failed %v\", err)\n\t\t\t}\n\t\t}\n\t\tlogrus.Errorf(\"'overlay' is not supported over %s at %q\", backingFs, home)\n\t\treturn supportsDType, errors.Wrapf(graphdriver.ErrIncompatibleFS, \"'overlay' is not supported over %s at %q\", backingFs, home)\n\t}\n\n\tlogrus.Error(\"'overlay' not found as a supported filesystem on this host. Please ensure kernel is new enough and has overlay support loaded.\")\n\treturn supportsDType, errors.Wrap(graphdriver.ErrNotSupported, \"'overlay' not found as a supported filesystem on this host. Please ensure kernel is new enough and has overlay support loaded.\")\n}\n```"
+        },
+        {
+            "user": "AndydeCleyre",
+            "body": "It's happening on ext4, as reported. I notice now this only happens when running buildah as a regular user (buildah-in-a-user-namespace).\n\nI'll include the comment-stripped `/etc/containers/storage.conf`:\n\n```ini\n[storage]\ndriver = \"overlay\"\nrunroot = \"/var/run/containers/storage\"\ngraphroot = \"/var/lib/containers/storage\"\n[storage.options]\nadditionalimagestores = [\n]\nsize = \"\"\noverride_kernel_check = \"true\"\nmountopt = \"nodev\"\n[storage.options.thinpool]\nostree_repo = \"\"\nskip_mount_home = \"false\"\n```\n\nBack to regular user:\n\n```bash\nbuildah --debug images\n```\n\n```\nrunning [buildah-in-a-user-namespace --debug images] with environment [<snip> _BUILDAH_STARTED_IN_USERNS=1 BUILDAH_ISOLATION=rootless], UID map [{HostID:1000 ContainerID:0 Size:1} {HostID:100000 ContainerID:1 Size:65536}], and GID map [{HostID:1002 ContainerID:0 Size:1} {HostID:100000 ContainerID:1 Size:65536}]\n\n[graphdriver] trying provided driver \"overlay\"\noverlay test mount with multiple lowers failed mountfrom re-exec error: exit status 1: output: operation not permitted\noverlay test mount with a single lower failed mountfrom re-exec error: exit status 1: output: operation not permitted\n'overlay' is not supported over extfs at \"/home/andy/.local/share/containers/storage/overlay\"\n[graphdriver] trying provided driver \"overlay\"\noverlay test mount with multiple lowers failed mountfrom re-exec error: exit status 1: output: operation not permitted\noverlay test mount with a single lower failed mountfrom re-exec error: exit status 1: output: operation not permitted\n'overlay' is not supported over extfs at \"/home/andy/.local/share/containers/storage/overlay\"\nkernel does not support overlay fs: 'overlay' is not supported over extfs at \"/home/andy/.local/share/containers/storage/overlay\": backing file system is unsupported for this graph driver\nkernel does not support overlay fs: 'overlay' is not supported over extfs at \"/home/andy/.local/share/containers/storage/overlay\": backing file system is unsupported for this graph driver\nexit status 1\n```\n\nMaybe I haven't properly configured user namespace stuff. What I've done:\n\n`/etc/subuid`:\n`andy:100000:65536`\n\n`/etc/subgid`:\n`andy:100000:65536`\n\n`/etc/sysctl.d/96-userns.conf`:\n`kernel.unprivileged_userns_clone = 1`"
+        },
+        {
+            "user": "ghost",
+            "body": "Well, Fedora workstation and Cloud image uses ext4 as the default rootfs. Many other distros use ext4 as default too. I don't see any reasons podman should not support ext4."
+        },
+        {
+            "user": "rhatdan",
+            "body": "Do you have fuse-overlayfs installed on your box?"
+        },
+        {
+            "user": "rhatdan",
+            "body": "I can get something like this to happen if I have a bogus entry in ~/.config/containers/storage.conf\n\n```\nbuildah bud .\nERRO[0000] 'overlay' is not supported over xfs at \"/home/dwalsh/.local/share/containers/storage/overlay\" \nERRO[0000] 'overlay' is not supported over xfs at \"/home/dwalsh/.local/share/containers/storage/overlay\" \nkernel does not support overlay fs: 'overlay' is not supported over xfs at \"/home/dwalsh/.local/share/containers/storage/overlay\": backing file system is unsupported for this graph driver\nkernel does not support overlay fs: 'overlay' is not supported over xfs at \"/home/dwalsh/.local/share/containers/storage/overlay\": backing file system is unsupported for this graph driver\nERRO[0000] exit status 1         \n```\n\n```\n cat ~/.config/containers/storage.conf\n[storage]\n  driver = \"overlay\"\n  runroot = \"/run/user/3267\"\n  graphroot = \"/home/dwalsh/.local/share/containers/storage\"\n  [storage.options]\n    mount_program = \"\"\n```\n\nIf you remove this and install fuse-overlayfs does the problem go away?"
+        },
+        {
+            "user": "rhatdan",
+            "body": "Overlayfs is not supported in rootless mode UNLESS fuse-overlay is configured as the mount-program."
+        },
+        {
+            "user": "AndydeCleyre",
+            "body": "YES, thank you! After nuking the config and installing `fuse-overlayfs-git` from the AUR, buildah generated the following, working-as-user config:\n\n```ini\n[storage]\n  driver = \"overlay\"\n  runroot = \"/run/user/1000\"\n  graphroot = \"/home/andy/.local/share/containers/storage\"\n  [storage.options]\n    mount_program = \"/bin/fuse-overlayfs\"\n```\n\nSo in all, the following will get rootless working on Arch:\n\n```bash\nsudo echo \"$USER:100000:65536\" >> /etc/subuid\nsudo echo \"$USER:100000:65536\" >> /etc/subgid\nsudo sysctl kernel.unprivileged_userns_clone=1\nsudo echo \"kernel.unprivileged_userns_clone = 1\" >> /etc/sysctl.d/96-userns.conf\ngit clone aur@aur.archlinux.org:fuse-overlayfs-git\ncd fuse-overlayfs-git\nmakepkg -sci\n```\n\nThat `96` is arbitrary, and I don't know if a particular ordering is recommended. I only have a couple other items there, at `90` and `99`.\n\nThanks so much!"
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "hpc",
+            "repository": "charliecloud",
+            "number": 793
+        },
+        {
+            "organization": "ES-Nix",
+            "repository": "podman-rootless",
+            "number": 2
+        }
+    ]
+}

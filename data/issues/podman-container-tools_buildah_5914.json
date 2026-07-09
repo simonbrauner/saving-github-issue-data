@@ -1,0 +1,42 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "buildah",
+    "number": 5914,
+    "type": "issue",
+    "title": "Is there a way to refer to a container rather than an image in multistage builds?",
+    "state": "closed",
+    "labels": [
+        "locked - please file new issue/PR"
+    ],
+    "user": "ytimenkov",
+    "body": "Hi!\n\nI've been using buildah's multi-container feature to create slim runtime images for a while now (something inspired by https://projectatomic.io/blog/2017/08/buildah-getting-fit/) - a technique to have a separate container or host with package manager and have a target runtime container where packages are installed. (OpenSUSE project even provides images for such purpose - they contain RPM database, but no rpm).\n\nHowever this process requires a bit of scripting to start containers and juggle with mounts and is not that expressive.\n\nRecently I discovered that Dockerfile syntax now allows to add a different set of mounts to `RUN` instruction, so I tried to check if it's possible to achieve same effect with just Containerfiles:\n\n```Dockerfile\nFROM registry.opensuse.org/opensuse/bci/bci-micro:latest AS base\n\nRUN echo \"Building...\"\n# ^^^^^^^^ This commits container to an image. The image will be (re)used in the final stage\n\nFROM registry.opensuse.org/opensuse/tumbleweed AS zypp\n\nRUN zypper modifyrepo --keep-packages --all\n\nRUN \\\n    --mount=type=cache,destination=/var/cache/zypp \\\n    --mount=type=bind,from=base,destination=/target,rw \\\n    zypper --non-interactive --gpg-auto-import-keys --installroot=/target install ripgrep\n# ^^^ This modifies running container, but not the image. Image is committed after finishing \"base\" stage\n\nFROM base\n\nRUN --mount=type=bind,from=zypp,destination=/root echo \"Done building\"\n# ^^^^ This is just to add dependency on zypp stage, otherwise it is ignored.\n```\n\nUnfortunately it doesn't work, because while `RUN` instructions take stage as a container, `FROM` instructions take stage as an image. The difference is that container is committed to image right before switching to the next stage (`FROM tumbleweed AS zypp`) and therefore any changes done to base container are not propagated (just discarded).\n\nSo that's my question - is there any way to create Containerfile which allows such use-case?\n\nP.S. thanks for a great tool!",
+    "comments": [
+        {
+            "user": "flouthoc",
+            "body": "I did not understand this completely if you do \n\n`RUN --mount=type=bind,from=<somestage>` wouldn't that allow the access to filesystem of `<somestage>` which was done by the last container before committing ?"
+        },
+        {
+            "user": "ytimenkov",
+            "body": "> wouldn't that allow the access to filesystem of <somestage> which was done by the last container before committing ?\n\nThat's the problem - this doesn't give access to the filesystem. It gives access to the image/layer (I.e. system which is stored) and modifying it won't update that stage.\n\nI want to use kind of \"sidecar\" container with tools to build. Think of build stage and runtime stage - you do `COPY FROM`, but in this case things can be slightly more complicated - I want to run something outside the current stage. The only way to do it - is to run \"sidecar\" / \"tool\" container and bind-mount \"target\" container and tell tools to operate on that target (e.g. via `--installroot` option).\n\nFor this both containers should be alive (i.e. not stored into an image / layer). This is why it works via command-line `buildah` - I can create as many containers as I need and keep them, while doing any kind of cross-mounts and runs. But Containerfile syntax doesn't allow this - when switching to a new stage, previous stage is stored as a layer and even if it's mounted - its content won't be updated."
+        },
+        {
+            "user": "flouthoc",
+            "body": "@ytimenkov Yeah I meant this will give access to comitted layers not the filesystem of running container. I don't think we have such support directly using `Containerfiles` maybe we can add this as a feature. @nalind any thoughts ?"
+        },
+        {
+            "user": "nalind",
+            "body": "The closest thing right now would be to do everything to set up a chroot in one stage, then have a subsequent `FROM scratch` stage `COPY --from` that directory from that stage into `/`.  The downside there is that while that works for setting up the rootfs that you want to commit to an image, because the stage with the desired rootfs was started from scratch, there's no history or configuration to be carried over from a base image."
+        },
+        {
+            "user": "ytimenkov",
+            "body": "Actually it seems to be possible to do without changes: `COPY` instruction doesn't seem to alter the layer if files are identical.\n\nI was looking at this [Containerfile](https://build.opensuse.org/projects/devel:BCI:Tumbleweed/packages/postgres-16-image/files/Dockerfile?expand=1):\n\n```\nFROM opensuse/bci/bci-micro:latest AS target\nFROM opensuse/tumbleweed:latest AS builder\nCOPY --from=target / /target\n\nRUN set -euo pipefail; \\\n    zypper -n --installroot /target --gpg-auto-import-keys install --no-recommends libpq5 postgresql16-server findutils coreutils sed util-linux\nRUN set -euo pipefail; zypper -n --installroot /target clean -a; \\\n    rm -rf {/target,}/var/log/{alternatives.log,lastlog,tallylog,zypper.log,zypp/history,YaST2}\nFROM opensuse/bci/bci-micro:latest\nCOPY --from=builder /target /\n\n```\n\nEssentially, instead of mapping volume it just copies data into \"worker\" container and then back (or forward, to a new container). I did a quick test with this Containerfile:\n\n```\nFROM registry.opensuse.org/opensuse/bci/bci-micro:latest AS target\nFROM registry.opensuse.org/opensuse/tumbleweed:latest AS builder\nCOPY --from=target / /target\nRUN echo \"New file\" > /target/dirty\nFROM registry.opensuse.org/opensuse/bci/bci-micro:latest\nCOPY --from=builder /target /\n```\n\nAnd according to skopeo it creates 2 layers: 32Mb and 2K (and the bigger one seems to be reused from the base image).\n\nI think this issue should be closed because it is very tricky to implement one with proper caching and other variables in play."
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "buildah",
+            "number": 5951
+        }
+    ]
+}

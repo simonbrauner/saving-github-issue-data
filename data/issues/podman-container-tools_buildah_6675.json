@@ -1,0 +1,112 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "buildah",
+    "number": 6675,
+    "type": "pull_request",
+    "title": "Add an undocumented general \"run with RPC service\"",
+    "state": "closed",
+    "labels": [
+        "size:XL"
+    ],
+    "user": "nalind",
+    "body": "#### What type of PR is this?\n\n/kind feature\n\n#### What this PR does / why we need it:\n\nAdd an undocumented general \"run this with an RPC service\" command, which right now doesn't do much, but provides some of the scaffolding we'll need should we want to expose any APIs that way.\n\n#### How to verify it\n\nNew integration test!\n\n#### Which issue(s) this PR fixes:\n\n#### Special notes for your reviewer:\n\n#### Does this PR introduce a user-facing change?\n\n```release-note\nNote\n```",
+    "comments": [
+        {
+            "user": "nalind",
+            "body": "/packit rebuild-failed"
+        },
+        {
+            "user": "nalind",
+            "body": "Rebased."
+        },
+        {
+            "user": "giuseppe",
+            "body": "@nalind how will this be used?  Do you already have any use case in mind?\n\nI am playing with something similar in container-libs/storage to allow copying a layer while preserving reflinks (https://github.com/containers/container-libs/pull/651) and @cgwalters suggested json-rpc for that.\n\nWould it make sense to unify on the protocol (and dependencies)?  @cgwalters would grpc work for composefs?"
+        },
+        {
+            "user": "cgwalters",
+            "body": "IPC protocols, always a fun topic. Obviously a lot of usage of gRPC in the ecosystem, though https://github.com/containerd/ttrpc is notable - and particularly https://github.com/containerd/ttrpc/pull/75\n\ngRPC (like base json-rpc) doesn't have any defined way to pass fds, though I'm sure we could invent one as the containerd folks were trying.\n\nconmon-rs is using [capnproto](https://github.com/containers/conmon-rs) and then of course there's [varlink](https://varlink.org/) for which I think systemd is still doing a lot with, but not sure about wider industry adoption. And DBus (which supports fd passing) but that's not cool anymore.\n\nThen of course we have REST for the Docker protocol as implemented by podman too...\n\nOf course json-rpc(+fdpass) doesn't have to be used for everything! One option is to negotiate its use over a side channel. (Though negotating that side channel is ugly in the general case, but I guess the simplest is \"two fds\", in a typical case probably each a socketpair())\n\n---\n\nAnyways I think whatever we do for a low level API in this space has to handle fd passing."
+        },
+        {
+            "user": "cgwalters",
+            "body": "I'm kind of just repeating https://github.com/bootc-dev/bootc/issues/522 here - and it looks like that hyper bug with HTTP over unix domain is still unfixed :cry: \n\nBasically gRPC over non-TCP|UDP is just not widely used (because really HTTP-over-non-IP is not widely used) But it could be fixed of course.\n\nThe appeal of jsonrpc is its bare-bones simplicity. For local communication a lot of the arguments for a binary protocol are lesser (same argument varlink makes for why JSON).\n"
+        },
+        {
+            "user": "cgwalters",
+            "body": "OK this data is `Assisted-by: OpenCode (Opus 4.5)` so take it with a bit of a grain of salt, but it all smells right.\n\nKey takeaways:\n\n- Rust is way, way, way better than Go on binary sizes\n- For buildah and podman we're already pulling in the main grpc package indirectly and it seems podman is also now pulling it in directly for a noop service?\n \n# IPC Library Binary Size Comparison\n\nContext: evaluating IPC options for [buildah PR #6675](https://github.com/containers/buildah/pull/6675)\nand related work in the containers ecosystem.\n\n## Go: jsonrpc-fdpass-go vs ttrpc vs gRPC\n\n| Context | Baseline | jsonrpc-fdpass | ttrpc | gRPC |\n|---------|----------|---------------:|------:|-----:|\n| **Standalone** | 2.47 MB | +112 KB (+4.5%) | +5.2 MB (+216%) | +12.9 MB (+535%) |\n| **Buildah** | 45.41 MB | +0.2 KB (0.0005%) | +31 KB (0.07%) | +275 KB (0.62%) |\n| **Podman** | 61.85 MB | +2 KB (0.003%) | +37 KB (0.06%) | +37 KB (0.06%) |\n\n## Rust: jsonrpc-fdpass vs tonic\n\nAll builds: release mode with LTO.\n\n| Context | Baseline | jsonrpc-fdpass | tonic (gRPC) |\n|---------|----------|---------------:|-------------:|\n| **Standalone** | 382 KB | +307 KB (+80%) | +261 KB (+68%) |\n| **composefs-rs (cfsctl)** | 5.80 MB | +75 KB (1.3%) | +692 KB (11.9%) |\n\n## Why existing projects absorb gRPC cheaply\n\nIn buildah and podman, the marginal cost of gRPC is small because\nboth already depend on it:\n\n- **buildah**: `ocicrypt/keywrap/keyprovider` uses gRPC to talk to\n  external key management services for encrypted container images\n- **podman**: directly uses gRPC in its own API server\n  (`pkg/api/server/server.go` multiplexes REST + gRPC on the same\n  listener via HTTP/2 content-type routing; `cmd/podman-testing` is\n  a gRPC client). Also pulls it in transitively via ocicrypt.\n- **ttrpc** itself imports `grpc/codes` and `grpc/status`, so it\n  does not avoid the grpc-go module\n\nIn Rust, composefs-rs has no existing gRPC dependency, so tonic's\nfull HTTP/2 stack (hyper, h2, tower, prost) adds ~692 KB. jsonrpc-fdpass\nshares deps already present (tokio, serde), keeping overhead to ~75 KB.\n\n## fd passing\n\n- **jsonrpc-fdpass**: native `SCM_RIGHTS` support built-in (both Go and Rust)\n- **ttrpc**: [exploring fd passing](https://github.com/containerd/ttrpc/pull/75), not merged\n- **gRPC/tonic**: no native fd passing; would need custom extension\n- The [hyper h2 PR #487](https://github.com/hyperium/h2/pull/487) for\n  Unix domain socket support remains unresolved\n\n## Go dependencies\n\n| Library | Key dependencies |\n|---------|-----------------|\n| jsonrpc-fdpass-go | `golang.org/x/sys` |\n| ttrpc | `google.golang.org/grpc` (codes/status), protobuf, logrus |\n| gRPC | `google.golang.org/grpc`, protobuf, genproto, `golang.org/x/net` |\n\n## Rust dependencies\n\n| Library | Key dependencies |\n|---------|-----------------|\n| jsonrpc-fdpass | rustix, serde, jsonrpsee, tokio, tracing |\n| tonic | tonic, hyper, h2, tower, prost, tokio |\n"
+        },
+        {
+            "user": "cgwalters",
+            "body": "> I am playing with something similar in container-libs/storage to allow copying a layer while preserving reflinks (https://github.com/containers/container-libs/pull/651) and @cgwalters suggested json-rpc for that.I am playing with something similar in container-libs/storage to allow copying a layer while preserving reflinks (https://github.com/containers/container-libs/pull/651) and @cgwalters suggested json-rpc for that.\n\nI would elaborate on that slightly, see https://github.com/containers/composefs-rs/pull/228#discussion_r2795815643\n\nSo I think a really key decision here is \"IPC for container-libs\" - and right now it's I think  just the indirect dependency \n\n> image/copy → ocicrypt → ocicrypt/keywrap/keyprovider → google.golang.org/grpc \n\npulling gRPC in there (which honestly...is anyone using that?)"
+        },
+        {
+            "user": "cgwalters",
+            "body": "I also did https://github.com/bootc-dev/jsonrpc-fdpass/pull/4 \nTL;DR systemd's varlink uses fdpassing quite a bit, but it's not officially part of the protocol, and not exposed by the bindings apart from the libsystemd C version. Which basically puts it in a similar boat as jsonrpc-fdpass really.\n\n\n"
+        },
+        {
+            "user": "nalind",
+            "body": "> @nalind how will this be used? Do you already have any use case in mind?\n\nYes.  There are build APIs which we'll need to provide for compose use cases, and they're expected to be exposed via grpc.  As you've noted, podman gained a listener with a no-op handler in its server, but we'll need to be able to test anything that we provide for it to hook up to that listener."
+        },
+        {
+            "user": "cgwalters",
+            "body": "Based on some research, gRPC + fd passing is just fundamentally in conflict (mostly due to HTTP/2's arbitrary interleaving of messages). There's so many layers to that abstraction. But it's not fatal: again we can use gRPC for most things, and negotiate say jsonrpc-fdpass over a separate socket.\n\nBTW something also to consider here (and I definitely thought about when working on https://github.com/cgwalters/cstor-dist ) is that it would be I think a quite straightforward thing to have containers-storage implement the registry HTTP protocol - with extensions. I almost did that for the [skopeo proxy](https://github.com/containers/skopeo/blob/main/cmd/skopeo/proxy.go) but the thing I disliked the most is that HTTP/1.1 has head-of-line blocking which is bad for container image fetches, and HTTP/2 is basically starting to head towards gRPC anyways.\n\nAnyways, also it looks like containerd is using grpc for snapshotters, so that's an argument for it.\n\nSo:\n\n- Move grpc usage to https://github.com/containers/container-libs/tree/main/storage\n- Scope out what it'd look like to expose an API similar to that of [skopeo proxy](https://github.com/containers/skopeo/blob/main/cmd/skopeo/proxy.go) there\n- Scope out extension to gRPC that allows fd passing\n\n(Here's an idea for the latter: if the *very first* content received on a grpc channel starts with say a NUL byte, that signals that that message should have an attached fd where we can also speak jsonrpc-fdpass)\n\n?\n"
+        },
+        {
+            "user": "nalind",
+            "body": "I don't think this pull request is the place to have a wide-ranging conversation about IPC."
+        },
+        {
+            "user": "cgwalters",
+            "body": "Fair, but where do you think we should have it? Or do you think we should just ignore the fact that one person is working on something related to IPC for containers in one format and there's a different one here?"
+        },
+        {
+            "user": "cgwalters",
+            "body": "@giuseppe After digging into this I think if we go gRPC for containers-libs/storage (which I'm OK with) by far the simplest thing is to have a separate jsonrpc-fdpass interface which is basically:\n\n- `OpenGRPC -> [fd]`: thereafter speak gRPC over that socketpair\n- ...other methods which do fd passing here\n\nWDYT?"
+        },
+        {
+            "user": "giuseppe",
+            "body": "> @giuseppe After digging into this I think if we go gRPC for containers-libs/storage (which I'm OK with) by far the simplest thing is to have a separate jsonrpc-fdpass interface which is basically:\n> \n> * `OpenGRPC -> [fd]`: thereafter speak gRPC over that socketpair\n> * ...other methods which do fd passing here\n> \n> WDYT?\n\nI am fine either way.\n\nthe json-rpc protocol, as you said, is much simpler and maybe works better for low level functionalities.\n\nWe can workaround that if we have grpc.\n\n@nalind is there any plan/desire to move the grpc server down to container-libs?"
+        },
+        {
+            "user": "nalind",
+            "body": "> @nalind is there any plan/desire to move the grpc server down to container-libs?\n\nI have no such plan or desire."
+        },
+        {
+            "user": "cgwalters",
+            "body": "OK let's move then the discussion about the RPC need for reflink copies over to https://github.com/containers/container-libs/issues/144 for now, and maybe anyone who is interested in sharing ideas/code for RPC in projects in containers/ space can join, and people who aren't can ignore it.\n"
+        },
+        {
+            "user": "TomSweeneyRedHat",
+            "body": "Are we planning to move forward with this PR, or are we still ruminating?"
+        },
+        {
+            "user": "nalind",
+            "body": "@TomSweeneyRedHat I have no to-do items to add to this PR."
+        },
+        {
+            "user": "TomSweeneyRedHat",
+            "body": "LGTM\n@giuseppe and @cgwalters I am planning to merge this tomorrow, March 3, 2026 in the afternoon US.  Please let me know if you have any lingering objections before then."
+        },
+        {
+            "user": "TomSweeneyRedHat",
+            "body": "/lgtm"
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "container-libs",
+            "number": 144
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "buildah",
+            "number": 6674
+        },
+        {
+            "organization": "composefs",
+            "repository": "composefs-rs",
+            "number": 302
+        }
+    ]
+}

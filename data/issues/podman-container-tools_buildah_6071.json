@@ -1,0 +1,63 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "buildah",
+    "number": 6071,
+    "type": "issue",
+    "title": "buildah is not relabeling mounted paths and instead relies on the OCI runtime to do this",
+    "state": "closed",
+    "labels": [
+        "locked - please file new issue/PR",
+        "jira"
+    ],
+    "user": "dcermak",
+    "body": "It appears as if buildah is not relabeling mounted directories itself and instead relies on the OCI runtime to perform this action, which is not really spec compliant.\n\nTo reproduce this issue, use the following `Dockerfile`:\n```Dockerfile\nfrom alpine\nrun --mount=type=bind,source=vendor,target=file,Z ls -al file\n```\n\nand run `buildah bud --runtime /usr/bin/crun -f containerfile .` which succeeds, whereas it fails with runc:\n```ShellSession\n❯ buildah bud --runtime /usr/bin/runc -f containerfile .\nSTEP 1/2: FROM alpine\nSTEP 2/2: run --mount=type=bind,source=vendor,target=file,Z ls -al file\nerror running container: from /usr/bin/runc creating container for [/bin/sh -c ls -al file]: time=\"2025-03-19T11:45:09+01:00\" level=error msg=\"runc create failed: invalid mount &{Source:/var/tmp/buildah954402691/mnt/buildah-bind-target-1 Destination:/file Device:bind Flags:20481 ClearedFlags:0 PropagationFlags:[262144] Data:Z Relabel: RecAttr:<nil> Extensions:0 IDMapping:<nil>}: bind mounts cannot have any filesystem-specific options applied\"\n: exit status 1\nERRO[0000] did not get container create message from subprocess: EOF\nError: building at STEP \"RUN --mount=type=bind,source=vendor,target=file,Z ls -al file\": while running runtime: exit status 1\n```\nThe error here is coming from runc directly: https://github.com/opencontainers/runc/blob/8b98e829f0934fc043f57d73b5c2ee091252a1d2/libcontainer/configs/validate/validator.go#L307\n\nrunc throws this warning because it doesn't perform any special handling of the `Z` flag, whereas crun apparently does (however, it probably shouldn't).\n\nThe issue in buildah specifically is, that it doesn't appear to perform the same mount flag \"sanitation\" that podman does, which drops the `z` or `Z` flags and relabels the bind mounted directories: https://github.com/danishprakash/podman/blob/29a90c3f8a1375b585dd3a870f7569ed2599426f/libpod/container_internal_common.go#L282\n\ncc @danishprakash @cyphar",
+    "comments": [
+        {
+            "user": "cyphar",
+            "body": "We made runc return an error in 1.2 when you specify a superblock flag for bind-mounts. Previously this was silently ignored, but now you get the error you see here. https://github.com/opencontainers/runc/pull/3990\n\nI dunno if crun has special handling of `Z` or if they copied our (very suspect) behaviour for mount options in this case and actually buildah is simply mistakenly passing the flags. [There were some other changes in 1.2 related to mount options, outlined in the 1.2.0-rc.1 release notes.](https://github.com/opencontainers/runc/releases/tag/v1.2.0-rc.1) Imho the old mount option behaviour was completely broken for users that actually cared about mount options but nobody played around with it enough to notice imho (and many things were silently ignored in a way that users could be using different configs to the ones they expect)."
+        },
+        {
+            "user": "ricardobranco777",
+            "body": "Tracking in https://bugzilla.suse.com/show_bug.cgi?id=1242445"
+        },
+        {
+            "user": "TheRealBecks",
+            "body": "I also use OpenSuse Tumbleweed on two systems. The old but updated system was able to run the container, but the new system with the same Podman version was not able to start the server.\n\nBuild without `z`:\n```\nSTEP 9/14: RUN --mount=type=cache,destination=/root/.cache/uv     --mount=type=bind,source=uv.lock,destination=uv.lock     --mount=type=bind,source=pyproject.toml,destination=pyproject.toml     uv sync --locked --no-install-project\nWARN[0000] pkg/bind: error unmounting \"/var/tmp/buildah3452673804/mnt/buildah-bind-target-12\": retrieving list of mounts: read /proc/thread-self/mountinfo: bad file descriptor \nERRO[0000] did not get container create message from subprocess: EOF \nERRO[0000] retrieving list of mounts: read /proc/thread-self/mountinfo: bad file descriptor \nerror running container: from /usr/bin/runc creating container for [/bin/sh -c uv sync --locked --no-install-project]: time=\"2025-05-06T09:00:36+02:00\" level=error msg=\"runc create failed: invalid mount &{Source:/var/tmp/buildah3452673804/mnt/buildah-bind-target-12 Destination:/root/.cache/uv Device:bind Flags:20480 ClearedFlags:1 PropagationFlags:[1048576] Data:z Relabel: RecAttr:<nil> Extensions:0 IDMapping:<nil>}: bind mounts cannot have any filesystem-specific options applied\"\n: exit status 1\nError: building at STEP \"RUN --mount=type=cache,destination=/root/.cache/uv --mount=type=bind,source=uv.lock,destination=uv.lock --mount=type=bind,source=pyproject.toml,destination=pyproject.toml uv sync --locked --no-install-project\": while running runtime: exit status 1\n```\n\nBuild with `z`:\n```\nSTEP 9/14: RUN --mount=type=cache,destination=/root/.cache/uv,z     --mount=type=bind,source=uv.lock,destination=uv.lock,z     --mount=type=bind,source=pyproject.toml,destination=pyproject.toml,z     uv sync --locked --no-install-project\nerror running container: from /usr/bin/runc creating container for [/bin/sh -c uv sync --locked --no-install-project]: time=\"2025-05-06T09:01:31+02:00\" level=error msg=\"runc create failed: invalid mount &{Source:/var/tmp/buildah3313102110/mnt/buildah-bind-target-10 Destination:/uv-ansible-example/pyproject.toml Device:bind Flags:20481 ClearedFlags:0 PropagationFlags:[262144] Data:z Relabel: RecAttr:<nil> Extensions:0 IDMapping:<nil>}: bind mounts cannot have any filesystem-specific options applied\"\n: exit status 1\nERRO[0000] did not get container create message from subprocess: EOF \nError: building at STEP \"RUN --mount=type=cache,destination=/root/.cache/uv,z --mount=type=bind,source=uv.lock,destination=uv.lock,z --mount=type=bind,source=pyproject.toml,destination=pyproject.toml,z uv sync --locked --no-install-project\": while running runtime: exit status 1\n```\n\nTemporary workaround:\n\nInstead of...\n```\npodman build --build-arg-file=\".env\" --tag uv-ansible-example \"$SOURCE_DIR\"\n```\n\nuse:\n```\npodman build --build-arg-file=\".env\" --security-opt label=disable --tag uv-ansible-example \"$SOURCE_DIR\"\n```\nSo add the `--security-opt label=disable` parameter to get it working."
+        },
+        {
+            "user": "TheRealBecks",
+            "body": "I found out that in my case it's all about the `cache` binds that aren't working anymore:\n\nNot working:\n```\nRUN --mount=type=cache,destination=/root/.cache/uv \\\n    --mount=type=bind,source=uv.lock,destination=uv.lock \\\n    --mount=type=bind,source=pyproject.toml,destination=pyproject.toml \\\n    uv sync --locked --no-install-project\n```\n\nWorking:\n```\n\nRUN --mount=type=bind,source=uv.lock,destination=uv.lock \\\n    --mount=type=bind,source=pyproject.toml,destination=pyproject.toml \\\n    uv sync --locked --no-install-project\n```\n\nMy temporary workaround with `--build-arg-file=\".env\"` also only worked once, but never again.\n\n@ricardobranco777 Your SUSE bug report can't be accessed publicly, is it possible to change the visibility?"
+        },
+        {
+            "user": "ricardobranco777",
+            "body": "> [@ricardobranco777](https://github.com/ricardobranco777) Your SUSE bug report can't be accessed publicly, is it possible to change the visibility?\n\nIt's just a tracker bug that right now only contains a link to this issue.  "
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "os-autoinst",
+            "repository": "opensuse-jobgroups",
+            "number": 622
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "buildah",
+            "number": 6132
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "buildah",
+            "number": 6201
+        },
+        {
+            "organization": "os-autoinst",
+            "repository": "os-autoinst-distri-opensuse",
+            "number": 22321
+        },
+        {
+            "organization": "os-autoinst",
+            "repository": "os-autoinst-distri-opensuse",
+            "number": 22592
+        }
+    ]
+}

@@ -1,0 +1,132 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "buildah",
+    "number": 2262,
+    "type": "issue",
+    "title": "Report: Error during unshare(CLONE_NEWUSER): Operation not permitted in the non-privileged container of k8s",
+    "state": "closed",
+    "labels": [
+        "locked - please file new issue/PR"
+    ],
+    "user": "zhangtbj",
+    "body": "Hi all,\n\nI need to run the buildah to build my source code on a shared kube cluster.\n\nThere are serval security policise and cannot run the container with privileged.\n\nSo when I running the buildah in the non-privileged container of k8s.\n\nIt reports the error:\n```\n...\ntime=\"2020-03-31T13:30:14Z\" level=warning msg=\"The cgroups manager is set to systemd but there is no systemd user session available\"\ntime=\"2020-03-31T13:30:14Z\" level=warning msg=\"For using systemd, you may need to login using an user session\"\ntime=\"2020-03-31T13:30:14Z\" level=warning msg=\"Alternatively, you can enable lingering with: `loginctl enable-linger 1000` (possibly as root)\"\ntime=\"2020-03-31T13:30:14Z\" level=warning msg=\"Falling back to --cgroup-manager=cgroupfs\"\nError during unshare(CLONE_NEWUSER): Operation not permitted\nlevel=error msg=\"error parsing PID \\\"\\\": strconv.Atoi: parsing \\\"\\\": invalid syntax\"\nlevel=error msg=\"(unable to determine exit status)\"\n2020/03/31 13:30:14 Skipping step because a previous step failed\n2020/03/31 13:30:15 Skipping step because a previous step failed\n{\"level\":\"info\",\"ts\":1585661399.569302,\"caller\":\"creds-init/main.go:44\",\"msg\":\"Credentials initialized.\"}\n```\n\nI also tried this `--isolation=chroot` parameter for `buildah bud` command, but doesn't work.\n\nAnd I asked open all allowedCapabilities also doesn't work:\n```\nspec:\n  allowPrivilegeEscalation: true\n  allowedCapabilities:\n  - '*'\n```\n\nI run the buildah by using Tekton task:\nhttps://github.com/tektoncd/catalog/blob/master/buildah/buildah.yaml#L43\n\nI saw there are many people had this problem before, but I didn't see the final solution: https://github.com/containers/buildah/issues/1011\n\nI think buildah should work like other builder like kaniko that can build without privileged.\n\nCan someone help me?\n\nThanks a lot!\n",
+    "comments": [
+        {
+            "user": "rhatdan",
+            "body": "Do you know if this running with docker backend or cri-o?  Do you know if seccomp.json rules are being applied.\nWhat OS is the server running with?"
+        },
+        {
+            "user": "zhangtbj",
+            "body": "Hi @rhatdan ,\n\nWe are running buildah as Tekton task on the **Kubernetes** which based on the `containerd`\n\nIt should be the `ubuntu` OS and I saw we set the seccomp setting in the kube PSP annotations like below.\n\n```\nkind: PodSecurityPolicy\nmetadata:\n  annotations:\n    apparmor.security.beta.kubernetes.io/allowedProfileNames: runtime/default\n    apparmor.security.beta.kubernetes.io/defaultProfileName: runtime/default\n    seccomp.security.alpha.kubernetes.io/allowedProfileNames: docker/default\n    seccomp.security.alpha.kubernetes.io/defaultProfileName: docker/default\nspec:\n  allowPrivilegeEscalation: false\n\n  defaultAddCapabilities:\n  - CHOWN\n  - DAC_OVERRIDE\n  - FOWNER\n\n  forbiddenSysctls:\n  - '*'\n```\n\nBut it doesn't work ...., Any suggestion? Or did I miss any other seccomp config here?\n\nThanks!"
+        },
+        {
+            "user": "zhangtbj",
+            "body": "After I changed the seccomp annotations in kube PSP like this:\n```\n    seccomp.security.alpha.kubernetes.io/allowedProfileNames: '*'\n    seccomp.security.alpha.kubernetes.io/defaultProfileName: unconfined\n```\n\nThe buildah build change to a new error:\n```\nError: error writing \"0 0 4294967295\\n\" to /proc/21/gid_map: write /proc/21/gid_map: operation not permitted\nlevel=error msg=\"error writing \\\"0 0 4294967295\\\\n\\\" to /proc/21/gid_map: write /proc/21/gid_map: operation not permitted\"\nlevel=error msg=\"(unable to determine exit status)\"\n2020/04/01 06:39:39 Skipping step because a previous step failed\n2020/04/01 06:39:39 Skipping step because a previous step failed\n```"
+        },
+        {
+            "user": "rhatdan",
+            "body": "This looks like the container is attempting to setup a user namespace now.  Are you running this container as non root?"
+        },
+        {
+            "user": "zhangtbj",
+            "body": "I tried both root and non-root, they all doesn't work....\n\nI heard the buildah team plan to add non-privileged support?\n\nIs there any news about it or is there any plan?\n\nThanks!"
+        },
+        {
+            "user": "rhatdan",
+            "body": "Depends on what you mean by non-privileged support?\n\nBuildah needs to be able to create files owned by multiple UIDs  To do this we need to have \"real\" root or \"user namespace\" root.  \n\nIn order to to this the container needs to be either launched as root, in which case we can use Buildah with isolation --chroot in a locked down container.  IE One without --privileged flag.  This means the container gets the default Linux capabilities for a container.  These Capabilities were hard coded into Docker and containerd, they have a shorter list of Capabilities defined by CRI-O.  These capabilities include SETUID and SETGID, so that the buildah processes are able to create UID and GID files in the images. Note that this also requires a few additional Seccomp rules that are blocked by default by Docker/containerd, that we allow with CRI-O and Podman mainly `mount` and `unshare`.\n\nThe second option is to allow buildah to be run as nonroot but inside of a User Namespace.  This works similarly to running buildah directly as a non root user.  But in order to setup a user namespace to run buildah, it requires two File capabilties based tools newuidmap and newgidmap.  These tools require SETUID and SETGID to be able to preform their tasks.  So the container still needs to be launched with these two capabilities.  Again this type of container requires `mount` and `unshare` syscalls added to seccomp.json, if you are running with a Docker/containerd backend.\n\nIn the future, hopefully not two distant, we could use CRI-O to run the `buildah` container directly in a User Namespace, in which case it would already be running in a user namespace when it was launched and would require NO linux capabilities on the host, although it would still require Namespaced capabilities of `setuid` and `setgid` in order to support multiple uids defined inside of the user namespace.  We can do this now with Podman but it has not yet been implemented in Kubernetes.  \n\n"
+        },
+        {
+            "user": "zhangtbj",
+            "body": "Thanks for your clear clarify! @rhatdan \n\nI am trying the first case:\n- Use `runasroot` to the buildah\n- enable the `SETUID` and `SETGID` capabilities\n- Add `--isolation=chroot` for buildah bud command\n\nBut it still report error during bud:\n```\nError during unshare(CLONE_NEWUSER): Operation not permitted\nlevel=error msg=\"error parsing PID \\\"\\\": strconv.Atoi: parsing \\\"\\\": invalid syntax\"\nlevel=error msg=\"(unable to determine exit status)\"\n```\n\nSo I am wondering did I miss any other config?\n"
+        },
+        {
+            "user": "rhatdan",
+            "body": "It is still blocked by seccomp.json or docker/containerd that is running the back end on kubernetes.  I believe.  Even though you are using chroot, the buildah container still needs to `mount` the /proc and /sys file systems, this is only allowed when the container is running in a user namespace, which requires the unshare syscall, which is being blocked."
+        },
+        {
+            "user": "rhatdan",
+            "body": "CRI-O and Podman allow unshare syscall by default.  Can you tell the pod to launch without seccomp filtering?"
+        },
+        {
+            "user": "zhangtbj",
+            "body": "Hi do you know how to launch without the seccomp filtering in kube PSP?\n\nI tried to remove the these annotations from PSP:\n```\n    seccomp.security.alpha.kubernetes.io/allowedProfileNames: docker/default\n    seccomp.security.alpha.kubernetes.io/defaultProfileName: docker/default\n```\n\nAnd tried to launch the Buildah build and got a new error:\n```\nError: error writing \"0 0 4294967295\\n\" to /proc/23/gid_map: write /proc/23/gid_map: operation not permitted\nlevel=error msg=\"error writing \\\"0 0 4294967295\\\\n\\\" to /proc/23/gid_map: write /proc/23/gid_map: operation not permitted\"\nlevel=error msg=\"(unable to determine exit status)\"\n```\n\nAnd I already provide:\n- the [\"**CHOWN**\", \"**DAC_OVERRIDE**\", \"**FOWNER**\", \"**SYS_CHROOT**\"] capabilities.\n- add `--isolation=chroot` for buildah bud command\n- Run as root\n\nI think it is also easy to reproduce on a Kube cluster.\n\nThanks!"
+        },
+        {
+            "user": "rhatdan",
+            "body": "The setting of GID_MAP and UID_MAP requires CAP_SETGID and CAP_SETUID respectively.\nSorry I don't know how to do this in Kubernetes."
+        },
+        {
+            "user": "zhangtbj",
+            "body": "Hi Daniel,\n\nI add the SETUID and SETGID capabilities:\n```\n        capabilities:\n          add: [\"CHOWN\", \"DAC_OVERRIDE\", \"FOWNER\", \"SETUID\", \"SETGID\"]\n```\n\nAnd tried to run by using root (UID=0) and non-root (UID=1000), it changed to another new error....:\n```\ntime=\"2020-04-06T01:55:50Z\" level=warning msg=\"The cgroups manager is set to systemd but there is no systemd user session available\"\ntime=\"2020-04-06T01:55:50Z\" level=warning msg=\"For using systemd, you may need to login using an user session\"\ntime=\"2020-04-06T01:55:50Z\" level=warning msg=\"Alternatively, you can enable lingering with: `loginctl enable-linger 1000` (possibly as root)\"\ntime=\"2020-04-06T01:55:50Z\" level=warning msg=\"Falling back to --cgroup-manager=cgroupfs\"\ntime=\"2020-04-06T01:55:50Z\" level=warning msg=\"The cgroups manager is set to systemd but there is no systemd user session available\"\ntime=\"2020-04-06T01:55:50Z\" level=warning msg=\"For using systemd, you may need to login using an user session\"\ntime=\"2020-04-06T01:55:50Z\" level=warning msg=\"Alternatively, you can enable lingering with: `loginctl enable-linger 1000` (possibly as root)\"\ntime=\"2020-04-06T01:55:50Z\" level=warning msg=\"Falling back to --cgroup-manager=cgroupfs\"\n```"
+        },
+        {
+            "user": "rhatdan",
+            "body": "Other then these warnings, did it work?"
+        },
+        {
+            "user": "zhangtbj",
+            "body": "No it doesn't work.... :(\n\nI forgot an error message in the end.\n\nIn the end, it report `permission denied`:\n```\ntime=\"2020-04-06T01:55:50Z\" level=warning msg=\"The cgroups manager is set to systemd but there is no systemd user session available\"\ntime=\"2020-04-06T01:55:50Z\" level=warning msg=\"For using systemd, you may need to login using an user session\"\ntime=\"2020-04-06T01:55:50Z\" level=warning msg=\"Alternatively, you can enable lingering with: `loginctl enable-linger 1000` (possibly as root)\"\ntime=\"2020-04-06T01:55:50Z\" level=warning msg=\"Falling back to --cgroup-manager=cgroupfs\"\ntime=\"2020-04-06T01:55:50Z\" level=warning msg=\"The cgroups manager is set to systemd but there is no systemd user session available\"\ntime=\"2020-04-06T01:55:50Z\" level=warning msg=\"For using systemd, you may need to login using an user session\"\ntime=\"2020-04-06T01:55:50Z\" level=warning msg=\"Alternatively, you can enable lingering with: `loginctl enable-linger 1000` (possibly as root)\"\ntime=\"2020-04-06T01:55:50Z\" level=warning msg=\"Falling back to --cgroup-manager=cgroupfs\"\npermission denied\nlevel=error msg=\"exit status 1\"\n```"
+        },
+        {
+            "user": "rhatdan",
+            "body": "https://github.com/containers/buildah/pull/2284\nShould remove the warnings."
+        },
+        {
+            "user": "rhatdan",
+            "body": "The Permission denied most likely is seccomp rules."
+        },
+        {
+            "user": "rhatdan",
+            "body": "@umohnani8 @haircommander Any chance you could try to run buildahimage on cri-o to see if it works with Kubernetes?"
+        },
+        {
+            "user": "iwangxiaodong",
+            "body": "@rhatdan @zhangtbj \n\nk8s deployment add:\n  spec.template.spec.containers[index].securityContext: **privileged: true**\n\n**It works!**\n"
+        },
+        {
+            "user": "zhangtbj",
+            "body": "Hi @iwangxiaodong ,\n\nWe cannot use the `privileged: true` permission in our shared cluster, it is forbidden :("
+        },
+        {
+            "user": "iwangxiaodong",
+            "body": "@zhangtbj \n\n```\ndocker run -it --rm --security-opt seccomp=unconfined \\\n    --security-opt apparmor=unconfined \\\n     quay.io/buildah/stable:latest bash\n```\n\nbuildah pull busybox\n\nIt works!\n\nk8s PodSecurityPolicy annotations  - https://kubernetes.io/docs/concepts/policy/pod-security-policy/#seccomp"
+        },
+        {
+            "user": "zhangtbj",
+            "body": "Thanks @iwangxiaodong ,\n\nLet me try again."
+        },
+        {
+            "user": "iwangxiaodong",
+            "body": "![image](https://user-images.githubusercontent.com/16535878/80634208-b120e900-8a8c-11ea-8039-a90a7419cde0.png)\n\n@zhangtbj\n\nWe do not need：\n\n    securityContext:\n      privileged: true"
+        },
+        {
+            "user": "rhatdan",
+            "body": "LGTM\nIf you add a containers.conf to the image that specified to use cgroupfs rather then systemd, you can get rid of the warnings.\n\nSomething like:\nhttps://github.com/containers/buildah/blob/master/contrib/buildahimage/stable/Dockerfile"
+        },
+        {
+            "user": "rhatdan",
+            "body": "I am going to close this since I believe you are satisfied.  Reopen if I am mistaken."
+        },
+        {
+            "user": "tdensmore",
+            "body": "\n\n> @zhangtbj wrote:\n> \n> ```\n> docker run -it --rm --security-opt seccomp=unconfined \\\n>     --security-opt apparmor=unconfined \\\n>      quay.io/buildah/stable:latest bash\n> ```\n> \n> buildah pull busybox\n> \n> It works!\n> \n> k8s PodSecurityPolicy annotations - https://kubernetes.io/docs/concepts/policy/pod-security-policy/#seccomp\n\nUnfortunately this (and every other suggestion) did not work for me:\n\n```\nbuildah bud --isolation=chroot -v $PWD:/build/fuse-overlayfs -t fuse-overlayfs -f ./Containerfile.static.ubuntu .\nSTEP 1: FROM docker.io/ubuntu:rolling\nTrying to pull docker.io/library/ubuntu:rolling...\nGetting image source signatures\nCopying blob 5c1f3479a03a done\nCopying blob 74eb3aea4da4 done\nCopying blob 2bfcfbcbcd59 done\nCopying config 478aa0080b done\nWriting manifest to image destination\nStoring signatures\nERRO[0002] error unmounting /var/lib/containers/storage/overlay/c9a3bfc46dcfd3ce493bcbecd05f80f27252a39518b7f53a7c567f878e51e246/merged: invalid argument\nerror mounting new container: error mounting build container \"48c19ead1403b9f2f2aaf328163618eef95d8c2082b0421969c3dc4cbbc4b6ae\": error creating overlay mount to /var/lib/containers/storage/overlay/c9a3bfc46dcfd3ce493bcbecd05f80f27252a39518b7f53a7c567f878e51e246/merged, mount_data=\"nodev,fsync=0,lowerdir=/var/lib/containers/storage/overlay/l/LDSGZPQRPLGETZT7BHUJGYZ6EM:/var/lib/containers/storage/overlay/l/5XQYE63YFO27ZPOB34A3DV4P42:/var/lib/containers/storage/overlay/l/SQWFK7OAHITTHGTJBYLDSLTBFX,upperdir=/var/lib/containers/storage/overlay/c9a3bfc46dcfd3ce493bcbecd05f80f27252a39518b7f53a7c567f878e51e246/diff,workdir=/var/lib/containers/storage/overlay/c9a3bfc46dcfd3ce493bcbecd05f80f27252a39518b7f53a7c567f878e51e246/work,volatile\": using mount program /usr/bin/fuse-overlayfs: fuse: device not found, try 'modprobe fuse' first\nfuse-overlayfs: cannot mount: No such file or directory\n: exit status 1\nERRO[0002] exit status 125\n[root@a67f78bb329f fuse-overlayfs]#\n```"
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "buildah",
+            "number": 2284
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "buildah",
+            "number": 1335
+        },
+        {
+            "organization": "shipwright-io",
+            "repository": "build",
+            "number": 134
+        }
+    ]
+}
