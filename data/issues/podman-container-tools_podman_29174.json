@@ -1,0 +1,18 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 29174,
+    "type": "pull_request",
+    "title": "fix: enable security.selinux extended attributes on tmpfs mounts",
+    "state": "open",
+    "labels": [],
+    "user": "Functionhx",
+    "body": "## Summary\nFixes #29127.\n\nWhen a container is run with `--tmpfs /b`, the tmpfs kernel driver does not enable the `security.*` extended attribute handler unless a SELinux context mount option is present. This means `setfattr -n security.selinux` fails with `EOPNOTSUPP` on tmpfs mounts.\n\n## Changes\n- **`libpod/container_internal_common.go`**: Add `hasSELinuxContextOption()` helper to detect existing SELinux mount options. For tmpfs mounts without explicit SELinux context, inject `fscontext=<label>` to enable the kernel's `security.*` xattr handler. Clear the global `Linux.MountLabel` and redistribute `context=<label>` to non-tmpfs mounts to prevent the OCI runtime from layering duplicate `context=` that would override per-mount options.\n- **`libpod/container_internal_common_test.go`**: Unit test for `hasSELinuxContextOption()` covering all 4 SELinux prefix variants, mixed options, empty slices, and partial-prefix edge cases. OCI spec inspection test for `addSELinuxMountOptionsNonTmpfs()` verifying tmpfs gets `fscontext=`, non-tmpfs gets `context=`, and global label is cleared correctly.\n\n## Why clear the global MountLabel?\n\nSimply adding `context=` or `fscontext=` to the target tmpfs is not enough. runc unconditionally appends `context=<MountLabel>` to every mount, and crun similarly layers its global label. If we leave `Linux.MountLabel` set with a per-mount `fscontext=`, the runtime produces duplicate options (`context=,...fscontext=...`), which SELinux may reject with `EINVAL`. Using `context=` on the tmpfs puts it in mount-point labeling mode, which still blocks per-file `setfattr`. The only way to reliably enable `security.*` xattrs on tmpfs is: (1) use `fscontext=` for the tmpfs, (2) clear the global label so the runtime does not append `context=`, and (3) explicitly redistribute `context=` to all non-tmpfs mounts.\n\n## Before/After (OCI spec mount options)\n\n**Before** (`podman run --tmpfs /b`):\n```\nMounts: [{Type: tmpfs, Destination: /b, Options: []}]\nLinux.MountLabel: \"system_u:object_r:container_file_t:s0:c1,c2\"\n```\n→ runc appends `context=system_u:object_r:container_file_t:s0:c1,c2`\n→ tmpfs in mount-point labeling mode → `setfattr` → EOPNOTSUPP\n\n**After**:\n```\nMounts: [{Type: tmpfs, Destination: /b, Options: [fscontext=system_u:object_r:container_file_t:s0:c1,c2]}]\nLinux.MountLabel: \"\"\nNon-tmpfs mounts get: context=system_u:object_r:container_file_t:s0:c1,c2\n```\n→ `security.selinux` xattr handler enabled → `setfattr` succeeds\n\n## Limitations\n- `/dev` tmpfs is excluded from `fscontext=` injection\n- Nested containers (`LabelNested`) use `rootcontext=` instead\n- Users needing full per-file labeling control should pass explicit `--tmpfs /mnt:fscontext=\"...\"`\n\n## Discussion\nThis is a best-effort fix for the common case. There are open questions I'd like maintainer input on:\n1. Is there a preferred way to handle this in the OCI runtime (runc/crun) instead of at the Podman level?\n2. Should we add an SELinux-gated integration test that runs `setfattr` inside a container?\n3. The current approach clears `Linux.MountLabel` globally; is there a cleaner per-mount API we should use?\n",
+    "comments": [
+        {
+            "user": "packit-as-a-service[bot]",
+            "body": "Cockpit tests failed for commit 0bc72a46cb6c192d885d14ab8d31a211a6995b09. @jelly, @mvollmer please check."
+        }
+    ],
+    "cross_references": []
+}
