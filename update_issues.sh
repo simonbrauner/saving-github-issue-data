@@ -4,7 +4,7 @@ set -euo pipefail
 shopt -s nullglob
 
 TIMESTAMP_DIR='data/timestamps'
-TIMEOUT='20s'
+TIMEOUT='2m'
 
 for timestamp_file in "$TIMESTAMP_DIR"/*; do
     basename="${timestamp_file##*/}"
