@@ -4,7 +4,7 @@
     "number": 29219,
     "type": "pull_request",
     "title": "feat(quadlet): add SocketActivationPort — systemd socket activation for containers and pods",
-    "state": "open",
+    "state": "closed",
     "labels": [],
     "user": "VibeProgramm",
     "body": "## Motivation\n\nEnabling socket activation for a container in Quadlet currently requires manually writing three systemd units: `.socket`, `-proxy.service`, and `.service`. One port = ~30 lines of boilerplate. This is the documented \"OnlyOffice pattern\" — functional but tedious.\n\n`SocketActivationPort=8080:80` replaces those three units with a single line. Uses the same syntax, parser, and collision detection as `PublishPort`.\n\n## Why systemd-socket-proxyd\n\n[systemd-socket-proxyd](https://www.freedesktop.org/software/systemd/man/latest/systemd-socket-proxyd.html) is a standard systemd component designed specifically for this: providing socket activation to applications that lack `LISTEN_FDS` support. From its man page: \"a generic socket-activated proxy for services that do not natively support socket activation.\"\n\nThis approach works with any container image without modification, supports port remapping (`hostPort ≠ containerPort`), and isolates containers from external networks (internal port is loopback-only).\n\n## v1 Limitations\n\n- TCP only (systemd-socket-proxyd limitation)\n- No automatic container shutdown on idle\n- First request may fail for slow-starting apps (subsequent requests work — proxy retries per-connection)\n\n## Testing\n\n- 35 unit tests: parse errors, port collisions, multi-port, hardening\n- gofumpt, go vet, go build — clean\n- Verified on a real system: cold start, concurrent requests",
@@ -52,6 +52,30 @@
         {
             "user": "VibeProgramm",
             "body": "> Regarding dependency, I wasn't referring to dependency between the three services created with this change. I was referring to the dependencies of the .container with other services.\n\nUnderstood — [Unit] dependencies from the .container (Requires, After, BindsTo, etc.) go to the container service only. Socket and proxy units have their own hardcoded dependencies and never inherit from [Unit].\n\nIf the user writes Requires=postgres.service, the chain is:\nsocket → proxy → container → postgres.\n\nThe socket never inherits postgres — that would be wrong (socket stopping when postgres stops would break re-activation).\n\n---\n\n> That's exactly my point. If by Systemd's design, users are expected to create separate files, why should Quadlet be any different.\n\nFair. What about a `.socket` quadlet type? Same SAP generation under the hood, just triggered from its own file instead of inline in `.container`:\n\n```ini\n# nginx.socket\n[Socket]\nContainer=nginx.container\nListenStream=8080\n\n[Install]\nWantedBy=sockets.target\n```\n\n`Container` tells Quadlet which container to activate. Same SAP generation\nas `SocketActivationPort`, just triggered from a standalone file.\n\nDoes this make more sense design-wise, or is one-file→multiple-units the problem regardless of the entry point?"
+        },
+        {
+            "user": "Luap99",
+            "body": "I don't think we should duplicate the socket unit type just so we can say container there vs the final unit name. I don't think that is worth it."
+        },
+        {
+            "user": "ygalblum",
+            "body": "@VibeProgramm while I agree with @Luap99 closing this PR, I would like to understand what are you really trying to achieve? \nWhy would Quadlet support a file type in an almost passthrough way? Are you trying to solve a portability issue? That is being able to ship a directory that includes also pure systemd units? If so, maybe that's the solution. Have Quadlet copy known systemd unit files so that systemd can read them?\n@Luap99 WDYT? "
+        },
+        {
+            "user": "VibeProgramm",
+            "body": "@ygalblum \n\nNo, the separate `.socket` file type wasn't my original goal.\n\nI suggested it only after the concern was raised that `SocketActivationPort` breaks the \"one Quadlet unit → one systemd unit\" design. It was an attempt to find a design that better fits that architectural constraint.\n\nMy original goal has always been much simpler from the user's perspective: make `SocketActivationPort` a natural extension of `PublishPort`.\n\nThe idea is that a user can simply replace:\n\n```ini\nPublishPort=8080:80\n```\n\nwith:\n\n```ini\nSocketActivationPort=8080:80\n```\n\nwithout creating or maintaining additional systemd units manually.\n\nIn my latest commit I implemented automatic container shutdown after idle, so the container starts on the first incoming connection and automatically returns to the stopped state when it is no longer needed.\n\nMy longer-term idea was also to support two implementation modes behind the same user-facing interface. For container images that do not support `LISTEN_FDS`, the proxy-based approach can be used. For images that do support native socket activation, I wanted to add an FD-passing mode as an alternative. From the user's perspective, the configuration would remain the same—the implementation could choose the appropriate backend.\n\nSo the `.socket` proposal was only an alternative design in response to the architectural discussion, not the original problem I was trying to solve. The real goal was to make socket activation as easy to use as `PublishPort`.\n"
+        },
+        {
+            "user": "ygalblum",
+            "body": "I guess I wasn't clear. I'm asking what did you try to solve to being with. Not why you proposed the new Quadlet type. We've established that your requirements can be met by an already supported systemd `.socket` file. What's missing?"
+        },
+        {
+            "user": "VibeProgramm",
+            "body": "I think my own use case explains the problem best.\n\nWhen I'm testing different applications, I often have 20 or more containers defined. Most of them are only used occasionally, but with `PublishPort` they all need to stay running and consume container resources.\n\nYes, I can achieve the same behavior today with native `.socket` and `.service` units. However, for 20 containers that also means creating and maintaining roughly 40 additional systemd unit files.\n\nWhat I felt was missing was a way to make this as simple as `PublishPort`: replace a single directive and have Quadlet generate everything needed so the container starts on demand and automatically stops again when it becomes idle.\n\nSo the problem I was trying to solve wasn't missing functionality—it was reducing the operational overhead of using socket activation for a large number of containers while also allowing those containers to remain stopped when they aren't being used.\n"
+        },
+        {
+            "user": "ygalblum",
+            "body": "Understood. So, as we said, if systemd's design separates services, we shouldn't try to combine them"
         }
     ],
     "cross_references": []
