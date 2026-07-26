@@ -39,7 +39,22 @@
         {
             "user": "ElectricTea",
             "body": "I can confirm I have the same issue with GroupAdd not working for rootless podman quadlets on Fedora 44 CoreOS. "
+        },
+        {
+            "user": "satwiksps",
+            "body": "I spent some time tracing through the full code path for this and I believe this isn't a Podman bug, it's a linux process credential behavior that isn't documented well....what happening is:\n\n1. `GroupAdd=keep-groups` or `--group-add keep-groups` doesn't actuaaly add any groups to the container spec. but Podman converts it into an OCI runtime annotation: `run.oci.keep_original_groups=1` ([create.go#L281](https://github.com/containers/podman/blob/main/cmd/podman/containers/create.go#L281)).\n2. This annotation is passed through to `crun`, which reads it and then reads its own supplementary groups from `/proc/self/status`. whatever groups the `crun` process has, those get passed into the container.\n3. `crun` inherits its groups from `conmon` to `podman` then to `systemd --user`. so the container gets whatever groups the `systemd --user` instance has.\n\nproblem is **`systemd --user` only picks up groups at the time it's started.** if a user was added to new groups via `usermod` _after_ the systemd user session was already running like via `loginctl enable-linger` those new groups are not visible to `systemd --user` or any of its child processes. This is standard Linux behavior, `usermod` updates `/etc/group` but doesn't retroactively update running processes.\n\nthat is why:\n- @ygalblum couldn't reproduce because he logged in fresh (his `systemd --user` had all groups from the start)\n- @Gremious's steps show `loginctl enable-linger jellyfin` being run _before_ `usermod --append --groups hdd_data jellyfin`, so `systemd --user` never got the `hdd_data` group\n- Running `sudo -u jellyfin podman run --group-add keep-groups ...` works because `sudo -u` creates a fresh process context with current groups from `/etc/group`\n\n**workaround** would be after adding a user to new groups, restart their systemd user manager so it picks up the new membership\n```bash\nloginctl terminate-user <user>\n# Then re-login or let linger restart the session\n```\n\nI am thinking to submit a docs PR to clarify this in both the `--group-add` option docs and the `Quadlet GroupAdd=` section so people don't keep hitting this"
         }
     ],
-    "cross_references": []
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 29170
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 29285
+        }
+    ]
 }
