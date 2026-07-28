@@ -7,7 +7,6 @@
     "state": "open",
     "labels": [
         "kind/bug",
-        "stale-issue",
         "CI"
     ],
     "user": "Luap99",
@@ -20,6 +19,42 @@
         {
             "user": "satwiksps",
             "body": "tried a bit to understand what is happening. the error path is `recordFsVerity()` in `storage/pkg/chunked/storage_linux.go` it calls `EnableVerity` followed by `MeasureVerity` on same readonly fd (opened via `/proc/self/fd/` after closing the writable one). both use the same fd, sequentially, in the same goroutine. the thing that's confusing me is that `FS_IOC_ENABLE_VERITY` is documented as synchronous, it blocks until the merkle tree is fully computed. `FS_IOC_MEASURE_VERITY` returning `ENODATA` right after a successful Enable on the same fd shouldn't really happen. but it clearly does, and only on real backed filesystems (not tmpfs where verity is unsupported and the whole path is skipped) . my best guess is this is a kernel-level issue specific to overlay + composefs on certain backing filesystems (the ci hits this on fedora-rawhide with btrfs) the verity metadata might not be immediately visible through the overlay layer even though the ioctl returned success on the underlying fs\n\none option would be adding a short retry loop in `MeasureVerity` (in `container-libs/storage/pkg/fsverity/fsverity_linux.go`) something like retrying up to 4 times with a 10ms delay, only for `ENODATA`. low risk and defensive, but not 100% sure it actually fix the issue if deeper overlay/kernel problem rather than a timing thing\nwould a retry like that be acceptable, or is the root cause something different that am missing? I can open a PR in `container-libs` if you think its worth trying. If not, totally fine, can unassign me and someone more familiar with the composefs internals can take it from here."
+        },
+        {
+            "user": "Luap99",
+            "body": "cc @mtrmac @giuseppe \n\nIn general retry loops must be used as last resort. If this is a kernel level issue it should be fixed in the kernel.\n(I have not looked at any details about the code mentioned)\n\nIn general the first thing for such issues is to provide a solid reproducer. Without that no fix wherever it will be can be verified."
+        },
+        {
+            "user": "giuseppe",
+            "body": "is this still happening?\n\nWhen it was first reported, we missed https://github.com/podman-container-tools/container-libs/commit/6b35cc0eb3d3df212e56bfff1f6c0b343c3ab6e0 that would give a better error message when `EnableVerity` fails"
+        },
+        {
+            "user": "Luap99",
+            "body": "@giuseppe We do not exercise the code path as it failed to often, https://github.com/podman-container-tools/podman/blob/2c0722bea6d27c2ed9c78dba01ad401e60ec556c/hack/ci/runner.sh#L35-L37\n\nWe can certainly remove that again and see what happens."
+        },
+        {
+            "user": "giuseppe",
+            "body": "we'd hopefully get a more meaningful error message now"
+        },
+        {
+            "user": "Luap99",
+            "body": "ok I opened https://github.com/podman-container-tools/podman/pull/29308, I can rerun a few times on the PR to see if we hit the flake"
+        },
+        {
+            "user": "Luap99",
+            "body": "Failed on the first try\n```\nnot ok 461 |700| podman play with image volume pull policies in 1181ms\n# tags: ci:parallel\n# (from function `bail-now' in file test/system/helpers.bash, line 230,\n#  from function `die' in file test/system/helpers.bash, line 967,\n#  from function `run_podman' in file test/system/helpers.bash, line 608,\n#  in test file test/system/700-play.bats, line 1217)\n#   `run_podman pull $volimg_both' failed\n#\n# [14:22:56.075914729] # /var/tmp/podman/bin/podman-remote --url=unix:///tmp/bats-run-75LS7X/suite/remotesystem.podman.rDMb95.sock pull quay.io/libpod/alpine:latest\n# [14:22:56.531526845] Trying to pull quay.io/libpod/alpine:latest...\n# Getting image source signatures\n# Copying blob sha256:9d16cba9fb961d1aafec9542f2bf7cb64acfc55245f9e4eb5abecd4cdc38d749\n# Error: unable to copy from source docker://quay.io/libpod/alpine:latest: copying system image from manifest list: partial pull of blob sha256:9d16cba9fb961d1aafec9542f2bf7cb64acfc55245f9e4eb5abecd4cdc38d749: staging a partially-pulled layer: failed to enable verity for \"/8f/a61d14b3c55f8b59bf9b2c5fd997f248dabcd5862cbd55a9acc9aa4e4efab0\": text file busy\n# [14:22:56.546389713] [ rc=125 (** EXPECTED 0 **) ]\n# #/vvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv\n# #| FAIL: exit code is 125; expected 0\n# #\\^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n# # [teardown]\n\n```\n\nhttps://docs.kernel.org/filesystems/fsverity.html#fs-ioc-enable-verity\n\n> ETXTBSY: someone has the file open for writing. This can be the caller’s file descriptor, another open file descriptor, or the file reference held by a writable memory map."
+        },
+        {
+            "user": "giuseppe",
+            "body": "thanks, that is helpful.  It happens with remote tests because `fork(2)` duplicates these FDs and `O_CLOEXEC` doesn't help here"
+        },
+        {
+            "user": "Luap99",
+            "body": "So what you are saying is an ordering like this?\n\n\n| thread 1 | thread 2 |\n|---|---|\n| opens file for writing | |\n| writes content | |\n| reopen file read only | | \n| | forks or calls clone in some variant that copies the fd table |\n| close rw file descriptor | | \n| call EnableVerity on ro descriptor | |\n| | now calls exec where O_CLOEXEC will close it  |\n\nAnd I guess with the go runtime logic there is no control we can have over the timings of each...\n\nIf that is the case I suppose a retry loop could help as long as we can be sure the time between fork/exec is not taking a very long time which it should not?\n\nHowever one I thing I noticed not all callers of openFileUnderRoot() specify O_CLOEXEC, i.e. at least not set in newFileFlags, so a normal leak sounds much more likely to hit in practise."
+        },
+        {
+            "user": "giuseppe",
+            "body": "opened https://github.com/podman-container-tools/container-libs/pull/1030\n\nand vendor PR to test it: https://github.com/podman-container-tools/podman/pull/29309"
         }
     ],
     "cross_references": [
@@ -27,6 +62,16 @@
             "organization": "podman-container-tools",
             "repository": "podman",
             "number": 29277
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 29308
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "container-libs",
+            "number": 1030
         }
     ]
 }

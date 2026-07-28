@@ -1,0 +1,57 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 29307,
+    "type": "pull_request",
+    "title": "auth: fix remote permission denied flake during authfile parsing",
+    "state": "open",
+    "labels": [
+        "kind/api-change",
+        "CI"
+    ],
+    "user": "prakharsingh-74",
+    "body": "fixes - #27455 \n\n### Description\nIn parallel GitHub Actions CI environments, the system tests are run inside a guest Lima VM. `limactl` by default forwards the host's `TMPDIR` into the VM.\n\nBecause the host temp directory is mounted inside the VM with host owner constraints (owned by the host's `runner` user), guest processes running under different UIDs/guest users (e.g. `root`, `lima`, or container processes) hit `EACCES` (Permission Denied) when trying to write to the shared host directory (such as creating temporary auth files in `GetCredentials`).\n\nThis PR fixes the issue by unsetting/resetting `TMPDIR` and `BATS_TMPDIR` to the local guest `/tmp` directory at the start of `hack/ci/runner.sh`, and preserving them under `sudo`. This guarantees that all guest commands use the VM's local world-writable `/tmp` directory, preventing any host-guest permission conflicts.\n\n",
+    "comments": [
+        {
+            "user": "prakharsingh-74",
+            "body": "@Luap99 and @TomSweeneyRedHat can you please review this PR?"
+        },
+        {
+            "user": "mheon",
+            "body": "Isn't the runtime temp directory a subdirectory of the test directory?"
+        },
+        {
+            "user": "prakharsingh-74",
+            "body": "> Isn't the runtime temp directory a subdirectory of the test directory?\n\nYes, during tests, the runtime's temp directory is configured to be a subdirectory of the isolated test directory (under PODMAN_TMPDIR / BATS_SUITE_TMPDIR).\n\nPreviously, authConfigsToAuthFile was calling os.CreateTemp which falls back to the host's default /tmp exposing it to external cleanups and parallel test conflicts. By using the runtime-managed temp directory, the auth file is safely created inside the test's own isolated subdirectory, resolving the permission denied flakes"
+        },
+        {
+            "user": "Luap99",
+            "body": "And aside commits should be be squashed as one commit and we should not have merge commits on a PR normally"
+        },
+        {
+            "user": "mtrmac",
+            "body": "> I don't see how this possibly fixes the issue.\n> \n> The first part of a flake is understanding why and when it happens. I don't see that answered\n\nYes. If `/tmp` were _generally_ not useful for doing things like this, that’s … not a reasonable possibility to consider.\n\nIf our tests are somehow disrupting `/tmp`, or perhaps the per-test temporary directory, in an unexpected way; or if our tests are deleting the per-test temporary directory too early; that needs to be found and fixed there.\n\n---\n\n> Now looking at this why do write a trmp authfile to begin with, this just risks us leaking the file. Should we not extend the the image library to pass the creds in via SystemContext and get rid of the write a tmpfile logic completely then? To me that would be much more worthwhile than a simple location switch in the hope it fixes anything. cc @mtrmac\n\n(That’s a really different conversation — if we have a flake in temporary file handling, we should find/fix it either way.)\n\nYes, extending c/image makes sense. (I can remember one attempt that was designed to use URLs and callbacks and …) I think might now be two or three instances of code like this, and doing it all in-memory would ultimately be simpler.\n\nThe harder part would be designing a stable API that does not commit us to any unexpected semantics. I’d imagine one field in `SystemContext` pointing to an optional object [really `SystemContext` is not a great idea, so let’s build things to move _closer_ towards specialized per-transport options], and that optional object being built using pretty semantically-limited API with functional-style options and the like (not as a struct where the caller provides a constructor).\n\nMaybe something like\n```go\nkeyring := docker.NewKeyring(/* perhaps options in the future */)\nkeyring.AddPasswordCredential(key, user, password, /* perhaps options in the future */)\n…\nSystemContext{ DockerKeyring: keyring }\n```\n"
+        },
+        {
+            "user": "prakharsingh-74",
+            "body": "The flake is caused by the /proc/sys/fs/protected_regular kernel setting (which is 2 on Fedora/RHEL). \n\nIn parallel CI, /tmp/ is world-writable so different workers and sudo tasks can access it. But because the directory is owned by the host runner user, when the podman service runs under a different UID and calls os.CreateTemp, the kernel blocks the creation with EACCES (Permission Denied).\n\nUsing the runtime-managed directory (runtime.TmpDir()) avoids this since it is private (usually /run/libpod or /run/user/<uid>/libpod) and owned exclusively by the process user, so it isn't subject to protected_regular restrictions.\n\nIn-memory credential passing in c/image is definitely the right long-term fix, but this PR is a safe workaround to stabilize the tests in the meantime. I've also force-pushed to squash the commits and remove the accidental auth.test binary.\n\ncc: @Luap99 and @mtrmac "
+        },
+        {
+            "user": "packit-as-a-service[bot]",
+            "body": "[NON-BLOCKING] Packit jobs failed. @containers/packit-build please check. Everyone else, feel free to ignore."
+        },
+        {
+            "user": "mtrmac",
+            "body": "> when the podman service runs under a different UID and calls os.CreateTemp, the kernel blocks the creation with EACCES (Permission Denied).\n\nThat’s not how `/tmp` or `CreateTemp` works."
+        },
+        {
+            "user": "mtrmac",
+            "body": "I apologize, you were saying this not about `/tmp` but about the subdirectory?\n\nBut then, under that theory, why should we be setting up the $TMPDIR to be used by two different UIDs without giving both of the appropriate access? If that is true, it needs fixing, not working around."
+        },
+        {
+            "user": "prakharsingh-74",
+            "body": "I completely agree. The root cause is that `limactl` forwards the host's `TMPDIR` into the guest VM, causing guest processes under other UIDs to hit permission issues on the shared host mount.\n\nI've fixed the VM test environment directly by resetting `TMPDIR` and `BATS_TMPDIR` to `/tmp` in `hack/ci/runner.sh`.\n\nThis ensures all VM test processes use the guest VM's local `/tmp` directory, completely avoiding the host-guest permission mismatch.\n\nlet me know if this approach is good to go or not?\n\ncc: @mtrmac "
+        }
+    ],
+    "cross_references": []
+}
