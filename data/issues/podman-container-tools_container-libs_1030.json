@@ -14,6 +14,22 @@
         {
             "user": "mtrmac",
             "body": "I have filed https://github.com/podman-container-tools/container-libs/issues/1035 for unrelated the `BlobInfoCache` test failure, and restarted the test."
+        },
+        {
+            "user": "Luap99",
+            "body": "> (I generally agree that it is plausible, although I’m unsure what in the Podman process would be forking during a chunked pull).\n\nThe flake was only visible on podman-remote testing, aka podman system service does the pulling. bats tests run in parallel with other test cases. Other tests case runs a container == fork/exec various processes, conmon, netavark, etc... and podman system service handles all requests in parallel.\n\nSo at least I think the story here checks out to the extend that we do only observe that failing on podman-remote. A `podman pull` will be just fine. "
+        },
+        {
+            "user": "giuseppe",
+            "body": "you can use this reproducer to see `fork` is enough:\n\n```\npackage main\n\nimport (\n\t\"fmt\"\n\t\"os\"\n\t\"runtime\"\n\t\"sync/atomic\"\n\t\"syscall\"\n\t\"unsafe\"\n\n\t\"golang.org/x/sys/unix\"\n)\n\nfunc enableVerity(fd int) error {\n\targ := unix.FsverityEnableArg{\n\t\tVersion:        1,\n\t\tHash_algorithm: unix.FS_VERITY_HASH_ALG_SHA256,\n\t\tBlock_size:     4096,\n\t}\n\t_, _, e1 := syscall.Syscall(unix.SYS_IOCTL, uintptr(fd),\n\t\tuintptr(unix.FS_IOC_ENABLE_VERITY), uintptr(unsafe.Pointer(&arg)))\n\tif e1 != 0 {\n\t\treturn e1\n\t}\n\treturn nil\n}\n\nfunc forkAndExit() {\n\tpid, _, e1 := syscall.RawSyscall(syscall.SYS_CLONE, uintptr(syscall.SIGCHLD), 0, 0)\n\tif e1 != 0 {\n\t\treturn\n\t}\n\tif pid == 0 {\n\t\t// Child: exit immediately.  Must use raw syscall — Go runtime\n\t\t// is not fork-safe.\n\t\tsyscall.RawSyscall(syscall.SYS_EXIT_GROUP, 0, 0, 0)\n\t}\n\tsyscall.Wait4(int(pid), nil, 0, nil)\n}\n\nfunc main() {\n\tnfiles := 2000\n\n\tfmt.Printf(\"fsverity ETXTBSY reproducer (fork-only, no exec) — GOMAXPROCS=%d, files=%d\\n\\n\",\n\t\truntime.GOMAXPROCS(0), nfiles)\n\n\tdir := \"reproducer_tmp\"\n\tos.MkdirAll(dir, 0755)\n\tdefer os.RemoveAll(dir)\n\n\tvar stopFork atomic.Bool\n\tfor i := 0; i < 4; i++ {\n\t\tgo func() {\n\t\t\tfor !stopFork.Load() {\n\t\t\t\tforkAndExit()\n\t\t\t}\n\t\t}()\n\t}\n\n\tetxtbsy := 0\n\tother := 0\n\n\tfor i := 0; i < nfiles; i++ {\n\t\tname := fmt.Sprintf(\"%s/f_%d\", dir, i)\n\n\t\t// Open writable, write content.\n\t\tfd, err := unix.Open(name, unix.O_CREAT|unix.O_EXCL|unix.O_WRONLY|unix.O_TRUNC, 0644)\n\t\tif err != nil {\n\t\t\tfmt.Printf(\"open: %v\\n\", err)\n\t\t\tcontinue\n\t\t}\n\t\tunix.Write(fd, []byte(\"test content for verity\\n\"))\n\n\t\troFd, err := unix.Open(fmt.Sprintf(\"/proc/self/fd/%d\", fd), unix.O_RDONLY|unix.O_CLOEXEC, 0)\n\t\tif err != nil {\n\t\t\tunix.Close(fd)\n\t\t\tfmt.Printf(\"reopen: %v\\n\", err)\n\t\t\tcontinue\n\t\t}\n\n\t\tunix.Close(fd)\n\n\t\terr = enableVerity(roFd)\n\t\tif err != nil {\n\t\t\tif err == unix.ETXTBSY {\n\t\t\t\tetxtbsy++\n\t\t\t} else {\n\t\t\t\tother++\n\t\t\t\tfmt.Printf(\"enable verity: %v\\n\", err)\n\t\t\t}\n\t\t}\n\n\t\tunix.Close(roFd)\n\t\tunix.Unlink(name)\n\t}\n\n\tstopFork.Store(true)\n\n\tfmt.Printf(\"Results: %d/%d ETXTBSY\", etxtbsy, nfiles)\n\tif other > 0 {\n\t\tfmt.Printf(\", %d other errors\", other)\n\t}\n\tfmt.Println()\n\n\tif etxtbsy > 0 {\n\t\tfmt.Println(\"Race reproduced!\")\n\t} else {\n\t\tfmt.Println(\"No race observed (try again, or increase nfiles).\")\n\t}\n}\n```\n\nI get:\n\n```\n go run reproducer.go\nfsverity ETXTBSY reproducer (fork-only, no exec) — GOMAXPROCS=22, files=2000\n\nResults: 1083/2000 ETXTBSY\nRace reproduced!\n```\n\nI'll take care of your other comments"
+        },
+        {
+            "user": "mtrmac",
+            "body": "Sure I believe that a fork can trigger the error, it was more “is that how _Podman_ is triggering it” — but Paul has a good explanation for that."
+        },
+        {
+            "user": "giuseppe",
+            "body": "comments addressed and re-vendored in: https://github.com/podman-container-tools/podman/pull/29309"
         }
     ],
     "cross_references": [
