@@ -4,11 +4,20 @@
     "number": 29361,
     "type": "issue",
     "title": "rootless preexec: heap overflow in get_cmd_line_args when /proc/self/cmdline lacks the trailing NUL",
-    "state": "open",
+    "state": "closed",
     "labels": [],
     "user": "hmhmdcy",
     "body": "## Environment\n- Linux arm64, kernel 4.14.190-perf+ (Android vendor kernel), Debian 13 userspace, glibc 2.41\n- podman 5.4.2 (Debian package)\n\n## Symptom\n`podman pull` crashes at startup:\n\n```\nFatal glibc error: malloc.c:2601 (sysmalloc): assertion failed: ...\nSIGABRT ... signal arrived during cgo execution\ngoroutine 1: sqlite3_open_v2 ← libpod.initSQLiteDB ← NewSqliteState ← podman 启动路径\n```\n\nWith `GLIBC_TUNABLES=glibc.malloc.tcache_count=0` the same run aborts earlier in `free()` with `corrupted size vs. prev_size`. Backtrace pins the crash to the preexec constructor in `pkg/rootless/rootless_linux.c` freeing the cmdline buffer.\n\n## Root cause\n1. On this kernel, `/proc/self/cmdline` has **no trailing NUL** (verified system-wide: every process's cmdline file ends with the last argument byte; `read()` of `/proc/self/cmdline` for `/usr/bin/podman pull docker.io/library/alpine:latest` returns 52 bytes with NULs only between the arguments). Mainline Linux always terminates the file with a NUL.\n2. `get_cmd_line_args()` (`pkg/rootless/rootless_linux.c`) counts NULs in `[0, used)` **assuming the trailing NUL exists**:\n   ```c\n   for (i = 0; i < used; i++)\n     if (buffer[i] == '\\0')\n       argc++;\n   if (argc == 0)\n     return NULL;\n   argv = malloc (sizeof (char *) * (argc + 1));\n   ```\n   With the trailing NUL missing, `argc` = number of interior separators only, so `argv` gets one slot too few.\n3. The fill loop then writes `argv[0]` + one entry per interior NUL + the terminating NULL = `argc + 2` entries into `argc + 1` slots — an **8-byte heap overflow** (verified with gdb: chunk of 24 bytes, 32 bytes written; the overflowed NULL lands on the glibc top-chunk `size` field, zeroing it).\n4. The zeroed top chunk causes the two observed crashes: `unlink_chunk`'s \"corrupted size vs. prev_size\" (tcache off) and `sysmalloc`'s `malloc.c:2601` assertion (tcache on, the default). Both are the same root cause; the sqlite backend is just the first later allocation that needs the top chunk.\n\nOn mainline kernels the trailing NUL is always present, so `argc` is correct, the allocation is exact, and no overflow occurs — which is why this has never surfaced upstream. The bug can trigger on any non-mainline kernel (Android containers, WSL variants, etc.).\n\n## Suggested fix\nCount only the NULs *between* arguments and size the array for `argv[0]` plus the terminator:\n\n```c\n  for (i = 0; i + 1 < used; i++)\n    if (buffer[i] == '\\0')\n      argc++;\n  if (used == 0)\n    return NULL;\n\n  argv = malloc (sizeof (char *) * (argc + 2));\n  ...\n```\n\nThis is exact both with and without a trailing NUL. Locally verified: with this change podman runs cleanly on the affected kernel (pull + container start) without any allocator workaround.\n",
-    "comments": [],
+    "comments": [
+        {
+            "user": "Luap99",
+            "body": "Please follow our normal bug templates.\n\nGenerally speaking I do not see why we would care about outdated non mainline kernel versions upstream. If the kernel is broken that needs to be fixed there. We depend on newer 5.X kernel features anyway (i.e. new mount api) so I do not think there is any point in adding work arounds for such old kernel\n\ncc @giuseppe "
+        },
+        {
+            "user": "giuseppe",
+            "body": "the kernel is old and can't really be used to run containers, but maybe it can still be useful to pull images there?  If such a fix (just add a NUL) is proposed as a PR, I'd not mind considering it."
+        }
+    ],
     "cross_references": [
         {
             "organization": "podman-container-tools",
