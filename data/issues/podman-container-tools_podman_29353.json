@@ -44,6 +44,18 @@
         {
             "user": "TanayJalan",
             "body": "Looking at createTimer in libpod/healthcheck_linux.go, the healthcheck timer is scheduled with --on-unit-inactive, so each run's interval is relative to when the previous run's transient unit exits, not a fixed wall-clock cadence. System tests run via bats -j $(nproc) (Makefile) on an 8-vCPU runner, so up to 8 test files execute fully in parallel with no spare core capacity — which is presumably why _check_health already has a load-aware timeout margin for PARALLEL_JOBSLOT. I don't see any concurrent podman command against this specific container between the \"first failure\" and \"four or more failures\" checks (just systemctl queries, which shouldn't touch the container lock), so my guess is a CPU-starved healthcheck run under that 8-way parallel load delays its own process exit — and because the next interval doesn't start counting until that exit, one starved run produces a full ~10s stall rather than gradual drift. Would it make sense to make the timer interval wall-clock-based (e.g. OnCalendar or absolute scheduling) instead of relative to previous-unit-exit, or is that tradeoff intentional? Happy to dig further if useful."
+        },
+        {
+            "user": "vtushar06",
+            "body": "@TanayJalan the ~10s stall was my misreading, corrected above so there is no stall for wall-clock scheduling to fix - what fails is on the test side, the --since is captured after the unhealthy event fires, so the events window can never contain it however the timer is scheduled."
+        },
+        {
+            "user": "TanayJalan",
+            "body": "> [@TanayJalan](https://github.com/TanayJalan) the ~10s stall was my misreading, corrected above so there is no stall for wall-clock scheduling to fix - what fails is on the test side, the --since is captured after the unhealthy event fires, so the events window can never contain it however the timer is scheduled.\n\n@vtushar06 Thanks, traced it through the actual test now. The race is even tighter than I first thought: _check_health \"First failure\" (lines 92–97) reads FailingStreak via inspect, accepting any value in [123] in the failing run this shows FailingStreak: 2. Right after that, line 101 re-captures current_time for the next --since, with a comment saying it's there specifically to avoid missing the unhealthy event during the systemctl checks that follow. But since FailingStreak is already 2 when that re-capture happens, only one more failing check is needed to flip to unhealthy and that can fire in the gap between the inspect read and the date call on line 101 (about 62ms in the actual log). So the existing mitigation doesn't cover the one race that actually matters. Would it make sense to just drop the re-capture on line 101 and reuse the original current_time from line 88 (before the failure was even forced) for both checks? That removes the gap entirely since --since would predate every possible transition. Happy to put up a PR for that if it looks right."
+        },
+        {
+            "user": "vtushar06",
+            "body": "Can u please wait before opening any Pr, there is still much thing behind this."
         }
     ],
     "cross_references": [
