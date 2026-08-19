@@ -1,0 +1,26 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 29579,
+    "type": "issue",
+    "title": "events: logfile backend drops historical events when --until is in the past",
+    "state": "open",
+    "labels": [
+        "kind/bug"
+    ],
+    "user": "HindzStark",
+    "body": "### Issue Description\n\nWhen using the file-based events backend (`events_logger = \"file\"` in `containers.conf`), invoking `podman events` with an `--until` option set to a timestamp or relative duration in the past (e.g. `--until 10m` or `--until 2025-01-01T00:00:00`) causes the tail reader to terminate immediately before historical events can be read from `events.log`.\n\nIn `libpod/events/logfile.go` (`EventLogFile.Read`):\n```go\nif len(options.Until) > 0 {\n    untilTime, err := util.ParseInputTime(options.Until, false)\n    if err != nil {\n        return err\n    }\n    go func() {\n        time.Sleep(time.Until(untilTime))\n        if err := t.Stop(); err != nil {\n            logrus.Errorf(\"Stopping logger: %v\", err)\n        }\n    }()\n}\n```\nWhen untilTime is in the past:\n\n`time.Until(untilTime)` evaluates to a negative ` time.Duration`.\nIn Go, `time.Sleep(d)` returns immediately when ` d <= 0`.\nThe background goroutine immediately invokes `t.Stop()`.\n`t.Stop()` closes the `t.Lines` channel concurrently as the event reading loop is starting, prematurely aborting event collection from disk.\nAdditionally, when `untilTime` is in the future, the spawned goroutine sleeps without selecting on `ctx.Done()`, causing a goroutine leak if the client cancels the context early.\n\n### Steps to reproduce the issue\n\nSteps to reproduce the issue\n1. Configure Podman to use file-based event logging by adding to `containers.conf`:\n\n```\n[engine]\nevents_logger = \"file\"\n```\n\n2. Generate container events (e.g., run `podman run --rm alpine true` multiple times).\n3. Query historical events with a past `--until` boundary \n```\npodman events --stream=false --since 1h --until 1m\n```\n\n\n### Describe the results you received\n\nNo events are printed to stdout (or the output is prematurely terminated after reading 0–1 lines) because `t.Stop()` closes the tail channel immediately upon startup.\n\n### Describe the results you expected\n\nPodman should parse the event log and output all recorded events that occurred between `--since` and `--until`.\n\n\n### podman info output\n\n```yaml\nhost:\n  arch: amd64\n  buildahVersion: 1.40.0\n  conmon:\n    package: conmon-2.1.12-1.fc41.x86_64\n    path: /usr/bin/conmon\n    version: 'conmon version 2.1.12, commit: '\n  distribution:\n    distribution: fedora\n    version: \"41\"\n  eventsLogger: file\n  ociRuntime:\n    name: crun\n    package: crun-1.20-1.fc41.x86_64\n    path: /usr/bin/crun\n    version: crun version 1.20\n  os: linux\n```\n\n### Podman in a container\n\nNo\n\n### Privileged Or Rootless\n\nRootless\n\n### Upstream Latest Release\n\nYes\n\n### Additional environment details\n\nOccurs on any OS/environment using `events_logger = \"file\"` (including rootless Linux, macOS remote, and containerized Podman setups).\n\n\n### Additional information\n\n- Code location: `libpod/events/logfile.go` (around lines 119–130)\n- The event filter `generateEventUntilOption` in `libpod/events/filters.go` already filters out events occurring after `untilTime`. Terminating the reader stream should be synchronized with reading through events rather than an uncoordinated background timer killing `tail.Tail`.\n",
+    "comments": [
+        {
+            "user": "HindzStark",
+            "body": "I am working on a fix and unit test for this in libpod/events/logfile.go and will submit a PR shortly.\n\n"
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 29580
+        }
+    ]
+}
