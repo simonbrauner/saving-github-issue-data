@@ -4,7 +4,7 @@
     "number": 29396,
     "type": "issue",
     "title": "Cannot build image on macOS through podman machine",
-    "state": "open",
+    "state": "closed",
     "labels": [
         "kind/bug",
         "remote",
@@ -81,6 +81,26 @@
         {
             "user": "kgibm",
             "body": "FYI, I moved the mount to a less \"system-y\" mountpoint and the issue is the same:\n\n```\n$ podman machine init --cpus 4 --memory 10240 --disk-size 100 --now --rootful -v /Users/kevin/work/tmp/:/tmp/host\n```"
+        },
+        {
+            "user": "Honny1",
+            "body": "I think the issue is that the build context directory is located inside a folder managed by macOS FileProvider (likely iCloud Drive's Desktop & Documents sync), where files are replaced with placeholders that require special framework access to read. When Podman's client-side nTar function walks the build context to create a tarball, it calls `os.Open()` on these files and gets permission denied, producing a truncated tar stream that breaks the HTTP request to the machine VM. \n\n@kgibm Are you using cloud syncing? If yes, can you try to move the project to a non-cloud-synced directory (e.g., `~/Projects/`) or force-download all files locally via Finder's \"Keep Downloaded\" option?\n\n---\n\nAnother thing is that the error propagation to the user could be improved. "
+        },
+        {
+            "user": "kgibm",
+            "body": "Hi, that makes sense though I believe I've turned off all iCloud synchronization and then tried again and it's the same issue (and confirmed it still works without `-v`). I also tried `mkdir ~/Projects/` and `podman machine init --cpus 4 --memory 10240 --disk-size 100 --now --rootful -v /tmp:/Users/kevin/Projects/` but the build had the same issue.\n\n<img width=\"472\" height=\"533\" alt=\"Image\" src=\"https://github.com/user-attachments/assets/a196caae-70e1-48cd-8a2a-0ded473fb629\" />\n\n<img width=\"472\" height=\"533\" alt=\"Image\" src=\"https://github.com/user-attachments/assets/576ad1d1-109e-4fa8-be61-1755f880549f\" />\n\n<img width=\"472\" height=\"533\" alt=\"Image\" src=\"https://github.com/user-attachments/assets/236d46a1-9cdf-4767-83be-3b34567266a7\" />\n\n<img width=\"734\" height=\"404\" alt=\"Image\" src=\"https://github.com/user-attachments/assets/d15268a4-f328-4f99-83aa-2e3f640c367f\" />"
+        },
+        {
+            "user": "Honny1",
+            "body": "@kgibm The `-v` syntax is `host_path:machine_path`, so `-v /tmp:/Users/kevin/Projects/` mounts host's `/tmp` (On MacOS it is a symlink) into the VM at that path. Not what you intended. Also, specifying any `-v` replaces the default mounts (`/Users:/Users`, etc.), so your home directory is no longer visible to the VM, forcing the client to tar everything instead.\n\nCould you test from a dedicated directory (not ~) with fresh machine?\n\nAlso, does OneDrive or any other cloud sync tool still run on the system?"
+        },
+        {
+            "user": "kgibm",
+            "body": "Whoops, sorry, my mistake on the `-v` syntax.\n\nAhh, that makes sense. So then the conclusion is that I should be careful where I place my `Containerfile` along with `-v` because by specifying `-v`, the podman client now has to recursively upload the entire folder where my `Containerfile` is? That makes sense why it would take so long and hit various permissions issues. I didn't realize that was happening so I definitely didn't mean to do that. I moved the `Containerfile` to `~/Projects/` and built from there and now it works fine even with `-v` (with corrected syntax).\n\nYes, the system also has OneDrive, although now that I understand what's happening, everything makes sense. I guess podman could print a warning if the user doesn't know that the entire current directory will be tarred and uploaded to the machine and the directory is very large.\n\nThanks!"
+        },
+        {
+            "user": "Honny1",
+            "body": "Well, you are mixing two separate concepts:\n\n- `-v` for mounting a directory into the VM via `podman machine init/set` (personally, I wouldn't change the machine defaults).\n- `-v` for mounting a directory into a container via `podman run` (on macOS, this leverages mounts from the VM).\n\nAnother consideration is `podman build`. On Linux, macOS, and Windows, it requires a context directory. In your build command, you specified `.`, which means your current working directory (`pwd`). If you run that from `~/`, the instruction `COPY .  .` will attempt to copy your entire home directory into the container image.\n\nOn macOS, the implementation uses two mechanisms to access the context directory:\n\n- Local API: This approach leverages directories already mounted to the Podman machine. It accesses files through VirtIO-FS, which is much faster than transferring the entire directory over the REST API.\n\n- Fallback: If the directory isn't mounted, it creates a tarball of the entire directory and sends it to the Podman machine over the network via the REST API. \n\nRegarding the context directory, it's good practice to use a `.containerignore` file to exclude unnecessary files from the build context, especially when falling back to the REST API.\n\nI don't think a warning is necessary since the local API is used most of the time, and podman build is already properly documented. I think we can close this issue.\n"
         }
     ],
     "cross_references": []
