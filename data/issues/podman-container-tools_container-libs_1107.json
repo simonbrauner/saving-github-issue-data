@@ -1,0 +1,20 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "container-libs",
+    "number": 1107,
+    "type": "pull_request",
+    "title": "storage: delete image metadata batched",
+    "state": "open",
+    "labels": [
+        "storage"
+    ],
+    "user": "usiegj00",
+    "body": "### Motivation\n\nOn a production cri-o 1.33.8 node, 208 days old with high container churn. Layer store had grown to 40,000+ layers / 20MB+ of layers.json. In this configuration `crictl images` never returned and `crictl rmi` would fail with DeadlineExceeded after 5m10s.\n\n### What is happening\n\n`DeleteImage` deletes an image's layers in a loop (`deferredDelete`). Each call rewrites layers.json twice. Our 40k layer image rewrote layers.json 2x40k times. This degrades with store size.\n\n### Why this shape\n\nThere was an existing approach in `load()`'s incomplete-layer recovery loop that batched deletions. Our change makes `DeleteImage` consistent in its approach. No public API changes.\n\nThis also follows from the previous #2325 work which moved physical file removal \"outside of global locks\" and this is the metadata half of the same concern.\n\n### Measured\n\nLinux x86_64, vfs driver, as root, best-of-3.\n\nSave count, via the new test (inotify on layers.json):\n\n| image layers | before | after |\n|---:|---:|---:|\n| 10 | 20 saves | 2 saves |\n\n`DeleteImage` wall clock:\n\n| store layers | image layers | before | after |\n|---:|---:|---:|---:|\n| 8,984 | 40 | 7,664 ms | 333 ms |\n| 43,222 | 20 | 16,391 ms | 2,106 ms |\n| 43,222 | 40 | 31,138 ms | 1,333 ms |\n| 43,222 | 1 | 958 ms | 1,023 ms |\n\nThe last row matters: single-layer callers are unaffected, so the four other\n`deferredDelete` call sites keep their current behaviour.\n\n### Behavior change\n\nPartial failure layers are now flagged incomplete and reaped on the next open. Previously they survived. The new approach is better, but is a change.\n\n### Testing\n\nThere is a new test that fails on the unpatched code as it measures the rewrite count and enforces the reduced writes. All other tests pass.\n\nSigned-off-by: Jonathan Siegel <248302+usiegj00@users.noreply.github.com>\n\n<!--- Please read the [contributing guidelines](https://github.com/containers/container-libs/blob/main/CONTRIBUTING.md) before proceeding --->\n",
+    "comments": [
+        {
+            "user": "mtrmac",
+            "body": "> In this configuration `crictl images` never returned\n\nAs in, timed out, or hanged completely? Hanging would be very unexpected.\n\n---\n\n> `DeleteImage` deletes an image's layers in a loop (`deferredDelete`). Each call rewrites layers.json twice. Our 40k layer image rewrote layers.json 2x40k times.\n\nWait, are you saying that there was a single image with 40k layers? That’s impossible with overlay.\n\nAlso this\n> | store layers | image layers | before | after |\n> |---:|---:|---:|---:|\n> | 8,984 | 40 | 7,664 ms | 333 ms |\n> | 43,222 | 20 | 16,391 ms | 2,106 ms |\n> | 43,222 | 40 | 31,138 ms | 1,333 ms |\n> | 43,222 | 1 | 958 ms | 1,023 ms |\n\nseems to suggest that the 40k layers are not a part of a single deletion operation.\n\n(Also, (31.138-1.333)/(40*2-2) = 0,382 seconds for a write+`fdatasync` seems intuitively a bit high, although perhaps plausible.)"
+        }
+    ],
+    "cross_references": []
+}
