@@ -1,0 +1,19 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "container-libs",
+    "number": 1109,
+    "type": "issue",
+    "title": "rootlessnetns leaks the unshared mount namespace onto a pooled thread",
+    "state": "open",
+    "labels": [],
+    "user": "vtushar06",
+    "body": "`setupMounts` unshares the mount namespace inside `nsRef.Do(...)`, but `Do` only saves and restores the **net** namespace before it unlocks the thread. The mount namespace is never restored, so the thread goes back to the Go scheduler pool still inside the throwaway namespace where `/run` is the rootless-netns run dir.\n\ncommon/libnetwork/internal/rootlessnetns/netns_linux.go, `setupMounts` runs inside `Do`:\n\n```go\nreturn nsRef.Do(func(_ netns.NetNS) error {\n    if err := n.setupMounts(); err != nil {\n```\n\nand `setupMounts` does:\n\n```go\nerr := unix.Unshare(unix.CLONE_NEWNS)\n...\nerr = unix.Mount(\"\", \"/\", \"\", unix.MS_SLAVE|unix.MS_REC, \"\")\n...\nerr = mountAndMkdirDest(runDir, \"/run\", none, unix.MS_BIND|unix.MS_REC)\n```\n\nwhile `Do` in containernetworking/plugins/pkg/ns saves only the net namespace:\n\n```go\nfunc getCurrentNSNoLock() (NetNS, error) {\n    return GetNS(getCurrentThreadNetNSPath())   // /proc/<pid>/task/<tid>/ns/net\n}\n```\n\nand on the way out:\n\n```go\nerr := threadNS.Set()   // net only\nif err == nil {\n    runtime.UnlockOSThread()\n}\n```\n\nI wrote a small program to check whether such a thread actually gets reused. It locks a thread, unshares CLONE_NEWNS, unlocks, then reads `/proc/thread-self/ns/mnt` from 2000 goroutines:\n\n```\n1 leaked thread    87 of 2000 goroutines landed on it   (4.4%)\n11 leaked threads  1451 of 2000                         (72.5%)\n```\n\nSo after a handful of rootless network setups a majority of later work can run on a thread whose `/run` is wrong. I have not tied this to a user visible failure yet, and `/` is `MS_SLAVE` so `/usr` and `/etc` stay correct, which limits the blast radius. Filing it because the thread does go back in the pool and that looks unintended.\n\nHappens on every rootless network setup and teardown, so podman rootless with a network is the exercised path.\n",
+    "comments": [],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "container-libs",
+            "number": 1110
+        }
+    ]
+}
