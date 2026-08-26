@@ -1,0 +1,33 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 29641,
+    "type": "issue",
+    "title": "podman image rm - concurrent with shared layers: build fails unpacking its own layer",
+    "state": "open",
+    "labels": [],
+    "user": "vtushar06",
+    "body": "`podman image rm - concurrent with shared layers` has gone red 9 times between 2026-06-08 and 2026-08-12, on five different distro and mode combinations, so it does not look environmental:\n\n```\n5x  int local root fedora-rawhide\n1x  int local rootless fedora-rawhide\n1x  int local rootless fedora-current\n1x  int local rootless debian-sid\n1x  int remote root debian-sid\n```\n\nThe failure is in the build half of the test, not the removal half. The assert that fires is `buildImage()` in common_test.go, and the reason is only on stderr, so the TAP line alone shows a build that ran to COMMIT and exited 1:\n\n```\nError: committing container for step {... Args:[touch rmtest:0] ...}: copying layers and\nmetadata for container \"04c35a38...\": writing blob: adding layer with blob \"sha256:724a7a77...\":\nunpacking failed (error: exit status 1; output: open /rmtest:0: no such file or directory)\n```\n\n`unpacking failed` comes from `invokeUnpack` in c/storage `pkg/chrootarchive/archive_unix.go`, and the quoted output is what the `storage-untar` re-exec child printed. The child gets the destination as an fd (`/proc/self/fd/4`) and creates entries under it, so an ENOENT while creating `/rmtest:0` reads like the destination went away underneath it rather than the tar being wrong. The test starts ten builds in goroutines off the same base image, which is what makes it concurrent.\n\nThe job had composefs and partial images on:\n\n```\n--storage-opt overlay.use_composefs=true\n--pull-option=enable_partial_images=true --pull-option=convert_images=true\n```\n\nI have not reproduced it locally, and I did not get further than the error above, so I do not know which side removes the directory.\n\n#18659 covered the same test being racy but is closed and locked, and that one was about the removal half.\n",
+    "comments": [
+        {
+            "user": "vtushar06",
+            "body": "found the mechanism, though not the culprit yet. the untar child chroots into the destination, and a directory that is unlinked while you are chrooted into it keeps working for anything already open but fails every create with ENOENT:\n\n```\ncreate BEFORE removal :  OK\ncreate AFTER  removal :  No such file or directory   (errno 2)\n```\n\nso `open /rmtest:0: no such file or directory` means the destination went away mid unpack, not that the layer tar is bad. I reproduced the exact string locally by removing the destination partway through an unpack.\n\nwhat still removes it during this test I do not know. opened podman-container-tools/container-libs#1115 so the error at least says which of the two it is next time."
+        },
+        {
+            "user": "eplightning",
+            "body": "I'm encountering similar issues when running multiple image builds/pulls concurrently on the same machine using Podman 6.0 (also had these issues with older Podman versions). I'm not entirely sure if this is related but the logs I encountered so far:\n```\nError: committing container for step {Env:[PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/local/bun-node-fallback-bin BUN_RUNTIME_TRANSPILER_CACHE_PATH=0 BUN_INSTALL_BIN=/usr/local/bin NODE_ENV=production] Command:copy Args:[. .] Flags:[] Attrs:map[] Message:COPY . . Heredocs:[] Original:COPY . .}: copying layers and metadata for container \"970a42039af223b390d22bb7939ea52f9e0b933f5aef57cc7b00a6221dacc480\": writing blob: adding layer with blob \"sha256:1eef7d34c79e05e6b0c89d2fab4aa7f07f711255d8f4587b1761fa516a9aa489\"/\"\"/\"sha256:22220d5b068ab239be493a1ac4ef510af293209824dfa06d9b1360a1b27e2fb2\": unpacking failed (error: exit status 1; output: mkdir /app: no such file or directory)\n```\n\n```\nunable to copy from source docker://<snip>/dockerhub/library/postgres:16: copying system image from manifest list: writing blob: adding layer with blob \"sha256:00034b17b963695ef825816fbf4147c71f32b66d5c0743dcaee4c4711e8ba8b6\"/\"\"/\"sha256:428818b3d4fc4a3e4ca1be4f71a5a96c31b1a8ee8cf6797b31e09d82b143107f\": rename /home/runner/.local/share/containers/storage/overlay-layers/tmp/temp-dir-896991578/0-addition /home/runner/.local/share/containers/storage/overlay-layers/d123591175e99fc8c2c21a8b0f92327ee4ff4e7b7ed4ad31bfecdcfcb8608395.tar-split.gz: no such file or directory\n```"
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 29640
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "container-libs",
+            "number": 1115
+        }
+    ]
+}
