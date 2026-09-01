@@ -1,0 +1,77 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 29684,
+    "type": "pull_request",
+    "title": "libpod: fix :O overlay volumes in a userns",
+    "state": "open",
+    "labels": [],
+    "user": "giuseppe",
+    "body": "When the user owning the storage is not mapped into the container user namespace (e.g. root with --userns=auto), the runtime cannot mount an overlay volume from inside the user namespace.\n\nMount the overlay in podman instead and pass the runtime a bind mount.\n\nCloses: https://github.com/podman-container-tools/podman/issues/28758\n\n<!-- Thanks for sending a pull request! -->\n\n#### Checklist\n\nEnsure you have completed the following checklist for your pull request to be reviewed:\n<!-- Use [x] to mark as done, or click the checkbox after opening PR -->\n\n- [ ] I have read and understood our [contributing guidelines](https://github.com/podman-container-tools/podman/blob/main/CONTRIBUTING.md) and will not have more than two open PRs as a new contributor.\n- [ ] PR description, commit message, and GitHub comments are human-written, per [LLM Policy](https://github.com/podman-container-tools/community/blob/main/LLM_POLICY.md)\n- [ ] Certify you wrote the patch or otherwise have the right to pass it on as an open-source patch by signing all\ncommits. (`git commit -s`). (If needed, use `git commit -s --amend`).  The author email must match\nthe sign-off email address. See [CONTRIBUTING.md](https://github.com/podman-container-tools/podman/blob/main/CONTRIBUTING.md#sign-your-prs)\nfor more information.\n- [ ] Referenced issues using `Fixes: #00000` in commit message (if applicable)\n- [ ] [Tests](https://github.com/podman-container-tools/podman/tree/main/test#readme) have been added/updated (or no tests are needed)\n- [ ] [Documentation](https://github.com/podman-container-tools/podman/blob/main/docs/README.md) has been updated (or no documentation changes are needed)\n- [ ] All commits pass `make validatepr` (format/lint checks)\n- [ ] [Release note](https://github.com/kubernetes/community/blob/master/contributors/guide/release-notes.md) entered in the section below (or `None` if no user-facing changes)\n\n#### Does this PR introduce a user-facing change?\n\n<!--\nWrite `None` if there are no user-facing changes, otherwise enter your release note below.\nInclude \"action required\" if users need to take action when upgrading.\n-->\n\n```release-note\n\n```\n",
+    "comments": [
+        {
+            "user": "M1cha",
+            "body": "This works, thanks. Is idmap supposed to be supported with `O`?\nWhen I mount a volume, idmap is simply ignored:\n```bash\n# ls -lah /var/lib/containers/storage/volumes/tmp/_data/\ntotal 0\ndrwxr-xr-x 1 root    root    10 Aug 30 12:34 .\ndrwx------ 1 1000000 1000000 10 Aug 30 12:00 ..\n-rw-r--r-- 1 root    root     0 Aug 30 12:34 hello\n# podman run --rm -it --userns auto -v tmp:/mnt:O,idmap docker.io/alpine ls -lah /mnt/\ntotal 0\ndrwx------    1 root     root           0 Aug 31 10:46 .\ndr-xr-xr-x    1 root     root          12 Aug 31 10:46 ..\n-rw-r--r--    1 nobody   nobody         0 Aug 30 10:34 hello\n```\n\nIf I use a directory, it's rejected:\n```bash\n# podman run --rm -it --userns auto -v /mnt:/mnt:O,idmap docker.io/alpine ls -lah /mnt/\nError: can't use 'O' with other options\n```"
+        },
+        {
+            "user": "packit-as-a-service[bot]",
+            "body": "[NON-BLOCKING] Packit jobs failed. @podman-container-tools/packit-jobs please check. Everyone else, feel free to ignore."
+        },
+        {
+            "user": "giuseppe",
+            "body": "it is a bit painful to implement because we would need to handle this in Podman and we need to apply `idmap` to the lower layers.  It might work (I've not tried) on recent kernels directly on the overlay mount itself, but it is less secure as files on the upperdir will be created with host mappings and it would work differently than the mappings for rootfs"
+        },
+        {
+            "user": "M1cha",
+            "body": "That makes sense, but that makes me worry, that the usefulness of overlay mounts without idmap is quite limited for userns=auto. You'd either have to use static IDs or use world-writable permissions in the lower dir.\n\nWhy are permissions in the upperdir an issue? With idmapped bind or volume mounts the mapped root user is also able to create real-root-owned files in the host namespace."
+        },
+        {
+            "user": "giuseppe",
+            "body": "because the container will be able to create files with host mappings, while that is not possible now; so they will be owned by the \"real\" root not just what users are mapped in the user namespace."
+        },
+        {
+            "user": "M1cha",
+            "body": "> while that is not possible now\n\nDo you mean just for overlays? Because for normal idmapped volumes (`name:/mnt:idmap,z`) that's already the case - all files are owned by the real root user."
+        },
+        {
+            "user": "giuseppe",
+            "body": "yes, I mean just for overlay.\n\n`idmap` for overlay right now is used to map the lower layers but the upper dir is private, when used for the rootfs.\n\nAnyway, I am not arguing against it, I was just answering why it is not implemented yet, and what could be different from expectations if we map the overlay mount itself.\n\n"
+        },
+        {
+            "user": "giuseppe",
+            "body": "in the end it was not much more complexity to support it.  Added a patch to support it, there is no reason to block combinations that the kernel supports (needs 7.3 though)"
+        },
+        {
+            "user": "M1cha",
+            "body": "Nice, thanks. I don't have (quick) access to 7.3, so I can't test this properly right now, but at least the rejection path works:\n```bash\n# ./bin/podman run --rm -it --userns auto -v /mnt:/mnt:O,idmap docker.io/alpine ls -lah /mnt/\nError: OCI runtime error: crun: mount_setattr `/mnt` (maybe the file system used doesn't support idmap mounts on this kernel?): Invalid argument\n```\n\nFor named volumes it still seems to be ignored though, are those handled differently?\n```bash\n# ./bin/podman run --rm -it --userns auto -v tmp:/mnt:O,idmap docker.io/alpine ls -lah /mnt/\ntotal 0\ndrwx------    1 root     root           0 Aug 31 13:07 .\ndr-xr-xr-x    1 root     root          12 Aug 31 13:07 ..\n-rw-r--r--    1 nobody   nobody         0 Aug 30 10:34 hello\n```"
+        },
+        {
+            "user": "giuseppe",
+            "body": "thanks, should be fixed now"
+        },
+        {
+            "user": "giuseppe",
+            "body": "I've tested it manually on a machine with 7.3"
+        },
+        {
+            "user": "M1cha",
+            "body": "This now fails on 7.1 (as it should):\n```bash\n# ./bin/podman run --rm -it --userns auto -v tmp:/mnt:O,idmap docker.io/alpine ls -lah /mnt/\nError: OCI runtime error: crun: mount_setattr `/mnt` (maybe the file system used doesn't support idmap mounts on this kernel?): Invalid argument\n```\n\nI also just tested this in a fedora rawhide VM, and it seems to work:\n```bash\n# ./bin/podman run --rm -it --userns auto -v tmp:/mnt:O,idmap docker.io/alpine ls -lah /mnt/\ntotal 4K\ndrwx------    1 root     root           6 Aug 31 13:42 .\ndr-xr-xr-x    1 root     root          28 Aug 31 13:42 ..\n-rw-r--r--    1 root     root           6 Aug 31 13:41 hello\n```\n\nThanks for your work and the quick responses :+1: "
+        },
+        {
+            "user": "baude",
+            "body": "code LGTM"
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 28758
+        },
+        {
+            "organization": "containers",
+            "repository": "crun",
+            "number": 2212
+        }
+    ]
+}

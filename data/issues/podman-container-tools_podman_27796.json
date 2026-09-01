@@ -19,6 +19,10 @@
         {
             "user": "renner0e",
             "body": "sorry for the mess above...\n\nThis happens to also cause weird interactions with  `--sign-by-sigstore` to fix issues like: https://github.com/ublue-os/main/issues/643.\n\n\nReproducible with something like:\n\n```\npodman push quay.io/fedora/fedora-bootc:latest ghcr.io/mytest/repo:tag --sign-by-sigstore sigstore-param-file.yaml\n```\n\nthe image is signed and has no annotations and to workaround this bug to get the layer annotations, we do the same podman push again which invalidates **all** the layers (because we signed an image without the annotations?)\n\n`sigstore-param-file.yaml`\n\n```\nprivateKeyFile: cosign.key\nprivateKeyPassphraseFile: /dev/null\nrekorURL: https://rekor.sigstore.dev\n```\n\n`podman version 5.8.2`\n\n\n"
+        },
+        {
+            "user": "TheMDev",
+            "body": "I think this issue should be moved to https://github.com/podman-container-tools/container-libs as that is where the actual issue appears to originate.\n\nSpecifically the compression step discards existing annotations when it constructs updated blob metadata. The first push uploads newly compressed blobs. Subsequent pushes reuse the cached remote blob hashes but use the original local metadata so the annotations are not dropped. Ideally, content annotations would be preserved during compression.\n\n## Proposed Fix: Preserve Content Annotations & Not Compression Metadata\n\nRetaining every annotation on all compression changes could preserve invalid offsets or checksums from the previous compressed representation. [chunkedToc.ChunkedAnnotations](https://github.com/podman-container-tools/container-libs/blob/main/storage/pkg/chunked/toc/toc.go) already provides a set of known chunked-compression annotation keys to remove which also appears to be used by the container-storage reader.\n\nAdd a function to https://github.com/podman-container-tools/container-libs/blob/main/image/copy/compression.go\n\n```go\n// Preserve Layer Annotations Excluding Compression Metadata.\nfunc annotationsAfterCompressionChange(original map[string]string) map[string]string {\n    result := maps.Clone(original)\n    maps.DeleteFunc(result, func(key string, _ string) bool {\n        _, compressionSpecific := chunkedToc.ChunkedAnnotations[key]\n        return compressionSpecific\n    })\n    return result\n}\n```\n\nAs per comment: https://github.com/podman-container-tools/container-libs/blob/a1be96d12a12d94a90c498a8ceeb0970803718a8/image/copy/compression.go#L170-L173\n\n```go\nstream.info = types.BlobInfo{ // FIXME? Should we preserve more data in src.info?\n\tDigest: \"\",\n\tSize:   -1,\n}\n```\n\nshould then be:\n\n```go\nstream.info = types.BlobInfo{\n    Digest: \"\",\n    Size:   -1,\n    Annotations: annotationsAfterCompressionChange(\n        stream.info.Annotations,\n    ),\n}\n```\n\n- `bpcCompressUncompressed`\n- The same transformations might also apply to:\n  - `bpcRecompressCompressed`\n  - `bpcDecompressCompressed`\n\nThe new compression data is added after this, and is thus not removed by the filter.\n\n@renner0e"
         }
     ],
     "cross_references": [
@@ -81,6 +85,11 @@
             "organization": "ublue-os",
             "repository": "aurora",
             "number": 2377
+        },
+        {
+            "organization": "ublue-os",
+            "repository": "bluefin",
+            "number": 4887
         }
     ]
 }
