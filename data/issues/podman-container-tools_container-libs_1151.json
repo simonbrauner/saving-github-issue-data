@@ -1,0 +1,21 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "container-libs",
+    "number": 1151,
+    "type": "pull_request",
+    "title": "freebsd: skip extattr namespaces the caller may not read",
+    "state": "open",
+    "labels": [
+        "storage"
+    ],
+    "user": "olgeni",
+    "body": "On FreeBSD, `Llistxattr()` walks both the `user` and `system` extattr namespaces and returns the first error it meets. Reading the `system` namespace requires privilege (`PRIV_VFS_EXTATTR_SYSTEM`), so `extattr_list_link(2)` fails with `EPERM` for any unprivileged process, and for any process in a jail without `allow.extattr`. The `user` namespace is readable in both cases, but its contents are discarded along with the error.\n\nThe caller that matters is `readUserXattrToTarHeader()`, which wants only `user.*` and would have been satisfied by the namespace that did work. `EPERM` is not `ENOTSUP`, so its guard does not catch it, and the error propagates out to the archive walkers. In `ExportChanges()` — the layer diff buildah takes on commit — a `prepareAddFile()` error is logged at debug level and the file is skipped.\n\nThe condition is systematic rather than transient, so **every** file is skipped: the layer commits as an empty tar and the build reports success. Nothing a `RUN` step writes survives into the next layer, and no error is printed at the default log level. In practice a `pkg install` succeeds at one step and the binary is missing several steps later.\n\n### Reproducer\n\nAs any non-root user on FreeBSD, or in a jail without `allow.extattr`:\n\n```go\nmarker := filepath.Join(t.TempDir(), \"marker\")\nos.WriteFile(marker, []byte(\"payload\\n\"), 0o644)\nrc, _ := archive.ExportChanges(dir,\n    []archive.Change{{Path: \"/marker\", Kind: archive.ChangeAdd}}, nil, nil)\n// before: the tar is empty, the file is gone, err is nil\n```\n\nMeasured directly against the syscall:\n\n| context | `extattr_list_link(user)` | `extattr_list_link(system)` | resulting tar |\n| --- | --- | --- | --- |\n| host, root | ok | ok | `marker`, 8 bytes |\n| jail, `allow.extattr=1` | ok | ok | `marker`, 8 bytes |\n| jail, `allow.extattr=0` | ok | **EPERM** | **empty** |\n| host, unprivileged | ok | **EPERM** | **empty** |\n\n### Fix\n\nSkip the namespaces we lack the privilege to read and return the ones we can, which is what `llistxattr(2)` on Linux already does — it omits names the caller cannot see rather than failing.\n\nOnly `EPERM` is skipped, since that is what `priv_check()` returns for the `system` namespace. Anything else, `EACCES` included, describes the file rather than the namespace and is still reported.\n\n### Testing\n\nIncludes a regression test, verified to fail without the fix and pass with it.\n\nRun unprivileged on FreeBSD, `pkg/system` and `pkg/archive` had **32 failures before this change and 9 after it**, with none newly broken. Of the 9 remaining, 8 fail on a privileged operation the test itself needs (chown, mknod, chflags, nmount); the ninth is a pre-existing FreeBSD failure in symlink change detection, unrelated to extended attributes.\n\n### Two notes\n\nCI currently covers Ubuntu and Fedora only. Worth knowing that **a FreeBSD CI job would not have caught this either**, because it only manifests unprivileged — as root both namespaces are readable and the bug never fires. The included test is subject to the same limitation, and says so in its doc comment.\n\nSeparately, and not addressed here: even with this fixed, `ExportChanges()` still logs a per-file `prepareAddFile()` failure at debug level and drops the file. That is reasonable for a transient `ENOENT` from a container mutating its filesystem mid-diff, but it means any *systematic* error silently produces an empty layer and a successful exit. Happy to open that separately if you think it is worth changing.\n",
+    "comments": [],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "container-libs",
+            "number": 1152
+        }
+    ]
+}
