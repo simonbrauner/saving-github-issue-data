@@ -1,0 +1,18 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "buildah",
+    "number": 7092,
+    "type": "pull_request",
+    "title": "imagebuildah: keep the job semaphore balanced when waitForStage's context is cancelled",
+    "state": "open",
+    "labels": [],
+    "user": "AtwoodTM",
+    "body": "#### What type of PR is this?\n\n/kind bug\n\n#### What this PR does / why we need it:\n\n`waitForStage` gives up the stage goroutine's job-semaphore token while it polls another stage, then tries to take it back. If the build context is already cancelled — which is what happens when a remote `podman build` client drops — `Acquire` returns immediately without taking a token, even when one is free. The goroutine still `defer Release(1)`s, and `golang.org/x/sync/semaphore` panics:\n\n    panic: semaphore: released more than held\n\nWhen that executor is running inside `podman system service`, the panic kills the whole API server. Other in-flight remote builds on the same socket then die with `server probably quit: unexpected EOF`.\n\nThis reacquires the token with `context.Background()` on that path so the deferred Release stays balanced. It also returns an empty content summary if the stage's builder is already gone, which nil-derefs on the same cancel path (`getContentSummaryAfterAddingContent`).\n\n#### How to verify it\n\n```\ngo test -tags 'exclude_graphdriver_btrfs exclude_graphdriver_devicemapper containers_image_openpgp' ./imagebuildah \\\n  -run 'TestWaitForStageCancelledContextDoesNotOverRelease|TestWaitForStageAlreadyTerminatedKeepsToken|TestGetContentSummaryAfterAddingContentNilBuilder'\n```\n\nThe cancelled-context test fails on main: after `waitForStage` returns, `TryAcquire(1)` succeeds, which means the caller no longer holds the token.\n\n#### Which issue(s) this PR fixes:\n\nFixes #7091\n\n#### Special notes for your reviewer:\n\nI hit this on Homebrew podman 6.1.1 (vendored buildah 1.45.0) serving several GitHub Actions slots through one user-scope API socket. Cancelling one build panicked the server and took down the others. The same code is still on main.\n\n`Acquire(context.Background(), 1)` after a cancelled `Acquire` should not block in the usual case (we just released a token). If another stage grabbed it during the 10ms sleep, we wait for that stage's deferred Release; the build is already failing.\n\n#### Does this PR introduce a user-facing change?\n\n```release-note\nFix a panic (`semaphore: released more than held`) when a remote build is cancelled while waiting on another stage.\n```\n",
+    "comments": [
+        {
+            "user": "nalind",
+            "body": "#7007 tweaks that part of the logic to use context.Background() when acquiring the semaphore so that it won't error out if the context was canceled - this error triggers more often in testing when the cancellation logic is properly wired up.\nThe new tests being added here in executor_test.go pass with its changes, and I'm not sure that it can still hit the case where the new guard in stage_executor.go would be necessary."
+        }
+    ],
+    "cross_references": []
+}
