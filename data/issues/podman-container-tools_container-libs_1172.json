@@ -1,0 +1,19 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "container-libs",
+    "number": 1172,
+    "type": "issue",
+    "title": "storage: ID-map hardlink reconstruction changes directory mtimes",
+    "state": "open",
+    "labels": [],
+    "user": "bbartels",
+    "body": "## Problem\n\nCreating a mapped container from an image changes the modification times of\ndirectories containing hardlinks to the current time. The archived timestamps\nare correct. Integer-second timestamps reproduce the problem, so this is not\nfractional timestamp rounding.\n\n## Reproduction\n\nUse the script below on a disposable rootful Podman host. It imports\na scratch filesystem with hardlinks in two directories and fixed mtimes, then\ncreates a container with `--uidmap 0:1:65535 --gidmap 0:1:65535` and inspects it\nthrough `podman mount`. No container execution or image download is required.\n\nExpected: both directory mtimes remain `1700000000`; hardlinks and contents\nremain intact.\n\nActual: directory mtimes change during materialization, while hardlinks and\ncontents remain intact.\n```\n#!/usr/bin/env bash\nset -euo pipefail\n\n# Run as root on a disposable Linux Podman host. No image pull or execution.\ntest \"$(id -u)\" -eq 0\nengine=\"${PODMAN:-podman}\"\nwork=\"$(mktemp -d)\"\nname=\"directory-mtime-$(basename \"$work\")\"\nname=\"${name,,}\"\nimage=\"localhost/$name:test\"\ncleanup() {\n    \"$engine\" rm -f \"$name\" >/dev/null 2>&1 || true\n    \"$engine\" rmi \"$image\" >/dev/null 2>&1 || true\n    rm -rf \"$work\"\n}\ntrap cleanup EXIT\nmkdir -p \"$work/tree/a\" \"$work/tree/b\"\nprintf 'contents\\n' > \"$work/tree/a/one\"\nln \"$work/tree/a/one\" \"$work/tree/a/two\"\nln \"$work/tree/a/one\" \"$work/tree/b/one\"\nln \"$work/tree/a/one\" \"$work/tree/b/two\"\ntouch -d @1700000000 \"$work/tree/a/one\" \"$work/tree/a\" \"$work/tree/b\" \"$work/tree\"\ntar --format=pax --numeric-owner --owner=0 --group=0 -C \"$work/tree\" -cf \"$work/rootfs.tar\" .\n\"$engine\" import \"$work/rootfs.tar\" \"$image\"\n\"$engine\" create --name \"$name\" --network=none --pull=never \\\n    --uidmap 0:1:65535 --gidmap 0:1:65535 \"$image\" /unused\nroot=\"$(\"$engine\" mount \"$name\")\"\nstat -c '%n mtime=%Y owner=%u:%g inode=%i links=%h' \"$root/a\" \"$root/b\" \"$root/a/one\" \"$root/b/two\"\ntest \"$(stat -c %i \"$root/a/one\")\" = \"$(stat -c %i \"$root/b/two\")\"\ntest \"$(cat \"$root/a/one\")\" = contents\ntest \"$(stat -c %Y \"$root/a\")\" = 1700000000\ntest \"$(stat -c %Y \"$root/b\")\" = 1700000000\necho 'Directory mtimes preserved'\n```\n\n## Diagnosis\n\n`storage/drivers/chown_unix.go` reconstructs duplicate hardlinks by removing and\nrecreating their entries. Those operations change the destination directory's\nmtime. This also happens for unchanged IDs. A direct filesystem regression\nreproduces the same defect without archive extraction.\n\n## Version and evidence\n\n- Source assessed: container-libs `49fe7190f3ecd16fe4dcfd9e749ae480d4021a6c`.\n- Consumer context: Podman 6.1.1, storage 1.64.0, rootful native overlay on XFS.\n- Direct root regression: five tests fail on the base implementation and pass\n  for 25 race-enabled repetitions with the patch, without skips.\n- Minimal Podman reproducer: exits 1 before and 0 after the candidate.\n- A broader probe also observes `/a` retaining host owner `0:0` in both stock\n  and candidate. That separate ownership assertion remains failing; the positive\n  engine result here is specifically directory-mtime preservation.\n- Attach the final relevant results from `verification.md` and add your own\n  sanitized `podman version` / `podman info --debug` output.",
+    "comments": [],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "container-libs",
+            "number": 1173
+        }
+    ]
+}
