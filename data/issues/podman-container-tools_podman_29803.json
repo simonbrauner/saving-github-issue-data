@@ -12,6 +12,30 @@
         {
             "user": "sarthakkaushik927",
             "body": "@Luap99 Thanks for the feedback on my previous attempt PR #29769 You were completely right, reating a separate scope for pasta was the wrong approach since it's a 1:1 relationship with the container.\n\nI've completely reworked the fix in this new Pull Request. Instead of creating a new libpod-pasta-<ID>.scope, the code now reads the pasta PID during setup and explicitly moves it into the container's existing libpod-conmon-<ID>.scope.\n\nNow, pasta and conmon live together under the exact same systemd unit. If the parent service is restarted (or if the container stops), systemd correctly kills them both together, leaving no leftover processes. Let me know if the new implementation looks good to you."
+        },
+        {
+            "user": "Honny1",
+            "body": "PTAL @Luap99 @giuseppe "
+        },
+        {
+            "user": "sarthakkaushik927",
+            "body": "> I have some comments.\n\n@Honny1 I've pushed an updated commit that addresses both of your feedback points. I made the PID read error fatal and reused the existing `readConmonPidFile` helper. I also fixed a CI linter issue where the `pastaPID` field was incorrectly getting flagged as unused during FreeBSD builds. The CI should be completely green now. PTAL!\n"
+        },
+        {
+            "user": "sarthakkaushik927",
+            "body": "@Honny1 The Cockpit integration tests were failing because `pasta` writes a trailing newline in its PID file (e.g., `1234\\n`). When we switched to using the existing `readConmonPidFile` as requested, it failed to parse that newline, which caused the container startup to fatally crash.\n\nTo fix this properly and keep the code reusable, I updated `readConmonPidFile` in `oci_conmon_common.go` to use `strings.TrimSpace` before parsing the PID. This makes the existing helper more robust for both conmon and pasta, allows us to cleanly reuse it, and ensures the fatal error check works exactly as intended. Everything is linted and tested!\n"
+        },
+        {
+            "user": "sarthakkaushik927",
+            "body": "@Honny1  I initially made the PID read fatal as you suggested, but it caused all the `podman-fedora` CI tests to fail on both `local-root` and `local-rootless` plans across every Fedora version.\n\n### The Problem\n\nWhen `pasta` starts in rootful mode, it drops privileges from `root` to an unprivileged user (e.g. `nobody`) for security. After dropping privileges, it tries to write its PID to a file inside the container's `RunDir`. But `RunDir` is owned by `root`, so `pasta` (now running as `nobody`) doesn't have permission to create a file there. The PID file never gets written.\n\nI also tried pre-creating an empty PID file with `0666` permissions before spawning `pasta`, but this didn't help either — `pasta` appears to unlink and recreate the file rather than writing to an existing one, so the pre-created file stays empty and `readConmonPidFile` fails with `strconv.Atoi: parsing \"\": invalid syntax`.\n\n### The Fix\n\nSince the PID file write is handled entirely inside the `pasta` binary (which we don't control from Podman's side), I've made the PID read best-effort with a descriptive warning log:\n\n- **When the PID file is available** → we read it and move `pasta` to the conmon cgroup scope as intended ✅\n- **When the PID file is missing/empty** → the container starts normally with a warning log, and `pasta` stays in its original cgroup (identical to current Podman behavior without this PR) ✅\n\nSo in the worst case, behavior is the same as today. In the best case, `pasta` gets properly moved to the conmon cgroup scope.\n\n### Regarding `readPidFile` from `container-libs/common`\n\nYou mentioned using `readPidFile` from `container-libs/common`, but that function is unexported (lowercase `r`) and lives inside an `internal` package (`go.podman.io/common/libnetwork/internal/rootlessnetns`), so it can't be imported from Podman. I'm currently using `readConmonPidFile` from `libpod/oci_conmon_common.go` which does the same thing. Should I open a PR in `container-libs/common` to export that function instead?\n\n### Suggestions Welcome\n\nDo you have any suggestions on how you'd like me to handle the PID file issue? Some options I can think of:\n1. Keep the current best-effort approach (warning log, no crash).\n2. Try to find the `pasta` PID via `/proc` by process name instead of relying on the PID file.\n3. File an upstream issue against `pasta` to fix the PID file writing behavior in rootful mode.\n\nHappy to go whichever direction you prefer! PTAL!\n"
+        },
+        {
+            "user": "packit-as-a-service[bot]",
+            "body": "Cockpit tests failed for commit 4a0a0412574e8bd3e7272bde3a7c2b79e83db983. @jelly, @mvollmer please check."
+        },
+        {
+            "user": "packit-as-a-service[bot]",
+            "body": "[NON-BLOCKING] Packit jobs failed. @podman-container-tools/packit-jobs please check. Everyone else, feel free to ignore."
         }
     ],
     "cross_references": []
