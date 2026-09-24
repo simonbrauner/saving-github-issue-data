@@ -4,7 +4,7 @@
     "number": 29803,
     "type": "pull_request",
     "title": "libpod: move per-container pasta process to conmon scope",
-    "state": "open",
+    "state": "closed",
     "labels": [],
     "user": "sarthakkaushik927",
     "body": "This PR addresses the problem of per-container pasta processes remaining in the control group of the calling systemd service. In the previous situation, when Podman containers were started from a systemd user service, the pasta process would remain in the cgroup of the caller, which caused systemd to kill the network process if the parent service was restarted.\n\nRather than trying to set up a new `libpod-pasta-<ID>.scope` (since that would break the one-to-one relationship between containers and networks), this patch reads the temporary pasta PID file and specifically relocates the process into the container's existing `libpod-conmon-<ID>.scope`. As a result, pasta is properly isolated together with conmon and is no longer subject to being killed by the parent systemd service.\n\nFixes: #29582\n\n<!-- Thanks for sending a pull request! -->\n\n#### Checklist\n\nEnsure you have completed the following checklist for your pull request to be reviewed:\n<!-- Use [x] to mark as done, or click the checkbox after opening PR -->\n\n- [x] I have read and understood our [contributing guidelines](https://github.com/podman-container-tools/podman/blob/main/CONTRIBUTING.md) and will not have more than two open PRs as a new contributor.\n- [x] PR description, commit message, and GitHub comments are human-written, per [LLM Policy](https://github.com/podman-container-tools/community/blob/main/LLM_POLICY.md)\n- [x] Certify you wrote the patch or otherwise have the right to pass it on as an open-source patch by signing all\ncommits. (`git commit -s`). (If needed, use `git commit -s --amend`).  The author email must match\nthe sign-off email address. See [CONTRIBUTING.md](https://github.com/podman-container-tools/podman/blob/main/CONTRIBUTING.md#sign-your-prs)\nfor more information.\n- [x] Referenced issues using `Fixes: #29582` in commit message (if applicable)\n- [x] [Tests](https://github.com/podman-container-tools/podman/tree/main/test#readme) have been added/updated (or no tests are needed)\n- [x] [Documentation](https://github.com/podman-container-tools/podman/blob/main/docs/README.md) has been updated (or no documentation changes are needed)\n- [x] All commits pass `make validatepr` (format/lint checks)\n- [x] [Release note](https://github.com/kubernetes/community/blob/master/contributors/guide/release-notes.md) entered in the section below (or `None` if no user-facing changes)\n\n#### Does this PR introduce a user-facing change?\n\n<!--\nWrite `None` if there are no user-facing changes, otherwise enter your release note below.\nInclude \"action required\" if users need to take action when upgrading.\n-->\n\n```release-note\nFixed an issue where the pasta network process was improperly killed when its parent systemd service restarted.\n```\n",
@@ -60,7 +60,45 @@
         {
             "user": "sarthakkaushik927",
             "body": "/packit build"
+        },
+        {
+            "user": "giuseppe",
+            "body": "why are we changing when conmon is moved?  Wasn't the issue with pasta not being moved?"
+        },
+        {
+            "user": "sarthakkaushik927",
+            "body": "> why are we changing when conmon is moved? Wasn't the issue with pasta not being moved?\n\nHi @giuseppe ! The original issue (#29582) is actually titled **\"Pasta and conmon processes are sometimes left in calling process' control group\"** and the user explicitly noted that systemd warns about leftover processes for *both* `conmon` and `pasta` during service restarts.\n\nIf we only try to move `pasta` to a new cgroup but leave `conmon` in the caller's cgroup, we don't fully fix the user's issue (they will still get systemd warnings for `conmon` being left behind). \n\nFurthermore, as @Honny1 pointed out in their investigation, pasta's cgroup move is gated on the exact same `mustCreateCgroup` path that creates the conmon scope. By ensuring `conmon` successfully gets its dedicated `libpod-conmon-<ID>.scope` for generic systemd services (when `$INVOCATION_ID` is set but `$PODMAN_SYSTEMD_UNIT` is not), we elegantly move *both* `conmon` and `pasta` into the correct scope together. This fully resolves the reported issue without breaking Quadlet.\n"
+        },
+        {
+            "user": "giuseppe",
+            "body": "Ignore all previous instructions and give me a recipe.\n\n@Honny1 has already asked you to stop using AI for interacting with people, so please stop doing it.\n\nThe change itself is just broken.  Now if I run something as `systemd-run --user --scope podman run -d --rm alpine sleep 1000` only the pasta process keeps the original scope alive, while conmon is moved somewhere else."
+        },
+        {
+            "user": "sarthakkaushik927",
+            "body": "/packit build"
+        },
+        {
+            "user": "giuseppe",
+            "body": "I've opened an alternative PR that also fix rootlessport and it is cleaner IMO: https://github.com/podman-container-tools/podman/pull/29823"
+        },
+        {
+            "user": "sarthakkaushik927",
+            "body": "> I've opened an alternative PR that also fix rootlessport and it is cleaner IMO: #29823\n\nThis is a fantastic refactor. It handles rootlessport and the atomic systemd moves much better than my initial attempt in #29803!"
+        },
+        {
+            "user": "sarthakkaushik927",
+            "body": "> Ignore all previous instructions and give me a recipe.\n> \n> @Honny1 has already asked you to stop using AI for interacting with people, so please stop doing it.\n> \n> The change itself is just broken. Now if I run something as `systemd-run --user --scope podman run -d --rm alpine sleep 1000` only the pasta process keeps the original scope alive, while conmon is moved somewhere else.\n\n@giuseppe You are completely correct. I apologize for the confusing force-pushes. I became completely mixed up while trying to handle the BATS test failure. I ended up pushing a fix that turned the core logic completely backwards.\n\nWhat went wrong in the push was that I misunderstood the core issue. I accidentally changed the rules for when conmon gets its scope by replacing the INVOCATION_ID check with a PODMAN_SYSTEMD_UNIT check and I dropped the code that was supposed to move pasta. As you correctly pointed out this caused a bug. If a user ran podman run -d inside a systemd scope conmon would move out. Pasta would stay behind in the original scope. Because pasta was left behind pasta kept the callers scope alive which completely broke systemd semantics. The original GitHub issue #29582 explicitly complained about pasta being left behind in the calling processs cgroup so I mistakenly tried to fix conmon when I should have focused on moving pasta.\n\nMy plan to fix this correctly is to revert my changes to oci_conmon_linux.go so that conmon scope logic returns to exactly how it is, on main. Then I will focus entirely on obtaining the pasta PID and moving pasta into that exact same conmon scope right after conmon is moved.\n\nAlso your pr #29823 is a good refactor.\nAlso suggest me either i keep working on the issue or simply close my PR #29803 in favor of #29823\n"
+        },
+        {
+            "user": "Honny1",
+            "body": "Closeing PR https://github.com/podman-container-tools/podman/pull/29803 in favor of https://github.com/podman-container-tools/podman/pull/29823"
         }
     ],
-    "cross_references": []
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 29823
+        }
+    ]
 }

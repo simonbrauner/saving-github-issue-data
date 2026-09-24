@@ -7,7 +7,7 @@
     "state": "open",
     "labels": [],
     "user": "AboEl3iz",
-    "body": "Under heavy container churn, the SQLite state DB can get corrupted with \"database disk image is malformed\" due to page 1 freelist header conflicts under the default rollback journal mode (#29721).\n\nTo address this:\n- Set `_journal_mode=WAL` in the SQLite connection string. This avoids writing directly to page 1 on every transaction and relies on SQLite's shared-memory locking.\n- Limit max open connections on the state db handle to 1 to prevent multiple internal goroutines/threads from cycling connection file descriptors.\n- Run a best-effort `PRAGMA wal_checkpoint(TRUNCATE)` on `SQLiteState.Close()`.\n- Add a unit test checking that the database actually opens in WAL mode.\n\n```release-note\nSwitched SQLite state database to WAL (Write-Ahead Logging) mode to prevent database corruption under high concurrency.```\n\nFixes #29721",
+    "body": "Fixes #29721\n\nUnder heavy container churn, the SQLite state DB can get corrupted with \"database disk image is malformed\" due to page 1 freelist header conflicts under the default rollback journal mode (#29721).\n\nTo address this:\n\nEnable WAL Mode: Set _journal_mode=WAL in the SQLite connection string on local filesystems. This avoids writing directly to page 1 on every transaction and relies on SQLite's shared-memory locking.\n\nClean Truncation: Run a best-effort PRAGMA wal_checkpoint(TRUNCATE) on SQLiteState.Close().\n\nNetwork Filesystem Detection: Added isNetworkFilesystem() pre-check. SQLite WAL mode requires POSIX mmap for -shm sidecar files, which network filesystems do not support. On Linux, we inspect unix.Statfs magic numbers (NFS, CIFS, SMB, AFS); on FreeBSD, we check unix.Statfs type prefixes (nfs, smbfs, afs). If a network filesystem is detected, WAL mode is bypassed automatically to keep the database fully operational.\n\nRuntime Fallback Verification: Added verifyJournalMode() post-open query (PRAGMA journal_mode;). If WAL mode was requested but SQLite silently kept delete mode (e.g., FUSE-over-NFS mounts), log an informational warning and continue safely in rollback mode instead of failing.\n\nUnit Tests: Added regression tests verifying WAL mode enablement (TestSqliteJournalModeWAL), silent fallback handling (TestSqliteVerifyJournalModeFallback), and local directory detection (TestIsNetworkFilesystemLocalReturnsFalse).\n\n```release-note\nSwitched SQLite state database to WAL (Write-Ahead Logging) mode to prevent database corruption under high concurrency, with automatic fallback for network filesystems.```\n\n",
     "comments": [
         {
             "user": "packit-as-a-service[bot]",
@@ -52,6 +52,54 @@
         {
             "user": "mheon",
             "body": "One potential note of concern, though. Apparently WAL mode doesn't work on NFS - which could break some folks, because while Podman storage on NFS is unusual, it's not entirely unheard of. We may need a fallback to continue to use the current backend if database creation fails."
+        },
+        {
+            "user": "AboEl3iz",
+            "body": "> One potential note of concern, though. Apparently WAL mode doesn't work on NFS - which could break some folks, because while Podman storage on NFS is unusual, it's not entirely unheard of. We may need a fallback to continue to use the current backend if database creation fails.\n\nI see you are right, i have searched for that .\nBut what do you suggest adding fallback mechanism when wal fail with any error like SQLITE_IOERR_DELETE_NOENT or mmap it back to Rollback Journal?\n\nOr we can use in memory SHM but It must remain on the same machine and in the same os kernel\n\nThe third option we can use FS Detection Check\nWe will check on the fs first then it decide with one "
+        },
+        {
+            "user": "Honny1",
+            "body": "I would detect that. Since Docs suggest that [using WAL on NFS is not a good idea](https://coddy.tech/docs/sqlite/wal-mode-and-concurrency#:~:text=your%20app%20code.-,When%20WAL%20Isn%27t%20the%20Right%20Choice,-WAL%20is%20the)."
+        },
+        {
+            "user": "AboEl3iz",
+            "body": "Sorry , my bad"
+        },
+        {
+            "user": "AboEl3iz",
+            "body": "> I would detect that. Since Docs suggest that [using WAL on NFS is not a good idea](https://coddy.tech/docs/sqlite/wal-mode-and-concurrency#:~:text=your%20app%20code.-,When%20WAL%20Isn%27t%20the%20Right%20Choice,-WAL%20is%20the).\n\n Agree with you, but do you suggest anything?"
+        },
+        {
+            "user": "Honny1",
+            "body": "> > I would detect that. Since Docs suggest that [using WAL on NFS is not a good idea](https://coddy.tech/docs/sqlite/wal-mode-and-concurrency#:~:text=your%20app%20code.-,When%20WAL%20Isn%27t%20the%20Right%20Choice,-WAL%20is%20the).\n> \n> Agree with you, but do you suggest anything?\n\nI would choose this third option.\n\n> The third option we can use FS Detection Check\n> We will check on the fs first then it decide with one\n\n"
+        },
+        {
+            "user": "AboEl3iz",
+            "body": "> > > I would detect that. Since Docs suggest that [using WAL on NFS is not a good idea](https://coddy.tech/docs/sqlite/wal-mode-and-concurrency#:~:text=your%20app%20code.-,When%20WAL%20Isn%27t%20the%20Right%20Choice,-WAL%20is%20the).\n> > \n> > \n> > Agree with you, but do you suggest anything?\n> \n> I would choose this third option.\n> \n> > The third option we can use FS Detection Check\n> > We will check on the fs first then it decide with one\n\ni want to add the option1 also as a safety net just in case the filesystem check misses a non standard network mount"
+        },
+        {
+            "user": "AboEl3iz",
+            "body": "@mheon  @Honny1 \n good?\n \n<img width=\"1586\" height=\"1762\" alt=\"ddddddddddddddddddd\" src=\"https://github.com/user-attachments/assets/364e4644-866a-4dc7-ad09-e3007b13b1e7\" />\n\n\n\n"
+        },
+        {
+            "user": "AboEl3iz",
+            "body": "I have  finished all the changes here\n\nlibpod/sqlite: add NFS fallback for WAL mode\n\nSQLite WAL depends on POSIX mmap for its -shm file, which isn't supported properly on NFS. Because of that, Podman can fail when the storage root is on NFS without making the actual cause obvious.\n\nThe idea is to handle this in two layers:\n\nCheck statfs() before opening the DB. If the database directory is on a known network filesystem like NFS, CIFS, SMB, or AFS, don't enable WAL in the DSN in the first place.\nAfter opening the DB, read back PRAGMA journal_mode. go-sqlite3 doesn't necessarily return an error when switching to WAL fails; it can just keep the previous journal mode. Reading it back lets us catch cases that the initial statfs() check can't detect, such as FUSE mounted over NFS.\n\nIf the journal mode doesn't match what we requested, log a warning and continue. SQLite can still work using the regular rollback journal mode.\n\nThe filesystem detection is kept OS-specific to avoid messing with build tags: Linux uses Statfs_t.Type and its filesystem magic numbers, while FreeBSD uses Fstypename.\n\nany feedback ?"
+        },
+        {
+            "user": "AboEl3iz",
+            "body": "> I have finished all the changes here\n> \n> libpod/sqlite: add NFS fallback for WAL mode\n> \n> SQLite WAL depends on POSIX mmap for its -shm file, which isn't supported properly on NFS. Because of that, Podman can fail when the storage root is on NFS without making the actual cause obvious.\n> \n> The idea is to handle this in two layers:\n> \n> Check statfs() before opening the DB. If the database directory is on a known network filesystem like NFS, CIFS, SMB, or AFS, don't enable WAL in the DSN in the first place. After opening the DB, read back PRAGMA journal_mode. go-sqlite3 doesn't necessarily return an error when switching to WAL fails; it can just keep the previous journal mode. Reading it back lets us catch cases that the initial statfs() check can't detect, such as FUSE mounted over NFS.\n> \n> If the journal mode doesn't match what we requested, log a warning and continue. SQLite can still work using the regular rollback journal mode.\n> \n> The filesystem detection is kept OS-specific to avoid messing with build tags: Linux uses Statfs_t.Type and its filesystem magic numbers, while FreeBSD uses Fstypename.\n> \n> any feedback ?\n\n@mheon @Honny1 "
+        },
+        {
+            "user": "Honny1",
+            "body": "Linter is not happy:\n\n```\nLinting for GOOS=linux\n+ /home/ubuntu/golangci-lint-2.13.2-linux-amd64/golangci-lint run --build-tags=apparmor,seccomp,selinux\nError: libpod/sqlite_state_linux.go:32:45: unnecessary conversion (unconvert)\n\tif name, ok := networkFilesystemTypes[int64(st.Type)]; ok {\n\t                                           ^\n1 issues:\n* unconvert: 1\n```"
+        },
+        {
+            "user": "AboEl3iz",
+            "body": "> Linter is not happy:\n> \n> ```\n> Linting for GOOS=linux\n> + /home/ubuntu/golangci-lint-2.13.2-linux-amd64/golangci-lint run --build-tags=apparmor,seccomp,selinux\n> Error: libpod/sqlite_state_linux.go:32:45: unnecessary conversion (unconvert)\n> \tif name, ok := networkFilesystemTypes[int64(st.Type)]; ok {\n> \t                                           ^\n> 1 issues:\n> * unconvert: 1\n> ```\n\nyeah , i am working on it \nunix.Statfs_t.Type on 32bit is int32 but for 64bit it int64"
+        },
+        {
+            "user": "AboEl3iz",
+            "body": "> Linter is not happy:\n> \n> ```\n> Linting for GOOS=linux\n> + /home/ubuntu/golangci-lint-2.13.2-linux-amd64/golangci-lint run --build-tags=apparmor,seccomp,selinux\n> Error: libpod/sqlite_state_linux.go:32:45: unnecessary conversion (unconvert)\n> \tif name, ok := networkFilesystemTypes[int64(st.Type)]; ok {\n> \t                                           ^\n> 1 issues:\n> * unconvert: 1\n> ```\n\nnow everything is ok"
         }
     ],
     "cross_references": []
