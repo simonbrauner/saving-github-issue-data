@@ -1,0 +1,33 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 29840,
+    "type": "issue",
+    "title": "podman cp ignores named-volume subpath for created and stopped containers",
+    "state": "open",
+    "labels": [],
+    "user": "sergesha",
+    "body": "### Environment\n\nPodman 6.1.2 (Alvistack/OBS package), Debian 13 Linux amd64, rootless,\ncrun 1.30, overlay storage with fuse-overlayfs. Reproduction uses Podman CLI\ndirectly, without Compose or OURS.\n\n### Minimal reproduction\n\n```sh\nset -eu\nvolume=\"cp-subpath-repro-$$\"\ncontainer=\"cp-subpath-repro-$$\"\nout=$(mktemp -d)\ncleanup() {\n  podman rm -f \"$container\" >/dev/null 2>&1 || true\n  podman volume rm \"$volume\" >/dev/null 2>&1 || true\n  rm -rf \"$out\"\n}\ntrap cleanup EXIT\n\npodman volume create \"$volume\"\npodman run --rm --network=none \\\n  --mount \"type=volume,source=$volume,target=/data\" \\\n  docker.io/library/node:24 sh -c \\\n  'mkdir -p /data/sub; echo ROOT_MARKER > /data/probe; echo SUBPATH_MARKER > /data/sub/probe'\npodman create --name \"$container\" --network=none \\\n  --mount \"type=volume,source=$volume,target=/data,subpath=sub\" \\\n  docker.io/library/node:24 sleep 120\n\npodman cp \"$container:/data/probe\" \"$out/created\"\npodman start \"$container\"\npodman exec \"$container\" cat /data/probe\npodman cp \"$container:/data/probe\" \"$out/running\"\npodman stop -t 1 \"$container\"\npodman cp \"$container:/data/probe\" \"$out/stopped\"\ncat \"$out/created\" \"$out/running\" \"$out/stopped\"\n```\n\nExpected: all three copies contain `SUBPATH_MARKER`.\n\nObserved:\n\n```text\nROOT_MARKER\nSUBPATH_MARKER\nROOT_MARKER\n```\n\nRemoving the root-level `probe` turns the wrong-content result into an ENOENT\nfailure, even though `sub/probe` exists. A control using the whole volume works\nin all three states.\n\n### Root cause\n\nThe running path uses the container mount namespace. The non-running path calls\n`resolvePath`. In\n[`container_path_resolution.go`](https://github.com/podman-container-tools/podman/blob/v6.1.2/libpod/container_path_resolution.go#L53),\nthe named-volume case combines `Volume.MountPoint()` directly with the relative\ncontainer path; it does not incorporate the selected mount's `SubPath`.\nConsequently, the host-side path is rooted at the entire volume.\n\n### Proposed fix\n\nRetain the matching named-volume mount entry and resolve its configured\nsubpath securely before resolving the relative file path. Preserve traversal\nand symlink containment. Add created/stopped/running regression coverage with\ndifferent marker files at the volume root and subpath, including a missing root\nfile. The copy must use the same view the container sees.\n\n[PR #29420](https://github.com/podman-container-tools/podman/pull/29420) concerns\nper-entry volume resolution when copying archives *into* stopped containers;\nthis reproduction copies *out* of an explicitly selected subpath and identifies\na separate missing-subpath step in `resolvePath`.\n\n### Additional environment details\n\nPodman runs directly on the Linux host, not inside a container. Rootless. Tested release: 6.1.2.\n",
+    "comments": [
+        {
+            "user": "pooyanazad",
+            "body": "/assign\n\nHello, I'd like to work on this issue.\n\nI'll first reproduce the behavior for created, running, and stopped containers, then trace how podman cp resolves named-volume subpaths and add regression coverage before working on the fix.\n\nI'd like to start implementation once the issue is assigned to me so we avoid duplicate work."
+        },
+        {
+            "user": "mitoyosh",
+            "body": "Reproduced on Debian 13's own package, `podman 5.4.2+ds1-2+b2`, rootful — so this reaches everyone on Trixie, not only 6.x from OBS. Same volume layout as above (`probe` = ROOT_MARKER at the root, `sub/probe` = SUBPATH_MARKER), `--mount type=volume,source=spvol,target=/data,subpath=sub`, exit codes taken without a pipe. **The copy-in direction is affected too**, which may matter more for whoever picks this up:\n\n```\n## created\n  cp OUT rc=0  content=ROOT_MARKER\n  cp IN  rc=0  lands at: <volume>/new-created        (root, not sub/)\n## running\n  cp OUT rc=0  content=SUBPATH_MARKER\n  cp IN  rc=0  lands at: <volume>/sub/new-running\n## stopped\n  cp OUT rc=0  content=ROOT_MARKER\n  cp IN  rc=0  lands at: <volume>/new-stopped        (root, not sub/)\n```\n\nWith the volume shared — container `app` mounting `subpath=app` (created, not started) and container `whole` mounting the entire volume (running), each with its own `config.json` — a copy meant for `app` overwrote `whole`'s file, and `app` never saw it:\n\n```\nbefore: whole sees /data/config.json = ROOT config.json (belongs to whole)\npodman cp /tmp/config.json app:/data/config.json  → rc=0\nafter:  whole sees /data/config.json = new app config\nafter:  app (now started) sees /data/config.json = app's own config.json\n```\n\nControl: Debian 13's `docker.io` 26.1.5 with `--mount type=volume,source=spvol,target=/data,volume-subpath=sub` returned SUBPATH_MARKER and wrote under `sub/` in all three states.\n\nWhere the subpath is lost, for whoever takes this: in `libpod/container_path_resolution.go`, `findVolume` matches the destination against `c.config.NamedVolumes` but returns `runtime.GetVolume(vol.Name)`, dropping the `NamedVolume` entry that carries `SubPath`; `resolvePath` then does `securejoin.SecureJoin(volume.MountPoint(), pathRelativeToVolume)`. Returning the entry (or its `SubPath`) and joining `mountPoint/SubPath` first looks like it would cover both directions, since the copy-in path resolves through the same function. Same code at `v5.4.2` and on `main` today. A regression test that copies *in* to a stopped container and reads the file back from inside it after start would catch the write side.\n\nTranscript, and a checker that lists containers with `subpath=` volume mounts that are not running: https://homelabpostmortem.com/2026/09/26/podman-cp-ignores-volume-subpath-when-the-container-is-stopped/\n"
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "adapt-toolkit",
+            "repository": "ours-network",
+            "number": 28
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 29842
+        }
+    ]
+}
