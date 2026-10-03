@@ -4,7 +4,7 @@
     "number": 29840,
     "type": "issue",
     "title": "podman cp ignores named-volume subpath for created and stopped containers",
-    "state": "open",
+    "state": "closed",
     "labels": [],
     "user": "sergesha",
     "body": "### Environment\n\nPodman 6.1.2 (Alvistack/OBS package), Debian 13 Linux amd64, rootless,\ncrun 1.30, overlay storage with fuse-overlayfs. Reproduction uses Podman CLI\ndirectly, without Compose or OURS.\n\n### Minimal reproduction\n\n```sh\nset -eu\nvolume=\"cp-subpath-repro-$$\"\ncontainer=\"cp-subpath-repro-$$\"\nout=$(mktemp -d)\ncleanup() {\n  podman rm -f \"$container\" >/dev/null 2>&1 || true\n  podman volume rm \"$volume\" >/dev/null 2>&1 || true\n  rm -rf \"$out\"\n}\ntrap cleanup EXIT\n\npodman volume create \"$volume\"\npodman run --rm --network=none \\\n  --mount \"type=volume,source=$volume,target=/data\" \\\n  docker.io/library/node:24 sh -c \\\n  'mkdir -p /data/sub; echo ROOT_MARKER > /data/probe; echo SUBPATH_MARKER > /data/sub/probe'\npodman create --name \"$container\" --network=none \\\n  --mount \"type=volume,source=$volume,target=/data,subpath=sub\" \\\n  docker.io/library/node:24 sleep 120\n\npodman cp \"$container:/data/probe\" \"$out/created\"\npodman start \"$container\"\npodman exec \"$container\" cat /data/probe\npodman cp \"$container:/data/probe\" \"$out/running\"\npodman stop -t 1 \"$container\"\npodman cp \"$container:/data/probe\" \"$out/stopped\"\ncat \"$out/created\" \"$out/running\" \"$out/stopped\"\n```\n\nExpected: all three copies contain `SUBPATH_MARKER`.\n\nObserved:\n\n```text\nROOT_MARKER\nSUBPATH_MARKER\nROOT_MARKER\n```\n\nRemoving the root-level `probe` turns the wrong-content result into an ENOENT\nfailure, even though `sub/probe` exists. A control using the whole volume works\nin all three states.\n\n### Root cause\n\nThe running path uses the container mount namespace. The non-running path calls\n`resolvePath`. In\n[`container_path_resolution.go`](https://github.com/podman-container-tools/podman/blob/v6.1.2/libpod/container_path_resolution.go#L53),\nthe named-volume case combines `Volume.MountPoint()` directly with the relative\ncontainer path; it does not incorporate the selected mount's `SubPath`.\nConsequently, the host-side path is rooted at the entire volume.\n\n### Proposed fix\n\nRetain the matching named-volume mount entry and resolve its configured\nsubpath securely before resolving the relative file path. Preserve traversal\nand symlink containment. Add created/stopped/running regression coverage with\ndifferent marker files at the volume root and subpath, including a missing root\nfile. The copy must use the same view the container sees.\n\n[PR #29420](https://github.com/podman-container-tools/podman/pull/29420) concerns\nper-entry volume resolution when copying archives *into* stopped containers;\nthis reproduction copies *out* of an explicitly selected subpath and identifies\na separate missing-subpath step in `resolvePath`.\n\n### Additional environment details\n\nPodman runs directly on the Linux host, not inside a container. Rootless. Tested release: 6.1.2.\n",
@@ -32,6 +32,11 @@
             "organization": "podman-container-tools",
             "repository": "podman",
             "number": 29842
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 29857
         }
     ]
 }
