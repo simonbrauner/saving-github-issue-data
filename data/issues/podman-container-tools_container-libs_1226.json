@@ -1,0 +1,38 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "container-libs",
+    "number": 1226,
+    "type": "issue",
+    "title": "RHEL-276285: Avoid temporary tarball when copying from a source containers-storage:",
+    "state": "open",
+    "labels": [],
+    "user": "cgwalters",
+    "body": "_Originally posted by @cgwalters in [#144](https://github.com/podman-container-tools/container-libs/issues/144#issuecomment-3300424410)_\n\n> Yes, I just got bit by https://github.com/containers/container-libs/blob/92222dcd3da49d1dcf684561f18c8b0022fc2f7e/image/storage/storage_src.go#L156\n> because in some tooling I'm writing we're spawning an ephemeral VM for installation, and this requires it to have memory proportional to the largest layer.\n> \n> I'm not sure it's the right tradeoff to copy an entire layer to a complete temporary tarball to shave off locking time.\n> \n> But in any case having tar in the middle breaks all kinds of optimizations here, from reflinks to parallelism to more fine grained locking. \n\nA variant of this was filed downstream as https://redhat.atlassian.net/browse/RHEL-267286\n\nBasically I think in the case of an Anaconda ISO, we can detect that the source store is read-only and actually avoid locking it at all, much less making temporary tarball copies.\n",
+    "comments": [
+        {
+            "user": "cgwalters",
+            "body": "In the meantime right now though, we ended up adding a \"direct containers-storage\" read path into composefs-rs, but this is only used with the composefs backend, not the ostree backend in bootc.\n\nIt is really temping to change this default - we talk about this in bootc as \"unified storage\" which could be done by us always using a composefs repository and then reflinking from there into ostree. But that has large implications.\n\nSo fixing this in container-libs (and getting an updated skopeo out with that fix) is the safest and most efficient path I think."
+        },
+        {
+            "user": "cgwalters",
+            "body": "This one is now tracked downstream as https://redhat.atlassian.net/browse/RHEL-276285 (I needed one as we had customer asks for this, but obviously feel free to adjust/close+reopen-new as you see fit)"
+        },
+        {
+            "user": "mtrmac",
+            "body": "> Basically I think in the case of an Anaconda ISO, we can detect that the source store is read-only and actually avoid locking it at all, much less making temporary tarball copies.\n\n(There is no concept of a read-only primary store.)\n\n_All_ accesses to additional stores currently take read locks. I don’t know why this one should be an exception.\n\nI could see an argument that this is actually unnecessary _because it is too weak_ (the primary RW store assumes the additional stores _don’t change at all_, not just during a single operation), and that the user setting up the additional store must ensure their immutability across all operations. But there’s no telling how users are using AIS, and “pull more images into the AIS without deleting anything” is currently possible without shutting down all RW users because of the existing locking."
+        },
+        {
+            "user": "cgwalters",
+            "body": "> (There is no concept of a read-only primary store.)\n\nRight, sorry; it's more in this case it *should* be an AIS or so, but isn't.\n\nI was wrong about the Anaconda store being read-only, but see below:\n\n> All accesses to additional stores currently take read locks. I don’t know why this one should be an exception.\n\nBut accesses to AIS do handle `EROFS` as they have to for bootc at least. https://github.com/podman-container-tools/container-libs/blob/fa0afc2957aace7e00cece1a2fe90544a467a8cb/storage/store.go#L1070\n\n### Option 1: Avoid temporary tarball for readonly AIS\n\nSo indeed...we could probably rearrange things in Anaconda and this installation process such that the images were actually stored in an AIS, then change the code to avoid making a temporary tarball from read-only sources.\n\n### Option 2: Runtime option to trade off locking latency for temporary storage\n\nIn this particular case, there are not expected to be any concurrent mutations at all, so the defensive intermediate tarball is unnecessary, and I could imagine a runtime option to trade off increased locking latency for decreased transient storage usage.\n\n### Option 3: Land splitdirfdstream\n\nJust to reiterate though I think by far the best fix for this case would include getting tar out of the picture entirely - it'd significantly reduce the amount of time we need to hold a lock by avoiding a large temporary copy. If nothing else happens here it's likely we turn on the direct `containers-storage:` read path in the bootc/composefs side at some point, which would do this without any changes in skopeo/container-libs. But landing the splitdirfdstream work is I think the best shape of fix for that.\n\n\n\n"
+        },
+        {
+            "user": "mtrmac",
+            "body": "> > All accesses to additional stores currently take read locks. I don’t know why this one should be an exception.\n> \n> But accesses to AIS do handle `EROFS` as they have to for bootc at least.\n\nThe effect of that code is to _ignore_ that store entirely, not to use it without locking.\n\n> ### Option 2: Runtime option to trade off locking latency for temporary storage\n> \n> In this particular case, there are not expected to be any concurrent mutations at all, so the defensive intermediate tarball is unnecessary, and I could imagine a runtime option to trade off increased locking latency for decreased transient storage usage.\n\n\\*shrug\\* plausible.\n\n> ### Option 3: Land splitdirfdstream\n\nUh, I thought that’s already the default plan; if this is an _alternative_ to it, I don’t know that we need to spend much time on it now."
+        },
+        {
+            "user": "cgwalters",
+            "body": "> The effect of that code is to ignore that store entirely, not to use it without locking.\n\nYou are right, I think that code has always been broken. \n\nWhat appears to *actually* be happening in some quick investigation here is that it only works with bootc's existing use of a RO AIS because the lockfile already exists, and acquiring a RO lock works.\n\n> Uh, I thought that’s already the default plan; if this is an alternative to it, I don’t know that we need to spend much time on it now.\n\nThis is a proposed alternative that is scoped to what I think is basically a bugfix for podman/skopeo.\n\nThe splitdirfdstream is for sure a *better* fix, but it requires deeper changes in multiple components to use.\n\nI guess the debate is, how difficult would it be to do a fix scoped to just avoiding the temporary tarball at all?"
+        }
+    ],
+    "cross_references": []
+}

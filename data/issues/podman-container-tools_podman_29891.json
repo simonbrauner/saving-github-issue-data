@@ -5,15 +5,56 @@
     "type": "issue",
     "title": "Windows podman.exe built with Go 1.27.1 crashes at startup (\"unexpected return pc\" / \"unknown caller pc\")",
     "state": "open",
-    "labels": [],
+    "labels": [
+        "kind/bug",
+        "windows"
+    ],
     "user": "ljcadungog",
     "body": "### Issue Description\n\nWindows `podman.exe` v6.1.2 and v6.1.3 crash at startup with a Go runtime fatal error, before `main` runs. `podman --version` crashed 98 of 100 times. Both releases were built with Go 1.27.1 (`go-version: stable` in the release workflow). Go 1.27.0 and 1.27.1 have a Windows thread-creation bug, golang/go#81731. The fix is CL 841305, planned for Go 1.27.2 (not released yet). v6.1.0, built with Go 1.26.5, ran clean 100 of 100 times.\n\nI confirmed the cause with a controlled build. I built v6.1.2 from source twice with the same flags. Only one file in the Go toolchain differed:\n\n- go1.27.1: `--version` crashed 100 of 100 times.\n- go1.27.1 + CL 841305: 0 of 100. `machine list` and `ps -a` also worked.\n\nThe crash happens on every command because the vendored `BurntSushi/toml` reads the local time zone in `init`. On Windows that calls `LockOSThread` inside the standard library, which is the path the Go fix changes.\n\n### Steps to reproduce the issue\n\n1. Install podman v6.1.2 or v6.1.3 for Windows.\n2. In PowerShell, run `podman --version` about 20 times.\n\n### Describe the results you received\n\n```\nruntime: g 3: unexpected return pc for runtime.gopark called from 0xffffffffffffffff\n...\nfatal error: unknown caller pc\nruntime.scanstack > runtime.markroot.func1 > runtime.gcDrain > runtime.gcBgMarkWorker.func2\n```\n\n### Describe the results you expected\n\n`podman --version` prints the version.\n\n### podman info output\n\n```yaml\n# podman info cannot run: the client crashes first.\nclient: podman.exe v6.1.2 (go1.27.1, windows/amd64), Podman Desktop 1.29.3\nos: Windows 11 Pro 10.0.26300\ncpu: AMD Ryzen AI 9 HX 370 (24 logical processors)\n```\n\n### Podman in a container\n\nNo\n\n### Privileged Or Rootless\n\nPrivileged\n\n### Upstream Latest Release\n\nYes (v6.1.3, 98 of 100 runs crashed)\n\n### Additional information\n\nRequest: build the Windows release with Go 1.26.5 until Go 1.27.2 is out. `release-build-artifacts.yml` has `go-version: stable` in three places at v6.1.3.\n\nWorkarounds: run `wsl -d podman-machine-default -u root podman ps -a`, or use v6.1.0.\n\nI tested one machine only. Build commands, hashes, crash counts, a full crash dump and the call chain are in https://gist.github.com/ljcadungog/23539ae34ad350b891c1eb90a63cdedc.\n\n*Prepared with Claude Sonnet 5.5 (Anthropic) through Claude Code, on behalf of @ljcadungog, who reviewed it.*\n",
-    "comments": [],
+    "comments": [
+        {
+            "user": "Luap99",
+            "body": "cc @l0rd "
+        },
+        {
+            "user": "l0rd",
+            "body": "I can't reproduce this problem, but I guess this is normal because I am on arm64:\n\n```pwsh\n> podman version\nClient:       Podman Engine\nVersion:      6.1.3\nAPI Version:  6.1.3\nGo Version:   go1.27.1\nGit Commit:   85b994955e0b4e30fbce9c8351cab85676140ede\nBuilt:        Tue Sep 29 17:31:34 2026\nOS/Arch:      windows/arm64\n```\n\nBut why can't we reproduce it in [CI e2e tests](https://github.com/podman-container-tools/podman/blob/main/.github/workflows/ci.yml#L529) running on an [x64 runner](https://github.com/actions/runner-images/blob/main/images/windows/Windows2025-VS2026-Readme.md)?\n\nAnd @ljcadungog, how did you run `podman machine init` (because I see that you could run `wsl -d` in it)?"
+        },
+        {
+            "user": "menglisch",
+            "body": "I am someone with the same crash (Windows 11 on amd64). For me I did run `podman machine init` without anything like `wsl -d`. It did not happen with podman 6.1.0 for me. \nHere the log when trying to run `podman image` in the Terminal: [crash-in-cli.txt](https://github.com/user-attachments/files/33058334/crash-in-cli.txt)\nHoping this helps."
+        },
+        {
+            "user": "Luap99",
+            "body": "> But why can't we reproduce it in [CI e2e tests](https://github.com/podman-container-tools/podman/blob/main/.github/workflows/ci.yml#L529) running on an [x64 runner](https://github.com/actions/runner-images/blob/main/images/windows/Windows2025-VS2026-Readme.md)?\n\nIt is testing with go 1.26 AFAICT, `go-version-file: go.mod`"
+        },
+        {
+            "user": "l0rd",
+            "body": "> It is testing with go 1.26 AFAICT, `go-version-file: go.mod`\n\nInterestingly, this is inconsistent with the release job https://github.com/podman-container-tools/podman/blob/main/.github/workflows/release-build-artifacts.yml#L73 that uses go stable version:\n\n```\n    - name: Set up Go\n      uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0\n      with:\n        go-version: stable\n```\n\nShould we use the `go.mod` version in both?"
+        },
+        {
+            "user": "Luap99",
+            "body": "> Should we use the go.mod version in both?\n\nWe really should not, I think that is a mistake from the ci job. go.mod contains the minimum supported version for compiling.\nThat does not mean we should use that to compile, using the latest makes more sense there just so we include all the go std lib security fixes there."
+        },
+        {
+            "user": "l0rd",
+            "body": "@Luap99 I have submitted https://github.com/podman-container-tools/podman/pull/29903. This doesn't fix the problem, but it lets us see whether we can reproduce it."
+        },
+        {
+            "user": "ljcadungog",
+            "body": "> And [@ljcadungog](https://github.com/ljcadungog), how did you run `podman machine init` (because I see that you could run `wsl -d` in it)?\n\nHi! Took me a while to trace this since I had to double check what I used to build my existing podman instance - apparently, it was the desktop runtime that initialized it (was playing around with user-installed vs. system-installed podman setups), so the machine used was initialized through the Podman Desktop GUI with version 6.0.2.\n\nThe old dev script I used to initialize the user-installed podman did continually fail (error 125), but I missed it because I started the instance from the stable Desktop app. It's only on the latest update that this issue kept happening. Been looking at the error and running some experiments, and it's a weird set of conditions that can trigger it in podman:\n\n- Podman built with Go 1.27.0 / 1.27.1, running in Windows/amd64 envs\n- Use a timezone **whose standardName is not in Go's table**, so the lookup goes to the Windows registry (as handled by the BurntSushi/toml indirect dependency), which then enters the error condition in https://github.com/golang/go/issues/81731"
+        }
+    ],
     "cross_references": [
         {
             "organization": "golang",
             "repository": "go",
             "number": 81731
+        },
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 29903
         }
     ]
 }
