@@ -4,7 +4,7 @@
     "number": 29856,
     "type": "issue",
     "title": "Wrong file ownership in rootless container export created with --userns=keep-id",
-    "state": "open",
+    "state": "closed",
     "labels": [
         "kind/bug"
     ],
@@ -16,5 +16,11 @@
             "body": "This isn't specific to running podman inside a container. Same result on an ordinary host: Raspberry Pi OS (Debian 13, arm64, kernel 6.18), Debian's `podman 5.4.2`, rootless as UID 1000 with the stock `100000:65536` subuid range. Image = `debian:13-slim` + `useradd -m user`. The keep-id container's mapping is `[\"0:1:1000\",\"1000:0:1\",\"1001:1001:64536\"]`; the plain one has `IDMappings null`.\n\nIt's the whole tree, not just `home/`. Owner counts over the full archive:\n\n```\nplain export:   3257 0/0    7 0/42    5 1000/1000    3 0/43    1 0/8\nkeep-id export: 3257 1/1    7 1/43    5 0/0          3 1/44    1 1/9\n```\n\nSo the setuid binaries (`su`, `passwd`, `mount`, ... 8 of them) come out `-rwsr-xr-x 1/1`. After `podman import`, `/etc/passwd` is `1:1`, `/usr/bin/su` is setuid UID 1, and `podman run --user user e2img touch /home/user/x` fails with `Permission denied` (the original image works). Both exports exit 0.\n\n`podman cp ctr:/ - | tar tv` on the same keep-id container shifts the same way (user's files `root/root`, root's `daemon/daemon`), so it isn't a workaround.\n\nWhat does work: `podman commit` the keep-id container, `podman create` a plain container from that image, export that. Owners come out right, including files written at runtime (`home/user/made-at-runtime.txt 1000/1000`, `root/made-by-root.txt 0/0`, `usr/bin/su 0/0`).\n\nLooks like the cause is in `Container.export()` (`libpod/container_internal.go`): `chrootarchive.Tar(mountPoint, nil, mountPoint)` passes no `TarOptions`, so no `UIDMaps`/`GIDMaps`, and the storage, which for keep-id is on disk under the intermediate IDs (`podman unshare` + `podman mount` shows the user's file as `0 0` and root's as `1 1`), is archived as-is. That line is identical at v5.4.2, v5.8.7 and main.\n\nWrite-up: https://homelabpostmortem.com/2026/09/30/podman-export-of-a-keep-id-container-shifts-every-owner/\n"
         }
     ],
-    "cross_references": []
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 29899
+        }
+    ]
 }
