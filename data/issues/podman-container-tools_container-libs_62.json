@@ -82,6 +82,50 @@
         {
             "user": "Mr-Bossman",
             "body": "/assign\n\n"
+        },
+        {
+            "user": "ricardobranco777",
+            "body": "I think we're breaking expectations when this is possible:\n\n```\n$ podman run --rm --cap-drop ALL --security-opt no-new-privileges registry.opensuse.org/opensuse/tumbleweed unshare -U --keep-caps grep ^Cap /proc/self/status \nCapInh: 000001ffffffffff\nCapPrm: 000001ffffffffff\nCapEff: 000001ffffffffff\nCapBnd: 000001ffffffffff\nCapAmb: 000001ffffffffff\n```\n\nWhat I'd normally expect:\n\n```\n$ podman run --rm --cap-drop ALL --security-opt no-new-privileges registry.opensuse.org/opensuse/tumbleweed grep ^Cap /proc/self/status \nCapInh: 0000000000000000\nCapPrm: 0000000000000000\nCapEff: 0000000000000000\nCapBnd: 0000000000000000\nCapAmb: 0000000000000000\n```"
+        },
+        {
+            "user": "giuseppe",
+            "body": "I don't understand the last comment, is it a separate issue?  I don't get your output on Fedora.  Are you using a custom seccomp profile?"
+        },
+        {
+            "user": "ricardobranco777",
+            "body": "> I don't understand the last comment, is it a separate issue? I don't get your output on Fedora. Are you using a custom seccomp profile?\n\nI'm getting this output on Fedora 45 Beta with podman v6.1.3 using the default profile. Also on openSUSE Tumbleweed with podman v6.0.2. \n\nI didn't create a new issue as I think it's due to this, but I can create a new one.\n\n"
+        },
+        {
+            "user": "giuseppe",
+            "body": "tried again on a different machine with Rawhide, get the same output.\n\nI don't see how your issue depends on this one.  Are you using a different seccomp profile?\n\nHave you changed anything in the default configuration?\n"
+        },
+        {
+            "user": "ricardobranco777",
+            "body": "> tried again on a different machine with Rawhide, get the same output.\n> \n> I don't see how your issue depends on this one. Are you using a different seccomp profile?\n> \n> Have you changed anything in the default configuration?\n\nNope.  I didn't change anything.  I'm running this command as rootless:\n\n```\npodman run --rm --cap-drop ALL --security-opt no-new-privileges registry.opensuse.org/opensuse/tumbleweed unshare -U --keep-caps grep ^Cap /proc/self/status\n```"
+        },
+        {
+            "user": "giuseppe",
+            "body": "> $ podman run --rm --cap-drop ALL --security-opt no-new-privileges registry.opensuse.org/opensuse/tumbleweed unshare -U --keep-caps grep ^Cap /proc/self/status \n> CapInh: 000001ffffffffff\n> CapPrm: 000001ffffffffff\n> CapEff: 000001ffffffffff\n> CapBnd: 000001ffffffffff\n> CapAmb: 000001ffffffffff\n\nsorry I didn't realize you were using unshare here, I thought it was the same command as the second run.\n\nWhy does it break the expectations though?  I'd expect it to work like it does.\n\nWithout `unshare` we are not able to run nested podman, or buildah inside a podman container.  That is by design.\n\n"
+        },
+        {
+            "user": "ricardobranco777",
+            "body": "> Why does it break the expectations though? I'd expect it to work like it does.\n\nNo capabilities. I expect all Caps sets to be all zeroes. :)\n"
+        },
+        {
+            "user": "giuseppe",
+            "body": "if you'd block `unshare` though, you would get an error:\n\n```\nunshare: unshare failed: Operation not permitted\n```\n\nCRI-O blocked `unshare` in their profile, but I still think for Podman it makes sense to have because there are many users of nested containers, and that wouldn't be possible by default."
+        },
+        {
+            "user": "ricardobranco777",
+            "body": "> CRI-O blocked `unshare` in their profile, but I still think for Podman it makes sense to have because there are many users of nested containers, and that wouldn't be possible by default.\n\nWhy not use something like the `--privileged` option for these use-cases?  Docker in docker (dind) requires this option, or at least it was the case years ago."
+        },
+        {
+            "user": "giuseppe",
+            "body": "`--privileged` gives you capabilities in the container user namespace, so unless you are setting up a new user namespace, it gives you capabilities on the host.\n\n`unshare` creates a new user namespace.\n\nThis is exactly what I am afraid of, podman nested will fail to run, and users will switch to `--privileged`."
+        },
+        {
+            "user": "ricardobranco777",
+            "body": "To teach myself seccomp and eventually come up with a \"hardened\" configuration that picks the best rules from both runtimes I created this project that is an intermediate line oriented language that translates the JSON and it's partially reversible (fully functional, though).  Also added a secprobe tool to probe the system calls available in the container via seccomp_unotify(2):\n\nhttps://github.com/ricardobranco777/seccat/\n\nThese are the differences between Docker 29.8.2 & Podman v6.1.3 on x86_64 in kernel 7.2.9:\n\n```\n# Generated with:\ndocker=https://raw.githubusercontent.com/moby/profiles/main/seccomp/default.json\npodman=https://raw.githubusercontent.com/podman-container-tools/container-libs/main/common/pkg/seccomp/seccomp.json\ndiff <(curl -sSfL $docker | seccat -A  -a $(uname -m) -c docker -k $(uname -r)) <(curl -sSfL $podman | seccat -A  -a $(uname -m) -c podman -k $(uname -r)) | python3 tools/diff2md.py | grep -v ERRNO.*ERRNO\n```\n\n|syscall |docker | podman|\n|---|---|---|\n| `cachestat` | `ALLOW` | `ERRNO(EPERM)` |\n| `clone` | `ALLOW arg0&0x7e020000==0` | `ALLOW` |\n| `clone3` | `ERRNO(ENOSYS)` | `ALLOW` |\n| `fanotify_init` | `ERRNO(EPERM)` | `ALLOW` |\n| `fsconfig` | `ERRNO(EPERM)` | `ALLOW` |\n| `fsmount` | `ERRNO(EPERM)` | `ALLOW` |\n| `fsopen` | `ERRNO(EPERM)` | `ALLOW` |\n| `fspick` | `ERRNO(EPERM)` | `ALLOW` |\n| `get_mempolicy` | `ERRNO(EPERM)` | `ALLOW` |\n| `getxattrat` | `ALLOW` | `ERRNO(ENOSYS)` |\n| `io_pgetevents` | `ALLOW` | `ERRNO(EPERM)` |\n| `io_pgetevents_time64` | `ALLOW` | `ERRNO(EPERM)` |\n| `keyctl` | `ERRNO(EPERM)` | `ALLOW` |\n| `listmount` | `ALLOW` | `ERRNO(ENOSYS)` |\n| `listxattrat` | `ALLOW` | `ERRNO(ENOSYS)` |\n| `map_shadow_stack` | `ALLOW` | `ERRNO(EPERM)` |\n| `mbind` | `ERRNO(EPERM)` | `ALLOW` |\n| `mount` | `ERRNO(EPERM)` | `ALLOW` |\n| `mount_setattr` | `ERRNO(EPERM)` | `ALLOW` |\n| `move_mount` | `ERRNO(EPERM)` | `ALLOW` |\n| `mseal` | `ALLOW` | `ERRNO(ENOSYS)` |\n| `open_tree` | `ERRNO(EPERM)` | `ALLOW` |\n| `pidfd_getfd` | `ERRNO(EPERM)` | `ALLOW` |\n| `pivot_root` | `ERRNO(EPERM)` | `ALLOW` |\n| `reboot` | `ERRNO(EPERM)` | `ALLOW` |\n| `removexattrat` | `ALLOW` | `ERRNO(ENOSYS)` |\n| `riscv_hwprobe` | `ALLOW` | ERRNO(ENOSYS) |\n| `set_mempolicy` | `ERRNO(EPERM)` | `ALLOW` |\n| `setns` | ERRNO(EPERM) | `ALLOW` |\n| `setxattrat` | `ALLOW` | `ERRNO(ENOSYS)` |\n| `signal` | ERRNO(EPERM) | `ALLOW` |\n| `statmount` | `ALLOW` | `ERRNO(ENOSYS)` |\n| `syslog` | `ERRNO(EPERM)` | `ALLOW` |\n| `umount` | ERRNO(EPERM) | `ALLOW` |\n| `umount2` | `ERRNO(EPERM)` | `ALLOW` |\n| `unshare` | `ERRNO(EPERM)` | `ALLOW` |\n| `uretprobe` | `ALLOW` | `ERRNO(ENOSYS)` |\n| `vmsplice` | `ALLOW` | `ERRNO(EPERM)` |\n\nNotes (to myself):\n- Docker default errno is EPERM while Podman is ENOSYS.\n- Non-listed syscalls get the default treatment."
         }
     ],
     "cross_references": [
