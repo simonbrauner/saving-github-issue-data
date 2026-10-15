@@ -1,0 +1,35 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 29971,
+    "type": "issue",
+    "title": "win-sshproxy fails with WSAEADDRINUSE (bind: Only one usage of each socket address is normally permitted) when restarting Podman machine on Windows",
+    "state": "open",
+    "labels": [
+        "kind/bug",
+        "remote",
+        "machine",
+        "windows"
+    ],
+    "user": "ReluPercan",
+    "body": "### Issue Description\nOn Windows, when starting a Podman machine (`podman machine start`) after a previous shutdown, reboot, or non-clean termination, `win-sshproxy.exe` fails to start with the following error logged in Windows Event Viewer:\n\n```\n[error] podman-machine-default: Error occurred in execution group: error listening on socket: /%TEMP%/podman/podman-machine-default-api.sock: listen unix %TEMP%/podman/podman-machine-default-api.sock: bind: Only one usage of each socket address (protocol/network address/port) is normally permitted.\n```\n\nAs a result, `podman machine start` fails or the API forwarding proxy exits immediately.\n\n### Root Cause\nUnlike Linux, where Go's `net.Listen(\"unix\", path)` removes/unlinks dead/stale socket files automatically, on Windows (Winsock `AF_UNIX`), if the `.sock` file already exists on the filesystem from a previous run, `bind()` fails with `WSAEADDRINUSE` (error code 10048).\n\nIn `win-sshproxy` (within `containers/gvisor-tap-vsock` / `containers/podman`), `net.Listen(\"unix\", path)` is called without first unlinking/deleting any leftover socket file at that path.\n\n### Steps to reproduce the issue\n1. Run `podman machine start` (first start succeeds and creates `%TEMP%\\podman\\podman-machine-default-api.sock`).\n2. Stop the machine or restart Windows without manual cleanup.\n3. Observe that `%TEMP%\\podman\\podman-machine-default-api.sock` (0 bytes) remains on disk.\n4. Run `podman machine start` again.\n5. `win-sshproxy` fails with `bind: Only one usage of each socket address (protocol/network address/port) is normally permitted.`\n\n### Describe the results you received\n`podman machine start` fails with WSAEADDRINUSE error from `win-sshproxy.exe`.\n\n### Describe the results you expected\n`win-sshproxy.exe` should either remove/unlink any existing stale `.sock` file prior to calling `net.Listen(\"unix\", path)` or overwrite it, allowing the machine to start normally across restarts.\n\n### podman info output\n```yaml\nClient:\n  APIVersion: 6.1.4\n  Built: 1791838521\n  BuiltTime: Mon Oct 12 23:55:21 2026\n  GitCommit: 464c15fec06f0074c916f9eff87c4806869c2833\n  GoVersion: go1.26.8\n  Os: windows\n  OsArch: windows/amd64\n  Version: 6.1.4\nhost:\n  arch: amd64\n  cgroupManager: cgroupfs\n  cgroupVersion: v2\n  distribution:\n    distribution: fedora\n    variant: podman-machine-os\n    version: \"44\"\n  kernel: 6.18.54.1-microsoft-standard-WSL2\n  networkBackend: netavark\n  ociRuntime:\n    name: crun\n  os: linux\n  serviceIsRemote: true\nversion:\n  APIVersion: 6.1.4\n  Built: 1791763200\n  GitCommit: 464c15fec06f0074c916f9eff87c4806869c2833\n  Version: 6.1.4\n```\n\n### Podman in a container\nNo\n\n### Privileged Or Rootless\nRootless\n\n### Upstream Latest Release\nYes\n\n### Additional environment details\nWindows 11 / Windows 10 (WSL2 / Hyper-V backend)\nPodman 6.1.4 release for Windows\n\n### Additional information\n**Workaround:**\nDeleting stale `.sock` files in `%TEMP%\\podman\\` prior to startup resolves the problem:\n```powershell\nRemove-Item \"$env:TEMP\\podman\\*.sock\" -Force -ErrorAction SilentlyContinue\npodman machine start\n```\n\n**Proposed Fix in Go:**\nBefore calling `net.Listen(\"unix\", path)` on Windows:\n```go\n_ = os.Remove(path)\nlistener, err := net.Listen(\"unix\", path)\n```\n",
+    "comments": [
+        {
+            "user": "Luap99",
+            "body": "> Unlike Linux, where Go's net.Listen(\"unix\", path) removes/unlinks dead/stale socket files automatically, on Windows (Winsock AF_UNIX), if the .sock file already exists on the filesystem from a previous run, bind() fails with WSAEADDRINUSE (error code 10048).\n\nThat makes no sense to me, on linux/macos a leftover socket file will always fail with `address already in use` as well.\nWhat Go does is to delete the file on Close by default. But of course on a non clean termination that will not happen and then the file is leaked. So of course we need to clean it up ourself on start again.\n\nThe only question is should we delete the `win-sshproxy` socket path on the podman or win-sshproxy side?\ncc @cfergeau @l0rd  "
+        },
+        {
+            "user": "cfergeau",
+            "body": "There are some code paths in gvisor-tap-vsock where we do not want to remove the socket file before listening, so I’d prefer to never remove socket files. If this is too strict and causes too many problems, we’ll consider removing the socket files which are passed on `win-sshproxy`/`gvproxy` command line before `Listen`, this should be relatively harmless.\nAs you pointed out, regardless of what we do, code will be needed in podman for non-clean termination.\n\nI also need to check if socket files are cleaned up on clean 'win-sshproxy' shutdown, if not this would be a bug we need to fix in `win-sshproxy`"
+        },
+        {
+            "user": "Luap99",
+            "body": "> If this is too strict and causes too many problems, we’ll consider removing the socket files which are passed on win-sshproxy/gvproxy command line before Listen, this should be relatively harmless.\nAs you pointed out, regardless of what we do, code will be needed in podman for non-clean termination.\n\nYeah I understand your concern but cli arguments should be trusted, but I certainly understand the argument of the process does not know if the existing socket is still in use. Doing the removal on the podman side only would be fine with me. \n\n> I also need to check if socket files are cleaned up on clean 'win-sshproxy' shutdown, if not this would be a bug we need to fix in win-sshproxy\n\nThe go std libary removes the file as long as you call Close() on the listener before program exit."
+        },
+        {
+            "user": "cfergeau",
+            "body": "\n>         > I also need to check if socket files are cleaned up on clean 'win-sshproxy' shutdown, if not this would be a bug we need to fix in win-sshproxy\n>             \n>         The go std libary removes the file as long as you call Close() on the listener before program exit.\n\n`win-sshproxy` apparently does the right thing from that perspective, but since there is this bug report, I prefer to carry out more extensive testing in case I misread the code.\n\n"
+        }
+    ],
+    "cross_references": []
+}
