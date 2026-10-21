@@ -1,0 +1,26 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 30010,
+    "type": "pull_request",
+    "title": "libpod: skip volumes that are already gone on pod removal",
+    "state": "closed",
+    "labels": [],
+    "user": "grey3228",
+    "body": "`removePod()` looks up the named volumes of the pod's containers after the containers have been removed, so it can clean up the anonymous ones. A volume that is already gone is supposed to be skipped quietly, but the check only skips the log message:\n\n```go\nvolume, err := r.state.Volume(volName)\nif err != nil && !errors.Is(err, define.ErrNoSuchVolume) {\n\tlogrus.Errorf(\"Retrieving volume %s: %v\", volName, err)\n\tcontinue\n}\nif !volume.Anonymous() {\n```\n\nOn `ErrNoSuchVolume` the loop goes on with a nil volume and panics. At that point the containers are already deleted from the database and nothing uses the volumes anymore, so a concurrent `podman volume rm` / `podman volume prune` can remove one first. `podman pod rm` then crashes before the pod itself is removed, and leaves an empty pod behind.\n\nThe window is small, so to reproduce it reliably I put a temporary sleep in front of that loop (local debug build only, not part of this PR) and removed the volume while `pod rm` was waiting:\n\n```\n$ podman pod create --infra=false --name prm\n$ podman run -d --pod prm --name prm-c -v /data alpine top\n$ podman pod rm -f -t0 prm &          # paused before the volume loop\n$ podman volume rm <anonymous volume of prm-c>\npanic: runtime error: invalid memory address or nil pointer dereference\n[signal SIGSEGV: segmentation violation code=0x1 addr=0x0 pc=0x160dd4b]\n\ngoroutine 1 [running]:\ngo.podman.io/podman/v6/libpod.(*Volume).Anonymous(...)\n\tlibpod/volume.go:193\ngo.podman.io/podman/v6/libpod.(*Runtime).removePod(...)\n\tlibpod/runtime_pod_common.go:268 +0x9ab\ngo.podman.io/podman/v6/libpod.(*Runtime).RemovePod(...)\n\tlibpod/runtime_pod.go:48 +0x134\n...\n$ podman pod ls\nNAME  # OF CONTAINERS\nprm   0\n```\n\n(note: trace trimmed, line numbers are shifted by the debug sleep)\n\nWith this change the same sequence removes the pod normally. The fix just skips the volume on any lookup error and keeps logging the unexpected ones, the same way `removeContainer()` already handles it.\n\nNo tests added: hitting this needs a race between `pod rm` and `volume rm`, and I don't see a way to make that deterministic in the system tests without a hook in the code.\n\nFound by Linux Verification Center (linuxtesting.org) with SVACE.\n\n<!-- Thanks for sending a pull request! -->\n\n#### Checklist\n\nEnsure you have completed the following checklist for your pull request to be reviewed:\n<!-- Use [x] to mark as done, or click the checkbox after opening PR -->\n\n- [x] I have read and understood our [contributing guidelines](https://github.com/podman-container-tools/podman/blob/main/CONTRIBUTING.md) and will not have more than two open PRs as a new contributor.\n- [x] PR description, commit message, and GitHub comments are human-written, per [LLM Policy](https://github.com/podman-container-tools/community/blob/main/LLM_POLICY.md)\n- [x] Certify you wrote the patch or otherwise have the right to pass it on as an open-source patch by including your Signed-off-by line in all\ncommits. (`git commit -s`). (If needed, use `git commit -s --amend`).  The author email must match\nthe sign-off email address. Read the [DCO Sign-off requirements](https://github.com/podman-container-tools/community/blob/main/CONTRIBUTING.md#DCO-Sign-off)\nand ensure you follow them before signing off your commits.\n- [x] Referenced issues using `Fixes: #00000` in commit message (if applicable)\n- [x] [Tests](https://github.com/podman-container-tools/podman/tree/main/test#readme) have been added/updated (or no tests are needed)\n- [x] [Documentation](https://github.com/podman-container-tools/podman/blob/main/docs/README.md) has been updated (or no documentation changes are needed)\n- [x] All commits pass `make validatepr` (format/lint checks)\n- [x] [Release note](https://github.com/kubernetes/community/blob/master/contributors/guide/release-notes.md) entered in the section below (or `None` if no user-facing changes)\n\n#### Does this PR introduce a user-facing change?\n\n<!--\nWrite `None` if there are no user-facing changes, otherwise enter your release note below.\nInclude \"action required\" if users need to take action when upgrading.\n-->\n\nNone",
+    "comments": [
+        {
+            "user": "grey3228",
+            "body": "> Change LGTM. Please create an E2E test for this.\n\nAdded an e2e test in a separate commit.\n\nThe real trigger is a race between pod rm and volume rm, which a test can't hit reliably. So the test drops the anonymous volume from db.sql and then runs \"pod rm -f\". The container is never started, otherwise pod rm would fail earlier while unmounting the volume."
+        },
+        {
+            "user": "mheon",
+            "body": "This really shouldn't be possible, SQLite constraints should prevent removal of a volume while still in use by a container... But I don't see a danger in being more defensive here"
+        },
+        {
+            "user": "mheon",
+            "body": "LGTM"
+        }
+    ],
+    "cross_references": []
+}
