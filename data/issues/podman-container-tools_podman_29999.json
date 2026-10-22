@@ -16,6 +16,14 @@
         {
             "user": "twiesing",
             "body": "> AFAICT this barrier support was added in systemd v246 (Jul 30, 2020) what happens if you call this against an older systemd?\n> \n> I suppose it might be old enough for us to no longer call this supported but the fact that things just hang 5s each time is really bad IMO as seen in the tests.\n\nOlder systemd doesn't hang here. Before v246 the manager already closed any fds that came with a notify message once it was done with it: `manager_dispatch_notify_fd` keeps them in a `_cleanup_fdset_free_` set and logs a warning at the end ([v239](https://github.com/systemd/systemd/blob/v239/src/core/manager.c#L2201-L2332), [v245](https://github.com/systemd/systemd/blob/v245/src/core/manager.c#L2324-L2455)). So the barrier still works there, it just logs that warning once per start.\n\nI checked it with a small static binary that only calls `SendMessageWithBarrier(\"\", \"READY=1\")` from this PR, run as `systemd-run -p Type=notify -p NotifyAccess=all` in a container booting systemd:\n\n| systemd | barrier returned after | unit | journal |\n|---|---|---|---|\n| 239 (Rocky 8, 239-82.el8_10.19) | 0s | active | `Got extra auxiliary fds with notification message, closing them.` |\n| 245 (Ubuntu 20.04, 245.4-4ubuntu3.24) | 1ms | active | same |\n\nThe 5s in the tests come from socat, which keeps the fd open. I'd replace it with a receiver that closes passed fds. Do you have a preference where that should live, e.g. a small helper in the test code? @Luap99 \n\nI also looked at waiting only until the message is read (SIOCOUTQ dropping to 0), which needs no fd at all. But systemd looks up the unit after the read ([v261](https://github.com/systemd/systemd/blob/v261/src/core/manager.c#L2912-L2940)), so that only narrows the race instead of closing it. That's why I'd keep the barrier."
+        },
+        {
+            "user": "Luap99",
+            "body": "> Older systemd doesn't hang here. \n\nOk perfect\n\n> The 5s in the tests come from socat, which keeps the fd open. I'd replace it with a receiver that closes passed fds. Do you have a preference where that should live, e.g. a small helper in the test code? @Luap99\n\nIf we cannot make socat close the fd then yes we need some custom helper, we already have some test only go code for podman-testing, see cmd/podman-testing/ so I guess we could add a special command to that to act as socat replacement for this test.\n"
+        },
+        {
+            "user": "twiesing",
+            "body": "Done, added `podman-testing sd-notify-listen` as the socat replacement. It closes the fds it receives right away and doesn't log `BARRIER=1`; the sdnotify tests are back to their old runtime."
         }
     ],
     "cross_references": []
