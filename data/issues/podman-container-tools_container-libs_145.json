@@ -43,6 +43,38 @@
         {
             "user": "yuvaldekel",
             "body": "This now affects bootc systems with physically bound images (e.g. MicroShift at the edge): the images are embedded in an additional store under /usr, every OS update replaces that store, and pulled images that shared its layers break. Reproducer: https://github.com/vrothberg/physically-bound-image-reproducer (Red Hat tracks it as RHEL-75827). The current workaround is copying every embedded image into the main store at boot.\n\nI have a prototype of the “copy instead of reuse” state @mtrmac described: an opt-in pull_options key, and in commitLayer a layer from a read-only store is copied into the primary store under a different ID instead of being reused. The contents still come from the local store, so nothing is downloaded; only the disk space is paid twice. The ID has to differ because overlay would otherwise resolve it to the additional store’s directory. It’s about 25 lines in containers/image, plus a test. https://github.com/yuvaldekel/container-libs/tree/isolate-additional-image-stores\n\nWould a PR along these lines be welcome? Should it be per store rather than global?"
+        },
+        {
+            "user": "giuseppe",
+            "body": "please share first the configuration change.  How would it look?  And yes, it should be per-store"
+        },
+        {
+            "user": "yuvaldekel",
+            "body": "Thanks. I'd mark it on the store path, the same way `additionallayerstores` uses `:ref`:\n\n```toml\n[storage.options]\nadditionalimagestores = [\n  \"/usr/lib/containers/storage:isolated\",\n  \"/mnt/shared/storage\",\n]\n```\n\nLayers from an `isolated` store are copied into the primary store (from local disk, under a different layer ID) instead of being reused. Stores without the suffix work the same as today.\n`additionalimagestores` takes no options today, so this is new syntax. With overlay, an older version fails on the suffixed path instead of silently ignoring it.\n\nDoes that look good, and is `isolated` a good name?"
+        },
+        {
+            "user": "giuseppe",
+            "body": "Maybe \"copy\"?"
+        },
+        {
+            "user": "yuvaldekel",
+            "body": "\"copy\" sounds good. Should I implement it that way and open a PR?"
+        },
+        {
+            "user": "giuseppe",
+            "body": "I am fine with it, we could wait a bit longer to gain feedback from others too"
+        },
+        {
+            "user": "mtrmac",
+            "body": "Looking at the commit in https://github.com/podman-container-tools/container-libs/compare/main...yuvaldekel:container-libs:isolate-additional-image-stores\n- with the design that pre-existing layers in the RO stores are copied, not re-pulled, fine, a local change around `commitLayer` makes sense.\n- If the configuration should be per-store, the existing `layer.ReadOnly` check will need redesigning in _some_ way.\n- Nothing guarantees that a `additionalImageStoreCopyLayerID`-named layer does not exist in one of the read-only stores already. At the same time, if we don’t make layer IDs deterministic, we break sharing of parent layers, so just making the layer IDs random would not be sufficient. In _principle_, I think duplicate layer IDs across the stores _should_ be possible and _should_ work fine, but how easy it would be to create such a layer, given existing stores, is another matter.\n\n---\n\nLooking at the proposed config: I strongly oppose adding syntax to strings. It does not scale to adding more options, it gives up on parsing/formatting tools for the config file format, and it breaks legitimate inputs (paths with `:`, in this case).\n\nWe could always add a new field, maybe just `additional_image_stores` (with underscores this time) which is an array of typed structures, and support both formats (rejecting configs that use both fields)."
+        },
+        {
+            "user": "yuvaldekel",
+            "body": "Thanks, that makes sense — I'll drop the suffix. Something like this?\n\n```toml\n[[storage.options.additional_image_stores]]\npath = \"/usr/lib/containers/storage\"\ncopy_layers = true\n```\n\nRejecting a config that sets both fields sounds good. For drop-in files: should a later file replace the `additional_image_stores` list, or should it support appending like `additionalimagestores` does with `{append = true}`?\n\nOn the IDs: the loop in `commitLayer` already derives the copy ID again if it also exists in a read-only store, so it stays deterministic. I first tried keeping the same ID, but overlay's `create` resolves the ID through `dir2` to the additional store's directory and tries to remove it. Would you prefer changing the drivers to create only in their own home, so copies keep the original ID?"
+        },
+        {
+            "user": "mtrmac",
+            "body": "Uh, drop-ins… I forgot about those. I don’t immediately know. I suppose we should not be losing features that exist today.\n\nReally, as I’m sure you have sen, all of the AIS code is inconsistently weaving across 3 layers of abstraction in c/storage, and in many ways an attempt to do one small thing cleanly would trigger the need for a large-scale redesign. And _not_ doing that small thing cleanly makes things worse for the future."
         }
     ],
     "cross_references": [
