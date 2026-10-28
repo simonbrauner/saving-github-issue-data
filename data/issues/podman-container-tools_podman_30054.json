@@ -1,0 +1,30 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 30054,
+    "type": "pull_request",
+    "title": "pkg/machine: stop using a device name for UserKnownHostsFile",
+    "state": "open",
+    "labels": [
+        "machine"
+    ],
+    "user": "ebruno",
+    "body": "**What:** `LocalhostSSHArgs()` passes `UserKnownHostsFile=` + `os.DevNull`. On Windows that value is `NUL`, and because the `ssh` binary is resolved from `PATH`, an MSYS/Cygwin build can win the race and treat `NUL` as a relative filename — creating a real file called `NUL` in the caller's working directory.\n\n**Why it matters:** `NUL` is a reserved device name on Windows (with `CON`, `PRN`, `AUX`, `COM1-9`, `LPT1-9`). Most tools cannot open it, Explorer and `del` cannot remove it, and if it is ever committed it breaks `git checkout` on Windows. It appears silently in whatever directory the caller happens to be in — common for tooling that shells out to `podman`.\n\nThe code already uses `os.DevNull` rather than a hardcoded `/dev/null`, which is exactly why it still breaks: Go-level portability doesn't help when the consumer is whichever `ssh` binary the `PATH` resolves.\n\n**Fix:** use a real file — `filepath.Join(os.TempDir(), \"podman-machine-known-hosts\")` — created up front at `0600`, and passed through `filepath.ToSlash`, because a backslash-separated `C:\\...` path is not portable between native Windows OpenSSH and Cygwin/MSYS builds.\n\n`LocalhostSSHArgs()`'s signature is unchanged, so both `localhostNativeSSH` and `LocalhostSSHCopy` are fixed without touching their call sites or the `-i`/`-p` argument ordering.\n\nA stable per-user path rather than a fresh temp file per invocation is deliberate: `StrictHostKeyChecking=no` is still in effect, so the file only ever receives host keys we have already decided not to verify. Per-invocation temp files would buy no additional safety and would require threading a cleanup function through both call sites, adding failure modes for no gain. Happy to switch if reviewers prefer.\n\n**Verification** — Windows 11 26300.9711, MSYS `ssh` OpenSSH_10.5p1 (`/usr/bin/ssh` ahead of `OpenSSH_for_Windows_9.5p2` on `PATH`), key exchange run against `localhost`:\n\n```\nUserKnownHostsFile=NUL                                    -> 91-byte file named NUL in the cwd\nUserKnownHostsFile=C:/.../Temp/podman-machine-known-hosts  -> cwd untouched, key written to that file\n```\n\nThis is the same mechanism the bug report describes, and it is not specific to `podman machine ssh` — any MSYS `ssh` invocation with that option creates the file.\n\n**Test:** `TestLocalhostSSHArgsKnownHostsIsRealFile` asserts the option is set, is not `os.DevNull`, is absolute, contains no backslashes, and resolves to an existing non-directory file. `go test ./pkg/machine/` and `go vet ./pkg/machine/` pass; `pkg/machine` also cross-compiles for `GOOS=windows`, and the full Windows binary builds with `-tags \"containers_image_openpgp remote\"`.\n\n**Not addressed here:** `StrictHostKeyChecking=no` remains. This change removes the stray-file symptom, not the decision to skip verification of a VM we created ourselves. Seeding the machine's real key and dropping the option would be the durable fix; it is a larger behavioural change and probably belongs in its own issue/PR.\n\nFixes #30026\n\n---\n\n**AI assistance:** the patch and its regression test were drafted with AI coding agents (CodingFleet). The reproduction on Windows, the A/B verification, the review responses and this description were directed and checked by me — I'm accountable for the change.\n",
+    "comments": [
+        {
+            "user": "packit-as-a-service[bot]",
+            "body": "[NON-BLOCKING] Packit jobs failed. @podman-container-tools/packit-jobs please check. Everyone else, feel free to ignore."
+        },
+        {
+            "user": "ebruno",
+            "body": "/packit test"
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 30026
+        }
+    ]
+}
