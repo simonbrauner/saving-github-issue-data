@@ -1,0 +1,27 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 30116,
+    "type": "issue",
+    "title": "quadlet: units in /usr/share/containers/systemd/users/<uid>/ are loaded by the system generator and by every other user",
+    "state": "open",
+    "labels": [
+        "kind/bug",
+        "quadlet"
+    ],
+    "user": "bigbywoo",
+    "body": "### Issue Description\n\n[#28232](https://github.com/bigbywoo/hommie/issues/28232) (v6.0) added /usr/share/containers/systemd/users/ and /usr/share/containers/systemd/users/<uid>/ as rootless Quadlet directories, mirroring /etc/containers/systemd/users/. The two filters that keep the /etc tree scoped were not extended to the /usr/share tree. Both match on the resolved /etc/containers/systemd/users prefix only, so two things happen:\n\n1. The system (rootful) generator loads every rootless unit under /usr/share/containers/systemd/users/. getRootDirs walks UnitDirDistro recursively through userLevelFilter. That filter only drops paths under /etc/containers/systemd/users, so /usr/share/containers/systemd/users/1000/foo.container also becomes the system unit foo.service. With WantedBy=default.target, it runs as root at boot, beside the user's own copy. The two compete for published ports and bind mounts, and root's storage pulls the image.\n2. Every rootless user loads every other user's /usr/share/containers/systemd/users/<uid>/ units. getRootlessDirs walks UnitDirDistro/users through nonNumericFilter, which only skips numeric subdirectories under /etc/containers/systemd/users. The numeric directories under /usr/share/containers/systemd/users are walked, so uid 1001 gets uid 1000's units.\nThe same files under /etc/containers/systemd/users/1000/ behave correctly in both cases, as the reproducer shows.\n\nThe unit test added in [#28232](https://github.com/bigbywoo/hommie/issues/28232) doesn't catch this: its fake distro directory is /users2, which happens to start with the /users prefix the filter checks.\n\n### Steps to reproduce the issue\n\nIn a throwaway quay.io/fedora/fedora:45 container (podman-6.1.3-1.fc45). The code is unchanged in v6.1.4 and on main.\n```sh\ndnf -y install podman util-linuxuseradd -u 1000 alice\nuseradd -u 1001 bob\nunit() {\n  mkdir -p \"$1\"\n  printf '[Container]\\nImage=registry.fedoraproject.org/fedora:45\\nExec=sleep infinity\\n\\n[Install]\\nWantedBy=default.target\\n' >\"$1/$2.container\"\n}\nunit /usr/share/containers/systemd/users/1000 distro-alice\nunit /etc/containers/systemd/users/1000 admin-alice\n\n/usr/libexec/podman/quadlet -dryrun                              # system generator\nrunuser -u alice -- /usr/libexec/podman/quadlet -dryrun -user    # uid 1000\nrunuser -u bob   -- /usr/libexec/podman/quadlet -dryrun -user    # uid 1001\n```\n\n### Describe the results you received\n\n> == root: quadlet -dryrun (system units)\n> quadlet-generator[146]: Loading source unit file /usr/share/containers/systemd/users/1000/distro-alice.container\n> ---distro-alice.service---\n> == uid 1000 (alice): quadlet -dryrun -user\n> ---admin-alice.service---\n> ---distro-alice.service---\n> == uid 1001 (bob): quadlet -dryrun -user\n> ---distro-alice.service---\n\n### Describe the results you expected\n\ndistro-alice.service is generated for uid 1000 only, exactly as admin-alice.service is: not by the system generator, and not for uid 1001.\n\n### podman info output\n\n```yaml\npodman-6.1.3-1.fc45 (Fedora 45). The relevant code is identical at v6.1.4.\n```\n\n### Podman in a container\n\nYes\n\n### Privileged Or Rootless\n\nPrivileged\n\n### Upstream Latest Release\n\nYes\n\n### Additional environment details\n\nOnly root can write /usr/share, so this is not an escalation path for an unprivileged user. It does break the scoping the directory layout promises: a packager shipping a per-user quadlet gets a root system service, and every other user's service as well.\n\n### Additional information\n\nA possible fix, in pkg/systemd/quadlet/unitdirs.go: resolve both users directories, UnitDirAdmin/users and UnitDirDistro/users, and have GetUserLevelFilter and GetNonNumericFilter test the path against whichever tree it is under, instead of the admin one alone. A regression test should use a distro directory whose name doesn't share a prefix with the admin one.\n\nWorkaround for image builders who want /usr/share and have no rootful quadlets: mask the system generator with ln -s /dev/null /etc/systemd/system-generators/podman-system-generator. That covers case 1 only; case 2 needs one uid's units per image.",
+    "comments": [
+        {
+            "user": "ygalblum",
+            "body": "Thanks for reporting and providing the analysis. I've opened a PR with the fix"
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 30120
+        }
+    ]
+}
