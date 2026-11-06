@@ -1,0 +1,27 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 30134,
+    "type": "issue",
+    "title": "machine server9p leaks ~8 handles per file op (Hyper-V), host kernel memory grows unbounded",
+    "state": "open",
+    "labels": [
+        "machine",
+        "windows"
+    ],
+    "user": "Seinra",
+    "body": "### Issue Description\n\n`podman machine server9p` (the Hyper-V 9p share server, child of `podman machine start`) leaks Windows handles linearly with 9p file operations: ~8.2 handles per file op, measured twice. The leaked handles live in kernel memory, so Task Manager shows nothing per-process while host RAM fills up (~12 GB unaccounted outside all process working sets on a 29 GB box, Memory Compression growing, performance counters failing with c0000bb8).\n\nObserved on a freshly restarted machine (clean server9p at ~300 handles):\n- After one job doing ~63k file ops (create + read 3000 small files x20 sweeps under the 9p bind): 520 -> 516,790 handles.\n- After a second identical job (~63k ops): 516,790 -> 1,032,992 handles.\n\nThe server9p process also survives `podman machine stop` (had to be killed by PID), and a stale gvproxy likewise survived and blocked the next `machine start` until killed.\n\n### Steps to reproduce the issue\n\n1. Windows 11 host, `podman machine init` + `start` (HyperV provider, 8 CPU / 2 GiB / 100 GiB), Podman 6.1.4, no Podman Desktop.\n2. Note baseline: `Get-Process podman | Select-Object Name,Id,Handles` (the `server9p --serve ...` process).\n3. Run a container workload with many small file ops on the 9p bind, e.g.:\n   `mkdir -p /work/synth && for i in $(seq 1 3000); do printf '...' > /work/synth/f$i.txt; done` then `cat /work/synth/*.txt > /dev/null` x20.\n4. Re-check handles: grows ~8 per file op, never released. Repeat: linear again.\n\n### Describe the results you received\n\nHandle count grows ~8.2 per file operation, monotonically, across jobs (520 -> 516,790 -> 1,032,992). Host physical memory fills with no corresponding process growth (~12 GB outside all working sets); only symptom is Memory Compression + swap churn.\n\n### Describe the results you expected\n\nHandle count stable across jobs; per-operation handles released when each 9p op completes.\n\n### podman info output\n\n```yaml\nClient:\n  APIVersion: 6.1.4\n  GitCommit: 464c15fec06f0074c916f9eff87c4806869c2833\n  GoVersion: go1.26.8\n  Os: windows\n  OsArch: windows/amd64\n  Version: 6.1.4\nhost:\n  arch: amd64\n  cpus: 8\n  distribution:\n    distribution: fedora\n    variant: podman-machine-os\n  memFree: 1980481536\n  memTotal: 2116026368\n  vmType: hyperv\nversion:\n  APIVersion: 6.1.4\n  GoVersion: go1.26.9-X:nodwarf5\n  Os: linux\n  OsArch: linux/amd64\n  Version: 6.1.4\n```\n\n(Full 160-line `podman info` on file; host/guest identity trimmed to the fields above. Complete output available on request.)\n\n### Podman in a container\n\nNo\n\n### Privileged Or Rootless\n\n_No response_\n\n### Upstream Latest Release\n\nYes\n\n### Additional environment details\n\nWindows 11 Pro 25H2 (build 26200), Hyper-V provider, machine 8 CPU / 2 GiB / 100 GiB, default 9p shares, no Podman Desktop involved.\n\n### Additional information\n\n- Repro uses default container flags (no --privileged); the leak is in the host-side 9p server, not in container privilege mode.\n- The leak does not affect 9p throughput itself (measured ~1.85ms/file clean vs ~1.3ms/file pre-restart — same order); it only eats host kernel memory over time, which makes it easy to misattribute to the workload.\n- Related but different mechanism: #25974 (Go-heap OOM in podman-remote during pull) — this one is kernel handles in server9p, no heap growth, no pull involved.\n",
+    "comments": [
+        {
+            "user": "Seinra",
+            "body": "Update with more data points (same machine, fresh server9p after a restart, Podman 6.1.4, Hyper-V 8CPU/2GiB):\n\n- 3k creates + 15k reads + 15k stats in one job: +261k handles (~7.9/op blended).\n- creates-only (3k files): +21k handles (~7.0/create).\n- 10k scale, one job: creates 26s, 5x10k reads 36s, 5x10k stats 34s; +647k handles over ~60k file ops (~10.7/op).\n\nTwo notes: (1) per-file read/stat latency actually drops with scale here (guest page cache warming: ~0.7ms/read at 10k vs ~2.3ms at 3k), while the handle leak stays linear — so throughput and leak are independent issues. (2) I attempted a per-op-type split (create vs read vs stat) but host-side sampling cannot align atomically with step edges, so I am not claiming per-type rates; the aggregate ~8-10 handles per file op across 5 jobs is the solid number."
+        }
+    ],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 30135
+        }
+    ]
+}
