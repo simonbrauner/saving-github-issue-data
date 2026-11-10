@@ -3,13 +3,13 @@
     "repository": "container-libs",
     "number": 1265,
     "type": "pull_request",
-    "title": "libartifact: retag/delete unnamed artifact orphans",
+    "title": "libartifact: fix unnamed artifact orphans on re-pull ",
     "state": "open",
     "labels": [
         "common"
     ],
     "user": "Honny1",
-    "body": "<!--- Please read the [contributing guidelines](https://github.com/containers/container-libs/blob/main/CONTRIBUTING.md) before proceeding --->\n\nWhen you re-pull the same tag and the digest changes, `c/image` drops `org.opencontainers.image.ref.name` on the old index entry. That leaves an unnamed manifest and breaks artifact ls.\n\nThis PR retags those entries to `repo@sha256:…` after pull (design doc B1) and deletes any still-unnamed entries when the store is opened (C1), for stores that were already broken.\n\nDesign: https://github.com/podman-container-tools/podman/blob/main/contrib/design-docs/artifact-unnamed-orphans.md\nFixes: https://github.com/podman-container-tools/podman/issues/28033",
+    "body": "<!--- Please read the [contributing guidelines](https://github.com/containers/container-libs/blob/main/CONTRIBUTING.md) before proceeding --->\nRe-pulling an artifact when a tag moves leaves the previous manifest in the OCI layout index without `org.opencontainers.image.ref.name` (c/image `addManifest` strips the old name). That breaks `artifact ls` and `artifact rm`.\n\nImplements [artifact-unnamed-orphans.md](https://github.com/podman-container-tools/podman/blob/main/contrib/design-docs/artifact-unnamed-orphans.md):\n- **B1** - Before `copyArtifact` on pull, move the pull tag on the *previous* manifest to `repo@sha256:<digest>` so the new manifest can take the tag without leaving an unnamed entry. Restore the tag on copy failure (`defer`). Index updates use atomic writes.\n- **C1** - On store open, delete legacy index entries that still have no `org.opencontainers.image.ref.name` (cannot recover repo for those orphans).\n\nPodman B2/B3 and vendor bump are out of scope here.\n\nFixes: https://github.com/podman-container-tools/podman/issues/28033  \nRelated: https://github.com/podman-container-tools/podman/pull/29658\n",
     "comments": [
         {
             "user": "Honny1",
@@ -26,7 +26,25 @@
         {
             "user": "TomSweeneyRedHat",
             "body": "In the description and commit, you're talking about \"retag\", but I think you're releasing, no?  If so, please change those for historical reasons.\n\nAlso, my AI review suggested adding a couple of tests as follows.  Please consider:\n\n```\ndiff --git a/common/pkg/libartifact/store_test.go b/common/pkg/libartifact/store_test.go\nindex 59af58f014..b7e4c0d000 100644\n--- a/common/pkg/libartifact/store_test.go\n+++ b/common/pkg/libartifact/store_test.go\n@@ -978,6 +978,78 @@ func TestNewArtifactStore_removesUnnamedOrphans(t *testing.T) {\n \tassert.Equal(t, namedRef, artifacts[0].Name)\n }\n \n+// TestPull_releaseThenCopyKeepsOldDigestNamed exercises the Pull retag sequence\n+// without a registry: release the tag to repo@digest, then layout→layout copy of\n+// new content onto the same tag (what c/image does during pull).\n+func TestPull_releaseThenCopyKeepsOldDigestNamed(t *testing.T) {\n+\tctx := t.Context()\n+\tasSrc, _ := setupTestStore(t)\n+\tasDest, _ := setupTestStore(t)\n+\n+\ttagName := \"quay.io/test/retag-pull:latest\"\n+\tdigestA, _ := helperAddArtifact(t, asDest, tagName, map[string]int{\"old.txt\": 64}, nil)\n+\tdigestB, _ := helperAddArtifact(t, asSrc, tagName, map[string]int{\"new.txt\": 128}, nil)\n+\trequire.NotEqual(t, digestA.String(), digestB.String(), \"digests must differ to simulate a retagged pull\")\n+\n+\tref, err := NewArtifactReference(tagName)\n+\trequire.NoError(t, err)\n+\n+\tsrcRef, err := layout.NewReference(asSrc.storePath, tagName)\n+\trequire.NoError(t, err)\n+\tdestRef, err := layout.NewReference(asDest.storePath, tagName)\n+\trequire.NoError(t, err)\n+\n+\tasDest.lock.Lock()\n+\tprevious := asDest.getManifestDigestForTag(tagName)\n+\trequire.Equal(t, *digestA, previous)\n+\n+\trequire.NoError(t, asDest.releaseTaggedManifestForPull(ref, previous))\n+\n+\tcopiedDigest, err := asDest.copyArtifact(ctx, srcRef, destRef, libimage.CopyOptions{})\n+\tasDest.lock.Unlock()\n+\trequire.NoError(t, err)\n+\tassert.Equal(t, digestB.String(), copiedDigest.String())\n+\n+\tartifacts, err := asDest.List(ctx)\n+\trequire.NoError(t, err)\n+\trequire.Len(t, artifacts, 2, \"old and new digests should both remain listable\")\n+\n+\tbyDigest := make(map[string]string, len(artifacts))\n+\tfor _, a := range artifacts {\n+\t\trequire.NotEmpty(t, a.Name, \"no unnamed orphans after release+copy\")\n+\t\tbyDigest[a.Digest.String()] = a.Name\n+\t}\n+\n+\twantOldName, err := ref.DigestReference(*digestA)\n+\trequire.NoError(t, err)\n+\tassert.Equal(t, wantOldName, byDigest[digestA.String()], \"previous digest should keep repo@sha256 name\")\n+\tassert.Equal(t, tagName, byDigest[digestB.String()], \"new digest should hold the pull tag\")\n+}\n+\n+// TestPull_copyWithoutReleaseLeavesUnnamed documents the pre-fix failure mode:\n+// copying a new digest onto an existing tag strips ref.name from the old entry.\n+func TestPull_copyWithoutReleaseLeavesUnnamed(t *testing.T) {\n+\tctx := t.Context()\n+\tasSrc, _ := setupTestStore(t)\n+\tasDest, _ := setupTestStore(t)\n+\n+\ttagName := \"quay.io/test/orphan-pull:latest\"\n+\t_, _ = helperAddArtifact(t, asDest, tagName, map[string]int{\"old.txt\": 64}, nil)\n+\t_, _ = helperAddArtifact(t, asSrc, tagName, map[string]int{\"new.txt\": 128}, nil)\n+\n+\tsrcRef, err := layout.NewReference(asSrc.storePath, tagName)\n+\trequire.NoError(t, err)\n+\tdestRef, err := layout.NewReference(asDest.storePath, tagName)\n+\trequire.NoError(t, err)\n+\n+\t_, err = asDest.copyArtifact(ctx, srcRef, destRef, libimage.CopyOptions{})\n+\trequire.NoError(t, err)\n+\n+\tindex := readIndex(t, asDest)\n+\tvar unnamed int\n+\tfor _, desc := range index.Manifests {\n+\t\tif desc.Annotations[specV1.AnnotationRefName] == \"\" {\n+\t\t\tunnamed++\n+\t\t}\n+\t}\n+\tassert.GreaterOrEqual(t, unnamed, 1, \"without release, re-tag copy should leave an unnamed index entry\")\n+}\n+\n func TestReleaseTaggedManifestForPull(t *testing.T) {\n \tstore := setupRetagTestStore(t)\n```\n\nOtherwise\n\nLGTM"
+        },
+        {
+            "user": "mheon",
+            "body": "LGTM over here. But would you mind adding an E2E test in Podman once this merges/gets vendored, just to validate that the retagging works all the way up the stack?"
+        },
+        {
+            "user": "Honny1",
+            "body": "@mheon I have added draft PR with integration tests and doc update: https://github.com/podman-container-tools/podman/pull/30153"
+        },
+        {
+            "user": "mtrmac",
+            "body": "(Note to self: I didn’t read the tests at all.)"
         }
     ],
-    "cross_references": []
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 30153
+        }
+    ]
 }

@@ -49,7 +49,7 @@
         },
         {
             "user": "veronnicka",
-            "body": "Following a suggestion from @giuseppe , I was able to reproduce the bug by using `podman create` and `podman start`. Using `podman run` doesnt reveal the bug.\n\n**Test setup:**\n- Fedora 43 VM with rootless Podman\n- Local autofs bind mount (`/srv/realdata` → `/mnt/autofs/share`)\n- `runc` 1.5.2\n\n**Steps to reproduce:**\n\n1. Create a container with an autofs volume:\n   ```bash\n   podman create --name autofs-repro \\\n     --userns=keep-id \\\n     -v /mnt/autofs/share:/data:ro,slave \\\n     docker.io/library/alpine:latest \\\n     cat /data/MARKER.txt\n   ```\n2. Verify that the autofs mount was triggered during `create`.\n3. Unmount the share:\n   ```bash\n   sudo umount /mnt/autofs/share\n   ```\n4. Start the container:\n   ```bash\n   podman start -a autofs-repro\n   ```\n5. Check whether the mount was triggered again:\n   ```bash\n   findmnt --mountpoint /mnt/autofs/share\n   ```\n\n**Results:**\n\n- **Without the patch:** The autofs mount was not triggered again during `podman start`. `findmnt` showed no active mount afterward.\n- **With the patch:** The autofs mount was triggered again during `podman start`, and `findmnt` confirmed it was active.\n"
+            "body": "Following a suggestion from @giuseppe , I was able to reproduce the bug by using `podman create` and `podman start`. Using `podman run` doesnt reveal the bug.\n\n**Test setup:**\n- Fedora 43 VM with rootless Podman\n- Local autofs bind mount (`/srv/realdata` → `/mnt/autofs/share`)\n- `runc` 1.5.2\n\n**Steps to reproduce:**\n\n1. Create a container with an autofs volume:\n   ```bash\n   podman create --name autofs-repro \\\n     --userns=keep-id \\\n     -v /mnt/autofs/share:/data:ro,slave \\\n     docker.io/library/alpine:latest \\\n     cat /data/MARKER.txt\n   ```\n2. Verify that the autofs mount was triggered during `create`.\n3. Unmount the share:\n   ```bash\n   sudo umount /mnt/autofs/share\n   ```\n4. Start the container:\n   ```bash\n   podman start -a autofs-repro\n   ```\n5. Check whether the mount was triggered again:\n   ```bash\n   findmnt --mountpoint /mnt/autofs/share\n   ```\n\n**Results:**\n\n- **Without the patch:** The autofs mount was not triggered again during `podman start`. `findmnt` showed no active mount afterward. The data access failed\n- **With the patch:** The autofs mount was triggered again during `podman start`, and `findmnt` confirmed it was active.\n"
         },
         {
             "user": "mtrmac",
@@ -58,6 +58,26 @@
         {
             "user": "mheon",
             "body": "Sure, LGTM. I think we're safe to not test given complexity of autofs (we'd probably need two VMs to do a proper test with NFS, I imagine?)"
+        },
+        {
+            "user": "giuseppe",
+            "body": "> Sure, LGTM. I think we're safe to not test given complexity of autofs (we'd probably need two VMs to do a proper test with NFS, I imagine?)\n\nwe could use a bind mount as well, this is the script used to setup the reproducer (need `autofs` installed):\n\n```bash\n#!/bin/bash\nset -e\nmkdir -p /srv/realdata\necho \"REAL-AUTOFS-CONTENT\" > /srv/realdata/file\nmkdir -p /mnt/autofs\necho \"/mnt/autofs  /etc/auto.test  --timeout=60\" > /etc/auto.master.d/test.autofs\necho \"share  -fstype=bind  :/srv/realdata\" > /etc/auto.test\n```\n\nthen you can do:\n\n```\npodman create --name foo -v /mnt/autofs/share:/share ... cat /share/file\n\numount /mnt/autofs/share\n\npodman start -a foo\n```\n\n"
+        },
+        {
+            "user": "veronnicka",
+            "body": "> > 1. Create a container with an autofs volume:\n> >    ```shell\n> >    podman create --name autofs-repro \\\n> >      --userns=keep-id \\\n> >      -v /mnt/autofs/share:/data:ro,slave \\\n> >      docker.io/library/alpine:latest \\\n> >      cat /data/MARKER.txt\n> >    ```\n> \n> The `slave` option is important here? Or does it fail without it?\n\nI used `slave` to reproduce the customer case. The bug is  present both with or without it.\n\n> \n> > **Results:**\n> > \n> > * **Without the patch:** The autofs mount was not triggered again during `podman start`. `findmnt` showed no active mount afterward.\n> \n> … and, to be explicit, the data access failed?\n\nThat is correct. I updated it.\n\n> \n> I also lean towards not _requiring_ an integration test, but if it can be done at small cost and the code ~already exists, having it wouldn’t hurt.\n\n"
+        },
+        {
+            "user": "giuseppe",
+            "body": "> > > 1. Create a container with an autofs volume:\n> > >    ```shell\n> > >    podman create --name autofs-repro \\\n> > >      --userns=keep-id \\\n> > >      -v /mnt/autofs/share:/data:ro,slave \\\n> > >      docker.io/library/alpine:latest \\\n> > >      cat /data/MARKER.txt\n> > >    ```\n> > \n> > \n> > The `slave` option is important here? Or does it fail without it?\n> \n> I used `slave` to reproduce the customer case. It doesnt fail without it.\n\nit shouldn't matter though.  The mount with your patch is created before the runtime creates the bind mount, so there is no mount to propagate.\n\nDoes the reproducer fail for you (on unpatched Podman) without `:slave` with NFS or also with the autofs bind mount?"
+        },
+        {
+            "user": "veronnicka",
+            "body": "\n\n\n> > > > 1. Create a container with an autofs volume:\n> > > >    ```shell\n> > > >    podman create --name autofs-repro \\\n> > > >      --userns=keep-id \\\n> > > >      -v /mnt/autofs/share:/data:ro,slave \\\n> > > >      docker.io/library/alpine:latest \\\n> > > >      cat /data/MARKER.txt\n> > > >    ```\n> > > \n> > > \n> > > The `slave` option is important here? Or does it fail without it?\n> > \n> > \n> > I used `slave` to reproduce the customer case. It doesnt fail without it.\n> \n> it shouldn't matter though. The mount with your patch is created before the runtime creates the bind mount, so there is no mount to propagate.\n> \n> Does the reproducer fail for you (on unpatched Podman) without `:slave` with NFS or also with the autofs bind mount?\n\n\nSorry for the confusion, I meant that the reproducer should trigger the bug even without `:slave`.  With unpatched Podman, podman start fails to read the file (can't open file) both with and without` :slave`. With the patched Podman, it succeeds."
+        },
+        {
+            "user": "giuseppe",
+            "body": "> > \n> \n> Sorry for the confusion, I meant that the reproducer still triggers the bug without `:slave` , (the reproducer _doesnt fail_). I'll double-check this with both the NFS and local autofs bind mount setups to confirm.\n\nok thanks, so that is the expected result.  `:slave` shouldn't make a difference"
         }
     ],
     "cross_references": []
