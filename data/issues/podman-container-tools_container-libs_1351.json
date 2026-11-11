@@ -1,0 +1,40 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "container-libs",
+    "number": 1351,
+    "type": "pull_request",
+    "title": "zfs: unmount FreeBSD layers without MNT_FORCE",
+    "state": "open",
+    "labels": [
+        "storage"
+    ],
+    "user": "ahze",
+    "body": "MNT_FORCE was used as an approximation of Linux's MNT_DETACH, but on FreeBSD it revokes every open vnode on the mount. When one podman process releases a layer while another is still unpacking into it, the unpacking pull fails with \"bad file descriptor\" or \"input/output error\" from chtimes, open and write. A plain unmount returns EBUSY for a layer still in use and leaves the mount to its remaining user, which is the closest FreeBSD comes to a lazy unmount; the callers already log that as a warning.\n\n<!--- Please read the [contributing guidelines](https://github.com/containers/container-libs/blob/main/CONTRIBUTING.md) before proceeding --->\n",
+    "comments": [
+        {
+            "user": "Luap99",
+            "body": "@dfr PTAL\n\nFYI you will need to rebase to pass CI."
+        },
+        {
+            "user": "ahze",
+            "body": "> FYI you will need to rebase to pass CI.\n\ndone.  thanks."
+        },
+        {
+            "user": "mtrmac",
+            "body": "> When one podman process releases a layer while another is still unpacking into it\n\nThe one calling `ApplyDiff` / `CreateLayer` should be holding an exclusive layer store lock. (There are those `LOCKING BUG` comments in `layers.go` but even in that situation the mounts should happen with a read lock, i.e. should not be possible concurrently with tar extraction.)"
+        },
+        {
+            "user": "ahze",
+            "body": "@mtrmac, Fair point on the locking, and I can't point at the path.   What I can say is how it was reproduced.  @hayzamjs hit it on 16.x with ZFS during sylve stack creation, which ran one `podman pull` per image in parallel.  I was able to reproduce his error (`chtimes ...: bad file descriptor from ApplyLayer`)  on a slow (overloaded n100) FreeBSD 16.x ZFS box running two copies of this at once: \n\n`for i in $(seq 20); do podman rmi -f ghcr.io/daemonless/grafana:pkg-latest; podman pull -q ghcr.io/daemonless/grafana:pkg-latest || break; done` \n\nOn a faster host, I haven't been able to reproduce it."
+        },
+        {
+            "user": "mtrmac",
+            "body": "Hum, I can’t even identify the code that would say `… from ApplyLayer`."
+        },
+        {
+            "user": "ahze",
+            "body": "Correction: I have to walk back \"I reproduced his error\". Checking my shell history & logs, my two loops only ever produced `layer not known` / `layer for blob ... not found` (the rmi/pull race). The only time I produced the chtimes error myself was with a hand `umount -f` on a layer mid-pull. So the EBADF report is Hayzam's alone, from Sylve running one `podman pull` process per image in parallel on 16-CURRENT/ZFS.\n\n\"from ApplyLayer\" was sloppy quoting. The full message is `ApplyLayer stdout:  stderr: chtimes /usr/local/share/grafana/public/build/NewOrgPage.c43b7859fcaf9681e013.js: bad file descriptor exit status 1`, i.e. pkg/chrootarchive/diff_unix.go:115 wrapping the re-exec'd extraction's stderr.\n\nI don't have a trigger to show. Fine to close this until one turns up, or narrow it to the MNT_FORCE vs MNT_DETACH semantics if you think that stands on its own.\n\nedit: Since then: ran the same loops with a DTrace trace on two 16-CURRENT hosts (about 240 pulls, one disk-bound): no chtimes error, every forced unmount came from the pull process itself, and `rmi -f` blocked on the lock for the whole extraction, as you expected. Only the rmi/pull race showed up (`layer not known`, and `saving big data \"manifest-...\"` when the other process removed the image mid-commit)."
+        }
+    ],
+    "cross_references": []
+}

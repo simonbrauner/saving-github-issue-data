@@ -1,0 +1,29 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 30174,
+    "type": "issue",
+    "title": "quadlet: generated ExecStart flag order is non-deterministic (string keys iterated from a Go map)",
+    "state": "closed",
+    "labels": [
+        "kind/bug",
+        "quadlet"
+    ],
+    "user": "r-cheologist",
+    "body": "### Issue Description\n\nQuadlet emits the podman flags for several `[Container]` keys (`ShmSize`, `StopTimeout`, `Memory`, `PidsLimit`, ...) in a random order. The same `.container` file yields a different `ExecStart=` line on each generator run, i.e. on every `systemctl daemon-reload`.\n\nCause: `lookupAndAddString()` and `lookupAndAddAllStrings()` in `pkg/systemd/quadlet/quadlet.go` range over a `map[string]string` (`stringKeys` in `ConvertContainer()`, also the pod/kube/network key maps), and Go randomises map iteration order:\n\n```go\nfunc lookupAndAddString(unit *parser.UnitFile, group string, keys map[string]string, podman *PodmanCmdline) {\n        for key, flag := range keys {\n                if val, ok := unit.Lookup(group, key); ok && len(val) > 0 {\n                        podman.add(flag, val)\n                }\n        }\n}\n```\n\nPresent in v5.8.8 and on `main` as of today.\n\nSemantics are unaffected, but the generated unit's content changes without any input change. That breaks anything that hashes or diffs generated units to detect configuration drift (config management, audit tooling): our automation restarted containers on every run because the unit's checksum kept changing.\n\n#28172 is the same class of bug in a different code path (`kube play` networks).\n\n### Steps to reproduce the issue\n\n1. Create a unit in an empty directory:\n\n   ```sh\n   mkdir -p /tmp/qrepro\n   cat > /tmp/qrepro/repro.container <<'EOF'\n   [Container]\n   Image=docker.io/library/alpine:latest\n   ShmSize=64m\n   StopTimeout=10\n   Memory=128m\n   PidsLimit=100\n   EOF\n   ```\n\n2. Run the generator several times and compare `ExecStart`:\n\n   ```sh\n   for i in 1 2 3 4 5 6 7 8; do\n     QUADLET_UNIT_DIRS=/tmp/qrepro \\\n       /usr/lib/systemd/system-generators/podman-system-generator --dryrun 2>/dev/null \\\n       | grep '^ExecStart=' | sha256sum\n   done | sort | uniq -c\n   ```\n\n\n### Describe the results you received\n\n8 runs, 6 distinct `ExecStart` lines. Two consecutive runs:\n\n```\nExecStart=/usr/bin/podman run --name systemd-%N --replace --rm --cgroups=split --pids-limit 100 --shm-size 64m --memory 128m --stop-timeout 10 --sdnotify=conmon -d docker.io/library/alpine:latest\nExecStart=/usr/bin/podman run --name systemd-%N --replace --rm --cgroups=split --stop-timeout 10 --memory 128m --pids-limit 100 --shm-size 64m --sdnotify=conmon -d docker.io/library/alpine:latest\n```\n\n### Describe the results you expected\n\nIdentical output for identical input: iterate the keys in a fixed order (e.g. sorted keys, or an ordered slice of key/flag pairs instead of a map).\n\n### podman info output\n\n```\npodman version 5.8.8 (Debian package 5.8.8, amd64)\nOS: Debian 12 (bookworm) based\nrootful, system generator (/run/containers/systemd)\n```\n\n### Podman in a container\n\nNo\n\n### Privileged Or Rootless\n\nPrivileged\n\n### Upstream Latest Release\n\nYes\n\n### Additional environment details\n\nReproduced in a QEMU VM; the generator code path is environment-independent (Go map iteration order).\n\n### Additional information\n\nHappens on every run; no special setup beyond two or more of the affected keys in one unit.\n\n**AI disclosure:** this bug was found, diagnosed and written up by Claude Opus 5.5 (Anthropic, model `claude-opus-5-5`), running in Claude Code during a test run of our infrastructure automation in a VM. Specifically, Claude:\n\n- noticed containers restarting with no configuration change and traced it to the generated unit's checksum changing between daemon-reload`s,\n- located the cause in `quadlet.go` (map iteration in `lookupAndAddString`/`lookupAndAddAllStrings`, v5.8.8 and `main`),\n- wrote and ran the reproduction above (8 dry runs, 6 distinct outputs) and searched for existing issues,\n- drafted this report.\n\nA human (the reporter) reviewed it and filed it.",
+    "comments": [
+        {
+            "user": "Luap99",
+            "body": "The output format is not meant to be stable. Any config checks should be done on the source quadlet file but never the output IMO.\n\ncc @ygalblum "
+        },
+        {
+            "user": "ygalblum",
+            "body": "@Luap99 is correct, the output is not meant to be deterministic. Furthermore, part of the reason we implemented Quadlet was to be able to make changes/fixes to the output based on changes in Podman without having to change the Quadlet file. The Quadlet files are the source of truth for configuration changes, not the output "
+        },
+        {
+            "user": "r-cheologist",
+            "body": "Thanks both - that makes sense. Treating the quadlet file as the source of truth, and the generated unit as an implementation detail that may change between Podman versions, is a reasonable design.\n                                                                                      \nWe've already moved our drift detection to hash the quadlet source instead of the generated unit, so the non-deterministic order no longer affects us. Closing."
+        }
+    ],
+    "cross_references": []
+}
