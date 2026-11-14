@@ -1,0 +1,19 @@
+{
+    "organization": "podman-container-tools",
+    "repository": "podman",
+    "number": 30256,
+    "type": "issue",
+    "title": "`--rootfs :O`: a failed start leaves the rootfs overlay mounted",
+    "state": "open",
+    "labels": [],
+    "user": "jeffrey-at-cohere",
+    "body": "### Issue Description\n\nWhen a container with an overlay rootfs (`--rootfs <dir>:O`) fails to start after `mountStorage` has mounted the overlay, the overlay stays mounted at `<graphroot>/overlay-containers/<id>/rootfs/merge`.\n\nIn `libpod/container_internal.go`, `mountStorage` mounts the overlay (`overlay.Mount`, plus `mount.Mount` for native overlay). It then calls `lookup.GetUserGroupInfo`, prepares `/etc`, sets the timezone and copies up volumes. Every error return after the mount leaves the overlay in place. `c.state.Mounted` is only set once `mountStorage` succeeds, so `cleanupStorage` returns at `if !c.state.Mounted` and never unmounts it. The SHM and idmapped-rootfs mounts earlier in the same function already unmount on error with a deferred cleanup. The rootfs overlay has none.\n\nRemoving the container afterwards runs `EnsureRemoveAll` on the container directory, through the still-mounted overlay, while `store.DeleteContainer` holds the store's write locks (`writeToAllStores`). With a small rootfs this finishes quickly, and `EnsureRemoveAll` unmounts the overlay when it hits `EBUSY`. With a large or slow lower directory it can take a very long time, and every other storage operation on that store waits behind it.\n\n### Steps to reproduce the issue\n\nRootless shown here. Rootful is the same, but read `/proc/self/mountinfo` directly.\n\n1. `mkdir rootfs && podman export $(podman create alpine true) | tar -C rootfs -xf -`\n2. `podman run --name leak --user nosuchuser --rootfs $PWD/rootfs:O true`\n3. `podman unshare grep \"$(podman inspect -f '{{.ID}}' leak)/rootfs/merge\" /proc/self/mountinfo`\n\n### Describe the results you received\n\nStep 2 fails as expected: `Error: unable to find user nosuchuser: no matching entries in passwd file` (exit 126).\n\nStep 3 still lists the overlay mounted at `.../overlay-containers/<id>/rootfs/merge`. It stays mounted until the container is removed.\n\n### Describe the results you expected\n\nAfter the failed start, nothing from the container's rootfs overlay is still mounted.\n\n### podman info output\n\nReproduced with podman 5.4.2 (Debian package), rootless and rootful, with kernel overlay. The same code is unchanged in 5.8.6 and on `main`.\n\n### Additional information\n\nA fix is up in #30257: defer `overlay.Unmount(contentDir)` after the overlay is mounted, the same way the SHM and idmapped mounts are handled, plus a system test.\n",
+    "comments": [],
+    "cross_references": [
+        {
+            "organization": "podman-container-tools",
+            "repository": "podman",
+            "number": 30257
+        }
+    ]
+}
